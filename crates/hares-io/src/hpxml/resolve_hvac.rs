@@ -3504,6 +3504,33 @@ fn apply_multispeed_parameters(
         }
     }
 
+    // Invariant: per-speed COP values must not be anomalously low relative to
+    // the equipment's rated efficiency.  A COP less than 50% of the
+    // SEER/EER-derived expectation indicates a physically implausible data
+    // entry.  EnergyPlus StandardRatings.hh:71 defines ConvFromSIToIP = 3.412141633
+    // as the conversion factor for SEER/EER to COP.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let eff_kind_upper = eff_kind_used.to_ascii_uppercase();
+        if !is_heating && (eff_kind_upper == "SEER" || eff_kind_upper == "EER") {
+            if let Some(&last_cop) = cops.last() {
+                let expected_cop = efficiency_value / BTU_PER_HR_PER_W;
+                if last_cop < expected_cop * 0.5 {
+                    tracing::warn!(
+                        equipment = %equipment_name,
+                        %eff_kind_used,
+                        efficiency_value,
+                        last_cop,
+                        expected_cop,
+                        "speed-{max_speed} COP {last_cop} is far below SEER-derived \
+                         expectation {expected_cop:.3} for {equipment_name}",
+                        max_speed = cops.len(),
+                    );
+                }
+            }
+        }
+    }
+
     if let Some(curve_set) = curves {
         if let Some(coeff_text) = serialize_stage_plr_coefficients(curve_set, n_speeds) {
             params.insert(

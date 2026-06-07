@@ -182,7 +182,7 @@ mod tests {
             x: u32,
             y: f64,
         }
-        let s = S { x: 42, y: 3.14 };
+        let s = S { x: 42, y: std::f64::consts::PI };
         let mut blob = try_save_postcard(&s).unwrap();
         // Corrupt one byte of the postcard blob (skip CRC suffix by
         // corrupting a middle byte — the CRC32 check will catch it)

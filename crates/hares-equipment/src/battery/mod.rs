@@ -4944,7 +4944,7 @@ mod tests {
                 tk::ACTIVE_POWER_KW,
                 tk::CAPACITY_FADE_PCT,
             ] {
-                if let Some(v) = bat.telemetry().get(*key) {
+                if let Some(v) = bat.telemetry().get(key) {
                     assert!(
                         v.is_finite(),
                         "telemetry key {key:?} must be finite at power_kw={power_kw}, got {v}"

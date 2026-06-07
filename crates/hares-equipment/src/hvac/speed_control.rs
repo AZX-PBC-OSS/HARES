@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn capacity_fractions_normalizes_overspeed_ratios() {
         let fracs = capacity_fractions_for(&[0.4, 0.6, 0.8, 1.2]);
-        let expected = vec![0.4 / 1.2, 0.6 / 1.2, 0.8 / 1.2, 1.0];
+        let expected = [0.4 / 1.2, 0.6 / 1.2, 0.8 / 1.2, 1.0];
         assert_eq!(fracs.len(), 4);
         for (i, (got, exp)) in fracs.iter().zip(expected.iter()).enumerate() {
             assert!(

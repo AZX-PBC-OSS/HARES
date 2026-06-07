@@ -496,7 +496,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use tempfile::tempdir;
+    
 
     fn test_schema() -> Schema {
         Schema::new(vec![

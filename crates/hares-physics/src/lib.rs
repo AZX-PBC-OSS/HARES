@@ -37,6 +37,7 @@ pub fn check_specific_heat_plausible(cp: f64, material_name: &str) {
 }
 
 #[cfg(test)]
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 mod tests {
     use super::*;
 

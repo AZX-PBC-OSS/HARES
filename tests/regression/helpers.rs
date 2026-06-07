@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Datelike, Duration, FixedOffset, NaiveDate, Timelike, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Timelike, Utc};
 use hares_core::{DwellingConfig, SimulationConfig};
 use hares_io::OutputFormat;
 

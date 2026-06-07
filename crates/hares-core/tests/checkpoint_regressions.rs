@@ -396,9 +396,7 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     // Collect SOC values from every equipment_core entry before save.
     let pre_save_soc_values: Vec<f64> = dwelling_a
         .latest_env()
-        .equipment_core
-        .iter()
-        .filter_map(|(_, co)| co.state.soc.map(|s| s.get()))
+        .equipment_core.values().filter_map(|co| co.state.soc.map(|s| s.get()))
         .collect();
     assert!(
         !pre_save_soc_values.is_empty(),
@@ -434,9 +432,7 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
 
     let post_restore_soc_values: Vec<f64> = dwelling_b
         .latest_env()
-        .equipment_core
-        .iter()
-        .filter_map(|(_, co)| co.state.soc.map(|s| s.get()))
+        .equipment_core.values().filter_map(|co| co.state.soc.map(|s| s.get()))
         .collect();
 
     assert_eq!(

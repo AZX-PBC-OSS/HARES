@@ -2422,7 +2422,7 @@ mod tests {
             actor
                 .telemetry
                 .get("demand_response_duration_s")
-                .map_or(false, |v| v.is_nan()),
+                .is_some_and(|v| v.is_nan()),
             "demand_response_duration_s must be pre-registered at init (NaN = unset)"
         );
     }

@@ -2332,7 +2332,8 @@ mod tests {
                 for gi in [0usize, 1] {
                     for di in [0usize, 1] {
                         for dhi in [0usize, 1] {
-                            for ti in [0usize] {
+                            {
+                                let ti = 0usize;
                                 let val =
                                     (zi as f64) * 10.0 + (gi as f64) * 2.0 + (di as f64) * 0.5;
                                 entries.push(([zi, ai, gi, di, dhi, ti], val));

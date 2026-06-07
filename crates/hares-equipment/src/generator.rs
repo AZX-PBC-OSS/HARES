@@ -3232,7 +3232,7 @@ mod tests {
         let total_waste_w = fuel_w - electric_w;
 
         assert!(
-            slots.thermal.len() >= 1,
+            !slots.thermal.is_empty(),
             "should have a thermal accumulator"
         );
         let acc = &slots.thermal[0];

@@ -354,7 +354,7 @@ fn validate_zip_terms(
 mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        BoundaryPolicy, DomainUpdate, EnvironmentState, FluidNodeId, GridState, SCHEDULE_DOMAIN_ID,
+        BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID,
         ScheduleSource, WeatherState,
     };
 

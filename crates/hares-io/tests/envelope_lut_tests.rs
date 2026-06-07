@@ -1043,8 +1043,8 @@ fn r38_stud_cavity_r_gte_r19() {
             }
         }
 
-        let r38 = r38_r.expect(&format!("{target_name} should have an R-38 variant"));
-        let r19 = r19_r.expect(&format!("{target_name} should have an R-19 variant"));
+        let r38 = r38_r.unwrap_or_else(|| panic!("{target_name} should have an R-38 variant"));
+        let r19 = r19_r.unwrap_or_else(|| panic!("{target_name} should have an R-19 variant"));
         assert!(
             r38 >= r19,
             "{target_name}: R-38 stud cavity R={r38:.4} should be >= R-19 stud cavity R={r19:.4}"

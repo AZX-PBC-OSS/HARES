@@ -24,7 +24,7 @@ use hares_types::{
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> EnvironmentState {
+fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, _zone_wb_c: f64) -> EnvironmentState {
     EnvironmentState {
         zones: vec![ZoneState {
             id: ZoneId(1),
@@ -90,7 +90,7 @@ fn make_env_two_zones(
     zone2_temp_c: f64,
     outdoor_temp_c: f64,
     zone1_wb_c: f64,
-    zone2_wb_c: f64,
+    _zone2_wb_c: f64,
 ) -> EnvironmentState {
     let mut env = make_env(zone1_temp_c, outdoor_temp_c, zone1_wb_c);
     env.zones.push(ZoneState {

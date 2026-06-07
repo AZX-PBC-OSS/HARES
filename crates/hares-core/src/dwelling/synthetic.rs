@@ -2277,7 +2277,7 @@ equipment_name = "None"
             let alt = solar_altitude_spencer(latitude, longitude, hour as u32);
             if alt > max_alt {
                 max_alt = alt;
-                max_alt_hour = hour as i32;
+                max_alt_hour = hour;
             }
         }
         // Check symmetry around solar noon for as many offset pairs as

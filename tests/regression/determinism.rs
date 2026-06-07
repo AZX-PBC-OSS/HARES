@@ -26,15 +26,15 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
     )> = vec![
         (
             "beopt_1",
-            Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s)),
+            Box::new(helpers::build_beopt_dwelling_config),
         ),
         (
             "beopt_2",
-            Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s)),
+            Box::new(helpers::build_beopt_dwelling_config),
         ),
         (
             "resstock",
-            Box::new(|id, dur, s| helpers::build_resstock_dwelling_config(id, dur, s)),
+            Box::new(helpers::build_resstock_dwelling_config),
         ),
     ];
 

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use hares_physics::biquadratic::BiquadraticCurve;
+use hares_physics::constants::BTU_PER_HR_PER_W;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -743,6 +744,31 @@ fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>
 
         if capacity_ratios.is_empty() || cops.is_empty() {
             continue;
+        }
+
+        // Validate that the rated-speed COP is not anomalously low relative to the
+        // SEER/EER-derived expectation.  HSPF→COP involves regional climate factors
+        // and AFUE is a percentage, so this check is restricted to SEER and EER
+        // entries where COP ≈ efficiency_value / BTU_PER_HR_PER_W.
+        // EnergyPlus StandardRatings.hh:71 defines ConvFromSIToIP = 3.412141633.
+        if efficiency_kind == "SEER" || efficiency_kind == "EER" {
+            if let Some(&last_cop) = cops.last() {
+                let expected = efficiency_value / BTU_PER_HR_PER_W;
+                let deviation = (last_cop - expected).abs() / expected;
+                if deviation > 0.30 {
+                    tracing::warn!(
+                        hvac_name = %hvac_name,
+                        %efficiency_kind,
+                        efficiency_value,
+                        last_cop,
+                        expected_cop = expected,
+                        deviation_pct = deviation * 100.0,
+                        "CSV row rated-speed COP deviates from SEER/EER-derived \
+                         expectation by {:.1}% (>30%); values may be erroneous",
+                        deviation * 100.0,
+                    );
+                }
+            }
         }
 
         rows.push(HvacMultispeedParameters {

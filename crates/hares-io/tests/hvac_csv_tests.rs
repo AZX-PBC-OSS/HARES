@@ -229,3 +229,90 @@ fn air_conditioner_multispeed_closest_match_on_seer_distance() {
         p.efficiency_value
     );
 }
+
+#[test]
+fn mshp_cooler_14_5_seer_cop4_between_neighbors() {
+    let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
+    let p13 = store
+        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 13.0)
+        .expect("13.0 SEER MSHP Cooler entry");
+    let p14_5 = store
+        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 14.5)
+        .expect("14.5 SEER MSHP Cooler entry");
+    let p16 = store
+        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 16.0)
+        .expect("16.0 SEER MSHP Cooler entry");
+
+    let cop4_13 = *p13.cops.last().unwrap();
+    let cop4_14_5 = *p14_5.cops.last().unwrap();
+    let cop4_16 = *p16.cops.last().unwrap();
+
+    assert!(
+        cop4_13 < cop4_14_5,
+        "13.0 SEER COP4 ({cop4_13}) should be < 14.5 SEER COP4 ({cop4_14_5})"
+    );
+    assert!(
+        cop4_14_5 < cop4_16,
+        "14.5 SEER COP4 ({cop4_14_5}) should be < 16.0 SEER COP4 ({cop4_16})"
+    );
+
+    // All COPs should increase with SEER tier (monotonic at each speed)
+    for i in 0..4 {
+        assert!(
+            p13.cops[i] < p14_5.cops[i],
+            "speed-{}: 13.0 COP ({}) should be < 14.5 COP ({})",
+            i + 1,
+            p13.cops[i],
+            p14_5.cops[i]
+        );
+        assert!(
+            p14_5.cops[i] < p16.cops[i],
+            "speed-{}: 14.5 COP ({}) should be < 16.0 COP ({})",
+            i + 1,
+            p14_5.cops[i],
+            p16.cops[i]
+        );
+    }
+}
+
+#[test]
+fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
+    let dir = tempfile::tempdir().unwrap();
+    // Only 13.0 and 16.0 SEER entries — no 14.5 or 15.0 entry.
+    std::fs::write(
+        dir.path().join("zip_parameters.toml"),
+        "[test_equipment]\nzp=0.0\nip=0.0\npp=1.0\nzq=0.0\niq=0.0\npq=0.0\npf=1.0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,Capacity Ratio 2,Air Flow Ratio 2,COP 2,SHR 1,SHR 2\n\
+         MSHP Cooler,13.0 SEER,2,0.70,0.80,3.5,1.0,1.0,2.8,0.80,0.75\n\
+         MSHP Cooler,16.0 SEER,2,0.70,0.80,4.3,1.0,1.0,3.0,0.80,0.75\n",
+    )
+    .unwrap();
+
+    let store = DefaultsStore::load(dir.path()).expect("load defaults");
+
+    // 14.5 SEER has no exact row; closest is 13.0 (distance 1.5) vs 16.0 (distance
+    // 1.5).  min_by keeps the first encountered (13.0).
+    let params = store
+        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 2, 14.5)
+        .expect("should fall back to closest entry");
+    assert!(
+        (params.efficiency_value - 13.0).abs() < 0.01,
+        "closest match to 14.5 SEER should be 13.0, got {}",
+        params.efficiency_value
+    );
+
+    // 17.0 SEER has no exact row; closest is 16.0 (distance 1.0 vs 13.0 distance
+    // 4.0).
+    let params2 = store
+        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 2, 17.0)
+        .expect("should fall back to closest entry");
+    assert!(
+        (params2.efficiency_value - 16.0).abs() < 0.01,
+        "closest match to 17.0 SEER should be 16.0, got {}",
+        params2.efficiency_value
+    );
+}

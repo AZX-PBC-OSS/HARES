@@ -1505,7 +1505,7 @@ mod tests {
         let zone_id = ZoneId(1);
         let t_c = 22.0;
         let w_init = 0.008;
-        let volume_m3 = 200.0;
+        let _volume_m3 = 200.0;
         let dt_s = 60.0;
         let h_fg = 2_501_000.0_f64;
 
