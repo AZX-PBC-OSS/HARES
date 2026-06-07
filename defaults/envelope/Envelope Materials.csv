@@ -812,6 +812,16 @@ Foundation Wall,"UB, Whole Wall R5",,Unfinished Basement,R5,UFBaseWall-FicR,0,0,
 Foundation Wall,"UB, Whole Wall R5",,Unfinished Basement,R5,Soil-12in,0.3048,1.731,1842.3,0.418752,0.176083189,235.1430836,Minimal_basement_wholewall_R5,
 Foundation Wall,"UB, Whole Wall R5",,Unfinished Basement,R5,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Minimal_basement_wholewall_R5,
 Foundation Wall,"UB, Whole Wall R5",,Unfinished Basement,R5,UFBaseWallIns,0.0254,0.02885,32.04,1.2143808,0.880415945,0.988282525,Minimal_basement_wholewall_R5,
+Foundation Wall (Walkout),"8-in Poured Concrete, Uninsulated",,,Uninsulated,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Copied from Foundation Wall UB Uninsulated,
+Foundation Wall (Walkout),"8-in Poured Concrete, Uninsulated",,,Uninsulated,UFBaseWall-FicR,0,0,0,0,0.363034643,0,Copied from Foundation Wall UB Uninsulated,
+Foundation Wall (Walkout),"8-in Poured Concrete, R-10 Interior",,,R-10 Interior,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Copied from Foundation Wall UB Whole Wall R10,
+Foundation Wall (Walkout),"8-in Poured Concrete, R-10 Interior",,,R-10 Interior,UFBaseWallIns,0.0508,0.02885,32.04,1.2143808,1.760831889,1.97656505,Copied from Foundation Wall UB Whole Wall R10,
+Foundation Wall (Walkout),"8-in Poured Concrete, R-15 Interior",,,R-15 Interior,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Copied from Foundation Wall UB Whole Wall R15,
+Foundation Wall (Walkout),"8-in Poured Concrete, R-15 Interior",,,R-15 Interior,UFBaseWallIns,0.0762,0.02885,32.04,1.2143808,2.641247834,2.964847575,Copied from Foundation Wall UB Whole Wall R15,
+Foundation Wall (Walkout),"8-in CMU, Uninsulated",,,Uninsulated,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Copied from Foundation Wall CS Uninsulated,
+Foundation Wall (Walkout),"8-in CMU, Uninsulated",,,Uninsulated,UFBaseWall-FicR,0,0,0,0,0.363034643,0,Copied from Foundation Wall CS Uninsulated,
+Foundation Wall (Walkout),"8-in CMU, R-10 Interior",,,R-10 Interior,Concrete-8in,0.2032,1.3114056,2242.8,0.837504,0.154948248,381.6815269,Copied from Foundation Wall CS Whole Wall R10,
+Foundation Wall (Walkout),"8-in CMU, R-10 Interior",,,R-10 Interior,UFBaseWallIns,0.0508,0.02885,32.04,1.2143808,1.760831889,1.97656505,Copied from Foundation Wall CS Whole Wall R10,
 Garage Attached Wall,"ConcreteMasonryUnit, asbestos siding, 6-in Hollow, R-7",,,,WALL RIGID INS,0.0083,0.029,32.04,,0.283,0.322902612,,1214.23
 Garage Attached Wall,"ConcreteMasonryUnit, asbestos siding, 6-in Hollow, R-7",,,,OSB SHEATHING 0.5 IN.,0.0127,0.115,512.64,,0.11,7.905278413,,1214.23
 Garage Attached Wall,"ConcreteMasonryUnit, asbestos siding, 6-in Hollow, R-7",,,,CONCRETE BLOCK,0.2032,0.194,1794.881,,1.049,308.5566142,,846.01

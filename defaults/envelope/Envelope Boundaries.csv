@@ -10,6 +10,7 @@ Interior Wall,IW,LIV,LIV
 Indoor Furniture,IM,LIV,LIV
 Foundation Wall,FW,GND,FND
 Rim Joist,RJ,EXT,FND
+Foundation Wall (Walkout),FK,EXT,FND
 Foundation Ceiling,FC,FND,LIV
 Foundation Floor,FF,GND,FND
 Foundation Furniture,FM,FND,FND

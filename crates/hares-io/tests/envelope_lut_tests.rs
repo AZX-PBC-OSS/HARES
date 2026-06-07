@@ -1129,3 +1129,174 @@ fn no_insulated_stud_cavity_conductivity_exceeds_plausible_maximum() {
         violations.join("\n")
     );
 }
+
+// ── T-0274: Foundation Wall (Walkout) zone mapping ───────────────────────────
+
+#[test]
+fn foundation_wall_walkout_resolves_correct_boundary_name() {
+    // A Wall between Foundation and Outdoor represents a walkout basement wall
+    // exposed to ambient air. It must return "Foundation Wall (Walkout)", not
+    // "Exterior Wall" (which has wood-framed thermal properties).
+    let name = resolve_boundary_name(
+        &BoundaryType::Wall,
+        Some(&ZoneType::Foundation),
+        Some(&ZoneType::Outdoor),
+    );
+    assert_eq!(name, Some("Foundation Wall (Walkout)"));
+}
+
+#[test]
+fn foundation_wall_walkout_lookup_returns_concrete_assemblies() {
+    // Regression: the walkout foundation wall lookup must return concrete-based
+    // assemblies with high thermal mass (capacitance > 200 kJ/m²·K), not
+    // wood-framed assemblies that are inappropriate for foundation construction.
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).unwrap();
+
+    // Verify the walkout boundary name resolves through the lookup.
+    let result = lut
+        .lookup("Foundation Wall (Walkout)", None, None, None, None)
+        .expect("Foundation Wall (Walkout) should have at least one assembly");
+
+    assert!(!result.layers.is_empty(), "should have material layers");
+
+    // Total capacitance across all layers (thermal mass).
+    let total_capacitance: f64 = result.layers.iter().map(|l| l.capacitance_kj_m2_k).sum();
+    assert!(
+        total_capacitance > 200.0,
+        "walkout foundation wall assembly thermal mass ({:.1} kJ/m²·K) should exceed 200 kJ/m²·K for concrete construction",
+        total_capacitance
+    );
+
+    // Assembly R-value should be positive (not a zero-thickness placeholder).
+    assert!(result.matched_r_value > 0.0);
+
+    // Spot-check that construction is concrete-based, not wood-framed.
+    assert!(
+        !result
+            .matched_boundary_type
+            .to_lowercase()
+            .contains("woodstud"),
+        "walkout foundation wall matched a wood-framed assembly: {}",
+        result.matched_boundary_type
+    );
+}
+
+#[test]
+fn csv_boundaries_no_wildcard_fallthrough_for_defined_entries() {
+    // Iterate every non-adjacent, non-furniture row in Envelope Boundaries.csv
+    // and verify that resolve_boundary_name() returns the expected boundary name.
+    // Any mismatch means the CSV and hardcoded mapping have diverged, which would
+    // cause the wildcard fallback to be hit for a defined entry.
+    use hares_io::envelope_lut::resolve_boundary_name;
+    use std::collections::HashSet;
+
+    let boundaries_path = defaults_envelope_dir().join("Envelope Boundaries.csv");
+    let mut rdr = csv::Reader::from_path(&boundaries_path).expect("open Envelope Boundaries.csv");
+
+    // Re-import zone_label_to_type and boundary_type_from_boundary_name from the
+    // crate-internal helpers. Since they are not pub, we inline minimal copies
+    // for the test.
+    fn zone_label_to_type(label: &str) -> Option<ZoneType> {
+        match label {
+            "LIV" => Some(ZoneType::Conditioned),
+            "EXT" => Some(ZoneType::Outdoor),
+            "GND" => Some(ZoneType::Ground),
+            "FND" => Some(ZoneType::Foundation),
+            "ATC" => Some(ZoneType::Attic),
+            "GAR" => Some(ZoneType::Garage),
+            _ => None,
+        }
+    }
+    fn boundary_type_from_name(name: &str) -> Option<BoundaryType> {
+        match name {
+            "Exterior Wall"
+            | "Interior Wall"
+            | "Attic Wall"
+            | "Garage Wall"
+            | "Garage Attached Wall"
+            | "Adjacent Wall"
+            | "Adjacent Attic Wall"
+            | "Adjacent Garage Wall"
+            | "Foundation Wall (Walkout)" => Some(BoundaryType::Wall),
+            "Roof" | "Attic Roof" | "Garage Roof" | "Adjacent Ceiling" => Some(BoundaryType::Roof),
+            "Raised Floor"
+            | "Attic Floor"
+            | "Foundation Ceiling"
+            | "Garage Interior Ceiling"
+            | "Garage Ceiling"
+            | "Adjacent Floor" => Some(BoundaryType::Floor),
+            "Floor" | "Foundation Floor" | "Garage Floor" => Some(BoundaryType::Slab),
+            "Window" => Some(BoundaryType::Window),
+            "Skylight" => Some(BoundaryType::Skylight),
+            "Door" | "Garage Door" => Some(BoundaryType::Door),
+            "Foundation Wall" | "Adjacent Foundation Wall" => Some(BoundaryType::FoundationWall),
+            "Rim Joist" | "Adjacent Rim Joist" => Some(BoundaryType::RimJoist),
+            // Furniture and unrecognized names are intentionally excluded from the mapping.
+            _ => None,
+        }
+    }
+
+    // Boundary names that do not participate in the hardcoded mapping because
+    // they are same-zone (furniture) or adjacent-only entries.
+    let excluded: HashSet<&str> = [
+        "Indoor Furniture",
+        "Foundation Furniture",
+        "Attic Furniture",
+        "Garage Furniture",
+        "Interior Wall", // same-zone (LIV/LIV)
+    ]
+    .into_iter()
+    .collect();
+
+    // Adjacent entries are excluded — their resolution is handled by the
+    // hardcoded adjacent path, not the CSV-derived map.
+    let skip_adjacent = |name: &str| -> bool { name.starts_with("Adjacent") };
+
+    // Skylight and Window return None — they bypass the LUT.
+    let skip_none = |name: &str| -> bool { matches!(name, "Window" | "Skylight") };
+
+    let mut checked = 0usize;
+    for result in rdr.records() {
+        let record = result.expect("read CSV record");
+        let boundary_name = record.get(0).unwrap_or("");
+        if excluded.contains(boundary_name)
+            || skip_adjacent(boundary_name)
+            || skip_none(boundary_name)
+        {
+            continue;
+        }
+        let ext_label = record.get(2).unwrap_or("");
+        let int_label = record.get(3).unwrap_or("");
+
+        let ext = match zone_label_to_type(ext_label) {
+            Some(z) => z,
+            None => continue,
+        };
+        let int = match zone_label_to_type(int_label) {
+            Some(z) => z,
+            None => continue,
+        };
+        let bt = match boundary_type_from_name(boundary_name) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let resolved = resolve_boundary_name(&bt, Some(&int), Some(&ext));
+        assert_eq!(
+            resolved,
+            Some(boundary_name),
+            "CSV row '{}' ({:?} / {:?}): resolve_boundary_name returned {:?}, expected Some(\"{}\")",
+            boundary_name,
+            bt,
+            (int, ext),
+            resolved,
+            boundary_name
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "no CSV rows were checked; test may be misconfigured"
+    );
+}

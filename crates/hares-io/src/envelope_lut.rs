@@ -137,6 +137,7 @@ fn boundary_type_from_boundary_name(name: &str) -> Option<BoundaryType> {
         "Skylight" => Some(BoundaryType::Skylight),
         "Door" | "Garage Door" => Some(BoundaryType::Door),
         "Foundation Wall" | "Adjacent Foundation Wall" => Some(BoundaryType::FoundationWall),
+        "Foundation Wall (Walkout)" => Some(BoundaryType::Wall),
         "Rim Joist" | "Adjacent Rim Joist" => Some(BoundaryType::RimJoist),
         // Same-zone furniture entries — not real boundary types
         "Indoor Furniture" | "Foundation Furniture" | "Attic Furniture" | "Garage Furniture" => {
@@ -792,8 +793,20 @@ pub fn resolve_boundary_name(
             (ZoneType::Garage, ZoneType::Outdoor) => Some("Garage Wall"),
             (ZoneType::Garage, ZoneType::Conditioned)
             | (ZoneType::Conditioned, ZoneType::Garage) => Some("Garage Attached Wall"),
-            (ZoneType::Foundation, ZoneType::Outdoor) => Some("Exterior Wall"),
-            _ => Some("Exterior Wall"),
+            (ZoneType::Foundation, ZoneType::Outdoor) => Some("Foundation Wall (Walkout)"),
+            _ => {
+                // wildcard catch-all — unrecognized zone pair; falls back to
+                // Exterior Wall as the least-wrong generic default for walls.
+                let result = "Exterior Wall";
+                tracing::warn!(
+                    boundary_type = ?boundary_type,
+                    interior_zone = ?int,
+                    exterior_zone = ?ext,
+                    fallback = %result,
+                    "Unrecognized boundary mapping; falling back to hardcoded default"
+                );
+                Some(result)
+            }
         },
         BoundaryType::Roof => match (int, ext) {
             (ZoneType::Attic, ZoneType::Outdoor) => Some("Attic Roof"),

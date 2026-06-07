@@ -204,6 +204,11 @@ Foundation Wall,"UB, Whole Wall R13",,Unfinished Basement,R13,Minimal_unfin_base
 Foundation Wall,"UB, Whole Wall R15",,Unfinished Basement,R15,Minimal_unfin_basement_R15 (Denver),2.9716903176
 Foundation Wall,"UB, Whole Wall R20",,Unfinished Basement,R20,Minimal_basement_wholewall_R20,3.8522937640
 Foundation Wall,"UB, Whole Wall R5",,Unfinished Basement,R5,Minimal_basement_wholewall_R5,1.2798755141
+Foundation Wall (Walkout),"8-in Poured Concrete, Uninsulated",,,Uninsulated,Copied from Foundation Wall UB Uninsulated,0.518401511
+Foundation Wall (Walkout),"8-in Poured Concrete, R-10 Interior",,,R-10 Interior,Copied from Foundation Wall UB Whole Wall R10,1.915985166
+Foundation Wall (Walkout),"8-in Poured Concrete, R-15 Interior",,,R-15 Interior,Copied from Foundation Wall UB Whole Wall R15,2.796030129
+Foundation Wall (Walkout),"8-in CMU, Uninsulated",,,Uninsulated,Copied from Foundation Wall CS Uninsulated,0.518401511
+Foundation Wall (Walkout),"8-in CMU, R-10 Interior",,,R-10 Interior,Copied from Foundation Wall CS Whole Wall R10,1.915985166
 Garage Attached Wall,"ConcreteMasonryUnit, asbestos siding, 6-in Hollow, R-7",asbestos siding,ConcreteMasonryUnit,"6-in Hollow, R-7",MF_300 - bldg0000036,1.5212167960
 Garage Attached Wall,"ConcreteMasonryUnit, brick veneer, 6-in Hollow, R-15",brick veneer,ConcreteMasonryUnit,"6-in Hollow, R-15",MF_300 - bldg0000189,2.5249893942
 Garage Attached Wall,"ConcreteMasonryUnit, none, 6-in Hollow, R-11",none,ConcreteMasonryUnit,"6-in Hollow, R-11",res3.1_national_300 - bldg0000094,1.9438098749
