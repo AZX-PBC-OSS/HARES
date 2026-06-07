@@ -9,6 +9,7 @@ use hares_core::SimulationEngine;
 
 use super::helpers;
 
+type BuildingBuilder = Box<dyn Fn(i64, Duration, u64) -> hares_core::DwellingConfig>;
 const THREAD_COUNTS: [usize; 3] = [1, 4, 8];
 const SIM_DURATION_HOURS: i64 = 24;
 const SEED: u64 = 42;
@@ -20,18 +21,9 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let duration = Duration::hours(SIM_DURATION_HOURS);
 
-    let buildings: Vec<(
-        &str,
-        Box<dyn Fn(i64, Duration, u64) -> hares_core::DwellingConfig>,
-    )> = vec![
-        (
-            "beopt_1",
-            Box::new(helpers::build_beopt_dwelling_config),
-        ),
-        (
-            "beopt_2",
-            Box::new(helpers::build_beopt_dwelling_config),
-        ),
+    let buildings: Vec<(&str, BuildingBuilder)> = vec![
+        ("beopt_1", Box::new(helpers::build_beopt_dwelling_config)),
+        ("beopt_2", Box::new(helpers::build_beopt_dwelling_config)),
         (
             "resstock",
             Box::new(helpers::build_resstock_dwelling_config),

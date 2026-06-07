@@ -2065,8 +2065,8 @@ mod tests {
     fn cpp_event_counter_enforcement() {
         // Event hours at 6, 7, 8, 9, 10. Limit is 3.
         let mut schedule = vec![0i32; 8760];
-        for h in 6..=10 {
-            schedule[h] = 1;
+        for v in schedule.iter_mut().skip(6).take(5) {
+            *v = 1;
         }
         let tariff = cpp_tariff(1.50, 3, schedule);
 
@@ -2335,8 +2335,8 @@ mod tests {
         // this can shift up to one hour between price bands, so the total may
         // differ by ±$0.10. Use a tolerance of $0.50 to accommodate.
         let mut prices = vec![0.05; 8760];
-        for i in 4380..8760 {
-            prices[i] = 0.15;
+        for v in prices.iter_mut().skip(4380) {
+            *v = 0.15;
         }
         let tariff = hourly_schedule_tariff(prices);
 

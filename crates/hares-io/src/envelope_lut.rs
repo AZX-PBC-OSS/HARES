@@ -175,6 +175,7 @@ const FILM_R_WALL_ROOF: f64 = 0.1585;
 ///
 /// This allows monotonicity checks to group variants that differ only in
 /// insulation level, not in construction type or siding material.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 fn split_r_variant(variant: &str) -> Option<(&str, u32)> {
     if variant.eq_ignore_ascii_case("Uninsulated") {
         return Some(("", 0));

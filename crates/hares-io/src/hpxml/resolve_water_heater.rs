@@ -742,6 +742,7 @@ fn canonical_water_heater_name(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_update)]
     use super::*;
     use crate::hpxml::parse_xml_document;
     use serde_json::Value;
@@ -1090,8 +1091,10 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
 
-        let mut patches = HpxmlDataPatches::default();
-        patches.number_of_bedrooms = Some(5.0);
+        let patches = HpxmlDataPatches {
+            number_of_bedrooms: Some(5.0),
+            ..Default::default()
+        };
 
         let mut specs = Vec::new();
         resolve_water_heaters(
@@ -1272,8 +1275,10 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
 
-        let mut patches = HpxmlDataPatches::default();
-        patches.number_of_bedrooms = Some(1.0);
+        let patches = HpxmlDataPatches {
+            number_of_bedrooms: Some(1.0),
+            ..Default::default()
+        };
 
         let mut specs = Vec::new();
         resolve_water_heaters(

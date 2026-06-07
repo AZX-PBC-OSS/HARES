@@ -783,6 +783,17 @@ fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>
         });
     }
 
+    // Invariant: for equipment rows with the same name, speed count, and
+    // efficiency kind, COP at each speed should increase with the efficiency
+    // rating. A reversal indicates a data entry error where COPs from a
+    // lower-efficiency unit were copied to a higher-rated row. The check
+    // uses a 1% tolerance for floating-point rounding, comparing against the
+    // proportional COP expected from the HSPF ratio.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        check_hspf_cop_monotonicity(&rows);
+    }
+
     Ok(rows)
 }
 
@@ -838,6 +849,71 @@ fn parse_efficiency_cell(raw: &str) -> (f64, String) {
         .unwrap_or(0.0);
     let kind = parts.next().unwrap_or("SEER").to_ascii_uppercase();
     (value, kind)
+}
+
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_hspf_cop_monotonicity(rows: &[HvacMultispeedParameters]) {
+    // Group rows by (hvac_name, number_of_speeds, efficiency_kind) and
+    // validate that COPs at each speed are monotonically increasing with
+    // the efficiency rating. A COP that is lower for a higher-rated unit
+    // than for a lower-rated unit signals a data entry error.
+    use std::collections::HashMap;
+
+    let mut groups: HashMap<(String, usize, String), Vec<&HvacMultispeedParameters>> =
+        HashMap::new();
+    for row in rows {
+        let key = (
+            normalize_equipment_key(&row.hvac_name),
+            row.number_of_speeds,
+            row.efficiency_kind.clone(),
+        );
+        groups.entry(key).or_default().push(row);
+    }
+
+    for group in groups.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        // Sort by efficiency rating ascending.
+        let mut sorted: Vec<&&HvacMultispeedParameters> = group.iter().collect();
+        sorted.sort_by(|a, b| {
+            a.efficiency_value
+                .partial_cmp(&b.efficiency_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let n_stages = sorted[0].cops.len();
+        for stage in 0..n_stages {
+            for i in 1..sorted.len() {
+                let cop_prev = sorted[i - 1].cops[stage];
+                let cop_curr = sorted[i].cops[stage];
+                let eff_prev = sorted[i - 1].efficiency_value;
+                let eff_curr = sorted[i].efficiency_value;
+
+                // Compare against proportional COP expected from the HSPF ratio.
+                // 1% tolerance accounts for floating-point rounding only.
+                let expected_cop = cop_prev * (eff_curr / eff_prev);
+                if cop_curr < expected_cop * 0.99 {
+                    let stage_num = stage + 1;
+                    tracing::warn!(
+                        hvac_name = %sorted[i].hvac_name,
+                        prev_hvac_name = %sorted[i - 1].hvac_name,
+                        eff_kind = %sorted[i].efficiency_kind,
+                        prev_eff = eff_prev,
+                        curr_eff = eff_curr,
+                        stage = stage_num,
+                        prev_cop = cop_prev,
+                        curr_cop = cop_curr,
+                        expected_cop,
+                        n_speeds = sorted[i].number_of_speeds,
+                        "COP at speed {stage_num} is {cop_curr:.3} but {eff_prev:.2}-rated \
+                         unit has COP {cop_prev:.3} at same speed; expected ~{expected_cop:.3} \
+                         from proportional scaling of the higher rating"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn normalize_equipment_key(raw: &str) -> String {
@@ -1241,5 +1317,97 @@ system_losses_fraction = 0.14
         // The caller should fall back to compile-time constants.
         assert_eq!(store.pv_panel_count(), 0);
         assert!(store.pv_panel_defaults("anything").is_none());
+    }
+
+    #[test]
+    fn ashp_heater_4speed_cops_monotonically_increase_with_hspf() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
+
+        // Collect all ASHP Heater 4-speed HSPF rows sorted by efficiency.
+        let mut ashp_heater_4sp: Vec<&HvacMultispeedParameters> = store
+            .hvac_multispeed
+            .iter()
+            .filter(|r| {
+                normalize_equipment_key(&r.hvac_name) == "ashp_heater"
+                    && r.number_of_speeds == 4
+                    && r.efficiency_kind == "HSPF"
+            })
+            .collect();
+        ashp_heater_4sp.sort_by(|a, b| {
+            a.efficiency_value
+                .partial_cmp(&b.efficiency_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        assert!(
+            ashp_heater_4sp.len() >= 3,
+            "expected at least 3 ASHP Heater 4-speed HSPF rows, got {}",
+            ashp_heater_4sp.len()
+        );
+
+        let n_stages = ashp_heater_4sp[0].cops.len();
+        for stage in 0..n_stages {
+            for i in 1..ashp_heater_4sp.len() {
+                let cop_prev = ashp_heater_4sp[i - 1].cops[stage];
+                let cop_curr = ashp_heater_4sp[i].cops[stage];
+                let eff_prev = ashp_heater_4sp[i - 1].efficiency_value;
+                let eff_curr = ashp_heater_4sp[i].efficiency_value;
+                let expected_cop = cop_prev * (eff_curr / eff_prev);
+                assert!(
+                    cop_curr > expected_cop * 0.99,
+                    "ASHP Heater COP at speed {} not monotonic: {} HSPF COP={:.3} < {} HSPF COP={:.3} (expected ~{:.3} proportional)",
+                    stage + 1,
+                    eff_curr,
+                    cop_curr,
+                    eff_prev,
+                    cop_prev,
+                    expected_cop
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ashp_heater_11hspf_cop_lookup_returns_correct_values() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
+
+        let row = store
+            .hvac_multispeed_parameters("ASHP Heater", "HSPF", 4, 11.0)
+            .expect("11.0 HSPF ASHP Heater 4-speed row should exist");
+
+        // Scaled from 10.47 HSPF BEopt row COPs [6.0975, 5.2085, 4.4020, 4.2058]
+        // with scale factor 11.0/10.47 ≈ 1.0506 → [6.41, 5.47, 4.62, 4.42]
+        assert!(
+            (row.cops[0] - 6.41).abs() < 0.02,
+            "COP₁ expected ~6.41, got {}",
+            row.cops[0]
+        );
+        assert!(
+            (row.cops[1] - 5.47).abs() < 0.02,
+            "COP₂ expected ~5.47, got {}",
+            row.cops[1]
+        );
+        assert!(
+            (row.cops[2] - 4.62).abs() < 0.02,
+            "COP₃ expected ~4.62, got {}",
+            row.cops[2]
+        );
+        assert!(
+            (row.cops[3] - 4.42).abs() < 0.02,
+            "COP₄ expected ~4.42, got {}",
+            row.cops[3]
+        );
     }
 }

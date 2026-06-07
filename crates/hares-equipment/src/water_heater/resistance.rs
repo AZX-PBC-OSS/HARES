@@ -954,6 +954,7 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -1701,6 +1702,7 @@ mod tests {
 
 #[cfg(test)]
 mod element_priority_tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};

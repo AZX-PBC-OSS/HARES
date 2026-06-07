@@ -866,8 +866,10 @@ mod tests {
             heating_c: 25.0,
             cooling_c: 21.0,
         });
-        let mut config = ThermostatConfig::default();
-        config.deadband_offset = 0.2;
+        let config = ThermostatConfig {
+            deadband_offset: 0.2,
+            ..Default::default()
+        };
         fsm.thermostat = config;
 
         // heat_turn_on = 25.0 - 1.0*(1.0-0.2) = 25.0 - 0.8 = 24.2

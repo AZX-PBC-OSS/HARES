@@ -2807,21 +2807,17 @@ mod tests {
 
         assert_eq!(col.len(), 168);
         // Day 1 (Wed): weekday → 0.8
-        for h in 0..24 {
-            assert!((col[h] - 0.8).abs() < 1e-10, "Wed hour {h}: expected 0.8");
+        for (h, &v) in col.iter().enumerate().take(24) {
+            assert!((v - 0.8).abs() < 1e-10, "Wed hour {h}: expected 0.8");
         }
         // Day 5 (Sun): weekend → 0.3
-        for h in 96..120 {
-            assert!(
-                (col[h] - 0.3).abs() < 1e-10,
-                "Sun hour {}: expected 0.3",
-                h - 96
-            );
+        for (h, &v) in col.iter().enumerate().skip(96).take(24) {
+            assert!((v - 0.3).abs() < 1e-10, "Sun hour {}: expected 0.3", h - 96);
         }
         // Day 6 (Mon): weekday → 0.8
-        for h in 144..168 {
+        for (h, &v) in col.iter().enumerate().skip(144).take(24) {
             assert!(
-                (col[h] - 0.8).abs() < 1e-10,
+                (v - 0.8).abs() < 1e-10,
                 "Mon hour {}: expected 0.8",
                 h - 144
             );

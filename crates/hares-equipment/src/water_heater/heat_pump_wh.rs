@@ -1251,6 +1251,7 @@ fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -2375,6 +2376,7 @@ mod tests {
 
 #[cfg(test)]
 mod mutual_exclusion_tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -2659,6 +2661,7 @@ mod mutual_exclusion_tests {
 
 #[cfg(test)]
 mod dr_tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -2972,6 +2975,7 @@ mod dr_tests {
 
 #[cfg(test)]
 mod new_feature_tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};

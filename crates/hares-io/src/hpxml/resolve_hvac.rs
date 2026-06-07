@@ -3311,6 +3311,7 @@ fn remap_minisplit_stages(
 /// single-speed despite its `number_of_speeds > 1` configuration.
 ///
 /// Only fires under `debug_assertions` or `check_invariants` feature.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 fn check_multispeed_invariant(params: &Map<String, Value>, n_speeds: usize) {
     let (_cap_prefix, _eir_prefix) = if params.contains_key("heating_capacity_w") {
         ("heating_capacity_w_stage", "heating_eir_stage")

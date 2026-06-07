@@ -1001,6 +1001,7 @@ fn default_skin_loss_fraction(burner_efficiency: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};

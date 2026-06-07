@@ -1282,6 +1282,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn dwelling_panic_during_step_is_caught_and_marks_dwelling_failed() {
         // End-to-end test of the panic→failed→skipped path in
@@ -1354,6 +1355,7 @@ mod tests {
         assert!(!fleet.telemetry(2).unwrap().dwelling_failed);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn assert_panic_from_dwelling_step_includes_file_and_line() {
         // Verifies the end-to-end chain when equipment/dwelling code panics
@@ -1401,6 +1403,7 @@ mod tests {
 
     // --- unit: double-panic prevention ---
 
+    #[cfg(debug_assertions)]
     #[test]
     fn single_panic_does_not_abort_fleet_and_other_dwellings_intact() {
         // Integration test: verify that when one dwelling panics in a

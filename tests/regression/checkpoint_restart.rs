@@ -103,11 +103,8 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     }
 
     let mut restarted_steps = Vec::new();
-    loop {
-        match dwelling_b.step() {
-            Ok(step) => restarted_steps.push(step),
-            Err(_) => break,
-        }
+    while let Ok(step) = dwelling_b.step() {
+        restarted_steps.push(step);
     }
 
     // Compare the tail of the reference run with the restarted run.
@@ -597,11 +594,8 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     }
 
     let mut restarted_steps = Vec::new();
-    loop {
-        match dwelling_b.step() {
-            Ok(step) => restarted_steps.push(step),
-            Err(_) => break,
-        }
+    while let Ok(step) = dwelling_b.step() {
+        restarted_steps.push(step);
     }
 
     let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];

@@ -6957,6 +6957,7 @@ mod tests {
     /// Test equipment that correctly deposits power into ports but
     /// under-reports electric power in `core_output()`, used to verify
     /// the telemetry consistency check catches the discrepancy.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     struct UnderReportingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -6966,6 +6967,7 @@ mod tests {
         ports: Vec<PortDeclaration>,
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl UnderReportingEquipment {
         fn new(name: &str, true_power_kw: f64, reported_power_kw: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -6998,6 +7000,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl Equipment for UnderReportingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -7166,6 +7169,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     struct ThermalUnderReportingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -7174,6 +7178,7 @@ mod tests {
         ports: Vec<PortDeclaration>,
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl ThermalUnderReportingEquipment {
         fn new(name: &str, deposited_thermal_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -7208,6 +7213,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl Equipment for ThermalUnderReportingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -7280,6 +7286,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     struct WaterHeatingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -7288,6 +7295,7 @@ mod tests {
         ports: Vec<PortDeclaration>,
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl WaterHeatingEquipment {
         fn new(name: &str, thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -7322,6 +7330,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl Equipment for WaterHeatingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -7391,6 +7400,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     struct CoolingWithLatentEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -7400,6 +7410,7 @@ mod tests {
         ports: Vec<PortDeclaration>,
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl CoolingWithLatentEquipment {
         fn new(name: &str, sensible_w: f64, latent_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -7435,6 +7446,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     impl Equipment for CoolingWithLatentEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -12639,11 +12651,8 @@ master_seed = 42
             .expect("restore checkpoint");
 
         let mut restarted_steps = Vec::new();
-        loop {
-            match dwelling_b.step() {
-                Ok(step) => restarted_steps.push(step),
-                Err(_) => break,
-            }
+        while let Ok(step) = dwelling_b.step() {
+            restarted_steps.push(step);
         }
 
         let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];

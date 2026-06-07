@@ -32,6 +32,7 @@ fn unique_temp_toml(tag: &str) -> PathBuf {
     path
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_synthetic_toml(
     path: &PathBuf,
     start_time: &str,

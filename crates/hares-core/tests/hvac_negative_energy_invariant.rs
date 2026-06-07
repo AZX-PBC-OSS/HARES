@@ -9,6 +9,7 @@
 //! Tests are gated on `debug_assertions` because the invariant check is
 //! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
 //! is active.
+#![cfg(debug_assertions)]
 
 use std::env;
 use std::fs;
@@ -56,7 +57,6 @@ master_seed = 0
 "#;
 
 /// Builds a minimal synthetic dwelling from the shared TOML fixture.
-#[cfg(debug_assertions)]
 fn minimal_dwelling() -> (std::path::PathBuf, Dwelling) {
     let tmp = env::temp_dir().join("hares_hvac_negative_invariant_test.toml");
     fs::write(&tmp, SYNTHETIC_TOML).expect("write toml");
@@ -66,7 +66,6 @@ fn minimal_dwelling() -> (std::path::PathBuf, Dwelling) {
 
 /// Verifies that a correctly-functioning dwelling steps cleanly through the
 /// HVAC delivered-energy invariant checks without false positives.
-#[cfg(debug_assertions)]
 #[test]
 fn dwelling_step_hvac_energy_invariant_wired() {
     let (tmp, mut dwelling) = minimal_dwelling();
@@ -93,7 +92,6 @@ fn dwelling_step_hvac_energy_invariant_wired() {
 /// If the `check_hvac_power_non_negative` or `check_heating_accumulator`
 /// calls were accidentally removed from `check_invariants`, this test would
 /// fail — the seam would have no effect and `step()` would return `Ok`.
-#[cfg(debug_assertions)]
 #[test]
 fn hvac_negative_energy_invariant_catches_injected_negative() {
     let (tmp, mut dwelling) = minimal_dwelling();
@@ -129,7 +127,6 @@ fn hvac_negative_energy_invariant_catches_injected_negative() {
 /// enough to exceed the drift tolerance rate. The accumulator's drift-tolerant
 /// behavior is covered by unit tests in `invariants.rs`; this test verifies
 /// end-to-end wiring of the per-step guard.
-#[cfg(debug_assertions)]
 #[test]
 fn hvac_negative_energy_accumulator_wiring_present() {
     let (tmp, mut dwelling) = minimal_dwelling();

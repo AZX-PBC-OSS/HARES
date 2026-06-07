@@ -1173,6 +1173,7 @@ impl DomainSolver for ThermalSolver {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_update)]
     use std::collections::HashMap;
     use std::time::Duration;
 

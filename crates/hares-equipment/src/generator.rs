@@ -4325,7 +4325,7 @@ mod tests {
             "FuelCell should use more fuel due to inverter loss"
         );
         assert!(
-            (fuel_fc_w - 11_111.1111).abs() < 20.0,
+            (fuel_fc_w - 11_111.111_1).abs() < 20.0,
             "FuelCell fuel should be ~11111 W, got {fuel_fc_w}"
         );
     }

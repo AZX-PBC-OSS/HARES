@@ -1073,10 +1073,11 @@ mod tests {
                 latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
             }],
             electrical: {
-                let mut e = ElectricalAccumulator::default();
-                e.reactive_power_kvar = 1.0;
-                e.load_power_w = 4.0;
-                e
+                ElectricalAccumulator {
+                    reactive_power_kvar: 1.0,
+                    load_power_w: 4.0,
+                    ..Default::default()
+                }
             },
             fuel: {
                 let mut f = FuelAccumulator::default();

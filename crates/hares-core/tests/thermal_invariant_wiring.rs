@@ -11,6 +11,7 @@
 //! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
 //! is active. In release-mode test builds the invariant is not compiled and
 //! these tests would provide no signal.
+#![cfg(debug_assertions)]
 
 use std::env;
 use std::fs;
@@ -80,7 +81,6 @@ master_seed = 0
 "#;
 
 /// Builds a synthetic dwelling with RC envelope from the shared TOML fixture.
-#[cfg(debug_assertions)]
 fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
     let tmp = env::temp_dir().join("hares_thermal_invariant_rc_test.toml");
     fs::write(&tmp, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
@@ -94,7 +94,6 @@ fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
 /// Works in conjunction with the envelope-level test in
 /// `solver_energy_conservation.rs` which verifies `thermal_balance_terms()`
 /// returns non-empty, correct results when `node_capacitances` is populated.
-#[cfg(debug_assertions)]
 #[test]
 fn dwelling_step_thermal_invariant_wired() {
     let (tmp, mut dwelling) = rc_dwelling();
@@ -121,7 +120,6 @@ fn dwelling_step_thermal_invariant_wired() {
 /// `check_invariants`, or if the balance terms were cleared before the check,
 /// this test would fail — the seam would have no effect and `step()` would
 /// return `Ok`.
-#[cfg(debug_assertions)]
 #[test]
 fn thermal_invariant_catches_broken_gain() {
     let (tmp, mut dwelling) = rc_dwelling();

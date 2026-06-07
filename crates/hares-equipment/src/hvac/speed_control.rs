@@ -1,6 +1,7 @@
 //! Speed staging and control types for HVAC equipment.
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use tracing::warn;
 
 /// Dynamic speed-control mode for HVAC performance selection.

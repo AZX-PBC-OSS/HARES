@@ -483,6 +483,7 @@ impl ThermalSolver {
             // surfaces — a physically meaningful, non-zero indicator of how active
             // the interior radiation exchange is.
             let mut zone_exchange = 0.0_f64;
+            #[allow(clippy::unused_enumerate_index)]
             for (_j, (info, &q)) in zone_cfg
                 .surfaces
                 .iter()
