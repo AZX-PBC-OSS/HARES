@@ -2224,4 +2224,224 @@ Setpoint,T_set,60.0,C
             }
         }
     }
+
+    // ── Draw schedule integration tests ─────────────────────────────────
+
+    fn load_draw_schedule_csv(path: &Path) -> Vec<(String, f64)> {
+        let mut rdr = csv::Reader::from_path(path).expect("CSV must be readable");
+        let headers = rdr.headers().expect("CSV must have headers").clone();
+        let water_col_idx = headers
+            .iter()
+            .position(|h| h == "Water Heating (L/min)" || h == "hot_water_fixtures")
+            .expect("draw schedule CSV must have a water heating column");
+        let time_col_idx = headers
+            .iter()
+            .position(|h| h == "Time")
+            .expect("draw schedule CSV must have a Time column");
+        let mut rows: Vec<(String, f64)> = Vec::new();
+        for result in rdr.records() {
+            let record = result.expect("CSV row must parse");
+            let time = record.get(time_col_idx).unwrap_or("").to_string();
+            let value: f64 = record
+                .get(water_col_idx)
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0.0);
+            rows.push((time, value));
+        }
+        rows
+    }
+
+    fn hour_from_timestamp(ts: &str) -> Option<u32> {
+        ts.split_whitespace()
+            .nth(1)?
+            .split(':')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    fn day_from_timestamp(ts: &str) -> Option<usize> {
+        ts.split_whitespace()
+            .next()?
+            .split('/')
+            .nth(1)?
+            .parse::<usize>()
+            .ok()
+            .map(|d| d - 1)
+    }
+
+    #[test]
+    fn residential_schedule_integrates_to_240_l_per_day() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let csv_path = defaults_dir
+            .join("water_heating")
+            .join("WH Medium Residential Schedule.csv");
+        assert!(csv_path.exists(), "residential schedule CSV must exist");
+        let rows = load_draw_schedule_csv(&csv_path);
+        assert!(!rows.is_empty());
+        let mut day_totals: Vec<f64> = Vec::new();
+        let mut cur_day: Option<usize> = None;
+        let mut cur_sum = 0.0;
+        for (ts, lpm) in &rows {
+            let d = day_from_timestamp(ts).expect("timestamp must parse");
+            if cur_day != Some(d) {
+                if cur_day.is_some() {
+                    day_totals.push(cur_sum);
+                }
+                cur_sum = 0.0;
+                cur_day = Some(d);
+            }
+            cur_sum += lpm * 60.0;
+        }
+        if cur_day.is_some() {
+            day_totals.push(cur_sum);
+        }
+        assert!(day_totals.len() >= 1);
+        for (i, total) in day_totals.iter().enumerate() {
+            assert!(
+                (total - 240.0).abs() < 5.0,
+                "day {} draw {:.1} L, expected ~240 L",
+                i + 1,
+                total,
+            );
+        }
+    }
+
+    #[test]
+    fn residential_schedule_has_morning_and_evening_peaks() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let csv_path = defaults_dir
+            .join("water_heating")
+            .join("WH Medium Residential Schedule.csv");
+        let rows = load_draw_schedule_csv(&csv_path);
+        let day_count = day_from_timestamp(&rows.last().unwrap().0).unwrap_or(0) + 1;
+        for day_idx in 0..day_count {
+            let mut hl = [0.0f64; 24];
+            for (ts, lpm) in &rows {
+                if day_from_timestamp(ts) != Some(day_idx) {
+                    continue;
+                }
+                if let Some(h) = hour_from_timestamp(ts) {
+                    hl[h as usize] += lpm * 60.0;
+                }
+            }
+            let morning_max = hl[6..10].iter().cloned().fold(0.0, f64::max);
+            let morning_avg = hl[6..10].iter().sum::<f64>() / 4.0;
+            let evening_max = hl[17..22].iter().cloned().fold(0.0, f64::max);
+            let other_avg: f64 = (0..24)
+                .filter(|h| !(6..10).contains(h) && !(17..22).contains(h))
+                .map(|h| hl[h])
+                .sum::<f64>()
+                / 15.0;
+            assert!(
+                morning_max > other_avg,
+                "day {} morning peak ({:.1} L/h) must exceed non-peak avg ({:.1})",
+                day_idx + 1,
+                morning_max,
+                other_avg,
+            );
+            let overnight_avg = hl[0..6].iter().sum::<f64>() / 6.0;
+            assert!(
+                morning_avg > overnight_avg,
+                "day {} morning avg ({:.1}) must exceed overnight avg ({:.1})",
+                day_idx + 1,
+                morning_avg,
+                overnight_avg,
+            );
+            assert!(
+                evening_max > 0.0,
+                "day {} must have evening draws",
+                day_idx + 1
+            );
+        }
+    }
+
+    #[test]
+    fn residential_schedule_overnight_draw_below_5_percent() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let csv_path = defaults_dir
+            .join("water_heating")
+            .join("WH Medium Residential Schedule.csv");
+        let rows = load_draw_schedule_csv(&csv_path);
+        let day_count = day_from_timestamp(&rows.last().unwrap().0).unwrap_or(0) + 1;
+        for day_idx in 0..day_count {
+            let mut hl = [0.0f64; 24];
+            for (ts, lpm) in &rows {
+                if day_from_timestamp(ts) != Some(day_idx) {
+                    continue;
+                }
+                if let Some(h) = hour_from_timestamp(ts) {
+                    hl[h as usize] += lpm * 60.0;
+                }
+            }
+            let total: f64 = hl.iter().sum();
+            let overnight = hl[22..24].iter().sum::<f64>() + hl[0..5].iter().sum::<f64>();
+            let pct = 100.0 * overnight / total;
+            assert!(
+                pct < 5.0,
+                "day {} overnight draw (22-5) is {:.1}%, must be <5%",
+                day_idx + 1,
+                pct,
+            );
+        }
+    }
+
+    #[test]
+    fn uef_test_schedule_integrates_to_208_2_l_per_day() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let csv_path = defaults_dir
+            .join("water_heating")
+            .join("WH UEF Test Medium Draw Profile.csv");
+        assert!(csv_path.exists(), "UEF test schedule must exist");
+        let rows = load_draw_schedule_csv(&csv_path);
+        assert!(!rows.is_empty());
+        let mut day_totals: Vec<f64> = Vec::new();
+        let mut cur_day: Option<usize> = None;
+        let mut cur_sum = 0.0;
+        for (ts, lpm) in &rows {
+            let d = day_from_timestamp(ts).expect("timestamp must parse");
+            if cur_day != Some(d) {
+                if cur_day.is_some() {
+                    day_totals.push(cur_sum);
+                }
+                cur_sum = 0.0;
+                cur_day = Some(d);
+            }
+            cur_sum += lpm;
+        }
+        if cur_day.is_some() {
+            day_totals.push(cur_sum);
+        }
+        let expected = 208.2;
+        for (i, total) in day_totals.iter().enumerate() {
+            assert!(
+                (total - expected).abs() < 1.0,
+                "UEF test day {} draw {:.1} L, expected {:.1} L",
+                i + 1,
+                total,
+                expected,
+            );
+        }
+    }
 }

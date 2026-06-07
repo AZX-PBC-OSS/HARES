@@ -1,5 +1,6 @@
 //! Tankless (on-demand) water heater model.
 
+use chrono::Timelike;
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -11,13 +12,14 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)]
+#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
 use tracing::warn;
 
 use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE,
 };
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
+use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
@@ -79,6 +81,8 @@ pub struct TanklessWH {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
+    draw_tracker: super::DrawVolumeTracker,
 }
 
 impl TanklessWH {
@@ -142,6 +146,7 @@ impl TanklessWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
 
@@ -261,6 +266,7 @@ impl TanklessWH {
         self.ctrl_load_fraction = 1.0;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
+        self.draw_tracker = super::DrawVolumeTracker::new();
         Ok(())
     }
 }
@@ -338,6 +344,11 @@ impl Equipment for TanklessWH {
 
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = schedule_draw_kg_s + appliance_demand_kg_s;
+
+        let draw_volume_l =
+            total_draw_kg_s * dt.as_secs_f64() / water_density_kg_m3(inlet_temp_c) * 1000.0;
+        self.draw_tracker
+            .accumulate(draw_volume_l, env.current_time.hour());
 
         let (thermal_output_w, outlet_temp_c) =
             if mode == OperatingMode::Heating && total_draw_kg_s > 0.0 {

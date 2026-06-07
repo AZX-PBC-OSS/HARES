@@ -11,6 +11,101 @@ pub mod wh_config;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
+/// Tracks hourly and daily draw volumes for observer capture and invariant checks.
+///
+/// The observer capture (`observe` feature) logs the hourly draw volume distribution
+/// each simulated hour so that the active schedule's temporal pattern can be verified.
+///
+/// The invariant check (`check_invariants`) validates that overnight draw (0:00–5:00)
+/// is less than 20% of the total daily draw — the expected residential pattern.
+/// A violation indicates a misconfiguration such as the DOE UEF test schedule being
+/// used for a residential simulation.
+#[derive(Debug, Clone)]
+pub(crate) struct DrawVolumeTracker {
+    /// Accumulated draw volume for the current hour [L].
+    current_hour_volume_l: f64,
+    /// Hour index (0-23) of the most recent observation.
+    last_hour: Option<u32>,
+    /// Total draw volume accumulated today [L].
+    daily_total_l: f64,
+    /// Draw volume accumulated between 0:00 and 5:00 today [L].
+    overnight_volume_l: f64,
+}
+
+impl DrawVolumeTracker {
+    pub(crate) const fn new() -> Self {
+        Self {
+            current_hour_volume_l: 0.0,
+            last_hour: None,
+            daily_total_l: 0.0,
+            overnight_volume_l: 0.0,
+        }
+    }
+
+    /// Register `draw_volume_l` for the given simulation hour (0-23).
+    ///
+    /// At hour boundaries:
+    /// - Observed feature: logs the completed hour's draw volume.
+    /// - Checkpoint: resets `current_hour_volume_l`.
+    ///
+    /// At midnight (hour 0): resets daily accumulators and runs the invariant check.
+    pub(crate) fn accumulate(&mut self, draw_volume_l: f64, hour: u32) {
+        if self.last_hour != Some(hour) {
+            // Hour boundary: flush the completed hour.
+            if let Some(completed_hour) = self.last_hour {
+                #[cfg(feature = "observe")]
+                {
+                    let vol = self.current_hour_volume_l;
+                    tracing::info!(
+                        hour = completed_hour,
+                        draw_volume_l = vol,
+                        "hourly hot water draw volume"
+                    );
+                }
+
+                // At midnight (hour 0 is the new hour, so last_hour was 23):
+                // run the overnight-draw invariant check.
+                if completed_hour == 23 {
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        if self.daily_total_l > 0.0 {
+                            let overnight_pct =
+                                100.0 * self.overnight_volume_l / self.daily_total_l;
+                            if overnight_pct > 20.0 {
+                                tracing::error!(
+                                    overnight_volume_l = self.overnight_volume_l,
+                                    daily_total_l = self.daily_total_l,
+                                    overnight_pct,
+                                    "overnight hot water draw (0:00–5:00) is \
+                                     {overnight_pct:.1}% of daily total — exceeds \
+                                     20% threshold; the active draw schedule may be a \
+                                     DOE UEF test-standard profile rather than a \
+                                     residential occupancy profile"
+                                );
+                            }
+                        }
+                        self.daily_total_l = 0.0;
+                        self.overnight_volume_l = 0.0;
+                    }
+                    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+                    {
+                        self.daily_total_l = 0.0;
+                        self.overnight_volume_l = 0.0;
+                    }
+                }
+            }
+            self.current_hour_volume_l = 0.0;
+            self.last_hour = Some(hour);
+        }
+
+        self.current_hour_volume_l += draw_volume_l;
+        self.daily_total_l += draw_volume_l;
+        if hour < 5 {
+            self.overnight_volume_l += draw_volume_l;
+        }
+    }
+}
+
 // Shared physical constants and defaults used by multiple water heater types.
 pub(crate) const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 pub(crate) const DEFAULT_UA_W_PER_K: f64 = 2.0;

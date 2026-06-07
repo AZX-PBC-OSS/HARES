@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use chrono::Timelike;
 use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
@@ -14,7 +15,7 @@ use hares_types::{
     TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)]
+#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -117,6 +118,8 @@ pub struct GasWH {
     hot_draw_temp_c: Option<f64>,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
+    draw_tracker: super::DrawVolumeTracker,
 }
 
 impl GasWH {
@@ -211,6 +214,7 @@ impl GasWH {
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
             zone_id_explicit,
+            draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
 
@@ -410,6 +414,7 @@ impl GasWH {
             .set(tk::BURNER_EFFICIENCY, self.burner_efficiency_constant);
         self.telemetry.set(tk::BURNER_EFFICIENCY_SOURCE, source);
         self.core_output = CoreOutput::default();
+        self.draw_tracker = super::DrawVolumeTracker::new();
         Ok(())
     }
 }
@@ -585,6 +590,12 @@ impl Equipment for GasWH {
             tmv,
             dt,
         )?;
+
+        let draw_volume_l = total_draw_kg_s * dt.as_secs_f64()
+            / water_density_kg_m3(self.tank.node_temps()[0])
+            * 1000.0;
+        self.draw_tracker
+            .accumulate(draw_volume_l, env.current_time.hour());
 
         let fuel_input_w = burner_input_w + self.pilot_power_w;
         if fuel_input_w > 0.0 {

@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use chrono::Timelike;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
@@ -115,6 +116,8 @@ pub struct ResistanceWH {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
+    draw_tracker: super::DrawVolumeTracker,
 }
 
 impl ResistanceWH {
@@ -207,6 +210,7 @@ impl ResistanceWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
 
@@ -387,6 +391,7 @@ impl ResistanceWH {
         self.telemetry = default_telemetry();
         self.tank.register_node_telemetry(&mut self.telemetry);
         self.core_output = CoreOutput::default();
+        self.draw_tracker = super::DrawVolumeTracker::new();
         Ok(())
     }
 
@@ -601,6 +606,13 @@ impl Equipment for ResistanceWH {
             tmv,
             dt,
         )?;
+
+        // Track hourly draw volumes for observer capture and invariant checks.
+        let draw_volume_l = total_draw_kg_s * dt.as_secs_f64()
+            / water_density_kg_m3(self.tank.node_temps()[0])
+            * 1000.0;
+        self.draw_tracker
+            .accumulate(draw_volume_l, env.current_time.hour());
 
         let rated_electric_power_w = upper_power_w + lower_power_w;
         let (electric_power_w, reactive_power_kvar) =

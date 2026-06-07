@@ -11,6 +11,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use chrono::Timelike;
 use hares_physics::constants::cp_j_kg_k;
 use hares_physics::water_density_kg_m3;
 use hares_types::{
@@ -21,7 +22,7 @@ use hares_types::{
     ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)]
+#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -102,6 +103,8 @@ pub struct IndirectTank {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
+    draw_tracker: super::DrawVolumeTracker,
 }
 
 impl IndirectTank {
@@ -182,6 +185,7 @@ impl IndirectTank {
             boiler_loop_flow_rate_kg_s: DEFAULT_BOILER_LOOP_FLOW_RATE_KG_S,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
 
@@ -311,6 +315,7 @@ impl IndirectTank {
             t
         };
         self.core_output = CoreOutput::default();
+        self.draw_tracker = super::DrawVolumeTracker::new();
         Ok(())
     }
 
@@ -467,6 +472,12 @@ impl Equipment for IndirectTank {
             tmv,
             dt,
         )?;
+
+        let draw_volume_l = total_draw_kg_s * dt.as_secs_f64()
+            / water_density_kg_m3(self.tank.node_temps()[0])
+            * 1000.0;
+        self.draw_tracker
+            .accumulate(draw_volume_l, env.current_time.hour());
 
         // Write boiler loop return: mass-conserving energy balance.
         let boiler_flow_kg_s = self.boiler_loop_flow_rate_kg_s;

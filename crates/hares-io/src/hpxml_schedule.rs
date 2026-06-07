@@ -24,7 +24,7 @@ const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
     ("cooking_range", "Cooking Range"),
     ("hot_water_dishwasher", "Dishwasher"),
     ("hot_water_clothes_washer", "Clothes Washer"),
-    ("hot_water_fixtures", "Water Fixtures"),
+    ("hot_water_fixtures", "Water Heating"),
 ];
 
 /// Generate a complete schedule from HPXML building data and default profiles.
