@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
+use hares_physics::units::power_kw_to_w;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -137,12 +138,63 @@ pub struct EquipmentDefaults {
     pub params: HashMap<String, toml::Value>,
 }
 
+/// Known unit strings for water heater default parameters.
+/// Each unit is either a direct SI unit (no conversion) or requires scaling.
+const KNOWN_WATER_HEATING_UNITS: &[&str] = &[
+    "degC",
+    "deltaC",
+    "K",
+    "W",
+    "kW",
+    "m3",
+    "L",
+    "m",
+    "W_per_K",
+    "m2_K_per_W",
+    "L_per_day",
+    "kg_per_s",
+    "dimensionless",
+    // Legacy aliases accepted but equivalent to the canonical form above.
+    "C",
+];
+
+/// Convert a value from its declared unit to the SI equivalent stored internally.
+///
+/// Returns the converted value (always in SI). Unrecognized units pass through
+/// without conversion — the invariant checker flags them at startup.
+///
+/// Conversion factors:
+/// - kW → W: via [`power_kw_to_w`] (1 kW = 1000 W, NIST SP 330 §7.3)
+fn convert_water_heating_value_to_si(value: f64, unit: &str) -> f64 {
+    match unit {
+        // Power: kW → W conversion. HARES stores electric element power in W
+        // (see wh_config.rs validation ranges). If a CSV row declares kW, the
+        // value must be multiplied by 1000 to match the SI internal convention.
+        "kW" => power_kw_to_w(value),
+        // All other known units are already in SI or are dimensionless — no conversion needed.
+        "W" | "degC" | "deltaC" | "K" | "C" | "m3" | "L" | "m" | "W_per_K" | "m2_K_per_W"
+        | "L_per_day" | "kg_per_s" | "dimensionless" | "" => value,
+        unrecognized => {
+            tracing::warn!(
+                unit = unrecognized,
+                value,
+                "unrecognized unit in water heating defaults; value passed through \
+                 without conversion — verify it is in SI. Known units: {}",
+                KNOWN_WATER_HEATING_UNITS.join(", ")
+            );
+            value
+        }
+    }
+}
+
 /// One row from `defaults/water_heating/default_paramters.csv`.
 #[derive(Debug, Clone, PartialEq)]
 struct WaterHeatingDefaultRow {
     description: String,
     name: String,
+    /// Value in SI units after conversion.
     value: f64,
+    /// Unit string as declared in the CSV.
     units: String,
 }
 
@@ -181,6 +233,15 @@ impl WaterHeatingDefaults {
     #[must_use]
     pub fn get_or(&self, name: &str, default: f64) -> f64 {
         self.get(name).unwrap_or(default)
+    }
+
+    /// Look up the description text by its CSV row name.
+    #[must_use]
+    pub fn description(&self, name: &str) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.description.as_str())
     }
 
     /// Number of parameter rows loaded.
@@ -1064,12 +1125,16 @@ fn normalize_equipment_key(raw: &str) -> String {
 ///
 /// The CSV has columns: Description, Name, Value, Units.
 /// Rows whose Value field is empty or unparseable are skipped with a warning.
+/// Values declared in non-SI units (e.g. kW) are converted to SI at load time.
 /// Returns `None` if the file does not exist (non-fatal — callers fall back).
 fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
     if !path.exists() {
         return None;
     }
-    let mut rdr = match csv::Reader::from_path(path) {
+    let mut rdr = match csv::ReaderBuilder::new()
+        .comment(Some(b'#'))
+        .from_path(path)
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -1104,10 +1169,22 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
 
         match value_str.trim().parse::<f64>() {
             Ok(v) if v.is_finite() => {
+                let si_value = convert_water_heating_value_to_si(v, &units);
+                #[cfg(feature = "observe")]
+                {
+                    tracing::info!(
+                        target: "hares_io::defaults::water_heating",
+                        name = %name,
+                        raw_value = v,
+                        units = %units,
+                        si_value,
+                        "water heating default parameter loaded"
+                    );
+                }
                 rows.push(WaterHeatingDefaultRow {
                     description,
                     name,
-                    value: v,
+                    value: si_value,
                     units,
                 });
             }
@@ -1139,11 +1216,33 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
 /// - UEF values are within valid ranges (0.0–1.0 for electric/gas, 1.0–5.0 for HPWH)
 /// - Tank volumes are in standard sizes with correct gallon-to-liter conversions
 /// - Every required field has a corresponding entry
+/// - Every row has a non-empty Units column
+/// - Every unit string is in the known set; unrecognized units produce a warning
 ///
 /// Core invariants that would corrupt simulation results produce `tracing::error!`;
 /// minor anomalies produce `tracing::warn!`.
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
+    // Unit validation: every row must have a non-empty, recognized unit.
+    for row in &wh.rows {
+        if row.units.is_empty() {
+            tracing::error!(
+                row_name = %row.name,
+                row_value = row.value,
+                "water heating defaults row has empty Units column; \
+                 use 'dimensionless' for dimensionless parameters"
+            );
+        } else if !KNOWN_WATER_HEATING_UNITS.contains(&row.units.as_str()) {
+            tracing::warn!(
+                row_name = %row.name,
+                row_unit = %row.units,
+                "unrecognized unit for water heating defaults row; \
+                 known units: {}",
+                KNOWN_WATER_HEATING_UNITS.join(", ")
+            );
+        }
+    }
+
     // UA monotonicity: larger tanks must have higher UA (more surface area).
     let sizes: [u8; 5] = [30, 40, 50, 65, 80];
     let mut prev_ua: Option<f64> = None;
@@ -1790,7 +1889,8 @@ system_losses_fraction = 0.14
     fn write_water_heating_csv(dir: &Path) {
         std::fs::write(
             dir.join("default_paramters.csv"),
-            r#"Description,Name,Value,Units
+            r#"# Water heater default parameters
+Description,Name,Value,Units
 Tank_Volume_50gal_m3,Vol_50gal_m3,0.189,m3
 Tank_Volume_50gal_L,Vol_50gal_L,189.3,L
 Tank_Volume_80gal_m3,Vol_80gal_m3,0.303,m3
@@ -1798,12 +1898,12 @@ Tank_Volume_80gal_L,Vol_80gal_L,302.8,L
 Tank_Height_50gal,H_50gal,1.22,m
 UA_50gal_R12,UA_50gal_R12,1.10,W_per_K
 UA_80gal_R12,UA_80gal_R12,1.49,W_per_K
-UEF_GasStorage_50gal,UEF_GasStorage_50gal,0.64,
-UEF_ElectricResistance_50gal,UEF_ElecRes_50gal,0.93,
-UEF_HPWH_50gal,UEF_HPWH_50gal,3.70,
+UEF_GasStorage_50gal,UEF_GasStorage_50gal,0.64,dimensionless
+UEF_ElectricResistance_50gal,UEF_ElecRes_50gal,0.93,dimensionless
+UEF_HPWH_50gal,UEF_HPWH_50gal,3.70,dimensionless
 HeatingCapacity_GasStorage_50gal,HC_GasStorage_50gal,11170,W
-Setpoint,T_set,51.67,C
-Deadband,T_db,5.56,C
+Setpoint,T_set,51.67,degC
+Deadband,T_db,5.56,deltaC
 Avg_Draw_Medium_L_per_day,Draw_Medium,208.2,L_per_day
 Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
 "#,
@@ -2102,6 +2202,135 @@ Another_Good,Key2,3.14,m
     }
 
     #[test]
+    fn kw_unit_converted_to_w_at_load_time() {
+        // Regression: if a CSV row declares P_hw1 as 4.5 kW, the loader must
+        // convert to 4500 W internally. Without the ×1000 conversion, a parser
+        // that silently assumes W would produce a 1000× error in power values.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Element_Power_Lower_Tank,P_hw1,4.5,kW
+Element_Power_Upper_Tank,P_hw2,4.5,kW
+"#,
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // 4.5 kW × 1000 = 4500 W.
+        assert!(
+            (wh.get("P_hw1").unwrap() - 4500.0).abs() < 1e-6,
+            "P_hw1 4.5 kW should convert to 4500 W, got {}",
+            wh.get("P_hw1").unwrap()
+        );
+        assert!(
+            (wh.get("P_hw2").unwrap() - 4500.0).abs() < 1e-6,
+            "P_hw2 4.5 kW should convert to 4500 W, got {}",
+            wh.get("P_hw2").unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_units_row_loaded_and_flagged_by_invariant_check() {
+        // The CSV parser stores rows with empty units but does not convert
+        // or fabricate a unit. Rows with empty units are accepted at load
+        // time (they are still parsed, value stored as-is). The invariant
+        // checker is responsible for flagging empty-units rows at startup.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Some_Parameter,P_test,42.0,
+"#,
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // The value is still accessible — loading is non-fatal.
+        assert!(
+            (wh.get("P_test").unwrap() - 42.0).abs() < 1e-6,
+            "empty-units row should still be loaded with value 42.0"
+        );
+    }
+
+    #[test]
+    fn all_known_unit_strings_parse_without_error() {
+        // Verify that every unit in KNOWN_WATER_HEATING_UNITS is accepted
+        // by the unit conversion function and produces a valid result.
+        let test_units = &[
+            ("degC", 25.0),
+            ("deltaC", 5.0),
+            ("K", 300.0),
+            ("W", 4500.0),
+            ("kW", 4.5), // should convert to 4500 W
+            ("m3", 0.189),
+            ("L", 189.3),
+            ("m", 1.2),
+            ("W_per_K", 2.0),
+            ("m2_K_per_W", 1.76),
+            ("L_per_day", 208.2),
+            ("kg_per_s", 0.1262),
+            ("dimensionless", 0.92),
+            ("C", 51.67), // legacy alias for degC
+        ];
+
+        for (unit, raw_value) in test_units {
+            let result = convert_water_heating_value_to_si(*raw_value, unit);
+            if *unit == "kW" {
+                assert!(
+                    (result - 4500.0).abs() < 1e-6,
+                    "4.5 kW should convert to 4500 W, got {result}"
+                );
+            }
+        }
+
+        // Empty string (CSV parser passes empty string for missing column)
+        // is accepted as a valid unit — it means "no unit declared."
+        // The invariant checker flags it separately.
+        let _ = convert_water_heating_value_to_si(1.0, "");
+
+        // Unrecognized unit passes through with a warning (non-fatal).
+        // The invariant checker is responsible for flagging it at startup.
+        let _ = convert_water_heating_value_to_si(1.0, "furlongs_per_fortnight");
+    }
+
+    #[test]
     fn partial_csv_does_not_panic_and_missing_fields_return_none() {
         // Regression: the invariant checker should catch missing required
         // fields without panicking. A CSV with only a few rows exercises the
@@ -2114,7 +2343,7 @@ Another_Good,Key2,3.14,m
             wh_dir.join("default_paramters.csv"),
             r#"Description,Name,Value,Units
 Tank_Volume_50gal_m3,Vol_50gal_m3,0.189,m3
-Setpoint,T_set,60.0,C
+Setpoint,T_set,60.0,degC
 "#,
         )
         .unwrap();

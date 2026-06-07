@@ -1,3 +1,19 @@
+# Water heater default parameters
+# T_set: storage tank setpoint temperature [degC], typical range 49–60
+#   per ASHRAE 90.2-2024 typical tempering valve delivery — 49°C (≈120°F)
+#   OCHRE default: 51.67°C (125°F)
+# T_db: thermostat deadband [deltaC], typical range 2–6
+#   OCHRE default: 5.56 deltaC (≈10°F)
+# T_max: maximum tank temperature [degC], typical range 71–85
+# T_init: initial tank temperature [degC]
+# P_hwN: electric element power [W], 4500 W (4.5 kW) standard residential
+#   OCHRE default_capacity = 4500 W (hpxml.py:1028)
+# Heating capacities: gas storage [W] per tank size, electric resistance [W], tankless gas [W]
+#   OCHRE ElectricResistance default: 4500 W (hpxml.py:1028)
+# UA values: tank heat loss coefficient [W_per_K] for R-10 and R-12 insulation
+# Tank volumes: standard US residential sizes 30–80 gal [m3] and [L]
+# UEF/EF values: dimensionless efficiency ratings
+# Draw profiles: daily volumes in [L_per_day], DOE UEF test procedure medium = 208.2 L/day
 Description,Name,Value,Units
 Tank_Volume_30gal_m3,Vol_30gal_m3,0.114,m3
 Tank_Volume_40gal_m3,Vol_40gal_m3,0.151,m3
@@ -27,22 +43,22 @@ UA_40gal_R10,UA_40gal_R10,1.14,W_per_K
 UA_50gal_R10,UA_50gal_R10,1.32,W_per_K
 UA_65gal_R10,UA_65gal_R10,1.56,W_per_K
 UA_80gal_R10,UA_80gal_R10,1.78,W_per_K
-UEF_GasStorage_30gal,UEF_GasStorage_30gal,0.63,
-UEF_GasStorage_40gal,UEF_GasStorage_40gal,0.64,
-UEF_GasStorage_50gal,UEF_GasStorage_50gal,0.64,
-UEF_GasStorage_65gal,UEF_GasStorage_65gal,0.63,
-UEF_GasStorage_80gal,UEF_GasStorage_80gal,0.62,
-UEF_ElectricResistance_30gal,UEF_ElecRes_30gal,0.92,
-UEF_ElectricResistance_40gal,UEF_ElecRes_40gal,0.93,
-UEF_ElectricResistance_50gal,UEF_ElecRes_50gal,0.93,
-UEF_ElectricResistance_65gal,UEF_ElecRes_65gal,0.93,
-UEF_ElectricResistance_80gal,UEF_ElecRes_80gal,0.92,
-UEF_HPWH_50gal,UEF_HPWH_50gal,3.70,
-UEF_HPWH_65gal,UEF_HPWH_65gal,3.50,
-UEF_HPWH_80gal,UEF_HPWH_80gal,3.30,
-UEF_TanklessGas,UEF_TanklessGas,0.82,
-EF_GasStorage_50gal,EF_GasStorage_50gal,0.59,
-EF_ElectricResistance_50gal,EF_ElecRes_50gal,0.90,
+UEF_GasStorage_30gal,UEF_GasStorage_30gal,0.63,dimensionless
+UEF_GasStorage_40gal,UEF_GasStorage_40gal,0.64,dimensionless
+UEF_GasStorage_50gal,UEF_GasStorage_50gal,0.64,dimensionless
+UEF_GasStorage_65gal,UEF_GasStorage_65gal,0.63,dimensionless
+UEF_GasStorage_80gal,UEF_GasStorage_80gal,0.62,dimensionless
+UEF_ElectricResistance_30gal,UEF_ElecRes_30gal,0.92,dimensionless
+UEF_ElectricResistance_40gal,UEF_ElecRes_40gal,0.93,dimensionless
+UEF_ElectricResistance_50gal,UEF_ElecRes_50gal,0.93,dimensionless
+UEF_ElectricResistance_65gal,UEF_ElecRes_65gal,0.93,dimensionless
+UEF_ElectricResistance_80gal,UEF_ElecRes_80gal,0.92,dimensionless
+UEF_HPWH_50gal,UEF_HPWH_50gal,3.70,dimensionless
+UEF_HPWH_65gal,UEF_HPWH_65gal,3.50,dimensionless
+UEF_HPWH_80gal,UEF_HPWH_80gal,3.30,dimensionless
+UEF_TanklessGas,UEF_TanklessGas,0.82,dimensionless
+EF_GasStorage_50gal,EF_GasStorage_50gal,0.59,dimensionless
+EF_ElectricResistance_50gal,EF_ElecRes_50gal,0.90,dimensionless
 HeatingCapacity_GasStorage_30gal,HC_GasStorage_30gal,9000,W
 HeatingCapacity_GasStorage_40gal,HC_GasStorage_40gal,10000,W
 HeatingCapacity_GasStorage_50gal,HC_GasStorage_50gal,11170,W
@@ -50,15 +66,15 @@ HeatingCapacity_GasStorage_65gal,HC_GasStorage_65gal,12000,W
 HeatingCapacity_GasStorage_80gal,HC_GasStorage_80gal,13000,W
 HeatingCapacity_ElectricResistance,HC_ElecRes,4500,W
 HeatingCapacity_TanklessGas,HC_TanklessGas,20000,W
-ConversionEfficiency_GasStorage,ConvEff_GasStorage,0.78,
-Setpoint,T_set,51.67,C
-Deadband,T_db,5.56,C
-Max_Tank_Temp,T_max,82.22,C
-Initial_Tank_Temp,T_init,51.67,C
+ConversionEfficiency_GasStorage,ConvEff_GasStorage,0.78,dimensionless
+Setpoint,T_set,51.67,degC
+Deadband,T_db,5.56,deltaC
+Max_Tank_Temp,T_max,82.22,degC
+Initial_Tank_Temp,T_init,51.67,degC
 Avg_Draw_Low_L_per_day,Draw_Low,135.0,L_per_day
 Avg_Draw_Medium_L_per_day,Draw_Medium,208.2,L_per_day
 Avg_Draw_High_L_per_day,Draw_High,240.0,L_per_day
 Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
-Tank_Nodes,N_tank,6,
+Tank_Nodes,N_tank,6,dimensionless
 Element_Power_Lower_Tank,P_hw1,4500.0,W
 Element_Power_Upper_Tank,P_hw2,4500.0,W
