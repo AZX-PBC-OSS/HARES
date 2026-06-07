@@ -1,6 +1,7 @@
 //! Speed staging and control types for HVAC equipment.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Dynamic speed-control mode for HVAC performance selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,7 +140,18 @@ pub fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
     if max_cap <= 0.0 {
         return vec![];
     }
-    caps.iter().map(|&c| c / max_cap).collect()
+    let fractions: Vec<f64> = caps.iter().map(|&c| c / max_cap).collect();
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    if (fractions.last().copied().unwrap_or(1.0) - 1.0).abs() > 1e-6 {
+        warn!(
+            max_entry = max_cap,
+            normalized_max = fractions.last().copied().unwrap_or(1.0),
+            "capacity_fractions_for normalizes max to {} instead of 1.0; \
+             capacity ratios may have non-unity max fraction",
+            fractions.last().unwrap()
+        );
+    }
+    fractions
 }
 
 /// Bracket-interpolation of a requested load fraction against normalized
@@ -469,5 +481,46 @@ mod tests {
         assert_eq!(sel.speed_index, 0);
         assert!((sel.speed_frac - 0.5).abs() < 1e-12);
         assert_eq!(sel.part_load_ratio, 1.0);
+    }
+
+    #[test]
+    fn capacity_fractions_normalizes_overspeed_ratios() {
+        let fracs = capacity_fractions_for(&[0.4, 0.6, 0.8, 1.2]);
+        let expected = vec![0.4 / 1.2, 0.6 / 1.2, 0.8 / 1.2, 1.0];
+        assert_eq!(fracs.len(), 4);
+        for (i, (got, exp)) in fracs.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-10,
+                "index {i}: expected {exp}, got {got}"
+            );
+        }
+        assert!(
+            (fracs.last().unwrap() - 1.0).abs() < 1e-12,
+            "last fraction must be 1.0"
+        );
+    }
+
+    #[test]
+    fn interpolate_at_exact_rated_capacity_selects_last_stage() {
+        // After capacity_fractions_for normalizes by max, the last stage is
+        // fraction 1.0. A load at exactly rated capacity (load_fraction=1.0)
+        // must select the last stage with plr=1.0, not interpolate between
+        // penultimate and ultimate stages.
+        let fracs = capacity_fractions_for(&[0.4, 0.6, 0.8, 1.2]);
+        // fracs = [0.333..., 0.5, 0.666..., 1.0]
+        let sel = interpolate_speed_stages(1.0, &fracs, false);
+        assert_eq!(
+            sel.speed_index,
+            fracs.len() - 1,
+            "rated load must select last stage"
+        );
+        assert!(
+            sel.speed_frac.abs() < 1e-12,
+            "rated load must not interpolate between stages"
+        );
+        assert!(
+            (sel.part_load_ratio - 1.0).abs() < 1e-12,
+            "rated load must have full part-load ratio"
+        );
     }
 }
