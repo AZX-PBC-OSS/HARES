@@ -13,7 +13,7 @@
 //! - `ochre/defaults/EV/*` -> `defaults/ev/*.toml`
 //! - `ochre/defaults/Gas Generator/*` -> `defaults/generator/*.toml`
 //! - `ochre/defaults/PV/*` -> `defaults/pv/*.toml`
-//! - `ochre/defaults/Water Heating/*` -> `defaults/water_heating/*.toml`
+//! - `ochre/defaults/Water Heating/*` -> `defaults/water_heating/*.toml` and `defaults/water_heating/default_paramters.csv`
 //! - appliance and event schedule defaults -> `defaults/loads/*.toml`
 
 use std::collections::HashMap;
@@ -137,6 +137,102 @@ pub struct EquipmentDefaults {
     pub params: HashMap<String, toml::Value>,
 }
 
+/// One row from `defaults/water_heating/default_paramters.csv`.
+#[derive(Debug, Clone, PartialEq)]
+struct WaterHeatingDefaultRow {
+    description: String,
+    name: String,
+    value: f64,
+    units: String,
+}
+
+/// Parsed water heater default parameters loaded from
+/// `defaults/water_heating/default_paramters.csv`.
+///
+/// Provides typed lookups for tank volumes, UA values, UEF/EF efficiency
+/// ratings, heating capacity, draw profiles, and setpoint schedules.
+///
+/// Source citations:
+/// - Tank volumes: standard US residential sizes, ASHRAE HoF 2021 Ch.51
+/// - UEF values: representative of typical installed residential stock
+///   (pre-2015 vintage); these are not DOE 10 CFR Part 430, Subpart B, App. E
+///   minimum-compliance baselines, which are higher for electric-resistance
+///   units under the 2017 rule
+/// - UA values: surface-area-derived from cylindrical tank geometry with
+///   R-10/R-12 jacket insulation (insulation R-values per ASHRAE HoF 2021
+///   Ch.26 Table 2) and a plumbing/fitting correction factor of ~1.15 applied
+///   to the pure cylindrical area to account for pipe connections and
+///   uninsulated tank top/bottom sections
+/// - Draw profiles: DOE UEF test procedure medium draw bin (208.2 L/day);
+///   low/high from ASHRAE HoF 2021 Ch.51 typical residential ranges
+#[derive(Debug, Clone, Default)]
+pub struct WaterHeatingDefaults {
+    rows: Vec<WaterHeatingDefaultRow>,
+}
+
+impl WaterHeatingDefaults {
+    /// Look up a numeric value by its CSV row name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<f64> {
+        self.rows.iter().find(|r| r.name == name).map(|r| r.value)
+    }
+
+    /// Look up a numeric value by its CSV row name, returning `default` if absent.
+    #[must_use]
+    pub fn get_or(&self, name: &str, default: f64) -> f64 {
+        self.get(name).unwrap_or(default)
+    }
+
+    /// Number of parameter rows loaded.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Iterator over all tank volume gallon sizes present in the defaults.
+    pub fn tank_sizes_gal(&self) -> impl Iterator<Item = u8> + '_ {
+        [30u8, 40, 50, 65, 80]
+            .into_iter()
+            .filter(|gal| self.get(&format!("Vol_{gal}gal_m3")).is_some())
+    }
+
+    /// Tank volume in m³ for a given gallon size.
+    #[must_use]
+    pub fn tank_volume_m3(&self, gallons: u8) -> Option<f64> {
+        self.get(&format!("Vol_{gallons}gal_m3"))
+    }
+
+    /// Tank height in m for a given gallon size.
+    #[must_use]
+    pub fn tank_height_m(&self, gallons: u8) -> Option<f64> {
+        self.get(&format!("H_{gallons}gal"))
+    }
+
+    /// UA heat loss coefficient in W/K for a given gallon size with R-12 insulation.
+    #[must_use]
+    pub fn ua_r12_w_per_k(&self, gallons: u8) -> Option<f64> {
+        self.get(&format!("UA_{gallons}gal_R12"))
+    }
+
+    /// UA heat loss coefficient in W/K for a given gallon size with R-10 insulation.
+    #[must_use]
+    pub fn ua_r10_w_per_k(&self, gallons: u8) -> Option<f64> {
+        self.get(&format!("UA_{gallons}gal_R10"))
+    }
+
+    /// Look up a UEF value by row name (e.g. "UEF_GasStorage_50gal").
+    #[must_use]
+    pub fn uef(&self, name: &str) -> Option<f64> {
+        self.get(name)
+    }
+
+    /// Look up heating capacity in W by row name.
+    #[must_use]
+    pub fn heating_capacity_w(&self, name: &str) -> Option<f64> {
+        self.get(name)
+    }
+}
+
 /// Central store for all default parameters loaded from the `defaults/` tree.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultsStore {
@@ -153,6 +249,8 @@ pub struct DefaultsStore {
     /// Typed PV panel specifications loaded from `defaults/pv/*.toml`.
     pv_panel: HashMap<String, PvPanelDefaults>,
     water_heating: HashMap<String, EquipmentDefaults>,
+    /// Typed water heater defaults loaded from `defaults/water_heating/default_paramters.csv`.
+    water_heating_csv: Option<WaterHeatingDefaults>,
     envelope_lut: Option<crate::envelope_lut::EnvelopeLookup>,
 }
 
@@ -223,6 +321,17 @@ impl DefaultsStore {
         store.pv = load_toml_dir(&defaults_dir.join("pv"))?;
         store.pv_panel = load_pv_panel_defaults(&defaults_dir.join("pv"))?;
         store.water_heating = load_toml_dir(&defaults_dir.join("water_heating"))?;
+        store.water_heating_csv = load_water_heating_csv(
+            &defaults_dir
+                .join("water_heating")
+                .join("default_paramters.csv"),
+        );
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let Some(ref wh) = store.water_heating_csv {
+                check_water_heating_invariants(wh);
+            }
+        }
 
         Ok(store)
     }
@@ -360,6 +469,19 @@ impl DefaultsStore {
             DefaultsCategory::Pv => self.pv.len(),
             DefaultsCategory::WaterHeating => self.water_heating.len(),
         }
+    }
+
+    /// Access typed water heater defaults loaded from
+    /// `defaults/water_heating/default_paramters.csv`.
+    #[must_use]
+    pub fn water_heating_defaults(&self) -> Option<&WaterHeatingDefaults> {
+        self.water_heating_csv.as_ref()
+    }
+
+    /// Whether the water heater CSV defaults were loaded successfully.
+    #[must_use]
+    pub fn has_water_heating_defaults(&self) -> bool {
+        self.water_heating_csv.is_some()
     }
 }
 
@@ -938,6 +1060,257 @@ fn normalize_equipment_key(raw: &str) -> String {
     }
 }
 
+/// Load water heater default parameters from the CSV file at `path`.
+///
+/// The CSV has columns: Description, Name, Value, Units.
+/// Rows whose Value field is empty or unparseable are skipped with a warning.
+/// Returns `None` if the file does not exist (non-fatal — callers fall back).
+fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
+    if !path.exists() {
+        return None;
+    }
+    let mut rdr = match csv::Reader::from_path(path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to open water heating defaults CSV"
+            );
+            return None;
+        }
+    };
+    let mut rows = Vec::new();
+    for result in rdr.records() {
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed row in water heating defaults CSV"
+                );
+                continue;
+            }
+        };
+        let description = record.get(0).unwrap_or("").to_string();
+        let name = record.get(1).unwrap_or("").to_string();
+        let value_str = record.get(2).unwrap_or("");
+        let units = record.get(3).unwrap_or("").to_string();
+
+        if name.is_empty() || value_str.trim().is_empty() {
+            continue;
+        }
+
+        match value_str.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => {
+                rows.push(WaterHeatingDefaultRow {
+                    description,
+                    name,
+                    value: v,
+                    units,
+                });
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    name = %name,
+                    value = %value_str.trim(),
+                    "non-finite value in water heating defaults CSV"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    name = %name,
+                    value = %value_str.trim(),
+                    error = %e,
+                    "unparseable value in water heating defaults CSV"
+                );
+            }
+        }
+    }
+    Some(WaterHeatingDefaults { rows })
+}
+
+/// Invariant checks for water heater defaults loaded at startup.
+///
+/// Validates:
+/// - UA values are within the physically plausible range (0.5–5.0 W/K) for residential tanks
+/// - UA values increase monotonically with tank volume (larger tanks have higher heat loss)
+/// - UEF values are within valid ranges (0.0–1.0 for electric/gas, 1.0–5.0 for HPWH)
+/// - Tank volumes are in standard sizes with correct gallon-to-liter conversions
+/// - Every required field has a corresponding entry
+///
+/// Core invariants that would corrupt simulation results produce `tracing::error!`;
+/// minor anomalies produce `tracing::warn!`.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
+    // UA monotonicity: larger tanks must have higher UA (more surface area).
+    let sizes: [u8; 5] = [30, 40, 50, 65, 80];
+    let mut prev_ua: Option<f64> = None;
+    for &gal in &sizes {
+        if let Some(ua) = wh.ua_r12_w_per_k(gal) {
+            // UA must be within physically plausible range for residential tanks.
+            if !(0.5..=5.0).contains(&ua) {
+                tracing::error!(
+                    gal,
+                    ua_w_per_k = ua,
+                    "UA for {gal}-gal tank ({ua:.2} W/K) outside plausible range [0.5, 5.0] W/K"
+                );
+            }
+            if let Some(prev) = prev_ua {
+                if ua <= prev {
+                    tracing::error!(
+                        gal,
+                        prev_ua = prev,
+                        ua_w_per_k = ua,
+                        "UA for {gal}-gal tank ({ua:.2} W/K) not greater than \
+                         previous size ({prev:.2} W/K); UA must increase monotonically with tank volume"
+                    );
+                }
+            }
+            prev_ua = Some(ua);
+        }
+    }
+
+    // UEF range checks.
+    // Gas storage and electric resistance: valid range [0.0, 1.0].
+    // HPWH: valid range [1.0, 5.0] (UEF can exceed 1.0 because the heat pump
+    // moves more heat than the electrical energy it consumes).
+    for (uef_name, min, max) in [
+        ("UEF_GasStorage_30gal", 0.0, 1.0),
+        ("UEF_GasStorage_40gal", 0.0, 1.0),
+        ("UEF_GasStorage_50gal", 0.0, 1.0),
+        ("UEF_GasStorage_65gal", 0.0, 1.0),
+        ("UEF_GasStorage_80gal", 0.0, 1.0),
+        ("UEF_ElecRes_30gal", 0.0, 1.0),
+        ("UEF_ElecRes_40gal", 0.0, 1.0),
+        ("UEF_ElecRes_50gal", 0.0, 1.0),
+        ("UEF_ElecRes_65gal", 0.0, 1.0),
+        ("UEF_ElecRes_80gal", 0.0, 1.0),
+        ("UEF_HPWH_50gal", 1.0, 5.0),
+        ("UEF_HPWH_65gal", 1.0, 5.0),
+        ("UEF_HPWH_80gal", 1.0, 5.0),
+    ] {
+        if let Some(uef) = wh.uef(uef_name) {
+            if !(min..=max).contains(&uef) {
+                tracing::error!(
+                    name = %uef_name,
+                    uef_value = uef,
+                    valid_range = format!("[{min}, {max}]"),
+                    "UEF value {uef} for {uef_name} outside valid range [{min}, {max}]"
+                );
+            }
+        }
+    }
+
+    // Tank volume consistency: check gallon → liter → m³ conversions.
+    for gal in sizes {
+        let key_m3 = format!("Vol_{gal}gal_m3");
+        let key_l = format!("Vol_{gal}gal_L");
+        if let (Some(m3), Some(l)) = (wh.get(&key_m3), wh.get(&key_l)) {
+            let expected_l = m3 * 1000.0;
+            let pct_error = ((l - expected_l) / expected_l).abs() * 100.0;
+            if pct_error > 1.0 {
+                tracing::error!(
+                    gal,
+                    vol_m3 = m3,
+                    vol_l = l,
+                    expected_l = expected_l,
+                    pct_error,
+                    "{gal}-gal tank: m³→L conversion error {pct_error:.2}% (m³={m3:.4} → {expected_l:.1} L, got {l:.1} L)"
+                );
+            }
+        }
+    }
+
+    // Required field coverage: every parameter field that the defaults CSV is
+    // expected to supply must have a corresponding entry. Missing entries mean
+    // downstream code silently receives None for that field.
+    let required: &[&str] = &[
+        // Per-size tank volumes and heights
+        "Vol_30gal_m3",
+        "Vol_30gal_L",
+        "Vol_40gal_m3",
+        "Vol_40gal_L",
+        "Vol_50gal_m3",
+        "Vol_50gal_L",
+        "Vol_65gal_m3",
+        "Vol_65gal_L",
+        "Vol_80gal_m3",
+        "Vol_80gal_L",
+        "H_30gal",
+        "H_40gal",
+        "H_50gal",
+        "H_65gal",
+        "H_80gal",
+        // Per-size UA values (R-12 and R-10)
+        "UA_30gal_R12",
+        "UA_40gal_R12",
+        "UA_50gal_R12",
+        "UA_65gal_R12",
+        "UA_80gal_R12",
+        "UA_30gal_R10",
+        "UA_40gal_R10",
+        "UA_50gal_R10",
+        "UA_65gal_R10",
+        "UA_80gal_R10",
+        // UEF values by fuel type and tank size
+        "UEF_GasStorage_30gal",
+        "UEF_GasStorage_40gal",
+        "UEF_GasStorage_50gal",
+        "UEF_GasStorage_65gal",
+        "UEF_GasStorage_80gal",
+        "UEF_ElecRes_30gal",
+        "UEF_ElecRes_40gal",
+        "UEF_ElecRes_50gal",
+        "UEF_ElecRes_65gal",
+        "UEF_ElecRes_80gal",
+        "UEF_HPWH_50gal",
+        "UEF_HPWH_65gal",
+        "UEF_HPWH_80gal",
+        "UEF_TanklessGas",
+        // Legacy EF values
+        "EF_GasStorage_50gal",
+        "EF_ElecRes_50gal",
+        // Heating capacities by fuel type and tank size
+        "HC_GasStorage_30gal",
+        "HC_GasStorage_40gal",
+        "HC_GasStorage_50gal",
+        "HC_GasStorage_65gal",
+        "HC_GasStorage_80gal",
+        "HC_ElecRes",
+        "HC_TanklessGas",
+        // Conversion efficiency
+        "ConvEff_GasStorage",
+        // Insulation R-values
+        "R_val_R10",
+        "R_val_R12",
+        "R_val_R16",
+        // Common temperature parameters
+        "T_set",
+        "T_db",
+        "T_max",
+        "T_init",
+        // Draw profiles
+        "Draw_Low",
+        "Draw_Medium",
+        "Draw_High",
+        "Draw_Flow",
+        // Tank nodes and element powers
+        "N_tank",
+        "P_hw1",
+        "P_hw2",
+    ];
+    for &name in required {
+        if wh.get(name).is_none() {
+            tracing::error!(
+                name,
+                "required water heating defaults CSV field '{name}' is missing"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,5 +1782,446 @@ system_losses_fraction = 0.14
             "COP₄ expected ~4.42, got {}",
             row.cops[3]
         );
+    }
+
+    // ── Water heater defaults CSV tests ──────────────────────────────────
+
+    /// Write a minimal valid water heating defaults CSV.
+    fn write_water_heating_csv(dir: &Path) {
+        std::fs::write(
+            dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Tank_Volume_50gal_m3,Vol_50gal_m3,0.189,m3
+Tank_Volume_50gal_L,Vol_50gal_L,189.3,L
+Tank_Volume_80gal_m3,Vol_80gal_m3,0.303,m3
+Tank_Volume_80gal_L,Vol_80gal_L,302.8,L
+Tank_Height_50gal,H_50gal,1.22,m
+UA_50gal_R12,UA_50gal_R12,1.10,W_per_K
+UA_80gal_R12,UA_80gal_R12,1.49,W_per_K
+UEF_GasStorage_50gal,UEF_GasStorage_50gal,0.64,
+UEF_ElectricResistance_50gal,UEF_ElecRes_50gal,0.93,
+UEF_HPWH_50gal,UEF_HPWH_50gal,3.70,
+HeatingCapacity_GasStorage_50gal,HC_GasStorage_50gal,11170,W
+Setpoint,T_set,51.67,C
+Deadband,T_db,5.56,C
+Avg_Draw_Medium_L_per_day,Draw_Medium,208.2,L_per_day
+Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn water_heating_csv_parses_successfully() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        write_water_heating_csv(&wh_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(store.has_water_heating_defaults());
+
+        let wh = store.water_heating_defaults().unwrap();
+        assert!(wh.row_count() > 10, "should have many parameter rows");
+    }
+
+    #[test]
+    fn water_heating_csv_lookup_returns_correct_values() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        write_water_heating_csv(&wh_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // Tank volumes
+        assert!(
+            (wh.get("Vol_50gal_m3").unwrap() - 0.189).abs() < 1e-6,
+            "50-gal volume in m³"
+        );
+        assert!(
+            (wh.get("Vol_50gal_L").unwrap() - 189.3).abs() < 0.1,
+            "50-gal volume in L"
+        );
+
+        // UA values
+        assert!(
+            (wh.get("UA_50gal_R12").unwrap() - 1.10).abs() < 1e-6,
+            "50-gal UA with R-12"
+        );
+        assert!(
+            (wh.get("UA_80gal_R12").unwrap() - 1.49).abs() < 1e-6,
+            "80-gal UA with R-12"
+        );
+
+        // UEF values
+        assert!(
+            (wh.uef("UEF_GasStorage_50gal").unwrap() - 0.64).abs() < 1e-6,
+            "gas storage UEF"
+        );
+        assert!(
+            (wh.uef("UEF_ElecRes_50gal").unwrap() - 0.93).abs() < 1e-6,
+            "electric resistance UEF"
+        );
+        assert!(
+            (wh.uef("UEF_HPWH_50gal").unwrap() - 3.70).abs() < 1e-6,
+            "HPWH UEF"
+        );
+
+        // Common parameters
+        assert!((wh.get("T_set").unwrap() - 51.67).abs() < 1e-6, "setpoint");
+        assert!((wh.get("T_db").unwrap() - 5.56).abs() < 1e-6, "deadband");
+    }
+
+    #[test]
+    fn ua_increases_monotonically_with_tank_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        write_water_heating_csv(&wh_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // UA should increase monotonically with tank volume.
+        let ua_50 = wh.ua_r12_w_per_k(50).expect("UA_50gal_R12");
+        let ua_80 = wh.ua_r12_w_per_k(80).expect("UA_80gal_R12");
+        assert!(
+            ua_80 > ua_50,
+            "80-gal UA ({ua_80}) must exceed 50-gal UA ({ua_50}): larger tanks have more surface area"
+        );
+    }
+
+    #[test]
+    fn uef_values_are_within_valid_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        write_water_heating_csv(&wh_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // Gas/electric UEF must be 0.0–1.0 (storage tank efficiency).
+        let gas_uef = wh.uef("UEF_GasStorage_50gal").expect("gas UEF");
+        assert!(
+            (0.0..=1.0).contains(&gas_uef),
+            "gas storage UEF {gas_uef} outside [0.0, 1.0]"
+        );
+
+        let elec_uef = wh.uef("UEF_ElecRes_50gal").expect("elec UEF");
+        assert!(
+            (0.0..=1.0).contains(&elec_uef),
+            "electric resistance UEF {elec_uef} outside [0.0, 1.0]"
+        );
+
+        // HPWH UEF must be 1.0–5.0 (heat pump can exceed 1.0).
+        let hpwh_uef = wh.uef("UEF_HPWH_50gal").expect("HPWH UEF");
+        assert!(
+            (1.0..=5.0).contains(&hpwh_uef),
+            "HPWH UEF {hpwh_uef} outside [1.0, 5.0]"
+        );
+    }
+
+    #[test]
+    fn water_heating_csv_regression_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        write_water_heating_csv(&wh_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        // Loading should succeed without panicking.
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // All typed getters should return Some or None, never panic.
+        let _ = wh.tank_volume_m3(50);
+        let _ = wh.tank_volume_m3(30); // not in fixture, should be None
+        let _ = wh.tank_height_m(50);
+        let _ = wh.ua_r12_w_per_k(50);
+        let _ = wh.ua_r10_w_per_k(50);
+        let _ = wh.get("T_set");
+        let _ = wh.get("T_db");
+        let _ = wh.get("Draw_Medium");
+        let _ = wh.get("Draw_Flow");
+        let _ = wh.get_or("nonexistent", 42.0);
+
+        // tank_sizes_gal should iterate only over sizes with volume data.
+        let sizes: Vec<u8> = wh.tank_sizes_gal().collect();
+        assert!(!sizes.is_empty(), "should have at least one tank size");
+    }
+
+    #[test]
+    fn water_heating_csv_missing_file_is_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        // No default_paramters.csv in water_heating dir — should load fine.
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(
+            !store.has_water_heating_defaults(),
+            "no CSV → no water heating defaults"
+        );
+        assert!(store.water_heating_defaults().is_none());
+    }
+
+    #[test]
+    fn water_heating_csv_malformed_rows_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Good_Row,GoodKey,42.0,units
+Bad_Row,BadKey,not_a_number,units
+Empty_Value,EmptyVal,,units
+Another_Good,Key2,3.14,m
+"#,
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        assert!(
+            (wh.get("GoodKey").unwrap() - 42.0).abs() < 1e-6,
+            "good row should parse"
+        );
+        assert!(
+            (wh.get("Key2").unwrap() - 3.14).abs() < 1e-6,
+            "another good row should parse"
+        );
+        assert!(
+            wh.get("BadKey").is_none(),
+            "unparseable row should be absent"
+        );
+        assert!(
+            wh.get("EmptyVal").is_none(),
+            "empty-value row should be absent"
+        );
+    }
+
+    #[test]
+    fn partial_csv_does_not_panic_and_missing_fields_return_none() {
+        // Regression: the invariant checker should catch missing required
+        // fields without panicking. A CSV with only a few rows exercises the
+        // partial-load path.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Tank_Volume_50gal_m3,Vol_50gal_m3,0.189,m3
+Setpoint,T_set,60.0,C
+"#,
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+
+        // Present fields are accessible.
+        assert!((wh.get("Vol_50gal_m3").unwrap() - 0.189).abs() < 1e-6);
+        assert!((wh.get("T_set").unwrap() - 60.0).abs() < 1e-6);
+
+        // Absent fields return None — the loader must not fabricate values.
+        assert!(wh.get("T_db").is_none(), "T_db not in CSV → None");
+        assert!(wh.get("UA_50gal_R12").is_none(), "UA not in CSV → None");
+        assert!(wh.get("Draw_Medium").is_none(), "Draw not in CSV → None");
+        assert!(wh.get("N_tank").is_none(), "N_tank not in CSV → None");
+    }
+
+    #[test]
+    fn real_water_heating_csv_loads_from_fixture() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
+
+        assert!(
+            store.has_water_heating_defaults(),
+            "real defaults/water_heating/default_paramters.csv should be present and parseable"
+        );
+
+        let wh = store.water_heating_defaults().unwrap();
+
+        // Verify key parameters from the real CSV are loaded.
+        assert!(
+            wh.row_count() > 30,
+            "should have many rows; got {}",
+            wh.row_count()
+        );
+
+        // Tank volumes for standard sizes.
+        for gal in [30u8, 40, 50, 65, 80] {
+            let m3 = wh.tank_volume_m3(gal);
+            assert!(m3.is_some(), "{gal}-gal tank volume should exist");
+            assert!(m3.unwrap() > 0.0, "{gal}-gal volume should be positive");
+        }
+
+        // UEF values for gas, electric, HPWH.
+        assert!(
+            wh.uef("UEF_GasStorage_50gal").is_some(),
+            "gas storage UEF for 50gal"
+        );
+        assert!(
+            wh.uef("UEF_ElecRes_50gal").is_some(),
+            "electric resistance UEF for 50gal"
+        );
+        assert!(wh.uef("UEF_HPWH_50gal").is_some(), "HPWH UEF for 50gal");
+
+        // Common parameters.
+        assert!(wh.get("T_set").is_some(), "setpoint");
+        assert!(wh.get("T_db").is_some(), "deadband");
+        assert!(wh.get("T_max").is_some(), "max tank temp");
+        assert!(wh.get("N_tank").is_some(), "tank nodes");
+        assert!(wh.get("Draw_Medium").is_some(), "medium draw profile");
+        assert!(wh.get("Draw_Flow").is_some(), "draw flow rate");
+
+        // UA consistency: monotonic increase with tank size.
+        let mut prev_ua = None;
+        for gal in [30u8, 40, 50, 65, 80] {
+            if let Some(ua) = wh.ua_r12_w_per_k(gal) {
+                if let Some(prev) = prev_ua {
+                    assert!(
+                        ua > prev,
+                        "UA must increase monotonically: {gal}-gal UA={ua:.3} ≤ previous UA={prev:.3}"
+                    );
+                }
+                prev_ua = Some(ua);
+            }
+        }
+
+        // UEF values within valid ranges.
+        for (name, min, max) in [
+            ("UEF_GasStorage_50gal", 0.0, 1.0_f64),
+            ("UEF_ElecRes_50gal", 0.0, 1.0),
+            ("UEF_HPWH_50gal", 1.0, 5.0),
+        ] {
+            if let Some(uef) = wh.uef(name) {
+                assert!(
+                    (min..=max).contains(&uef),
+                    "{name} UEF={uef} outside [{min}, {max}]"
+                );
+            }
+        }
     }
 }
