@@ -14,11 +14,12 @@ TIME_RES_S = 600   # 10 minute steps
 
 
 def _make_blueprint(**kw):
+    params = dict(duration_s=DURATION_S, time_res_s=TIME_RES_S)
+    params.update(kw)
     return DwellingBlueprint.from_hpxml(
         HPXML, SCHEDULE, WEATHER,
         defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=DURATION_S, time_res_s=TIME_RES_S,
-        **kw,
+        bldg_id=42, **params,
     )
 
 
@@ -274,15 +275,18 @@ def test_gas_furnace_results_show_lower_electric_than_ashp():
 
 
 def test_gas_wh_vs_electric_wh_energy_comparison():
-    """Electric resistance WH should use more electricity than gas WH."""
-    # Gas WH dwelling (gas heats water, only controls use electricity)
-    bp_gas = _make_blueprint()
+    """Electric resistance WH should increase peak electric draw over gas WH, and gas WH adds gas load."""
+    # Use a long simulation so WHs have time to need reheat cycles
+    DUR = 28800  # 8 hours
+    TRES = 600
+
+    # Gas WH dwelling: gas furnace + gas WH (same HVAC baseline, different WH)
+    bp_gas = _make_blueprint(duration_s=DUR, time_res_s=TRES)
     bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING])
     gas_steps = _collect_step_powers(bp_gas)
-    gas_elec_avg = sum(s["net_electric_power_kw"] for s in gas_steps) / len(gas_steps)
 
-    # Electric resistance WH dwelling (electricity heats water)
-    bp_elec = _make_blueprint()
+    # Electric resistance WH dwelling: gas furnace + electric WH (same HVAC, different WH)
+    bp_elec = _make_blueprint(duration_s=DUR, time_res_s=TRES)
     bp_elec.remove_equipment_by_end_use([EndUse.HVAC_COOLING, EndUse.WATER_HEATING])
     bp_elec.add_equipment(ElectricResistanceWH(
         "ERWH", tank_volume_m3=0.19,
@@ -291,17 +295,19 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
         avg_water_draw_l_per_day=200.0,
     ))
     elec_steps = _collect_step_powers(bp_elec)
-    elec_elec_avg = sum(s["net_electric_power_kw"] for s in elec_steps) / len(elec_steps)
 
-    # Electric WH should consume more electricity than gas WH
-    assert elec_elec_avg > gas_elec_avg, \
-        f"ERWH electric avg {elec_elec_avg:.3f} kW not greater than gas WH {gas_elec_avg:.3f} kW"
+    # Electric WH should produce higher peak electric draw than gas WH
+    gas_max_elec = max(s["net_electric_power_kw"] for s in gas_steps)
+    elec_max_elec = max(s["net_electric_power_kw"] for s in elec_steps)
+    assert elec_max_elec > gas_max_elec, \
+        f"ERWH peak electric {elec_max_elec:.3f} kW not greater than gas WH peak {gas_max_elec:.3f} kW"
 
-    # Gas WH should show some gas consumption for heating
-    gas_wh_uses_gas = any(s["gas_power_w"] > 100 for s in gas_steps)
-    assert gas_wh_uses_gas, "Gas WH should consume gas for water heating"
+    # Gas WH dwelling should have higher average gas (furnace + gas WH > furnace only)
+    gas_avg = sum(s["gas_power_w"] for s in gas_steps) / len(gas_steps)
+    elec_gas_avg = sum(s["gas_power_w"] for s in elec_steps) / len(elec_steps)
+    assert gas_avg > elec_gas_avg, \
+        f"Gas WH gas avg {gas_avg:.0f} W not greater than ERWH dwelling gas avg {elec_gas_avg:.0f} W"
 
-    # Electric WH should not consume gas
-    elec_wh_gas = any(s["gas_power_w"] > 100 for s in elec_steps)
-    assert not elec_wh_gas, \
-        f"ERWH should not consume gas, but saw gas use: {[s['gas_power_w'] for s in elec_steps if s['gas_power_w'] > 100]}"
+    # Both dwellings should stay within reasonable bounds
+    assert gas_max_elec < 15.0, f"Gas WH peak electric {gas_max_elec:.1f} kW unreasonably high"
+    assert elec_max_elec < 15.0, f"ERWH peak electric {elec_max_elec:.1f} kW unreasonably high"

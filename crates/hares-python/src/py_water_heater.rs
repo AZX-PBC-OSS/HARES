@@ -93,7 +93,7 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> EquipmentSpec {
     }
 
     let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-    let capacity = Some(wh.heating_capacity_w.unwrap_or(0.0));
+    let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
     let cfg = GasWaterHeaterConfig {
         fuel_type: FuelType::Gas,
         tank_volume_m3: volume,
@@ -226,7 +226,7 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> EquipmentSpec {
     }
 
     let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-    let capacity = Some(wh.heating_capacity_w.unwrap_or(0.0));
+    let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
     let cfg = ElectricResistanceWaterHeaterConfig {
         tank_volume_m3: volume,
         uniform_energy_factor: wh.uniform_energy_factor,
@@ -360,7 +360,7 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> EquipmentSpec {
     }
 
     let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-    let backup = Some(wh.backup_element_power_w.unwrap_or(0.0));
+    let backup = Some(wh.backup_element_power_w.unwrap_or(4500.0));
     let cop = Some(wh.cop.unwrap_or(3.5));
     let cfg = HeatPumpWaterHeaterConfig {
         tank_volume_m3: volume,
