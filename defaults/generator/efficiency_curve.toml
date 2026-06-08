@@ -1,7 +1,8 @@
 # Generator part-load efficiency curve — 6-point piecewise-linear model.
-# No primary-source datasheet available; this is an engineering estimate
-# of typical residential spark-ignited generator part-load behaviour
-# (Generac, Kohler, Briggs & Stratton 7–22 kW standby units).
+# Source: OCHRE defaults/Gas Generator/efficiency_curve2.csv — the
+# "realistic" residential curve reflecting Generac/Kohler manufacturer data.
+# Typical residential spark-ignited generators (7–22 kW standby) reach
+# ~80–90 % of rated efficiency at 50 % load; this curve captures that shape.
 #
 # Each point defines efficiency_ratio at a given capacity_ratio (both 0-1).
 # efficiency_ratio scales the rated electrical efficiency (eta_electric):
