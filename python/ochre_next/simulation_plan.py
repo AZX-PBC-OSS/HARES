@@ -62,6 +62,13 @@ class SimulationPlan:
         }
         self.segments: list[SimulationSegment] = []
 
+        DwellingBlueprint.from_hpxml(
+            hpxml, schedule, weather,
+            start_time="2000-01-01T00:00:00",
+            duration_s=time_res_s,
+            **self.base_kwargs,
+        )
+
     def add_segment(
         self,
         start: datetime,
@@ -81,22 +88,30 @@ class SimulationPlan:
         checkpoint = None
 
         for i, seg in enumerate(self.segments):
+            kwargs = dict(self.base_kwargs)
+            if i > 0:
+                # Zero initialization_duration for segments 1+.
+                # After segment 0's warmup restore_building_state transfers
+                # the thermal state forward, so re-initialization is unnecessary
+                # and would reset the dwelling state.
+                kwargs["initialization_duration"] = 0
+
             bp = DwellingBlueprint.from_hpxml(
                 self.hpxml,
                 self.schedule,
                 self.weather,
                 start_time=seg.start.isoformat(),
                 duration_s=seg.duration_s,
-                **self.base_kwargs,
+                **kwargs,
             )
             seg.setup(bp)
             dw = bp.build()
 
-            if seg.post_build is not None:
-                seg.post_build(dw)
-
             if checkpoint is not None:
                 dw.restore_building_state(checkpoint)
+
+            if seg.post_build is not None:
+                seg.post_build(dw)
 
             # initialize() snapshots the post-restore state as the "initial"
             # state for this segment, ensuring the first step() call sees
@@ -107,10 +122,11 @@ class SimulationPlan:
                     dw.step()
             except Exception as e:
                 warnings.warn(
-                    f"Segment {i} failed: {e} — skipping results collection",
+                    f"Segment {i} failed: {e} — re-raising so caller can "
+                    "decide how to handle the failure",
                     stacklevel=2,
                 )
-                continue
+                raise
 
             df: pl.DataFrame = dw.results()
             if df is not None and not df.is_empty():

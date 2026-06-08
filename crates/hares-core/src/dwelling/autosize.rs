@@ -31,10 +31,9 @@
 //!    50 gal tank, 4500 W element capacity.
 
 use hares_envelope::ThermalSolver;
-use hares_equipment::config::ConfigPayload;
 use hares_io::{
     Building, DesignConditions, EquipmentSpec,
-    hpxml::resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
+    hpxml::{rebuild_wh_typed_config, resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config}},
 };
 use hares_physics::ashrae152::design_temperatures_f;
 use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
@@ -96,8 +95,9 @@ const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
 const DEFAULT_ELEMENT_CAPACITY_W: f64 = 4_500.0;
 
 /// Default mains cold-water temperature [°C] for sizing when unavailable.
-/// US annual average per ASHRAE HoF 2021 Ch.14 (mains temperature ≈ 10 °C).
-const DEFAULT_MAINS_TEMP_C: f64 = 10.0;
+/// Mild-climate fallback; tropical sites should supply their actual mains
+/// temperature (typically 25–35 °C).
+const DEFAULT_MAINS_TEMP_C: f64 = 25.0;
 
 /// Default hot water setpoint [°C] for sizing when not specified.
 /// ASHRAE 90.2-2018 §7.5: storage water heater setpoint 125 °F (51.67 °C).
@@ -118,19 +118,19 @@ const USABLE_TANK_FRACTION: f64 = 0.7;
 /// introduces <2% error in the capacity calculation.
 const WATER_DENSITY_LB_PER_GAL: f64 = 8.33;
 
-/// Conversion: 1 W = 3.412 BTU/h.
+/// BTU per hour per watt (= 3.412 BTU/hr per W).
 /// ASHRAE HoF 2021 Ch.1 Table 1.
-const W_PER_BTUH: f64 = 3.412;
+const BTU_PER_HR_PER_W: f64 = 3.412;
 
 /// Conversion: 1 °C = 1.8 °F.
 const DEG_F_PER_DEG_C: f64 = 1.8;
 
 /// Pre-computed water energy factor for FHR capacity formula:
-///   `WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / W_PER_BTUH`
+///   `WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / BTU_PER_HR_PER_W`
 ///   = 8.33 × 1.8 / 3.412 ≈ 4.395
 ///
 /// Used in: capacity_w = max(0, FHR_gph − usable_volume_gal) × factor × ΔT_C
-const WATER_ENERGY_FACTOR: f64 = WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / W_PER_BTUH;
+const WATER_ENERGY_FACTOR: f64 = WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / BTU_PER_HR_PER_W;
 
 /// Context bundle for autosizing: weather-derived design conditions and
 /// duct parameters needed to rebuild typed equipment configs.
@@ -624,8 +624,9 @@ pub fn autosize_water_heater_capacities(
     n_bedrooms: Option<f64>,
     mains_temp_c: f64,
 ) {
-    // Validate mains temperature — use default if unreasonable.
-    let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 40.0 {
+    // Validate mains temperature — clamp or use default if unreasonable.
+    // Upper bound allows tropical cold-water temperatures up to 50 °C.
+    let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 50.0 {
         mains_temp_c
     } else {
         tracing::warn!(
@@ -802,36 +803,6 @@ pub fn autosize_water_heater_capacities(
                 );
             }
 
-            // Patch the typed_config's internal JSON data with autosized values
-            // so that downstream consumers (schedule resolution, equipment init)
-            // see the computed capacity and volume.
-            // Field names vary by water heater type:
-            //   - storage WH: heating_capacity_w
-            //   - HPWH:        backup_element_power_w
-            //   - Indirect:    no capacity (heat from boiler)
-            if let Some(ref mut tc) = spec.typed_config {
-                if let ConfigPayload::Typed {
-                    data: Value::Object(map),
-                    ..
-                } = &mut tc.payload
-                {
-                    let capacity_field = if spec.name == "Heat Pump Water Heater" {
-                        "backup_element_power_w"
-                    } else if spec.name == "Indirect Tank" {
-                        // Indirect tanks have no heating_capacity field;
-                        // only tank_volume_m3 is updated below.
-                        ""
-                    } else {
-                        "heating_capacity_w"
-                    };
-                    if !capacity_field.is_empty() {
-                        map.insert(capacity_field.to_string(), json!(sized_capacity_w));
-                    }
-                    if !map.contains_key("tank_volume_m3") {
-                        map.insert("tank_volume_m3".to_string(), json!(tank_volume_m3));
-                    }
-                }
-            }
         } else {
             // Autosizing computed zero or negative capacity — fall back to a
             // minimum safe default so the simulation can still run.
@@ -862,31 +833,11 @@ pub fn autosize_water_heater_capacities(
                     .insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
             }
             spec.parameters.remove("autosize_water_heater");
-
-            // Patch typed_config with the fallback values so downstream
-            // schedule injection and equipment init see valid capacities.
-            if let Some(ref mut tc) = spec.typed_config {
-                if let ConfigPayload::Typed {
-                    data: Value::Object(map),
-                    ..
-                } = &mut tc.payload
-                {
-                    let capacity_field = if spec.name == "Heat Pump Water Heater" {
-                        "backup_element_power_w"
-                    } else if spec.name == "Indirect Tank" {
-                        ""
-                    } else {
-                        "heating_capacity_w"
-                    };
-                    if !capacity_field.is_empty() {
-                        map.insert(capacity_field.to_string(), json!(DEFAULT_ELEMENT_CAPACITY_W));
-                    }
-                    if !map.contains_key("tank_volume_m3") {
-                        map.insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
-                    }
-                }
-            }
         }
+
+        // Rebuild typed config from the (now updated) parameters so
+        // downstream consumers see the autosized capacity and volume.
+        spec.typed_config = rebuild_wh_typed_config(&spec.name, &spec.parameters);
     }
 }
 
@@ -3094,11 +3045,11 @@ mod tests {
 
     #[test]
     fn wh_autosize_unreasonable_mains_temp_uses_default() {
-        // A mains temp of 50 °C is unreasonable for cold water; the
-        // autosizer should fall back to 10 °C and produce a reasonable
-        // capacity.
+        // A mains temp of 60 °C is unreasonable for cold water; the
+        // autosizer should fall back to the default (25 °C) and produce a
+        // reasonable capacity.
         let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 50.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0);
 
         let result = &specs[0];
         let capacity_w = result
@@ -3107,14 +3058,14 @@ mod tests {
             .and_then(|v| v.as_f64())
             .expect("capacity must be set");
 
-        // With 10 °C default mains and 51.67 °C setpoint: ΔT = 41.67 °C
+        // With 25 °C default mains and 51.67 °C setpoint: ΔT = 26.67 °C
         // 3 BR → FHR = 48, tank = 50 gal
         // usable = 35 gal, deficit = 13 gal
-        // capacity = 13 × 4.395 × 41.67 ≈ 2380 W
-        let expected = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - 10.0);
+        // capacity = 13 × 4.395 × 26.67 ≈ 1524 W
+        let expected = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - DEFAULT_MAINS_TEMP_C);
         assert!(
             (capacity_w - expected).abs() < 1e-3,
-            "with unreasonable mains temp 50 °C, should fall back to 10 °C \
+            "with unreasonable mains temp 60 °C, should fall back to 25 °C \
              and produce {expected:.2} W, got {capacity_w:.2} W"
         );
         assert!(capacity_w > 0.0, "capacity must be positive");

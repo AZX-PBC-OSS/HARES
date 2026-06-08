@@ -63,12 +63,17 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBattery>()?;
     m.add_class::<py_blueprint::PyDwellingBlueprint>()?;
     m.add_class::<py_hvac::PyElectricBaseboard>()?;
+    m.add_class::<py_hvac::PyElectricBoiler>()?;
+    m.add_class::<py_hvac::PyElectricFurnace>()?;
     m.add_class::<py_water_heater::PyElectricResistanceWH>()?;
     m.add_class::<PyEv>()?;
+    m.add_class::<py_hvac::PyGasBoiler>()?;
     m.add_class::<py_hvac::PyGasFurnace>()?;
     m.add_class::<py_water_heater::PyGasWaterHeater>()?;
     m.add_class::<py_water_heater::PyHeatPumpWH>()?;
     m.add_class::<py_hvac::PyIdealHVAC>()?;
+    m.add_class::<py_water_heater::PyIndirectTank>()?;
+    m.add_class::<py_water_heater::PyTanklessWaterHeater>()?;
     m.add_class::<PyPv>()?;
     m.add_class::<PyPvSoilingConfig>()?;
     m.add_class::<PyProtocolBridge>()?;

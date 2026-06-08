@@ -28,12 +28,17 @@ from ._hares import AirConditioner
 from ._hares import ASHPHeater
 from ._hares import ASHPCooler
 from ._hares import ElectricBaseboard
+from ._hares import ElectricBoiler
+from ._hares import ElectricFurnace
+from ._hares import GasBoiler
 from ._hares import IdealHVAC
 
 # Water heater equipment types
 from ._hares import GasWaterHeater
 from ._hares import ElectricResistanceWH
 from ._hares import HeatPumpWH
+from ._hares import IndirectTank
+from ._hares import TanklessWaterHeater
 
 # Actor system
 from ._hares import Actor
@@ -142,11 +147,16 @@ __all__ = [
     "ASHPHeater",
     "ASHPCooler",
     "ElectricBaseboard",
+    "ElectricBoiler",
+    "ElectricFurnace",
+    "GasBoiler",
     "IdealHVAC",
     # Water heater equipment
     "GasWaterHeater",
     "ElectricResistanceWH",
     "HeatPumpWH",
+    "IndirectTank",
+    "TanklessWaterHeater",
     # Actor system
     "Actor",
     "DispatchRequest",

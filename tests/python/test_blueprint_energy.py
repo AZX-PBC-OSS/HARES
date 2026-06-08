@@ -52,9 +52,8 @@ def test_gas_furnace_electric_power_is_low():
 
 
 def test_heat_pump_increases_electric_consumption_vs_gas_furnace():
-    """Swapping gas furnace+AC to ASHP should significantly increase electric draw."""
+    """Swapping gas furnace to ASHP should significantly increase electric draw."""
     bp_gas = _make_blueprint()
-    bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING])
     gas_steps = _collect_step_powers(bp_gas)
 
     bp_hp = _make_blueprint()
@@ -66,7 +65,7 @@ def test_heat_pump_increases_electric_consumption_vs_gas_furnace():
     gas_elec_avg = sum(s["net_electric_power_kw"] for s in gas_steps) / len(gas_steps)
     hp_elec_avg = sum(s["net_electric_power_kw"] for s in hp_steps) / len(hp_steps)
 
-    # Heat pump should draw more electric power than gas furnace
+    # Heat pump should draw more electric power than gas furnace (both have cooling)
     assert hp_elec_avg > gas_elec_avg, \
         f"ASHP electric {hp_elec_avg:.3f} kW not greater than gas furnace {gas_elec_avg:.3f} kW"
 
@@ -88,7 +87,7 @@ def test_swap_wh_to_hpwh_does_not_panic():
     bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
 
     hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
-                       backup_element_power_w=4500.0,
+                       backup_capacity_w=4500.0,
                        avg_water_draw_l_per_day=200.0)
     bp.add_equipment(hpwh)
 
@@ -199,7 +198,7 @@ def test_full_swap_gas_to_electric_does_not_panic():
     bp.add_equipment(ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000))
     bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
     bp.add_equipment(HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
-                                 backup_element_power_w=4500.0,
+                                 backup_capacity_w=4500.0,
                                  avg_water_draw_l_per_day=200.0))
 
     dw = bp.build()
@@ -250,7 +249,6 @@ def test_results_dataframe_has_expected_columns():
 def test_gas_furnace_results_show_lower_electric_than_ashp():
     """results() electric total should be lower for gas furnace than ASHP."""
     bp_gas = _make_blueprint()
-    bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING])
     dw_gas = bp_gas.build()
     dw_gas.initialize()
     for _ in dw_gas.timesteps():
@@ -282,7 +280,11 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
 
     # Gas WH dwelling: gas furnace + gas WH (same HVAC baseline, different WH)
     bp_gas = _make_blueprint(duration_s=DUR, time_res_s=TRES)
-    bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING])
+    bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING, EndUse.WATER_HEATING])
+    bp_gas.add_equipment(GasWaterHeater("GasWH", tank_volume_m3=0.19,
+                                         uniform_energy_factor=0.62,
+                                         heating_capacity_w=4500,
+                                         avg_water_draw_l_per_day=200.0))
     gas_steps = _collect_step_powers(bp_gas)
 
     # Electric resistance WH dwelling: gas furnace + electric WH (same HVAC, different WH)

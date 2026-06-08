@@ -128,15 +128,10 @@ impl DwellingBlueprint {
         let design_conditions = weather.design_conditions;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
-        let defaults_dir = config
+        let resolved_defaults_dir = config
             .defaults_path
             .clone()
             .unwrap_or_else(|| PathBuf::from("defaults"));
-        let resolved_defaults_dir = if defaults_dir.exists() {
-            defaults_dir.clone()
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
-        };
         let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
             Ok(store) => store,
             Err(err) => {
@@ -208,15 +203,26 @@ impl DwellingBlueprint {
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> usize {
         let before = self.equipment_specs.len();
         self.equipment_specs.retain(|s| {
-            let eu = hares_io::equipment_name_to_end_use(&s.name);
-            !end_uses.contains(&eu)
+            s.name == "Occupancy"
+                || !end_uses.contains(&hares_io::equipment_name_to_end_use(&s.name))
         });
         before - self.equipment_specs.len()
     }
 
-    /// Add an equipment spec.
-    pub fn add_equipment_spec(&mut self, spec: EquipmentSpec) {
+    /// Add an equipment spec.  Returns an error if an equipment with the same
+    /// instance name (or canonical name, when instance name is absent) already
+    /// exists in the blueprint.
+    pub fn add_equipment_spec(&mut self, spec: EquipmentSpec) -> Result<(), HaresError> {
+        let name = spec.instance_name.as_deref().unwrap_or(&spec.name);
+        if self.equipment_specs.iter().any(|s| {
+            s.instance_name.as_deref().unwrap_or(&s.name) == name
+        }) {
+            return Err(HaresError::Dwelling(format!(
+                "duplicate equipment name '{name}' — each equipment must have a unique name"
+            )));
+        }
         self.equipment_specs.push(spec);
+        Ok(())
     }
 
     /// Build the dwelling from this blueprint.

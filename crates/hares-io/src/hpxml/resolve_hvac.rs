@@ -935,7 +935,7 @@ fn try_build_gas_boiler_config(
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let zone_id = zone_id_from_params(params);
-    let cfg = GasBoilerConfig {
+    let mut cfg = GasBoilerConfig {
         equipment_id: None,
         zone_id,
         loop_id: None,
@@ -958,6 +958,11 @@ fn try_build_gas_boiler_config(
         // with a 6-coefficient efficiency curve vs 10 coefficients for non-condensing.
         condensing: afue > 0.90,
     };
+    // When condensing is inferred from AFUE, adjust return_temp_c to a
+    // condensing-safe value (65 °C / 150 °F) to avoid validation failure.
+    if cfg.condensing && cfg.return_temp_c >= 70.0 {
+        cfg.return_temp_c = 65.0;
+    }
     Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), "Gas Boiler".to_string(), cfg)
             .with_setpoints_reconciled(setpoints),

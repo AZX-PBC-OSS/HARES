@@ -1,8 +1,9 @@
 //! Shared utilities for Python bindings.
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
-use hares_io::ResampleMethod;
-use hares_types::DayFilter;
+use hares_equipment::EquipmentConfig;
+use hares_io::{EquipmentSpec, ResampleMethod};
+use hares_types::{DayFilter, FuelType};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
@@ -12,6 +13,28 @@ use serde_json::{json, Map, Value};
 pub fn insert_opt<T: serde::Serialize>(map: &mut Map<String, Value>, key: &str, value: Option<T>) {
     if let Some(v) = value {
         map.insert(key.into(), json!(v));
+    }
+}
+
+/// Construct an [`EquipmentSpec`] with the common defaults shared by all
+/// `*_spec_from_py` functions.
+pub fn make_spec(
+    canonical_name: &str,
+    instance_name: &str,
+    fuel_type: FuelType,
+    params: Map<String, Value>,
+    typed_config: Option<EquipmentConfig>,
+) -> EquipmentSpec {
+    EquipmentSpec {
+        name: canonical_name.to_string(),
+        instance_name: Some(instance_name.to_string()),
+        fuel_type,
+        parameters: params,
+        zip_params: None,
+        typed_config,
+        system_id: None,
+        related_hvac_idref: None,
+        primary_role: None,
     }
 }
 

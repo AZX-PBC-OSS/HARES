@@ -12,13 +12,17 @@ use crate::py_enums::PyEndUse;
 use crate::py_hvac::{
     PyGasFurnace, PyAirConditioner, PyASHPHeater, PyASHPCooler,
     PyIdealHVAC, PyElectricBaseboard,
+    PyGasBoiler, PyElectricBoiler, PyElectricFurnace,
     gas_furnace_spec_from_py, ac_spec_from_py,
     ashp_heater_spec_from_py, ashp_cooler_spec_from_py,
     ideal_hvac_spec_from_py, baseboard_spec_from_py,
+    gas_boiler_spec_from_py, electric_boiler_spec_from_py, electric_furnace_spec_from_py,
 };
 use crate::py_water_heater::{
     PyGasWaterHeater, PyElectricResistanceWH, PyHeatPumpWH,
+    PyTanklessWaterHeater, PyIndirectTank,
     gas_wh_spec_from_py, elec_res_wh_spec_from_py, hpwh_spec_from_py,
+    tankless_wh_spec_from_py, indirect_tank_spec_from_py,
 };
 
 #[pyclass(name = "DwellingBlueprint")]
@@ -94,7 +98,7 @@ impl PyDwellingBlueprint {
             PyValueError::new_err("DwellingBlueprint has already been built")
         })?;
         let spec = py_any_to_equipment_spec(obj)?;
-        bp.add_equipment_spec(spec);
+        bp.add_equipment_spec(spec).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -140,6 +144,21 @@ fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<EquipmentSpec> {
     }
     if let Ok(wh) = obj.extract::<PyRef<'_, PyHeatPumpWH>>() {
         return Ok(hpwh_spec_from_py(&wh));
+    }
+    if let Ok(gb) = obj.extract::<PyRef<'_, PyGasBoiler>>() {
+        return Ok(gas_boiler_spec_from_py(&gb));
+    }
+    if let Ok(eb) = obj.extract::<PyRef<'_, PyElectricBoiler>>() {
+        return Ok(electric_boiler_spec_from_py(&eb));
+    }
+    if let Ok(ef) = obj.extract::<PyRef<'_, PyElectricFurnace>>() {
+        return Ok(electric_furnace_spec_from_py(&ef));
+    }
+    if let Ok(wh) = obj.extract::<PyRef<'_, PyTanklessWaterHeater>>() {
+        return Ok(tankless_wh_spec_from_py(&wh));
+    }
+    if let Ok(it) = obj.extract::<PyRef<'_, PyIndirectTank>>() {
+        return Ok(indirect_tank_spec_from_py(&it));
     }
     Err(PyValueError::new_err(
         "equipment must be a typed HVAC or water heater config object"

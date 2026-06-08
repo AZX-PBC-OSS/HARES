@@ -27,7 +27,7 @@ pub use building::{
 };
 pub use data_patches::HpxmlDataPatches;
 pub use equipment::{EquipmentSpec, build_typed_spec, nested_update, resolve_equipment};
-pub use resolve_water_heater::extract_bedroom_count;
+pub use resolve_water_heater::{extract_bedroom_count, rebuild_wh_typed_config};
 pub use validation::{ValidationReport, ValidationWarning};
 
 /// Structured parse error carrying position and element context.

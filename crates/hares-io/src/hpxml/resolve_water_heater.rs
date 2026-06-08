@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
@@ -738,6 +738,253 @@ fn canonical_water_heater_name(
         }
     };
     Ok(name.to_string())
+}
+
+fn param_f64(params: &Map<String, Value>, key: &str) -> Option<f64> {
+    params.get(key).and_then(Value::as_f64)
+}
+
+fn param_u16(params: &Map<String, Value>, key: &str) -> Option<u16> {
+    params.get(key).and_then(Value::as_u64).map(|v| v as u16)
+}
+
+fn param_str(params: &Map<String, Value>, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn param_fuel(params: &Map<String, Value>) -> FuelType {
+    param_str(params, "fuel_type")
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "gas" | "natural gas" => Some(FuelType::Gas),
+            "propane" => Some(FuelType::Propane),
+            "oil" | "fuel oil" => Some(FuelType::Oil),
+            "wood" => Some(FuelType::Wood),
+            "coal" => Some(FuelType::Coal),
+            "woodpellet" | "wood pellet" => Some(FuelType::WoodPellet),
+            _ => None,
+        })
+        .unwrap_or(FuelType::Gas)
+}
+
+fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+    let cfg = GasWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: param_u16(params, "zone_id"),
+        loop_id: None,
+        fuel_type: param_fuel(params),
+        tank_volume_m3: param_f64(params, "tank_volume_m3"),
+        tank_height_m: param_f64(params, "tank_height_m"),
+        energy_factor: param_f64(params, "energy_factor"),
+        uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
+        heating_capacity_w: param_f64(params, "heating_capacity_w"),
+        ua_w_per_k: param_f64(params, "ua_w_per_k"),
+        setpoint_c: param_f64(params, "setpoint_c"),
+        deadband_c: param_f64(params, "deadband_c"),
+        max_tank_temp_c: param_f64(params, "max_tank_temp_c"),
+        initial_tank_temp_c: param_f64(params, "initial_tank_temp_c"),
+        tank_nodes: None,
+        avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
+        draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        pilot_power_w: param_f64(params, "pilot_power_w"),
+        flue_loss_fraction: param_f64(params, "flue_loss_fraction"),
+        skin_loss_fraction: param_f64(params, "skin_loss_fraction"),
+        ignition_type: param_str(params, "ignition_type"),
+        performance_adjustment: param_f64(params, "performance_adjustment"),
+        zone_type: param_str(params, "zone_type"),
+        first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
+        jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
+        conversion_efficiency: param_f64(params, "conversion_efficiency"),
+        fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
+        hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
+        pilot_fraction_to_tank: param_f64(params, "pilot_fraction_to_tank"),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_elec_res_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let cfg = ElectricResistanceWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: param_u16(params, "zone_id"),
+        loop_id: None,
+        tank_volume_m3: param_f64(params, "tank_volume_m3"),
+        tank_height_m: param_f64(params, "tank_height_m"),
+        energy_factor: param_f64(params, "energy_factor"),
+        uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
+        heating_capacity_w: param_f64(params, "heating_capacity_w"),
+        ua_w_per_k: param_f64(params, "ua_w_per_k"),
+        setpoint_c: param_f64(params, "setpoint_c"),
+        deadband_c: param_f64(params, "deadband_c"),
+        max_tank_temp_c: param_f64(params, "max_tank_temp_c"),
+        initial_tank_temp_c: param_f64(params, "initial_tank_temp_c"),
+        tank_nodes: None,
+        avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
+        draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        performance_adjustment: param_f64(params, "performance_adjustment"),
+        zone_type: param_str(params, "zone_type"),
+        first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
+        element_power_w: param_f64(params, "element_power_w")
+            .or_else(|| param_f64(params, "heating_capacity_w")),
+        max_setpoint_ramp_rate_c_per_min: param_f64(params, "max_setpoint_ramp_rate_c_per_min"),
+        element_priority_mode: param_str(params, "element_priority_mode"),
+        jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
+        max_combined_power_w: param_f64(params, "max_combined_power_w"),
+        fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
+        hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Resistance Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+    let cfg = HeatPumpWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: param_u16(params, "zone_id"),
+        loop_id: None,
+        tank_volume_m3: param_f64(params, "tank_volume_m3"),
+        tank_height_m: param_f64(params, "tank_height_m"),
+        cop: param_f64(params, "cop"),
+        backup_element_power_w: param_f64(params, "backup_element_power_w")
+            .or_else(|| param_f64(params, "heating_capacity_w")),
+        ua_w_per_k: param_f64(params, "ua_w_per_k"),
+        setpoint_c: param_f64(params, "setpoint_c"),
+        deadband_c: param_f64(params, "deadband_c"),
+        max_tank_temp_c: param_f64(params, "max_tank_temp_c"),
+        initial_tank_temp_c: param_f64(params, "initial_tank_temp_c"),
+        tank_nodes: None,
+        tempering_valve_setpoint_c: param_f64(params, "tempering_valve_setpoint_c"),
+        avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
+        draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
+        compressor_power_w: param_f64(params, "compressor_power_w"),
+        backup_enable_offset_c: param_f64(params, "backup_enable_offset_c"),
+        min_ambient_temp_c: param_f64(params, "min_ambient_temp_c"),
+        max_ambient_temp_c: param_f64(params, "max_ambient_temp_c"),
+        min_on_time_s: param_f64(params, "min_on_time_s"),
+        min_off_time_s: param_f64(params, "min_off_time_s"),
+        hp_only_mode: params.get("hp_only_mode").and_then(Value::as_bool),
+        element_hp_control_mode: param_str(params, "element_hp_control_mode"),
+        fan_power_w: param_f64(params, "fan_power_w"),
+        parasitic_power_w: param_f64(params, "parasitic_power_w"),
+        backup_efficiency: param_f64(params, "backup_efficiency"),
+        shr: param_f64(params, "shr"),
+        lost_heat_fraction: param_f64(params, "lost_heat_fraction"),
+        wall_heat_fraction: param_f64(params, "wall_heat_fraction"),
+        capacity_biquadratic_coeffs: None,
+        cop_biquadratic_coeffs: None,
+        performance_adjustment: param_f64(params, "performance_adjustment"),
+        zone_type: param_str(params, "zone_type"),
+        first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
+        jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
+        fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Heat Pump Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_tankless_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let cfg = TanklessWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: param_u16(params, "zone_id"),
+        loop_id: None,
+        fuel_type: param_fuel(params),
+        energy_factor: param_f64(params, "energy_factor"),
+        uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
+        heating_capacity_w: param_f64(params, "heating_capacity_w"),
+        setpoint_c: param_f64(params, "setpoint_c"),
+        parasitic_power_w: param_f64(params, "parasitic_power_w"),
+        performance_adjustment: param_f64(params, "performance_adjustment"),
+        inlet_temp_c: param_f64(params, "inlet_temp_c"),
+        draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
+        zone_type: param_str(params, "zone_type"),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Tankless Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_indirect_tank_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let cfg = IndirectTankConfig {
+        equipment_id: None,
+        zone_id: param_u16(params, "zone_id"),
+        boiler_loop_id: param_u16(params, "boiler_loop_id"),
+        tank_volume_m3: param_f64(params, "tank_volume_m3"),
+        tank_height_m: param_f64(params, "tank_height_m"),
+        ua_w_per_k: param_f64(params, "ua_w_per_k"),
+        hx_ua_w_per_k: param_f64(params, "hx_ua_w_per_k"),
+        setpoint_c: param_f64(params, "setpoint_c"),
+        deadband_c: param_f64(params, "deadband_c"),
+        max_tank_temp_c: param_f64(params, "max_tank_temp_c"),
+        initial_tank_temp_c: param_f64(params, "initial_tank_temp_c"),
+        tank_nodes: None,
+        draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
+        avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        performance_adjustment: param_f64(params, "performance_adjustment"),
+        zone_type: param_str(params, "zone_type"),
+        first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
+        jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
+        fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
+        hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
+        boiler_loop_flow_rate_kg_s: param_f64(params, "boiler_loop_flow_rate_kg_s"),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Indirect Tank".to_string(),
+        cfg,
+    ))
+}
+
+/// Rebuild a water heater equipment typed config using updated parameters.
+///
+/// Called after autosizing to replace placeholder capacities and volumes
+/// with computed values. Matches on the canonical equipment name to select
+/// the correct config builder.
+pub fn rebuild_wh_typed_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    match name {
+        "Gas Water Heater" => try_build_gas_wh_config(name, params),
+        "Electric Resistance Water Heater" => try_build_elec_res_wh_config(name, params),
+        "Heat Pump Water Heater" => try_build_hpwh_config(name, params),
+        "Tankless Water Heater" => try_build_tankless_wh_config(name, params),
+        "Indirect Tank" => try_build_indirect_tank_config(name, params),
+        other => {
+            tracing::warn!(
+                canonical_name = other,
+                "rebuild_wh_typed_config called with unrecognized WH name; returning None"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

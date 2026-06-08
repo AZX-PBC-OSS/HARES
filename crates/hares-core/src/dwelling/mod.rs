@@ -1722,14 +1722,24 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     let mut warnings = Vec::new();
 
     // ── WH typed_config debug assertion ─────────────────────────────────
+    // WH specs with autosize_water_heater = true will have typed_config = None
+    // here because autosizing hasn't run yet; it runs later and rebuilds the
+    // typed_config before schedule injection consumes it.
     #[cfg(debug_assertions)]
     for spec in &equipment_specs {
         if matches!(spec.name.as_str(), "Electric Resistance Water Heater"
             | "Gas Water Heater" | "Heat Pump Water Heater"
             | "Tankless Water Heater" | "Gas Tankless Water Heater")
         {
-            assert!(spec.typed_config.is_some(),
-                "WH spec '{}' has no typed_config — schedule injection will panic", spec.name);
+            let will_be_autosized = spec
+                .parameters
+                .get("autosize_water_heater")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !will_be_autosized {
+                assert!(spec.typed_config.is_some(),
+                    "WH spec '{}' has no typed_config — schedule injection will panic", spec.name);
+            }
         }
     }
 
@@ -3795,11 +3805,6 @@ impl Dwelling {
                 cp.format_version, CHECKPOINT_VERSION
             )));
         }
-
-        let mut restored_rng = ChaCha8Rng::from_seed(cp.rng_state);
-        restored_rng.set_stream(cp.rng_stream);
-        restored_rng.set_word_pos(cp.rng_word_pos);
-        self.rng = restored_rng;
 
         self.thermal_solver
             .restore_state(&cp.envelope_state, &cp.thermal_last_u, &cp.lwr_t_prev_c)
