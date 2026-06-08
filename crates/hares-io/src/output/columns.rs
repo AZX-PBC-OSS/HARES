@@ -128,6 +128,7 @@ pub fn equipment_name_to_end_use(name: &str) -> EndUse {
 
         // Water Heating
         "Gas Water Heater"
+        | "Gas Tankless Water Heater"
         | "Electric Resistance Water Heater"
         | "Resistance Water Heater"
         | "Heat Pump Water Heater"
@@ -167,7 +168,7 @@ pub fn equipment_name_to_end_use(name: &str) -> EndUse {
         "Ceiling Fan" => EndUse::CEILING_FAN,
 
         // Cooking
-        "Gas Grill" => EndUse::COOKING,
+        "Gas Grill" | "Cooking Range" => EndUse::COOKING,
 
         // Pool / Spa
         "Pool Pump" => EndUse::POOL_PUMP,

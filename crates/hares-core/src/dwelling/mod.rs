@@ -1988,6 +1988,12 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         }
     }
 
+    // Deduplicate equipment instance names before the uniqueness check.
+    // Blueprint callers may add specs with the same name (e.g. two "PV"
+    // arrays) via add_equipment_spec(); assign canonical "Name #N" instance
+    // names so the duplicate-detection pass below sees distinct names.
+    hares_io::hpxml::equipment::assign_instance_names(&mut equipment_specs);
+
     // Equipment names whose loads are handled outside the registry (e.g. directly in the
     // simulation loop) -- silently skip them rather than emitting a warning.
     const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
@@ -2379,7 +2385,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         );
         #[cfg(feature = "dst")]
         {
-            clock.civil_tz = parsed_civil_tz;
+            clock.civil_tz = bp.parsed_civil_tz;
         }
         dwelling.clock = clock;
     } else {
@@ -3790,7 +3796,6 @@ impl Dwelling {
             )));
         }
 
-        self.clock.current_step = cp.timestep_index;
         let mut restored_rng = ChaCha8Rng::from_seed(cp.rng_state);
         restored_rng.set_stream(cp.rng_stream);
         restored_rng.set_word_pos(cp.rng_word_pos);
@@ -3823,6 +3828,12 @@ impl Dwelling {
             )))?;
 
         self.prior_electrical_summary = cp.prior_electrical_summary.clone();
+
+        // Reset clock to start-of-segment. restore_building_state transfers
+        // only building physics state (thermal/humidity/fluid) — not the
+        // simulation clock, which was independently created for the new
+        // segment by build_from_blueprint.
+        self.clock.current_step = 0;
 
         self.snapshot_equipment_state();
 

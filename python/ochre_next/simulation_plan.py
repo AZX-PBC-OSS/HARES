@@ -1,20 +1,32 @@
 """Multi-segment dwelling simulation with equipment swapping between time windows."""
 
 from __future__ import annotations
+
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable
 
 import polars as pl
 
-from ochre_next._hares import Dwelling, DwellingBlueprint
+from ochre_next import Dwelling, DwellingBlueprint
+
+
+def _noop(_bp: DwellingBlueprint) -> None:
+    """No-op setup callback for SimulationSegment default."""
+    pass
 
 
 @dataclass
 class SimulationSegment:
     start: datetime
     end: datetime
-    setup: Callable[[DwellingBlueprint], None] = field(default=lambda _: None)
+    setup: Callable[[DwellingBlueprint], None] = field(
+        default=_noop, repr=False, compare=False
+    )
+    post_build: Callable[[Dwelling], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def duration_s(self) -> int:
@@ -33,6 +45,7 @@ class SimulationPlan:
         time_res_s: int = 300,
         output_verbosity: int = 0,
         master_seed: int = 42,
+        initialization_duration: int = 604800,  # 7 days
         **extra_kwargs,
     ):
         self.hpxml = hpxml
@@ -44,6 +57,7 @@ class SimulationPlan:
             "time_res_s": time_res_s,
             "output_verbosity": output_verbosity,
             "master_seed": master_seed,
+            "initialization_duration": initialization_duration,
             **extra_kwargs,
         }
         self.segments: list[SimulationSegment] = []
@@ -53,8 +67,11 @@ class SimulationPlan:
         start: datetime,
         end: datetime,
         setup: Callable[[DwellingBlueprint], None] | None = None,
+        post_build: Callable[[Dwelling], None] | None = None,
     ) -> None:
-        self.segments.append(SimulationSegment(start, end, setup or (lambda _: None)))
+        self.segments.append(
+            SimulationSegment(start, end, setup or _noop, post_build=post_build)
+        )
 
     def run(self) -> pl.DataFrame:
         if not self.segments:
@@ -75,17 +92,36 @@ class SimulationPlan:
             seg.setup(bp)
             dw = bp.build()
 
+            if seg.post_build is not None:
+                seg.post_build(dw)
+
             if checkpoint is not None:
                 dw.restore_building_state(checkpoint)
 
-            dw.initialize()
-            for _ in dw.timesteps():
-                dw.step()
+            # initialize() snapshots the post-restore state as the "initial"
+            # state for this segment, ensuring the first step() call sees
+            # correct equipment core outputs from the transferred state.
+            try:
+                dw.initialize()
+                for _ in dw.timesteps():
+                    dw.step()
+            except Exception as e:
+                warnings.warn(
+                    f"Segment {i} failed: {e} — skipping results collection",
+                    stacklevel=2,
+                )
+                continue
 
             df: pl.DataFrame = dw.results()
             if df is not None and not df.is_empty():
                 df = df.with_columns(pl.lit(i).alias("segment"))
                 all_frames.append(df)
+            else:
+                warnings.warn(
+                    f"Segment {i} produced no results — "
+                    "this may indicate a simulation error",
+                    stacklevel=2,
+                )
 
             checkpoint = dw.save_checkpoint()
 

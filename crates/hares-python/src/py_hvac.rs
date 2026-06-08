@@ -1,6 +1,6 @@
 //! Python bindings for typed HVAC heating/cooling equipment configuration.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use hares_types::FuelType;
@@ -97,17 +97,11 @@ pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> EquipmentSpec {
     if gf.autosize {
         params.insert("autosize_heating".into(), json!(true));
     }
-    if let Some(v) = gf.capacity_w {
-        params.insert("capacity_w".into(), json!(v));
-    }
+    insert_opt(&mut params, "heating_capacity_w", gf.capacity_w);
     insert_opt(&mut params, "afue", gf.afue);
-    if let Some(v) = gf.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "zone_id", gf.zone_id);
     insert_opt(&mut params, "fan_power_w", gf.fan_power_w);
-    if let Some(v) = gf.number_of_speeds {
-        params.insert("number_of_speeds".into(), json!(v));
-    }
+    insert_opt(&mut params, "number_of_speeds", gf.number_of_speeds);
     insert_opt(&mut params, "heating_setpoint_c", gf.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", gf.cooling_setpoint_c);
     if let Some(v) = gf.oversizing_factor {
@@ -233,20 +227,12 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
     if ac.autosize {
         params.insert("autosize_cooling".into(), json!(true));
     }
-    if let Some(v) = ac.capacity_w {
-        params.insert("capacity_w".into(), json!(v));
-    }
+    insert_opt(&mut params, "cooling_capacity_w", ac.capacity_w);
     params.insert("eir".into(), json!(eir));
-    if let Some(v) = ac.seer {
-        params.insert("seer".into(), json!(v));
-    }
-    if let Some(v) = ac.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "seer", ac.seer);
+    insert_opt(&mut params, "zone_id", ac.zone_id);
     insert_opt(&mut params, "shr", ac.shr);
-    if let Some(v) = ac.number_of_speeds {
-        params.insert("number_of_speeds".into(), json!(v));
-    }
+    insert_opt(&mut params, "number_of_speeds", ac.number_of_speeds);
     insert_opt(&mut params, "fan_power_w", ac.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", ac.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", ac.cooling_setpoint_c);
@@ -329,6 +315,8 @@ pub struct PyASHPHeater {
     #[pyo3(get)] pub is_mini_split: Option<bool>,
     #[pyo3(get)] pub backup_capacity_w: Option<f64>,
     #[pyo3(get)] pub backup_fuel: Option<String>,
+    /// Pre-parsed fuel type, validated during construction.
+    pub(crate) backup_fuel_parsed: Option<FuelType>,
     #[pyo3(get)] pub fan_power_w: Option<f64>,
     #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
     #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
@@ -359,6 +347,7 @@ impl PyASHPHeater {
                 "ASHPHeater: capacity_w is required when autosize=False",
             ));
         }
+        let backup_fuel_parsed = parse_fuel_type(backup_fuel.as_deref())?;
         Ok(Self {
             name,
             autosize,
@@ -368,6 +357,7 @@ impl PyASHPHeater {
             is_mini_split,
             backup_capacity_w,
             backup_fuel,
+            backup_fuel_parsed,
             fan_power_w,
             heating_setpoint_c,
             cooling_setpoint_c,
@@ -401,7 +391,7 @@ fn parse_fuel_type(s: Option<&str>) -> PyResult<Option<FuelType>> {
     }
 }
 
-pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
+pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> EquipmentSpec {
     let mut params = Map::new();
     let hspf = hp.hspf.unwrap_or(8.2);
     let heating_eir = BTU_PER_HR_PER_W / hspf.max(1e-6);
@@ -409,19 +399,13 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
     if hp.autosize {
         params.insert("autosize_heating".into(), json!(true));
     }
-    if let Some(v) = hp.capacity_w {
-        params.insert("heating_capacity_w".into(), json!(v));
-    }
+    insert_opt(&mut params, "heating_capacity_w", hp.capacity_w);
     params.insert("heating_eir".into(), json!(heating_eir));
     if hp.hspf.is_some() {
         params.insert("hspf".into(), json!(hspf));
     }
-    if let Some(v) = hp.is_mini_split {
-        params.insert("is_mini_split".into(), json!(v));
-    }
-    if let Some(v) = hp.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "is_mini_split", hp.is_mini_split);
+    insert_opt(&mut params, "zone_id", hp.zone_id);
     insert_opt(&mut params, "backup_capacity_w", hp.backup_capacity_w);
     if let Some(ref fuel) = hp.backup_fuel {
         params.insert("backup_fuel".into(), json!(fuel));
@@ -437,8 +421,6 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
         }
     }
 
-    let backup_fuel = parse_fuel_type(hp.backup_fuel.as_deref())?;
-
     let typed_config = if hp.autosize {
         None
     } else {
@@ -448,7 +430,7 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
             zone_id: hp.zone_id,
             is_mini_split: hp.is_mini_split.unwrap_or(false),
             backup_capacity_w: hp.backup_capacity_w,
-            backup_fuel,
+            backup_fuel: hp.backup_fuel_parsed,
             fan_power_w: hp.fan_power_w,
             setpoint: setpoint_config(hp.heating_setpoint_c, hp.cooling_setpoint_c),
             ..HeatPumpCommonConfig::default()
@@ -464,7 +446,7 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
         ))
     };
 
-    Ok(EquipmentSpec {
+    EquipmentSpec {
         name: "ASHP Heater".to_string(),
         instance_name: Some(hp.name.clone()),
         fuel_type: FuelType::Electric,
@@ -474,7 +456,7 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -551,19 +533,13 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> EquipmentSpec {
     if hp.autosize {
         params.insert("autosize_cooling".into(), json!(true));
     }
-    if let Some(v) = hp.capacity_w {
-        params.insert("cooling_capacity_w".into(), json!(v));
-    }
+    insert_opt(&mut params, "cooling_capacity_w", hp.capacity_w);
     params.insert("cooling_eir".into(), json!(cooling_eir));
     if hp.seer.is_some() {
         params.insert("seer".into(), json!(seer));
     }
-    if let Some(v) = hp.is_mini_split {
-        params.insert("is_mini_split".into(), json!(v));
-    }
-    if let Some(v) = hp.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "is_mini_split", hp.is_mini_split);
+    insert_opt(&mut params, "zone_id", hp.zone_id);
     insert_opt(&mut params, "shr", hp.shr);
     insert_opt(&mut params, "fan_power_w", hp.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", hp.heating_setpoint_c);
@@ -676,13 +652,9 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> EquipmentSpec {
     if bb.autosize {
         params.insert("autosize_heating".into(), json!(true));
     }
-    if let Some(v) = bb.capacity_w {
-        params.insert("capacity_w".into(), json!(v));
-    }
+    insert_opt(&mut params, "heating_capacity_w", bb.capacity_w);
     params.insert("eir".into(), json!(eir));
-    if let Some(v) = bb.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "zone_id", bb.zone_id);
     insert_opt(&mut params, "heating_setpoint_c", bb.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", bb.cooling_setpoint_c);
     if let Some(v) = bb.oversizing_factor {
@@ -773,9 +745,7 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> EquipmentSpec {
 
     insert_opt(&mut params, "heating_capacity_w", ih.heating_capacity_w);
     insert_opt(&mut params, "cooling_capacity_w", ih.cooling_capacity_w);
-    if let Some(v) = ih.zone_id {
-        params.insert("zone_id".into(), json!(v));
-    }
+    insert_opt(&mut params, "zone_id", ih.zone_id);
     insert_opt(&mut params, "heating_setpoint_c", ih.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", ih.cooling_setpoint_c);
     insert_opt(&mut params, "deadband_c", ih.deadband_c);

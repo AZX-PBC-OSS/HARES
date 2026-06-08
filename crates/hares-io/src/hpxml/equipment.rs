@@ -152,7 +152,13 @@ where
     let parameters = serde_json::to_value(&config)
         .ok()
         .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                equipment = %name,
+                "serialization of typed config produced non-object or failed; using empty parameters"
+            );
+            serde_json::Map::new()
+        });
     let typed_config = EquipmentConfig::from_typed(name.clone(), name.clone(), config);
     EquipmentSpec {
         name: name.clone(),
@@ -287,24 +293,31 @@ pub fn canonical_instance_namer(name: &str, count: usize) -> String {
     format!("{name} #{count}")
 }
 
-fn assign_instance_names(specs: &mut [EquipmentSpec]) {
+pub fn assign_instance_names(specs: &mut [EquipmentSpec]) {
     use std::collections::HashMap;
 
-    let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+    let effective_names: Vec<String> = specs
+        .iter()
+        .map(|s| s.instance_name.clone().unwrap_or_else(|| s.name.clone()))
+        .collect();
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
-    for name in &names {
+    for name in &effective_names {
         *counts.entry(name.as_str()).or_insert(0) += 1;
     }
 
     let mut indices: HashMap<&str, usize> = HashMap::new();
     for (i, spec) in specs.iter_mut().enumerate() {
-        let name = &names[i];
-        let total = counts.get(name.as_str()).copied().unwrap_or(1);
+        let effective = &effective_names[i];
+        let total = counts.get(effective.as_str()).copied().unwrap_or(1);
         if total > 1 {
-            let idx = indices.entry(name.as_str()).or_insert(0);
+            let idx = indices.entry(effective.as_str()).or_insert(0);
             *idx += 1;
-            spec.instance_name = Some(canonical_instance_namer(name, *idx));
+            let new_name = canonical_instance_namer(effective, *idx);
+            spec.instance_name = Some(new_name.clone());
+            if let Some(ref mut typed) = spec.typed_config {
+                typed.name = new_name;
+            }
         }
     }
 }

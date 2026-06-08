@@ -7,8 +7,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
 
-/// Insert an optional f64 value into a JSON map under the given key.
-pub fn insert_opt(map: &mut Map<String, Value>, key: &str, value: Option<f64>) {
+/// Insert an optional value into a JSON map under the given key.
+/// Generic over any `Serialize` type (f64, u16, u8, bool, String, etc.).
+pub fn insert_opt<T: serde::Serialize>(map: &mut Map<String, Value>, key: &str, value: Option<T>) {
     if let Some(v) = value {
         map.insert(key.into(), json!(v));
     }

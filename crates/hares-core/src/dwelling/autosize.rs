@@ -417,6 +417,10 @@ pub fn autosize_equipment_capacities(
             spec.parameters.remove("autosize_heating_max_w");
 
             if sized_capacity > 0.0 {
+                // Remove the non-canonical "capacity_w" key (inserted by
+                // the Python typed-equipment bindings) now that the
+                // canonical "heating_capacity_w" is set.
+                spec.parameters.remove("capacity_w");
                 spec.parameters
                     .insert("heating_capacity_w".to_string(), json!(sized_capacity));
                 spec.parameters.remove("autosize_heating");
@@ -501,6 +505,10 @@ pub fn autosize_equipment_capacities(
             spec.parameters.remove("autosize_cooling_max_w");
 
             if sized_capacity > 0.0 {
+                // Remove the non-canonical "capacity_w" key (inserted by
+                // the Python typed-equipment bindings) now that the
+                // canonical "cooling_capacity_w" is set.
+                spec.parameters.remove("capacity_w");
                 spec.parameters
                     .insert("cooling_capacity_w".to_string(), json!(sized_capacity));
                 spec.parameters.remove("autosize_cooling");
@@ -825,15 +833,59 @@ pub fn autosize_water_heater_capacities(
                 }
             }
         } else {
-            error!(
+            // Autosizing computed zero or negative capacity — fall back to a
+            // minimum safe default so the simulation can still run.
+            tracing::warn!(
                 equipment = %spec.name,
                 fhr_gph,
                 tank_volume_gal,
                 delta_t_c,
                 factor,
                 "water heater autosizing: computed capacity is zero — \
-                 check bedroom count, setpoint, and mains temperature"
+                 falling back to default element capacity {} W and {} gal tank. \
+                 Check bedroom count, setpoint, and mains temperature",
+                DEFAULT_ELEMENT_CAPACITY_W,
+                DEFAULT_TANK_VOLUME_GAL
             );
+
+            // Remove consumed params and autosize flag so the spec is not
+            // re-processed on subsequent builds.
+            spec.parameters.remove("autosize_water_heater_factor");
+            spec.parameters.remove("autosize_water_heater_min_w");
+            spec.parameters.remove("autosize_water_heater_max_w");
+
+            let fallback_vol_m3 = hares_physics::units::volume_gal_to_m3(DEFAULT_TANK_VOLUME_GAL);
+            spec.parameters
+                .insert("heating_capacity_w".to_string(), json!(DEFAULT_ELEMENT_CAPACITY_W));
+            if !spec.parameters.contains_key("tank_volume_m3") {
+                spec.parameters
+                    .insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
+            }
+            spec.parameters.remove("autosize_water_heater");
+
+            // Patch typed_config with the fallback values so downstream
+            // schedule injection and equipment init see valid capacities.
+            if let Some(ref mut tc) = spec.typed_config {
+                if let ConfigPayload::Typed {
+                    data: Value::Object(map),
+                    ..
+                } = &mut tc.payload
+                {
+                    let capacity_field = if spec.name == "Heat Pump Water Heater" {
+                        "backup_element_power_w"
+                    } else if spec.name == "Indirect Tank" {
+                        ""
+                    } else {
+                        "heating_capacity_w"
+                    };
+                    if !capacity_field.is_empty() {
+                        map.insert(capacity_field.to_string(), json!(DEFAULT_ELEMENT_CAPACITY_W));
+                    }
+                    if !map.contains_key("tank_volume_m3") {
+                        map.insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
+                    }
+                }
+            }
         }
     }
 }

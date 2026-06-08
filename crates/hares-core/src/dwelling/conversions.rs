@@ -645,7 +645,11 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
 
 pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> EquipmentConfig {
     if let Some(typed) = &spec.typed_config {
-        return typed.clone();
+        let mut cfg = typed.clone();
+        if let Some(ref instance_name) = spec.instance_name {
+            cfg.name = instance_name.clone();
+        }
+        return cfg;
     }
 
     let mut raw_config: HashMap<String, ConfigValue> = spec

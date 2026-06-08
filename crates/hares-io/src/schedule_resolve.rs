@@ -805,7 +805,17 @@ fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
                 )
             })
         }
-        other => panic!("unsupported water heater type for draw normalization: {other}"),
+        other => {
+            #[cfg(debug_assertions)]
+            {
+                panic!("unsupported water heater type for draw normalization: {other}");
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                tracing::warn!(equipment = %other, "unknown water heater type, using default daily draw (227 L)");
+                227.0
+            }
+        }
     }
 }
 

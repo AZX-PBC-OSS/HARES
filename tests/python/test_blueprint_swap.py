@@ -1,12 +1,13 @@
 """Test HVAC and WH equipment swapping via DwellingBlueprint."""
 
-import pytest
+from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
 from ochre_next import (
-    DwellingBlueprint, GasFurnace, ASHPHeater, ASHPCooler,
-    AirConditioner, HeatPumpWH, ElectricResistanceWH,
+    ASHPHeater,
+    DwellingBlueprint,
+    ElectricResistanceWH,
     EndUse,
+    HeatPumpWH,
 )
-from conftest import HPXML, SCHEDULE, WEATHER, HARES_DEFAULTS
 
 
 def _make_blueprint():
@@ -25,7 +26,7 @@ def test_swap_gas_furnace_to_ashp():
     ashp = ASHPHeater("ASHP", capacity_w=12000, hspf=9.5,
                        backup_capacity_w=10000)
     bp.add_equipment(ashp)
-    assert "ASHP Heater" in bp.equipment_names()
+    assert "ASHP" in bp.equipment_names()
 
     dw = bp.build()
     dw.initialize()
@@ -42,6 +43,7 @@ def test_swap_gas_wh_to_hpwh():
     assert all("Water Heater" not in n for n in bp.equipment_names())
 
     hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
+                       backup_element_power_w=4500.0,
                        avg_water_draw_l_per_day=200.0)
     bp.add_equipment(hpwh)
     dw = bp.build()
@@ -56,8 +58,9 @@ def test_swap_gas_wh_to_electric_resistance():
     bp = _make_blueprint()
     bp.remove_equipment_by_end_use([EndUse.WATER_HEATING])
     erwh = ElectricResistanceWH("ERWH", tank_volume_m3=0.19,
-                                uniform_energy_factor=0.95,
-                                avg_water_draw_l_per_day=200.0)
+                                 heating_capacity_w=4500.0,
+                                 uniform_energy_factor=0.95,
+                                 avg_water_draw_l_per_day=200.0)
     bp.add_equipment(erwh)
     dw = bp.build()
     dw.initialize()

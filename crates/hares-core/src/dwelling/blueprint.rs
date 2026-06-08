@@ -20,13 +20,13 @@ use crate::dwelling::DwellingConfig;
 /// Pre-build dwelling state. Equipment can be mutated before calling build().
 pub struct DwellingBlueprint {
     pub config: DwellingConfig,
-    pub building: hares_io::Building,
-    pub weather: WeatherTimeSeries,
+    pub(super) building: hares_io::Building,
+    pub(super) weather: WeatherTimeSeries,
     pub schedule: ScheduleTimeSeries,
-    pub(crate) weather_avgs: WeatherAverages,
-    pub design_conditions: Option<DesignConditions>,
-    pub site_location: SiteLocation,
-    pub defaults: DefaultsStore,
+    pub(super) weather_avgs: WeatherAverages,
+    pub(super) design_conditions: Option<DesignConditions>,
+    pub(super) site_location: SiteLocation,
+    pub(super) defaults: DefaultsStore,
     pub defaults_path: Option<PathBuf>,
     pub equipment_specs: Vec<EquipmentSpec>,
     pub(super) local_start: DateTime<FixedOffset>,
@@ -177,12 +177,13 @@ impl DwellingBlueprint {
         })
     }
 
-    /// Return names of all equipment specs (excluding "Occupancy").
+    /// Return display names (instance_name if set, otherwise canonical name) of all
+    /// equipment specs (excluding "Occupancy").
     pub fn equipment_names(&self) -> Vec<&str> {
         self.equipment_specs
             .iter()
             .filter(|s| s.name != "Occupancy")
-            .map(|s| s.name.as_str())
+            .map(|s| s.instance_name.as_deref().unwrap_or(&s.name))
             .collect()
     }
 
@@ -191,7 +192,7 @@ impl DwellingBlueprint {
         let pos = self
             .equipment_specs
             .iter()
-            .position(|s| s.name == name)
+            .position(|s| s.name == name || s.instance_name.as_deref() == Some(name))
             .ok_or_else(|| {
                 HaresError::Dwelling(format!(
                     "equipment '{}' not found in blueprint",

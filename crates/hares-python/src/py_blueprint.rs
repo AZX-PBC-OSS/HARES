@@ -22,6 +22,7 @@ use crate::py_water_heater::{
 };
 
 #[pyclass(name = "DwellingBlueprint")]
+#[doc = "A two-phase dwelling blueprint: first inspect and swap equipment, then build."]
 pub struct PyDwellingBlueprint {
     inner: Option<DwellingBlueprint>,
     config: hares_core::DwellingConfig,
@@ -29,6 +30,7 @@ pub struct PyDwellingBlueprint {
 
 #[pymethods]
 impl PyDwellingBlueprint {
+    /// Create a DwellingBlueprint from HPXML, schedule, and weather file paths.
     #[classmethod]
     #[pyo3(signature = (hpxml, schedule, weather, **kwargs))]
     pub fn from_hpxml(
@@ -48,6 +50,7 @@ impl PyDwellingBlueprint {
         })
     }
 
+    /// Return the list of equipment names currently in the blueprint.
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {
         let bp = self.inner.as_ref().ok_or_else(|| {
             PyValueError::new_err("DwellingBlueprint has already been built")
@@ -59,6 +62,7 @@ impl PyDwellingBlueprint {
             .collect())
     }
 
+    /// Remove equipment by its instance name.
     pub fn remove_equipment(&mut self, name: &str) -> PyResult<()> {
         let bp = self.inner.as_mut().ok_or_else(|| {
             PyValueError::new_err("DwellingBlueprint has already been built")
@@ -66,14 +70,25 @@ impl PyDwellingBlueprint {
         bp.remove_equipment(name).map_err(to_py_err)
     }
 
-    pub fn remove_equipment_by_end_use(&mut self, end_uses: Vec<PyEndUse>) -> PyResult<usize> {
+    /// Remove all equipment serving the given end-use(s).
+    /// Accepts a single EndUse or a list[EndUse].
+    pub fn remove_equipment_by_end_use(&mut self, end_uses: &Bound<'_, PyAny>) -> PyResult<usize> {
         let bp = self.inner.as_mut().ok_or_else(|| {
             PyValueError::new_err("DwellingBlueprint has already been built")
         })?;
-        let rust_uses: Vec<EndUse> = end_uses.into_iter().map(EndUse::from).collect();
+        let rust_uses: Vec<EndUse> = if let Ok(single) = end_uses.extract::<PyEndUse>() {
+            vec![EndUse::from(single)]
+        } else if let Ok(list) = end_uses.extract::<Vec<PyEndUse>>() {
+            list.into_iter().map(EndUse::from).collect()
+        } else {
+            return Err(PyValueError::new_err(
+                "end_uses must be an EndUse or list[EndUse]",
+            ));
+        };
         Ok(bp.remove_equipment_by_end_use(&rust_uses))
     }
 
+    /// Add a typed equipment config object (GasFurnace, ASHPHeater, etc.).
     pub fn add_equipment(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
         let bp = self.inner.as_mut().ok_or_else(|| {
             PyValueError::new_err("DwellingBlueprint has already been built")
@@ -83,6 +98,8 @@ impl PyDwellingBlueprint {
         Ok(())
     }
 
+    /// Finalise the blueprint and return a PyDwelling ready for simulation.
+    /// Consumes the blueprint; calling build() a second time will error.
     pub fn build(&mut self) -> PyResult<PyDwelling> {
         let bp = self.inner.take().ok_or_else(|| {
             PyValueError::new_err("DwellingBlueprint has already been built")
@@ -104,7 +121,7 @@ fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<EquipmentSpec> {
         return Ok(ac_spec_from_py(&ac));
     }
     if let Ok(hp) = obj.extract::<PyRef<'_, PyASHPHeater>>() {
-        return Ok(ashp_heater_spec_from_py(&hp)?);
+        return Ok(ashp_heater_spec_from_py(&hp));
     }
     if let Ok(hp) = obj.extract::<PyRef<'_, PyASHPCooler>>() {
         return Ok(ashp_cooler_spec_from_py(&hp));
