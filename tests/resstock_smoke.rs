@@ -22,18 +22,15 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn fixture_versions() -> Vec<&'static str> {
-        vec!["2024.2", "2025.1"]
-    }
-
     fn fixture_building_dirs(version: &str) -> Vec<PathBuf> {
-        let base = project_root()
-            .join("tests/fixtures/resstock")
-            .join(version);
+        let base = project_root().join("tests/fixtures/resstock").join(version);
         let mut dirs: Vec<_> = std::fs::read_dir(&base)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.path().join("home.xml").exists()
+            })
             .map(|e| e.path())
             .collect();
         dirs.sort();
@@ -76,8 +73,8 @@ mod tests {
                 let inner = &line[start + 6..];
                 if let Some(end) = inner.find("</Name>") {
                     let name = &inner[..end];
-                    if name.starts_with('G') && name.len() >= 7 {
-                        return name[..7].to_string();
+                    if name.starts_with('G') {
+                        return name.trim().to_string();
                     }
                 }
             }
@@ -154,8 +151,8 @@ mod tests {
         let hpxml_path = bldg_dir.join("home.xml");
         let schedule_path = bldg_dir.join("in.schedules.csv");
         let weather_path = weather_path(version, bldg_dir);
-        let output_path = std::env::temp_dir()
-            .join(unique_temp_name("hares_resstock_smoke", "csv"));
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_resstock_smoke", "csv"));
         let _guard = TempFile(output_path.clone());
 
         let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
@@ -215,6 +212,18 @@ mod tests {
         if output_path.exists() {
             assert_physics_bounds(&output_path);
         }
+    }
+
+    #[test]
+    fn parse_fips_preserves_full_8_char_code() {
+        let xml = r#"<Site><Address><Name>G0900090</Name></Address></Site>"#;
+        assert_eq!(parse_fips_from_hpxml(xml), "G0900090");
+    }
+
+    #[test]
+    fn parse_fips_preserves_7_char_code() {
+        let xml = r#"<Site><Address><Name>G160027</Name></Address></Site>"#;
+        assert_eq!(parse_fips_from_hpxml(xml), "G160027");
     }
 
     #[test]

@@ -47,8 +47,8 @@ mod tests {
                 let inner = &line[s + 6..];
                 if let Some(e) = inner.find("</Name>") {
                     let n = &inner[..e];
-                    if n.starts_with('G') && n.len() >= 7 {
-                        return n[..7].to_string();
+                    if n.starts_with('G') {
+                        return n.trim().to_string();
                     }
                 }
             }

@@ -48,6 +48,34 @@ tempfile = { workspace = true }
 name = "regression"
 path = "../../tests/regression/mod.rs"
 
+[[test]]
+name = "parity"
+path = "../../tests/parity/mod.rs"
+
+[[test]]
+name = "bestest"
+path = "../../tests/bestest/mod.rs"
+
+[[test]]
+name = "conditioned_oracle"
+path = "../../tests/conditioned_oracle.rs"
+
+[[test]]
+name = "freefloat_oracle"
+path = "../../tests/freefloat_oracle.rs"
+
+[[test]]
+name = "structural_envelope_oracle"
+path = "../../tests/structural_envelope_oracle.rs"
+
+[[test]]
+name = "warmup_regression"
+path = "../../tests/warmup_regression.rs"
+
+[[test]]
+name = "resstock_smoke"
+path = "../../tests/resstock_smoke.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"
