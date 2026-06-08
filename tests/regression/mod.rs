@@ -9,6 +9,7 @@ mod parity;
 #[path = "../bestest/mod.rs"]
 mod bestest;
 
+mod aggregation_check;
 mod checkpoint_restart;
 mod determinism;
 mod fleet_scale;
@@ -117,6 +118,16 @@ fn regression_full_suite() {
         for detail in errs {
             failures.push(RegressionFailure {
                 suite: "multi_instance",
+                detail,
+            });
+        }
+    }
+
+    // --- Weighted aggregation ---
+    if let Err(errs) = aggregation_check::run_aggregation_check() {
+        for detail in errs {
+            failures.push(RegressionFailure {
+                suite: "aggregation_check",
                 detail,
             });
         }
