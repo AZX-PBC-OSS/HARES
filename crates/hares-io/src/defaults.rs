@@ -489,6 +489,7 @@ impl DefaultsStore {
                      falling back to hardcoded 6-point default curve"
                 );
             }
+            check_csv_header_invariants(defaults_dir);
         }
 
         Ok(store)
@@ -1806,6 +1807,137 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
             );
         }
     }
+}
+
+/// Check equipment defaults directories for CSV files whose parameter names
+/// belong to a different equipment type — for example, a battery configuration
+/// file placed in the generator directory.
+///
+/// Unrecognised CSV files are not consumed by the loader (which only reads
+/// `.toml` from equipment directories via [`load_toml_dir`]), but they create
+/// confusion and can mislead users. This check emits a warning for each
+/// misplacement detected so the operator can clean it up.
+///
+/// The check inspects CSV files in the generator directory and flags any file
+/// whose "Name" column contains battery-specific parameter names.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_csv_header_invariants(defaults_dir: &Path) {
+    // Battery-specific parameters that should never appear in non-battery
+    // equipment parameter files. Derived from defaults/battery/default_parameters.csv
+    // and battery/ directory files.
+    const BATTERY_ONLY_PARAMS: &[&str] = &[
+        "capacity_kwh",
+        "soc_init",
+        "soc_max",
+        "soc_min",
+        "efficiency_charge",
+        "efficiency_discharge",
+        "efficiency_inverter",
+        "discharge_pct",
+        "initial_voltage",
+        "v_cell",
+        "ah_cell",
+        "r_cell",
+        "charge_start_hour",
+        "discharge_start_hour",
+        "charge_power",
+        "discharge_power",
+        "charge_from_solar",
+        "import_limit",
+        "export_limit",
+        "thermal_r",
+        "thermal_c",
+    ];
+
+    let findings =
+        check_dir_for_foreign_csv_params(&defaults_dir.join("generator"), BATTERY_ONLY_PARAMS);
+    for finding in &findings {
+        tracing::warn!(
+            directory = %defaults_dir.join("generator").display(),
+            finding = %finding,
+            "misplaced battery parameter file detected in generator defaults directory"
+        );
+    }
+}
+
+/// Scan an equipment defaults directory for CSV files whose "Name" column
+/// values include parameter names that belong to a different equipment type.
+///
+/// Returns human-readable strings describing each violation found.
+/// Callers convert these to warnings, errors, or test assertions.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_dir_for_foreign_csv_params(dir: &Path, foreign_params: &[&str]) -> Vec<String> {
+    let mut findings = Vec::new();
+    if !dir.exists() {
+        return findings;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return findings;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut reader = csv::Reader::from_reader(content.as_bytes());
+        let headers = match reader.headers() {
+            Ok(h) => h.clone(),
+            Err(_) => continue,
+        };
+
+        // Find the index of the "Name" column (case-insensitive).
+        // OCHRE-format CSV files use the "Name" column for parameter names.
+        // For wide-format CSVs where headers are the parameter names, check
+        // the headers directly.
+        let name_idx = headers.iter().position(|h| h.eq_ignore_ascii_case("Name"));
+
+        let mut foreign_names: Vec<String> = Vec::new();
+
+        if let Some(name_idx) = name_idx {
+            for result in reader.records() {
+                let Ok(record) = result else {
+                    continue;
+                };
+                if let Some(name) = record.get(name_idx) {
+                    let name_lower = name.trim().to_ascii_lowercase();
+                    if foreign_params.contains(&name_lower.as_str()) {
+                        let clean = name.trim().to_string();
+                        if !foreign_names.contains(&clean) {
+                            foreign_names.push(clean);
+                        }
+                    }
+                }
+            }
+        } else {
+            // No "Name" column — check header columns directly against
+            // foreign parameter names.
+            for h in headers.iter() {
+                let h_lower = h.trim().to_ascii_lowercase();
+                if foreign_params.contains(&h_lower.as_str()) {
+                    let clean = h.trim().to_string();
+                    if !foreign_names.contains(&clean) {
+                        foreign_names.push(clean);
+                    }
+                }
+            }
+        }
+
+        if !foreign_names.is_empty() {
+            findings.push(format!(
+                "file '{}' contains battery-specific parameters {foreign_names:?} — \
+                 this file does not belong in {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                dir.display()
+            ));
+        }
+    }
+    findings
 }
 
 /// Load the generator efficiency curve from
@@ -3597,4 +3729,188 @@ efficiency_ratio = 0.0
             "non-strictly-increasing curve points should be rejected"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // CSV header invariant tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generator_dir_loads_cleanly_without_battery_csv() {
+        // Verify that the defaults loader does not attempt to parse
+        // battery-specific fields for a generator equipment type when
+        // the generator directory is clean.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store =
+            DefaultsStore::load(dir.path()).expect("load defaults from clean generator dir");
+
+        // Generator defaults are keyed under ["default-parameters"] by
+        // load_toml_dir via normalize_equipment_key (which converts
+        // "Default Parameters" to "default-parameters"). With no TOML files
+        // in the generator directory, there should be no entries.
+        let defaults = store.equipment_defaults(DefaultsCategory::Generator, "default-parameters");
+        assert!(
+            defaults.is_none(),
+            "generator defaults should be empty when no TOML files present"
+        );
+    }
+
+    #[test]
+    fn generator_dir_ignores_battery_csv_with_name_column() {
+        // OCHRE-format CSV (Description,Name,Value,Units header) with battery
+        // parameter names placed in the generator directory. The loader must
+        // succeed gracefully (CSV is ignored by load_toml_dir), and the
+        // invariant check must detect the misplaced parameters.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let gen_dir = dir.path().join("generator");
+        // Write a CSV file with battery-specific parameter names in the Name
+        // column — this exactly replicates the original bug.
+        std::fs::write(
+            gen_dir.join("stale_battery_params.csv"),
+            "Description,Name,Value,Units\n\
+             Battery Capacity,capacity_kwh,13.5,kWh\n\
+             Max Power,capacity,5.0,kW\n\
+             Initial SOC,soc_init,0.5,fraction\n\
+             Charge Efficiency,efficiency_charge,0.98,fraction\n",
+        )
+        .unwrap();
+
+        // Loading must succeed — CSV files are not consumed by the loader.
+        let store =
+            DefaultsStore::load(dir.path()).expect("load defaults with misplaced battery CSV");
+
+        // Generator EquipmentDefaults should be empty — the CSV was not parsed.
+        let defaults = store.equipment_defaults(DefaultsCategory::Generator, "default-parameters");
+        assert!(
+            defaults.is_none(),
+            "CSV should not leak into generator defaults map"
+        );
+
+        // The invariant check function also verifies: call it directly to
+        // confirm it detects the foreign parameters.
+        let findings = check_dir_for_foreign_csv_params(&gen_dir, BATTERY_ONLY_FOR_TEST);
+        assert!(
+            !findings.is_empty(),
+            "invariant check should detect battery params in generator CSV"
+        );
+        let first = &findings[0];
+        assert!(
+            first.contains("capacity_kwh")
+                || first.contains("soc_init")
+                || first.contains("efficiency_charge"),
+            "finding should name the specific battery parameters detected, got: {first}"
+        );
+    }
+
+    #[test]
+    fn generator_dir_ignores_csv_with_battery_header_columns() {
+        // Wide-format CSV where header columns are the parameter names
+        // (no Description/Name/Value/Units structure). Battery-specific
+        // header columns in a generator CSV should be detected.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let gen_dir = dir.path().join("generator");
+        // Wide format with battery-specific column headers — no "Name" column.
+        std::fs::write(
+            gen_dir.join("battery_wide_format.csv"),
+            "capacity_kwh,soc_init,soc_max,efficiency_charge,discharge_pct\n\
+             13.5,0.5,0.95,0.98,0.0\n",
+        )
+        .unwrap();
+
+        let store = DefaultsStore::load(dir.path())
+            .expect("load defaults with battery CSV in generator dir");
+
+        // Loader must succeed.
+        let defaults = store.equipment_defaults(DefaultsCategory::Generator, "default-parameters");
+        assert!(
+            defaults.is_none(),
+            "wide-format CSV should not leak into generator defaults"
+        );
+
+        // Direct invariant check: headers should be detected as foreign.
+        let findings = check_dir_for_foreign_csv_params(&gen_dir, BATTERY_ONLY_FOR_TEST);
+        assert!(
+            !findings.is_empty(),
+            "wide-format battery CSV should be detected by header-level check"
+        );
+        let first = &findings[0];
+        assert!(
+            first.contains("capacity_kwh") || first.contains("soc_init"),
+            "finding should name the battery column headers, got: {first}"
+        );
+    }
+
+    /// Test-only copy of the battery-only parameter list so the invariant
+    /// function can be unit-tested without duplicating the production constant.
+    #[cfg(test)]
+    const BATTERY_ONLY_FOR_TEST: &[&str] = &[
+        "capacity_kwh",
+        "soc_init",
+        "soc_max",
+        "soc_min",
+        "efficiency_charge",
+        "efficiency_discharge",
+        "efficiency_inverter",
+        "discharge_pct",
+        "initial_voltage",
+        "v_cell",
+        "ah_cell",
+        "r_cell",
+        "charge_start_hour",
+        "discharge_start_hour",
+        "charge_power",
+        "discharge_power",
+        "charge_from_solar",
+        "import_limit",
+        "export_limit",
+        "thermal_r",
+        "thermal_c",
+    ];
 }
