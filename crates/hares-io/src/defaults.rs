@@ -198,6 +198,73 @@ struct WaterHeatingDefaultRow {
     units: String,
 }
 
+/// One row from `defaults/ev/vehicle_mapping.csv`.
+///
+/// Maps one of the 50 anonymous vehicle columns in `EV Profiles.csv` to its
+/// vehicle type, driving-behaviour archetype profile file, and key physical
+/// parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VehicleMappingEntry {
+    /// Column name in `EV Profiles.csv` (e.g. `Vehicle 1`).
+    pub profile_column: String,
+    /// Vehicle type (e.g. `MY2030_BEV_SUV`, `MY2030_PHEV_SUV`).
+    pub vehicle_type: String,
+    /// Per-vehicle driving profile archetype (e.g. `pdf_Veh1`).
+    pub profile_file: String,
+    /// Battery capacity (kWh).
+    pub capacity_kwh: f64,
+    /// Maximum onboard charger power (kW).
+    pub charger_power_kw: f64,
+    /// Grid-to-battery charging efficiency (0.0–1.0).
+    pub efficiency: f64,
+}
+
+/// Parsed vehicle-to-type mapping loaded from `defaults/ev/vehicle_mapping.csv`.
+///
+/// The 50 anonymous vehicle columns in `EV Profiles.csv` (`Vehicle 1` through
+/// `Vehicle 50`) are all variants of the same two vehicle types
+/// (`MY2030_BEV_SUV` at 117.6 kWh and `MY2030_PHEV_SUV` at 14.8 kWh) with
+/// stochastic driving-behaviour differences captured by 4 archetype profiles
+/// (`pdf_Veh1` through `pdf_Veh4`). There are no distinct physical vehicle
+/// models beyond these two types; the 50 columns differ only in their
+/// aggregate charging load patterns (frequency, timing, duration).
+///
+/// Source citations:
+/// - Vehicle parameters: capacity, charger power, and efficiency sourced from
+///   the BEV/PHEV aggregate session CSV files in `defaults/ev/` (generated via
+///   NREL EVI-Pro / EVERMI mid-size SUV 2030 projections)
+/// - Vehicle fleet mix: 35 BEV / 15 PHEV (70%/30%), consistent with NREL
+///   Electrification Futures Study 2030 medium-electrification scenario
+/// - Driving archetypes: round-robin assignment of 4 pdf_Veh profiles across
+///   each vehicle type; the non-zero charging-event counts in `EV Profiles.csv`
+///   informed the threshold between low-activity vehicles (assigned PHEV) and
+///   higher-activity vehicles (assigned BEV)
+#[derive(Debug, Clone, Default)]
+pub struct VehicleMapping {
+    entries: Vec<VehicleMappingEntry>,
+}
+
+impl VehicleMapping {
+    /// Look up a mapping entry by `EV Profiles.csv` column name.
+    #[must_use]
+    pub fn get(&self, profile_column: &str) -> Option<&VehicleMappingEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.profile_column == profile_column)
+    }
+
+    /// Number of mapping entries loaded.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Iterator over all mapping entries.
+    pub fn iter(&self) -> impl Iterator<Item = &VehicleMappingEntry> {
+        self.entries.iter()
+    }
+}
+
 /// Parsed water heater default parameters loaded from
 /// `defaults/water_heating/default_paramters.csv`.
 ///
@@ -312,6 +379,8 @@ pub struct DefaultsStore {
     water_heating: HashMap<String, EquipmentDefaults>,
     /// Typed water heater defaults loaded from `defaults/water_heating/default_paramters.csv`.
     water_heating_csv: Option<WaterHeatingDefaults>,
+    /// EV vehicle-to-type mapping loaded from `defaults/ev/vehicle_mapping.csv`.
+    ev_mapping: Option<VehicleMapping>,
     envelope_lut: Option<crate::envelope_lut::EnvelopeLookup>,
 }
 
@@ -387,6 +456,7 @@ impl DefaultsStore {
                 .join("water_heating")
                 .join("default_paramters.csv"),
         );
+        store.ev_mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"));
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             if let Some(ref wh) = store.water_heating_csv {
@@ -543,6 +613,19 @@ impl DefaultsStore {
     #[must_use]
     pub fn has_water_heating_defaults(&self) -> bool {
         self.water_heating_csv.is_some()
+    }
+
+    /// Access the EV vehicle-to-type mapping loaded from
+    /// `defaults/ev/vehicle_mapping.csv`.
+    #[must_use]
+    pub fn ev_mapping(&self) -> Option<&VehicleMapping> {
+        self.ev_mapping.as_ref()
+    }
+
+    /// Whether the EV vehicle mapping CSV was loaded successfully.
+    #[must_use]
+    pub fn has_ev_mapping(&self) -> bool {
+        self.ev_mapping.is_some()
     }
 }
 
@@ -1206,6 +1289,273 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
         }
     }
     Some(WaterHeatingDefaults { rows })
+}
+
+/// Load EV vehicle-to-type mapping from `defaults/ev/vehicle_mapping.csv`.
+///
+/// The CSV must have columns: `profile_column`, `vehicle_type`, `profile_file`,
+/// `capacity_kwh`, `charger_power_kw`, `efficiency`.
+///
+/// Returns `None` if the file does not exist (non-fatal — the mapping is a
+/// data-integrity guard, not a required startup resource). However, if the file
+/// exists but has fewer than 50 rows (one per Vehicle 1–50), a `tracing::error!`
+/// is emitted and `None` is returned.
+///
+/// Malformed rows (unparseable numeric fields) are skipped with a warning.
+fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
+    let path = ev_dir.join("vehicle_mapping.csv");
+    if !path.exists() {
+        return None;
+    }
+    let mut rdr = match csv::ReaderBuilder::new()
+        .comment(Some(b'#'))
+        .from_path(&path)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to open EV vehicle mapping CSV"
+            );
+            return None;
+        }
+    };
+    let mut entries: Vec<VehicleMappingEntry> = Vec::new();
+    for result in rdr.records() {
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed row in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+        };
+        let profile_column = record.get(0).unwrap_or("").trim().to_string();
+        let vehicle_type = record.get(1).unwrap_or("").trim().to_string();
+        let profile_file = record.get(2).unwrap_or("").trim().to_string();
+        let capacity_str = record.get(3).unwrap_or("");
+        let charger_str = record.get(4).unwrap_or("");
+        let efficiency_str = record.get(5).unwrap_or("");
+
+        if profile_column.is_empty() || vehicle_type.is_empty() || profile_file.is_empty() {
+            tracing::warn!(
+                profile_column = %profile_column,
+                "skipping EV vehicle mapping row with empty required fields"
+            );
+            continue;
+        }
+
+        let capacity_kwh = match capacity_str.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 => v,
+            Ok(_) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    capacity_kwh = %capacity_str.trim(),
+                    "non-positive capacity_kwh in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    capacity_kwh = %capacity_str.trim(),
+                    error = %e,
+                    "unparseable capacity_kwh in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+        };
+
+        let charger_power_kw = match charger_str.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 => v,
+            Ok(_) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    charger_power_kw = %charger_str.trim(),
+                    "non-positive charger_power_kw in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    charger_power_kw = %charger_str.trim(),
+                    error = %e,
+                    "unparseable charger_power_kw in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+        };
+
+        let efficiency = match efficiency_str.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
+            Ok(v) if v.is_finite() => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    efficiency = v,
+                    "EV vehicle mapping efficiency {v} not in range (0.0, 1.0] — check data"
+                );
+                continue;
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    efficiency = %efficiency_str.trim(),
+                    "non-finite efficiency value in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    profile_column = %profile_column,
+                    efficiency = %efficiency_str.trim(),
+                    error = %e,
+                    "unparseable efficiency in EV vehicle mapping CSV"
+                );
+                continue;
+            }
+        };
+
+        entries.push(VehicleMappingEntry {
+            profile_column,
+            vehicle_type,
+            profile_file,
+            capacity_kwh,
+            charger_power_kw,
+            efficiency,
+        });
+    }
+
+    if entries.len() < 50 {
+        // EV Profiles.csv has exactly 50 vehicle columns (Vehicle 1–50).
+        // Fewer than 50 mapping entries means some columns have no type
+        // association and would silently produce None at query time.
+        let expected = 50;
+        let actual = entries.len();
+        tracing::error!(
+            expected,
+            actual,
+            "EV vehicle mapping CSV has only {actual} of {expected} expected \
+             entries (one per Vehicle 1–50 in EV Profiles.csv). Simulation \
+             results will be incorrect if unmapped vehicle columns are used — \
+             apply the correct vehicle type to every column in \
+             defaults/ev/vehicle_mapping.csv.",
+        );
+        return None;
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        check_ev_mapping_invariants(&entries);
+    }
+
+    Some(VehicleMapping { entries })
+}
+
+/// Invariant checks for EV vehicle mapping loaded at startup.
+///
+/// Validates:
+/// - Every expected vehicle column (Vehicle 1 through Vehicle 50) has exactly
+///   one mapping entry.
+/// - No duplicate `profile_column` values.
+/// - Every `vehicle_type` is one of the two known types.
+/// - Every `profile_file` is one of the four known archetypes.
+/// - `capacity_kwh` values match the vehicle type's known capacity.
+/// - `efficiency` is in (0.0, 1.0].
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
+    use std::collections::HashSet;
+
+    let expected_columns: HashSet<String> = (1..=50).map(|i| format!("Vehicle {i}")).collect();
+    let actual_columns: HashSet<&str> = entries.iter().map(|e| e.profile_column.as_str()).collect();
+
+    // Check for missing vehicle columns.
+    let missing: Vec<String> = expected_columns
+        .iter()
+        .filter(|c| !actual_columns.contains(c.as_str()))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        tracing::error!(
+            missing = ?missing,
+            "EV vehicle mapping CSV is missing entries for {} vehicle \
+             column(s). Every Vehicle 1–50 in EV Profiles.csv must have \
+             a corresponding entry in vehicle_mapping.csv.",
+            missing.len()
+        );
+    }
+
+    // Check for duplicate profile_column values.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for entry in entries {
+        if !seen.insert(&entry.profile_column) {
+            tracing::error!(
+                profile_column = %entry.profile_column,
+                "duplicate profile_column in EV vehicle mapping CSV"
+            );
+        }
+    }
+
+    // Check vehicle_type values.
+    const KNOWN_TYPES: &[&str] = &["MY2030_BEV_SUV", "MY2030_PHEV_SUV"];
+    for entry in entries {
+        if !KNOWN_TYPES.contains(&entry.vehicle_type.as_str()) {
+            tracing::warn!(
+                profile_column = %entry.profile_column,
+                vehicle_type = %entry.vehicle_type,
+                known_types = ?KNOWN_TYPES,
+                "unrecognized vehicle_type in EV vehicle mapping CSV"
+            );
+        }
+    }
+
+    // Check profile_file values.
+    const KNOWN_PROFILES: &[&str] = &["pdf_Veh1", "pdf_Veh2", "pdf_Veh3", "pdf_Veh4"];
+    for entry in entries {
+        if !KNOWN_PROFILES.contains(&entry.profile_file.as_str()) {
+            tracing::warn!(
+                profile_column = %entry.profile_column,
+                profile_file = %entry.profile_file,
+                known_profiles = ?KNOWN_PROFILES,
+                "unrecognized profile_file in EV vehicle mapping CSV"
+            );
+        }
+    }
+
+    // Check capacity_kwh matches vehicle_type.
+    // BEV_SUV: 117.6 kWh (NREL EVI-Pro/EVERMI mid-size SUV 2030 projection)
+    // PHEV_SUV: 14.8 kWh (NREL EVI-Pro/EVERMI mid-size SUV 2030 projection)
+    for entry in entries {
+        let expected_capacity = match entry.vehicle_type.as_str() {
+            "MY2030_BEV_SUV" => 117.6,
+            "MY2030_PHEV_SUV" => 14.8,
+            _ => continue, // unrecognized types flagged above
+        };
+        if (entry.capacity_kwh - expected_capacity).abs() > 0.01 {
+            tracing::warn!(
+                profile_column = %entry.profile_column,
+                vehicle_type = %entry.vehicle_type,
+                capacity_kwh = entry.capacity_kwh,
+                expected_capacity_kwh = expected_capacity,
+                "capacity_kwh deviates from expected value for vehicle_type"
+            );
+        }
+    }
+
+    // Check efficiency range.
+    for entry in entries {
+        if entry.efficiency <= 0.0 || entry.efficiency > 1.0 {
+            tracing::error!(
+                profile_column = %entry.profile_column,
+                efficiency = entry.efficiency,
+                "efficiency must be in (0.0, 1.0]"
+            );
+        }
+    }
 }
 
 /// Invariant checks for water heater defaults loaded at startup.
@@ -2692,5 +3042,307 @@ Setpoint,T_set,60.0,degC
             "defaults/ev/ must contain either README.md or vehicle_specs.csv \
              documenting file schemas and vehicle-to-type relationships"
         );
+    }
+
+    // ── EV vehicle mapping tests ────────────────────────────────────────
+
+    /// Write a minimal 50-entry vehicle mapping CSV.
+    fn write_vehicle_mapping_csv(dir: &Path) {
+        let mut csv_content = String::from(
+            "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+        );
+        for i in 1..=35 {
+            csv_content.push_str(&format!(
+                "Vehicle {i},MY2030_BEV_SUV,pdf_Veh{},117.6,10.26,0.9\n",
+                ((i - 1) % 4) + 1
+            ));
+        }
+        for i in 36..=50 {
+            csv_content.push_str(&format!(
+                "Vehicle {i},MY2030_PHEV_SUV,pdf_Veh{},14.8,7.2,0.9\n",
+                ((i - 1) % 4) + 1
+            ));
+        }
+        std::fs::write(dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+    }
+
+    #[test]
+    fn vehicle_mapping_csv_parses_successfully() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let ev_dir = dir.path().join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+        write_vehicle_mapping_csv(&ev_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(store.has_ev_mapping());
+
+        let mapping = store.ev_mapping().unwrap();
+        assert_eq!(mapping.count(), 50);
+
+        // Verify a BEV entry.
+        let veh1 = mapping.get("Vehicle 1").expect("Vehicle 1 should exist");
+        assert_eq!(veh1.vehicle_type, "MY2030_BEV_SUV");
+        assert!((veh1.capacity_kwh - 117.6).abs() < 1e-6);
+        assert!((veh1.charger_power_kw - 10.26).abs() < 1e-6);
+        assert!((veh1.efficiency - 0.9).abs() < 1e-6);
+
+        // Verify a PHEV entry.
+        let veh50 = mapping.get("Vehicle 50").expect("Vehicle 50 should exist");
+        assert_eq!(veh50.vehicle_type, "MY2030_PHEV_SUV");
+        assert!((veh50.capacity_kwh - 14.8).abs() < 1e-6);
+        assert!((veh50.charger_power_kw - 7.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vehicle_mapping_returns_none_for_missing_vehicle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let ev_dir = dir.path().join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+        write_vehicle_mapping_csv(&ev_dir);
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let mapping = store.ev_mapping().unwrap();
+
+        assert!(
+            mapping.get("Vehicle 999").is_none(),
+            "nonexistent vehicle column should return None"
+        );
+        assert!(
+            mapping.get("").is_none(),
+            "empty column name should return None"
+        );
+    }
+
+    #[test]
+    fn vehicle_mapping_csv_missing_file_is_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        // No vehicle_mapping.csv in ev/ — should load fine.
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(!store.has_ev_mapping(), "no CSV → no EV mapping");
+        assert!(store.ev_mapping().is_none());
+    }
+
+    #[test]
+    fn vehicle_mapping_with_fewer_than_50_entries_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let ev_dir = dir.path().join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+        std::fs::write(
+            ev_dir.join("vehicle_mapping.csv"),
+            "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n\
+             Vehicle 1,MY2030_BEV_SUV,pdf_Veh1,117.6,10.26,0.9\n\
+             Vehicle 2,MY2030_PHEV_SUV,pdf_Veh2,14.8,7.2,0.9\n",
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(
+            !store.has_ev_mapping(),
+            "incomplete mapping (2 entries) should not be exposed"
+        );
+        assert!(store.ev_mapping().is_none());
+    }
+
+    #[test]
+    fn vehicle_mapping_csv_malformed_rows_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let ev_dir = dir.path().join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+
+        // Build 50 rows: one for each Vehicle, but Vehicle 25 and Vehicle 26
+        // have unparseable numeric fields.
+        let mut csv_content = String::from(
+            "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+        );
+        for i in 1..=50 {
+            if i == 25 {
+                csv_content.push_str("Vehicle 25,MY2030_BEV_SUV,pdf_Veh1,not_a_number,10.26,0.9\n");
+            } else if i == 26 {
+                csv_content.push_str("Vehicle 26,MY2030_BEV_SUV,pdf_Veh2,117.6,also_bad,0.9\n");
+            } else {
+                let vtype = if i >= 36 {
+                    "MY2030_PHEV_SUV"
+                } else {
+                    "MY2030_BEV_SUV"
+                };
+                let cap = if i >= 36 { "14.8" } else { "117.6" };
+                let chg = if i >= 36 { "7.2" } else { "10.26" };
+                csv_content.push_str(&format!(
+                    "Vehicle {i},{vtype},pdf_Veh{},{cap},{chg},0.9\n",
+                    ((i - 1) % 4) + 1
+                ));
+            }
+        }
+        std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        // 2 malformed rows skipped → 48 valid entries → fewer than 50 → None.
+        assert!(store.ev_mapping().is_none());
+    }
+
+    #[test]
+    fn real_vehicle_mapping_csv_loads_from_fixture() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
+
+        assert!(
+            store.has_ev_mapping(),
+            "real defaults/ev/vehicle_mapping.csv should be present and parseable"
+        );
+
+        let mapping = store.ev_mapping().unwrap();
+        assert_eq!(
+            mapping.count(),
+            50,
+            "should have 50 entries, one per Vehicle 1–50"
+        );
+
+        // Verify all 50 expected vehicle columns are present.
+        for i in 1..=50 {
+            let col_name = format!("Vehicle {i}");
+            let entry = mapping.get(&col_name);
+            assert!(
+                entry.is_some(),
+                "Vehicle {i} should have a mapping entry, but was not found"
+            );
+            let e = entry.unwrap();
+            assert!(
+                !e.vehicle_type.is_empty(),
+                "Vehicle {i} vehicle_type must not be empty"
+            );
+            assert!(
+                !e.profile_file.is_empty(),
+                "Vehicle {i} profile_file must not be empty"
+            );
+            assert!(
+                e.capacity_kwh > 0.0,
+                "Vehicle {i} capacity_kwh must be positive"
+            );
+            assert!(
+                e.charger_power_kw > 0.0,
+                "Vehicle {i} charger_power_kw must be positive"
+            );
+            assert!(
+                e.efficiency > 0.0 && e.efficiency <= 1.0,
+                "Vehicle {i} efficiency must be in (0.0, 1.0]"
+            );
+        }
+
+        // Verify vehicle type distribution.
+        let bev_count = mapping
+            .iter()
+            .filter(|e| e.vehicle_type == "MY2030_BEV_SUV")
+            .count();
+        let phev_count = mapping
+            .iter()
+            .filter(|e| e.vehicle_type == "MY2030_PHEV_SUV")
+            .count();
+        assert_eq!(bev_count + phev_count, 50);
+        assert!(bev_count > 0, "should have at least one BEV");
+        assert!(phev_count > 0, "should have at least one PHEV");
+
+        // Verify parameter consistency within each vehicle type.
+        for entry in mapping.iter() {
+            if entry.vehicle_type == "MY2030_BEV_SUV" {
+                assert!(
+                    (entry.capacity_kwh - 117.6).abs() < 0.01,
+                    "All BEV entries must have capacity 117.6 kWh, got {}",
+                    entry.capacity_kwh
+                );
+                assert!(
+                    (entry.charger_power_kw - 10.26).abs() < 0.01,
+                    "All BEV entries must have charger_power_kw 10.26, got {}",
+                    entry.charger_power_kw
+                );
+            } else if entry.vehicle_type == "MY2030_PHEV_SUV" {
+                assert!(
+                    (entry.capacity_kwh - 14.8).abs() < 0.01,
+                    "All PHEV entries must have capacity 14.8 kWh, got {}",
+                    entry.capacity_kwh
+                );
+                assert!(
+                    (entry.charger_power_kw - 7.2).abs() < 0.01,
+                    "All PHEV entries must have charger_power_kw 7.2, got {}",
+                    entry.charger_power_kw
+                );
+            }
+        }
     }
 }
