@@ -22,6 +22,19 @@ from ._hares import PvSoilingConfig
 from ._hares import EV
 from ._hares import ProtocolBridge
 
+# HVAC equipment types
+from ._hares import GasFurnace
+from ._hares import AirConditioner
+from ._hares import ASHPHeater
+from ._hares import ASHPCooler
+from ._hares import ElectricBaseboard
+from ._hares import IdealHVAC
+
+# Water heater equipment types
+from ._hares import GasWaterHeater
+from ._hares import ElectricResistanceWH
+from ._hares import HeatPumpWH
+
 # Actor system
 from ._hares import Actor
 from ._hares import DispatchRequest
@@ -123,6 +136,17 @@ __all__ = [
     "PvSoilingConfig",
     "EV",
     "ProtocolBridge",
+    # HVAC equipment
+    "GasFurnace",
+    "AirConditioner",
+    "ASHPHeater",
+    "ASHPCooler",
+    "ElectricBaseboard",
+    "IdealHVAC",
+    # Water heater equipment
+    "GasWaterHeater",
+    "ElectricResistanceWH",
+    "HeatPumpWH",
     # Actor system
     "Actor",
     "DispatchRequest",

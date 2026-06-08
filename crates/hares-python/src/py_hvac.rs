@@ -296,7 +296,7 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
         };
         Some(EquipmentConfig::from_typed(
             ac.name.clone(),
-            "Central AC".to_string(),
+            "Air Conditioner".to_string(),
             cfg,
         ))
     };
