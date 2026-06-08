@@ -1627,6 +1627,26 @@ impl PyDwelling {
 }
 
 impl PyDwelling {
+    pub(crate) fn from_blueprint_build(
+        dwelling: Dwelling,
+        config: DwellingConfig,
+    ) -> Self {
+        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
+        Self {
+            dwelling: Mutex::new(dwelling),
+            poisoned: AtomicBool::new(false),
+            mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
+            config,
+            sim_config,
+            initial_state: None,
+            initialized: false,
+            registry: ActorRegistry::new(),
+            equipment_registry: EquipmentRegistry::new(),
+            zone_keys: None,
+            gas_tariff: None,
+        }
+    }
+
     /// Acquire the dwelling mutex after checking the poisoned flag.
     /// Returns `FatalDwellingError` if the dwelling is in a fatal error state.
     fn acquire(&self) -> PyResult<MutexGuard<'_, Dwelling>> {
@@ -1882,7 +1902,7 @@ fn extract_site_location_override(
     })
 }
 
-fn build_config(
+pub(crate) fn build_config(
     hpxml: String,
     schedule: String,
     weather: String,
@@ -2244,7 +2264,7 @@ fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     )))
 }
 
-fn to_py_err(err: HaresError) -> PyErr {
+pub(crate) fn to_py_err(err: HaresError) -> PyErr {
     let msg = err.to_string();
     match err {
         // Io errors are mapped to ConfigError because they predominantly arise during

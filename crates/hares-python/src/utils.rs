@@ -5,6 +5,14 @@ use hares_io::ResampleMethod;
 use hares_types::DayFilter;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use serde_json::{json, Map, Value};
+
+/// Insert an optional f64 value into a JSON map under the given key.
+pub fn insert_opt(map: &mut Map<String, Value>, key: &str, value: Option<f64>) {
+    if let Some(v) = value {
+        map.insert(key.into(), json!(v));
+    }
+}
 
 /// Case-insensitive day filter parser shared by tariff and enum modules.
 pub fn parse_day_filter(s: &str) -> PyResult<DayFilter> {
