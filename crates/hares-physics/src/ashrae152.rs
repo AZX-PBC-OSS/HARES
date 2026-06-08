@@ -86,6 +86,11 @@ pub struct DuctDseInput {
 // ---------------------------------------------------------------------------
 
 struct ClimateStation {
+    // Why: `state` is parsed from the CSV and asserted in tests to guard against
+    // province/state code errors (e.g. MN for Winnipeg). Clippy's dead_code lint
+    // cannot see test-only reads of a private field.
+    #[allow(dead_code)]
+    state: &'static str,
     latitude_deg: f64,
     longitude_deg: f64,
     heating_design_temp_f: f64,
@@ -144,6 +149,7 @@ fn parse_climate_csv() -> Vec<ClimateStation> {
         let Some(seas_h_in) = parse(16) else { continue };
 
         stations.push(ClimateStation {
+            state: fields[2],
             latitude_deg: lat,
             longitude_deg: lon,
             heating_design_temp_f: htg_des,
@@ -761,5 +767,54 @@ mod tests {
         };
         let dse_c = calculate_dse(&cooling_input);
         assert!(dse_c > 0.0 && dse_c <= 1.0, "cooling DSE: {dse_c}");
+    }
+
+    /// Regression: Montreal has State == "QC", Winnipeg has State == "MB".
+    #[test]
+    fn canadian_province_codes_correct_after_parse() {
+        let stations = climate_data();
+        // Find Montreal (≈45.5°N, −73.57°W) and Winnipeg (≈49.9°N, −97.14°W)
+        // by coordinates since some Alaska rows are skipped during parsing.
+        let montreal = stations
+            .iter()
+            .find(|s| {
+                (s.latitude_deg - 45.5).abs() < 0.1 && (s.longitude_deg - (-73.57)).abs() < 0.1
+            })
+            .expect("Montreal station not found");
+        assert_eq!(
+            montreal.state, "QC",
+            "Montreal State should be QC, got {}",
+            montreal.state
+        );
+        let winnipeg = stations
+            .iter()
+            .find(|s| {
+                (s.latitude_deg - 49.9).abs() < 0.1 && (s.longitude_deg - (-97.14)).abs() < 0.1
+            })
+            .expect("Winnipeg station not found");
+        assert_eq!(
+            winnipeg.state, "MB",
+            "Winnipeg State should be MB, got {}",
+            winnipeg.state
+        );
+    }
+
+    /// No row with State == "MN" should have coordinates in Canadian territory
+    /// (lat ≥ 49°N, long between −141°W and −52°W).
+    #[test]
+    fn no_minnesota_in_canadian_territory() {
+        let stations = climate_data();
+        for station in stations {
+            if station.state == "MN" {
+                let in_canada = station.latitude_deg >= 49.0
+                    && station.longitude_deg >= -141.0
+                    && station.longitude_deg <= -52.0;
+                assert!(
+                    !in_canada,
+                    "station with State=MN has Canadian coordinates: lat={}, lon={}",
+                    station.latitude_deg, station.longitude_deg
+                );
+            }
+        }
     }
 }
