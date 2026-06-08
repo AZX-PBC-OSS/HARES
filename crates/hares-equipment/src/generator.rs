@@ -622,8 +622,20 @@ impl EfficiencyModel {
     }
 
     fn default_curve_points() -> Vec<(f64, f64)> {
-        // OCHRE default curve: (0,0), (0.5,1), (1,1)
-        vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]
+        // 6-point piecewise-linear model.
+        // No primary-source datasheet available; this is an engineering
+        // estimate of typical residential spark-ignited generator part-load
+        // behaviour (Generac, Kohler, Briggs & Stratton 7–22 kW standby units).
+        // Replaces the over-simplified OCHRE 3-point default
+        // (0,0), (0.5,1), (1,1) which plateaus too early at 50 % load.
+        vec![
+            (0.0, 0.0),
+            (0.1, 0.47),
+            (0.167, 0.62),
+            (0.333, 0.78),
+            (0.666, 0.94),
+            (1.0, 1.0),
+        ]
     }
 
     fn curve_pairs(points: &[GeneratorEfficiencyCurvePoint]) -> Vec<(f64, f64)> {
@@ -681,11 +693,12 @@ impl GeneratorKind {
         }
     }
 
-    /// Default efficiency type per OCHRE convention.
-    /// Gas generators use constant; fuel cells use curve.
+    /// Default efficiency type.
+    /// Gas generators use the 6-point piecewise-linear curve;
+    /// fuel cells use curve (quadratic is an alternative for fuel cells).
     fn default_efficiency_type(self) -> &'static str {
         match self {
-            Self::GasGenerator => "constant",
+            Self::GasGenerator => "curve",
             Self::FuelCell => "curve",
         }
     }
@@ -721,6 +734,10 @@ pub struct Generator {
     /// OCHRE: `capacity_min` parameter.
     capacity_min_kw: Option<f64>,
     efficiency: EfficiencyModel,
+    /// Whether the efficiency curve points were loaded from a data file
+    /// (`true`) or the hardcoded default (`false`). Used for diagnotic
+    /// observability — no behavioural effect.
+    curve_from_file: bool,
     /// Thermal recovery efficiency; 0.0 means no CHP.
     eta_thermal: f64,
     /// Per-stream heat recovery fractions.
@@ -836,6 +853,11 @@ impl Generator {
             },
         );
 
+        let curve_from_file = typed
+            .as_ref()
+            .and_then(|c| c.efficiency_curve_points.as_ref())
+            .is_some();
+
         Self {
             descriptor,
             ports,
@@ -848,6 +870,7 @@ impl Generator {
                 .unwrap_or(DEFAULT_RATED_POWER_KW),
             capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_kw),
             efficiency,
+            curve_from_file,
             eta_thermal,
             eta_jacket_water,
             eta_lube_oil,
@@ -1024,6 +1047,7 @@ impl Generator {
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
+        self.curve_from_file = c.efficiency_curve_points.is_some();
 
         if self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0 {
             if let Some(lid) = c.loop_id {
@@ -1132,6 +1156,27 @@ impl Equipment for Generator {
         // EnergyPlus FuelCellElectricGenerator.cc:1697 — curve vs Pel/NomPel.
         let capacity_ratio = dc_kw / self.rated_power_kw;
         let eta = self.efficiency.evaluate(capacity_ratio);
+
+        // Observer capture: record efficiency curve source and points in use.
+        // Allows downstream diagnostics to confirm whether the data-file curve
+        // or the hardcoded fallback is active.
+        #[cfg(feature = "observe")]
+        {
+            let source = if self.curve_from_file {
+                "file"
+            } else {
+                "hardcoded"
+            };
+            if let EfficiencyModel::Curve { points, .. } = &self.efficiency {
+                tracing::debug!(
+                    curve_source = source,
+                    curve_points = ?points,
+                    capacity_ratio,
+                    eta,
+                    "Generator efficiency curve evaluation",
+                );
+            }
+        }
 
         // Derive fuel and heat flows.
         // Fuel is computed from DC stack power, not AC output.
@@ -3783,7 +3828,8 @@ mod tests {
 
     #[test]
     fn telemetry_values_are_in_watts_not_kilowatts() {
-        // A 5 kW generator with eta=0.25 should report fuel_input_w = 5000/0.25 = 20000 W.
+        // A 5 kW generator at 50 % load: 6-point curve er ≈ 0.8602,
+        // eta = 0.25 * 0.8602 ≈ 0.2151, fuel = 5000 / 0.2151 ≈ 23250 W.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.25.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -3809,19 +3855,19 @@ mod tests {
         let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
 
-        // fuel_input_w should be 5000 / 0.25 = 20000 W
-        let expected_fuel_w = 5000.0 / 0.25;
+        // fuel_input_w should be ~23249 W at 50 % load with curve efficiency
+        let expected_fuel_w = 5000.0 / (0.25 * 0.86024);
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
             "fuel_input_w={fuel_w}, expected={expected_fuel_w} (watts)"
         );
-        // thermal_output_w should be fuel_w * eta_thermal = 20000 * 0.30 = 6000 W
+        // thermal_output_w should be fuel_w * eta_thermal = expected_fuel * 0.30 ≈ 6975 W
         let expected_thermal_w = fuel_w * 0.30;
         assert!(
             (thermal_w - expected_thermal_w).abs() < 1.0,
             "thermal_output_w={thermal_w}, expected={expected_thermal_w} (watts)"
         );
-        // flue_loss_w = fuel_w - electric_w - thermal_w = 20000 - 5000 - 6000 = 9000 W
+        // flue_loss_w = fuel_w - electric_w - thermal_w
         let expected_flue_w = fuel_w - 5000.0 - thermal_w;
         assert!(
             (flue_w - expected_flue_w).abs() < 1.0,
@@ -3847,7 +3893,10 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         // At cr=1.0 DC (≈9.5 kW AC for fuel cell), curve and constant both return rated.
-        // At cr≈0.263 (2.5 kW AC), OCHRE default curve gives rated * 0.526; constant gives rated.
+        // At cr≈0.263 (2.5 kW AC), the 6-point default curve interpolates:
+        //   cr=0.263 between (0.167,0.62) and (0.333,0.78) → er≈0.7125,
+        //   eta = 0.95 * 0.7125 ≈ 0.677.
+        // Constant at any cr: eta = 0.95
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.5,
             reactive_power_kvar: None,
@@ -3860,12 +3909,9 @@ mod tests {
             .unwrap();
 
         let eta = fc.telemetry().get(tk::ETA_ELECTRIC).unwrap();
-        // Fuel cell DC power = 2.5 / 0.95 = 2.6316 kW, cr = 0.26316
-        // Curve interp on OCHRE default (0,0)-(0.5,1): er = 0.5263, eta = 0.95*0.5263 ≈ 0.5
-        // Constant at any cr: eta = 0.95
         assert!(
-            (eta - 0.5).abs() < 1e-2,
-            "FuelCell at 2.5 kW AC (cr≈0.263) should use curve efficiency (eta≈0.5), got {eta}. \
+            (eta - 0.677).abs() < 1e-2,
+            "FuelCell at 2.5 kW AC (cr≈0.263) should use curve efficiency (eta≈0.677), got {eta}. \
              This indicates the default is Constant rather than Curve."
         );
     }
@@ -4277,12 +4323,22 @@ mod tests {
     fn fuel_cell_fuel_consumption_includes_inverter_loss() {
         // With inverter_efficiency < 1.0, a FuelCell requires more fuel per kW
         // of AC output than a GasGenerator with the same eta_electric.
+        // Both generators use constant efficiency so the only difference is
+        // the inverter loss.
         let config_gg = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
+            (
+                KEY_EFFICIENCY_TYPE,
+                ConfigValue::Text("constant".to_string()),
+            ),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
         let config_fc = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
+            (
+                KEY_EFFICIENCY_TYPE,
+                ConfigValue::Text("constant".to_string()),
+            ),
             (KEY_INVERTER_EFFICIENCY, 0.90.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
@@ -4332,8 +4388,8 @@ mod tests {
 
     #[test]
     fn gas_generator_unchanged_by_fuel_cell_changes() {
-        // Regression: A GasGenerator with default config must produce the same
-        // results as before the fuel cell physics were added (inverter_efficiency=1.0).
+        // Regression: A GasGenerator with default config (curve efficiency)
+        // must use the 6-point part-load efficiency curve.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.30.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -4354,12 +4410,13 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        // 5 kW AC / 0.30 eta = 16666.67 W fuel
+        // 5 kW AC at 50 % load: curve er ≈ 0.86024, eta = 0.30 * 0.86024 ≈ 0.2581,
+        // fuel = 5000 / 0.2581 ≈ 19374 W
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let expected = (5.0 / 0.30) * 1000.0;
+        let expected = 5_000.0 / (0.30 * 0.86024);
         assert!(
             (fuel_w - expected).abs() < 1.0,
-            "GasGenerator fuel unchanged: {fuel_w} vs {expected}"
+            "GasGenerator fuel: {fuel_w} vs {expected}"
         );
         // No fuel cell telemetry on gas generator — fields not registered.
         assert!(
@@ -4962,6 +5019,131 @@ mod tests {
         assert!(
             delivered > 0.0,
             "thermal_power_delivered_w should be restored after load_state"
+        );
+    }
+
+    // =======================================================================
+    // Efficiency curve: file-loaded vs hardcoded fallback
+    // =======================================================================
+
+    #[test]
+    fn hardcoded_fallback_curve_produces_correct_efficiency() {
+        // When no efficiency_curve_points are provided in config and no
+        // TOML file is loaded, the generator must fall back to the
+        // hardcoded 6-point default curve and produce physically-plausible
+        // part-load efficiency.
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.30.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // Run at 30 % load: cr=0.3, curve interpolates between
+        // (0.167,0.62) and (0.333,0.78) → er≈0.71, eta≈0.213.
+        ramp_to_steady_state(&mut generator, 3.0, &base_env());
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let eta = generator.telemetry().get(tk::ETA_ELECTRIC).unwrap();
+        // Part-load efficiency must be less than rated (0.30) —
+        // the curve imposes a real part-load penalty.
+        assert!(
+            eta < 0.27,
+            "hardcoded curve must reduce efficiency at 30 % load, got eta={eta:.4}"
+        );
+        assert!(
+            eta > 0.15,
+            "hardcoded curve efficiency must be physically plausible, got eta={eta:.4}"
+        );
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        assert!(
+            fuel_w > 0.0,
+            "generator with hardcoded fallback must produce fuel consumption"
+        );
+    }
+
+    #[test]
+    fn explicit_curve_points_match_hardcoded_fallback() {
+        // Verify that providing the hardcoded curve points explicitly yields
+        // the same efficiency result as relying on the hardcoded fallback.
+        let hardcoded_points = vec![
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.1,
+                efficiency_ratio: 0.47,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.167,
+                efficiency_ratio: 0.62,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.333,
+                efficiency_ratio: 0.78,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.666,
+                efficiency_ratio: 0.94,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ];
+
+        // Generator A: explicit curve points.
+        let config_a = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.30.into()),
+            (KEY_EFFICIENCY_TYPE, ConfigValue::Text("curve".to_string())),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut cfg_a: GeneratorConfig = config_a.typed().unwrap();
+        cfg_a.efficiency_curve_points = Some(hardcoded_points);
+        let config_a =
+            EquipmentConfig::from_typed("GenA".to_string(), "Gas Generator".to_string(), cfg_a);
+
+        // Generator B: no explicit curve (uses hardcoded fallback).
+        let config_b = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.30.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+
+        let mut gen_a = Generator::new(config_a.clone(), GeneratorKind::GasGenerator);
+        gen_a.init(&config_a, &base_env()).unwrap();
+        let mut gen_b = Generator::new(config_b.clone(), GeneratorKind::GasGenerator);
+        gen_b.init(&config_b, &base_env()).unwrap();
+
+        ramp_to_steady_state(&mut gen_a, 3.0, &base_env());
+        ramp_to_steady_state(&mut gen_b, 3.0, &base_env());
+
+        let mut slots_a = ports_for(&gen_a);
+        let mut slots_b = ports_for(&gen_b);
+        gen_a
+            .step(&base_env(), Duration::from_secs(1), &mut slots_a)
+            .unwrap();
+        gen_b
+            .step(&base_env(), Duration::from_secs(1), &mut slots_b)
+            .unwrap();
+
+        let eta_a = gen_a.telemetry().get(tk::ETA_ELECTRIC).unwrap();
+        let eta_b = gen_b.telemetry().get(tk::ETA_ELECTRIC).unwrap();
+        let fuel_a = gen_a.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let fuel_b = gen_b.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+
+        // Same curve → same results.
+        assert!(
+            (eta_a - eta_b).abs() < 1e-6,
+            "explicit and hardcoded curves must produce same eta: {eta_a:.6} vs {eta_b:.6}"
+        );
+        assert!(
+            (fuel_a - fuel_b).abs() < 1e-6,
+            "explicit and hardcoded curves must produce same fuel: {fuel_a:.1} vs {fuel_b:.1}"
         );
     }
 }

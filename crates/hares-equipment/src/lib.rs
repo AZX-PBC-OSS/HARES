@@ -51,6 +51,7 @@ pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointR
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
 pub use generator::GeneratorConfig;
+pub use generator::GeneratorEfficiencyCurvePoint;
 pub use hares_types::Telemetry;
 pub use hares_types::{CoreFlows, CoreOutput, CorePerformance, CoreState};
 pub use hvac::cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};

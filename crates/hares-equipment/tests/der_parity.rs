@@ -749,10 +749,10 @@ fn generator_fuel_efficiency_at_half_load() {
         "fuel_input must equal electric/eta ({expected_fuel_w:.1} W ±1%); got {fuel_w:.1} W"
     );
 
-    // Efficiency at rated eta=0.30 constant model
+    // Efficiency with 6-point curve at 50 % load: er ≈ 0.8602, eta = 0.30 * 0.8602 ≈ 0.258
     assert!(
-        (eta - 0.30).abs() < 0.001,
-        "generator eta must be 0.30 (constant model); got {eta:.4}"
+        (eta - 0.258).abs() < 0.001,
+        "generator eta must be ~0.258 (curve model at half load); got {eta:.4}"
     );
 }
 

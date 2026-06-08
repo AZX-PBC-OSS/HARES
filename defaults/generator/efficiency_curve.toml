@@ -1,0 +1,33 @@
+# Generator part-load efficiency curve — 6-point piecewise-linear model.
+# No primary-source datasheet available; this is an engineering estimate
+# of typical residential spark-ignited generator part-load behaviour
+# (Generac, Kohler, Briggs & Stratton 7–22 kW standby units).
+#
+# Each point defines efficiency_ratio at a given capacity_ratio (both 0-1).
+# efficiency_ratio scales the rated electrical efficiency (eta_electric):
+#   effective efficiency = eta_electric * efficiency_ratio(capacity_ratio)
+# Interpolated linearly between points; clamped at endpoints.
+
+[[points]]
+capacity_ratio = 0.0
+efficiency_ratio = 0.0
+
+[[points]]
+capacity_ratio = 0.1
+efficiency_ratio = 0.47
+
+[[points]]
+capacity_ratio = 0.167
+efficiency_ratio = 0.62
+
+[[points]]
+capacity_ratio = 0.333
+efficiency_ratio = 0.78
+
+[[points]]
+capacity_ratio = 0.666
+efficiency_ratio = 0.94
+
+[[points]]
+capacity_ratio = 1.0
+efficiency_ratio = 1.0

@@ -276,6 +276,8 @@ pub(super) fn resolve_generators(
             }
         })?;
 
+        let efficiency_curve_points = defaults.generator_efficiency_curve_points();
+
         let cfg = GeneratorConfig {
             equipment_id: None,
             zone_id: None,
@@ -287,7 +289,7 @@ pub(super) fn resolve_generators(
             eta_lube_oil: None,
             eta_exhaust: None,
             efficiency_type: None,
-            efficiency_curve_points: None,
+            efficiency_curve_points,
             delta_kw_per_s: None,
             capacity_min_kw: None,
             grid_import_limit_kw: None,

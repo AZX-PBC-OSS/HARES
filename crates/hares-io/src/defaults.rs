@@ -130,6 +130,23 @@ impl PvPanelDefaults {
     }
 }
 
+/// One point in the generator efficiency curve (TOML deserialization only).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GeneratorCurvePointToml {
+    /// Normalized electric output fraction [0, 1].
+    pub capacity_ratio: f64,
+    /// Efficiency scaling factor at this capacity ratio.
+    pub efficiency_ratio: f64,
+}
+
+/// Generator part-load efficiency curve loaded from
+/// `defaults/generator/efficiency_curve.toml`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GeneratorEfficiencyCurve {
+    #[serde(rename = "points")]
+    pub points: Vec<GeneratorCurvePointToml>,
+}
+
 /// Generic default parameters loaded from a TOML file in any equipment
 /// subdirectory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -382,6 +399,9 @@ pub struct DefaultsStore {
     /// EV vehicle-to-type mapping loaded from `defaults/ev/vehicle_mapping.csv`.
     ev_mapping: Option<VehicleMapping>,
     envelope_lut: Option<crate::envelope_lut::EnvelopeLookup>,
+    /// Typed generator efficiency curve loaded from
+    /// `defaults/generator/efficiency_curve.toml`.
+    pub generator_curve: Option<GeneratorEfficiencyCurve>,
 }
 
 #[derive(Debug, Error)]
@@ -447,6 +467,7 @@ impl DefaultsStore {
         store.envelope = load_toml_dir(&defaults_dir.join("envelope"))?;
         store.ev = load_toml_dir(&defaults_dir.join("ev"))?;
         store.generator = load_toml_dir(&defaults_dir.join("generator"))?;
+        store.generator_curve = load_generator_curve(&defaults_dir.join("generator"));
         store.loads = load_toml_dir(&defaults_dir.join("loads"))?;
         store.pv = load_toml_dir(&defaults_dir.join("pv"))?;
         store.pv_panel = load_pv_panel_defaults(&defaults_dir.join("pv"))?;
@@ -461,6 +482,12 @@ impl DefaultsStore {
         {
             if let Some(ref wh) = store.water_heating_csv {
                 check_water_heating_invariants(wh);
+            }
+            if store.generator_curve.is_none() {
+                tracing::warn!(
+                    "generator efficiency curve file not loaded; \
+                     falling back to hardcoded 6-point default curve"
+                );
             }
         }
 
@@ -626,6 +653,27 @@ impl DefaultsStore {
     #[must_use]
     pub fn has_ev_mapping(&self) -> bool {
         self.ev_mapping.is_some()
+    }
+
+    /// Return the loaded generator efficiency curve points, if any,
+    /// converted to the runtime [`hares_equipment::GeneratorEfficiencyCurvePoint`] type.
+    ///
+    /// Returns `None` when the `defaults/generator/efficiency_curve.toml`
+    /// file was not loaded (missing, malformed, or validation failed).
+    #[must_use]
+    pub fn generator_efficiency_curve_points(
+        &self,
+    ) -> Option<Vec<hares_equipment::GeneratorEfficiencyCurvePoint>> {
+        self.generator_curve.as_ref().map(|curve| {
+            curve
+                .points
+                .iter()
+                .map(|p| hares_equipment::GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: p.capacity_ratio,
+                    efficiency_ratio: p.efficiency_ratio,
+                })
+                .collect()
+        })
     }
 }
 
@@ -1756,6 +1804,74 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
                 name,
                 "required water heating defaults CSV field '{name}' is missing"
             );
+        }
+    }
+}
+
+/// Load the generator efficiency curve from
+/// `defaults/generator/efficiency_curve.toml`.
+///
+/// Returns `None` silently when the file is missing — the caller falls back to
+/// the hardcoded 6-point curve at
+/// [`hares_equipment::generator::EfficiencyModel::default_curve_points`].
+fn load_generator_curve(dir: &Path) -> Option<GeneratorEfficiencyCurve> {
+    let path = dir.join("efficiency_curve.toml");
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match toml::from_str::<GeneratorEfficiencyCurve>(&content) {
+            Ok(curve) => {
+                // Validate the points at load time.
+                if curve.points.len() < 2 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "generator efficiency curve has fewer than 2 points; ignoring"
+                    );
+                    return None;
+                }
+                for point in &curve.points {
+                    if !point.capacity_ratio.is_finite()
+                        || !(0.0..=1.0).contains(&point.capacity_ratio)
+                        || !point.efficiency_ratio.is_finite()
+                        || point.efficiency_ratio < 0.0
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            capacity_ratio = point.capacity_ratio,
+                            efficiency_ratio = point.efficiency_ratio,
+                            "invalid generator efficiency curve point; ignoring file"
+                        );
+                        return None;
+                    }
+                }
+                for window in curve.points.windows(2) {
+                    if window[1].capacity_ratio <= window[0].capacity_ratio {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "generator efficiency curve points not strictly increasing; ignoring"
+                        );
+                        return None;
+                    }
+                }
+                Some(curve)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "malformed generator efficiency curve TOML; ignoring"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "I/O error reading generator efficiency curve; ignoring"
+            );
+            None
         }
     }
 }
@@ -3344,5 +3460,141 @@ Setpoint,T_set,60.0,degC
                 );
             }
         }
+    }
+
+    #[test]
+    fn load_generator_efficiency_curve_from_toml_populates_six_points() {
+        let dir = tempfile::tempdir().unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+        write_minimal_zip(dir.path());
+
+        // Write the 6-point efficiency curve TOML.
+        let toml_content = r#"
+[[points]]
+capacity_ratio = 0.0
+efficiency_ratio = 0.0
+
+[[points]]
+capacity_ratio = 0.1
+efficiency_ratio = 0.47
+
+[[points]]
+capacity_ratio = 0.167
+efficiency_ratio = 0.62
+
+[[points]]
+capacity_ratio = 0.333
+efficiency_ratio = 0.78
+
+[[points]]
+capacity_ratio = 0.666
+efficiency_ratio = 0.94
+
+[[points]]
+capacity_ratio = 1.0
+efficiency_ratio = 1.0
+"#;
+        std::fs::write(
+            dir.path().join("generator").join("efficiency_curve.toml"),
+            toml_content,
+        )
+        .unwrap();
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+
+        let points = store
+            .generator_efficiency_curve_points()
+            .expect("generator curve should be loaded");
+        assert_eq!(points.len(), 6, "should have 6 curve points");
+        assert!((points[0].capacity_ratio - 0.0).abs() < 1e-12);
+        assert!((points[0].efficiency_ratio - 0.0).abs() < 1e-12);
+        assert!((points[1].capacity_ratio - 0.1).abs() < 1e-12);
+        assert!((points[1].efficiency_ratio - 0.47).abs() < 1e-12);
+        assert!((points[5].capacity_ratio - 1.0).abs() < 1e-12);
+        assert!((points[5].efficiency_ratio - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn missing_generator_efficiency_curve_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+        write_minimal_zip(dir.path());
+        // No efficiency_curve.toml in generator/ — simulate missing file.
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+
+        assert!(
+            store.generator_efficiency_curve_points().is_none(),
+            "missing efficiency_curve.toml should return None"
+        );
+    }
+
+    #[test]
+    fn malformed_generator_efficiency_curve_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "generator",
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+        write_minimal_zip(dir.path());
+
+        // Write a malformed TOML (reversed capacity_ratio order — not strictly increasing).
+        let toml_content = r#"
+[[points]]
+capacity_ratio = 1.0
+efficiency_ratio = 1.0
+
+[[points]]
+capacity_ratio = 0.0
+efficiency_ratio = 0.0
+"#;
+        std::fs::write(
+            dir.path().join("generator").join("efficiency_curve.toml"),
+            toml_content,
+        )
+        .unwrap();
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+
+        assert!(
+            store.generator_efficiency_curve_points().is_none(),
+            "non-strictly-increasing curve points should be rejected"
+        );
     }
 }
