@@ -42,6 +42,9 @@ dwelling_*.csv
 dwelling_*.parquet
 *.parquet
 
+# Worktrees
+.worktrees/
+
 # Compiled binaries
 conditioned_oracle
 .codex
