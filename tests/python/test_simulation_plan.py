@@ -142,7 +142,7 @@ def test_thermal_continuity_across_segments():
         temp_col = temp_cols[0]
         seg0_last = seg0[temp_col].tail(1).item()
         seg1_first = seg1[temp_col].head(1).item()
-        assert abs(seg0_last - seg1_first) < 5.0, (
+        assert abs(seg0_last - seg1_first) < 0.5, (
             f"Thermal discontinuity: seg0={seg0_last:.1f}C, seg1={seg1_first:.1f}C"
         )
 

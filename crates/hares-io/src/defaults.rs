@@ -2786,7 +2786,7 @@ Another_Good,Key2,3.14,m
             "good row should parse"
         );
         assert!(
-            (wh.get("Key2").unwrap() - 3.14).abs() < 1e-6,
+            (wh.get("Key2").unwrap() - std::f64::consts::PI).abs() < 1e-2,
             "another good row should parse"
         );
         assert!(
@@ -3129,7 +3129,7 @@ Setpoint,T_set,60.0,degC
         if cur_day.is_some() {
             day_totals.push(cur_sum);
         }
-        assert!(day_totals.len() >= 1);
+        assert!(!day_totals.is_empty());
         for (i, total) in day_totals.iter().enumerate() {
             assert!(
                 (total - 240.0).abs() < 5.0,

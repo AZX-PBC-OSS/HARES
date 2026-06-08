@@ -21,7 +21,7 @@ heating_capacity_kbtu_h = 30.0
 deadband_c = 0.0
 
 [weather]
-epw_path = "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+epw_path = "../../../data/examples/USA_CO_Denver.epw"
 
 [setpoints]
 cooling_c = 27.0

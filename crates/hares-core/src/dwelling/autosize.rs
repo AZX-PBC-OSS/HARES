@@ -39,6 +39,7 @@ use hares_physics::ashrae152::design_temperatures_f;
 use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
 use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
+#[cfg_attr(not(test), allow(unused_imports))]
 use serde_json::{Value, json};
 use tracing::{error, warn};
 

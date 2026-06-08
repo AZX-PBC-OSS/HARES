@@ -80,6 +80,7 @@ use crate::rng::{
 };
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
 
 #[cfg(feature = "observe")]
