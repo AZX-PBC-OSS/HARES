@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
 use hares_core::{
-    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingConfig,
+    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingCheckpoint, DwellingConfig,
     environment::SurfaceGeometry,
 };
 use hares_equipment::{
@@ -1311,6 +1311,20 @@ impl PyDwelling {
         let checkpoint = serde_json::from_slice(state).map_err(to_py_err_display)?;
         let mut dwelling = self.acquire()?;
         dwelling.load_checkpoint(checkpoint).map_err(to_py_err)
+    }
+
+    pub fn save_checkpoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let dwelling = self.acquire()?;
+        let bytes = serde_json::to_vec(&dwelling.save_checkpoint().map_err(to_py_err_display)?)
+            .map_err(to_py_err_display)?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    pub fn restore_building_state(&self, state: &[u8]) -> PyResult<()> {
+        let checkpoint: DwellingCheckpoint =
+            serde_json::from_slice(state).map_err(to_py_err_display)?;
+        let mut dwelling = self.acquire()?;
+        dwelling.restore_building_state(&checkpoint).map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {

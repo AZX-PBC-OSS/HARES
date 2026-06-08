@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ._hares import Dwelling
+from ._hares import DwellingBlueprint
 from ._hares import Fleet
 from ._hares import SteppableFleet
 from ._hares import FleetResults
@@ -10,6 +11,8 @@ from ._hares import SimulationConfig
 from ._hares import DwellingConfig
 from ._hares import ControlSignal
 from ._hares import Telemetry
+
+from ochre_next.simulation_plan import SimulationPlan, SimulationSegment
 
 # Equipment types
 from ._hares import Battery
@@ -105,6 +108,7 @@ from ._hares import batch_step
 __all__ = [
     # Core simulation
     "Dwelling",
+    "DwellingBlueprint",
     "Fleet",
     "SteppableFleet",
     "FleetResults",
@@ -190,4 +194,7 @@ __all__ = [
     "TimestepsIter",
     # Gym / RL
     "batch_step",
+    # Multi-segment simulation
+    "SimulationPlan",
+    "SimulationSegment",
 ]

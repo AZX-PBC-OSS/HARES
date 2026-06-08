@@ -3776,6 +3776,59 @@ impl Dwelling {
         Ok(())
     }
 
+    /// Restore building shell state from a prior-segment checkpoint.
+    ///
+    /// Transfers thermal envelope, humidity, fluid solver, clock, RNG, and
+    /// electrical summary. Equipment and actor states are intentionally NOT
+    /// restored — the current equipment set was freshly built by
+    /// `DwellingBlueprint::build()` and already initialized via `Equipment::init()`.
+    pub fn restore_building_state(&mut self, cp: &DwellingCheckpoint) -> Result<()> {
+        if cp.format_version != CHECKPOINT_VERSION {
+            return Err(HaresError::Io(format!(
+                "restore_building_state: checkpoint version mismatch: file={}, expected={}",
+                cp.format_version, CHECKPOINT_VERSION
+            )));
+        }
+
+        self.clock.current_step = cp.timestep_index;
+        let mut restored_rng = ChaCha8Rng::from_seed(cp.rng_state);
+        restored_rng.set_stream(cp.rng_stream);
+        restored_rng.set_word_pos(cp.rng_word_pos);
+        self.rng = restored_rng;
+
+        self.thermal_solver
+            .restore_state(&cp.envelope_state, &cp.thermal_last_u, &cp.lwr_t_prev_c)
+            .map_err(|err| HaresError::Envelope(format!(
+                "restore_building_state: thermal solver restore failed: {err}"
+            )))?;
+
+        let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.iter().copied().collect();
+        for zone in &mut self.latest_env.zones {
+            let humidity = checkpoint_zones.get(&zone.id).ok_or_else(|| {
+                HaresError::Io(format!(
+                    "restore_building_state: checkpoint missing humidity for zone {:?}",
+                    zone.id
+                ))
+            })?;
+            self.humidity_solver
+                .humidity_ratios
+                .insert(zone.id, *humidity);
+            zone.humidity_ratio = *humidity;
+        }
+
+        self.fluid_solver
+            .restore_from_payload(&cp.fluid_states)
+            .map_err(|err| HaresError::Envelope(format!(
+                "restore_building_state: fluid solver restore failed: {err}"
+            )))?;
+
+        self.prior_electrical_summary = cp.prior_electrical_summary.clone();
+
+        self.snapshot_equipment_state();
+
+        Ok(())
+    }
+
     /// Populates `latest_env.equipment_core` and `latest_env.equipment_telemetry`
     /// by snapshotting the current `core_output()` and `telemetry()` from every
     /// equipment instance.  Called after `load_checkpoint` so that the first
