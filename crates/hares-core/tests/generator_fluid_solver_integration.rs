@@ -101,6 +101,7 @@ fn generator_fluid_solver_invariant_passes() {
         stack_cooler_r3: None,
         stack_nominal_temp_c: None,
         heat_rec_max_temp_c: None,
+        no_load_fuel_fraction: None,
     };
     let config = EquipmentConfig::from_typed(
         "Test CHP Gen".to_string(),

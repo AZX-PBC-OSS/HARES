@@ -108,6 +108,12 @@ pub struct GeneratorConfig {
     /// the temperature rise from heat recovery does not exceed this value.
     /// EnergyPlus ICEngineElectricGenerator.cc:768 — HeatRecMaxTemp.
     pub heat_rec_max_temp_c: Option<f64>,
+    /// Fuel consumption at no-load idle, as a fraction of full-load fuel rate.
+    /// Residential generators typically consume 0.30–0.50 of full-load fuel at idle.
+    /// Generac Guardian 22 kW spec sheet: idle ~180,000 BTU/hr vs full-load ~320,000 BTU/hr (~56%).
+    /// Kohler 20RESCL spec sheet: idle fuel ~40–45% of full load.
+    /// Default 0.40 is a conservative midpoint for residential standby generators.
+    pub no_load_fuel_fraction: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GeneratorConfig {
@@ -250,6 +256,13 @@ impl GeneratorConfig {
                 ));
             }
         }
+        if let Some(fraction) = self.no_load_fuel_fraction {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(HaresError::Equipment(
+                    "generator no_load_fuel_fraction must be finite and within [0, 1]".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -306,6 +319,8 @@ const KEY_STACK_COOLER_R3: &str = "stack_cooler_r3";
 const KEY_STACK_NOMINAL_TEMP_C: &str = "stack_nominal_temp_c";
 #[cfg(test)]
 const KEY_HEAT_REC_MAX_TEMP_C: &str = "heat_rec_max_temp_c";
+#[cfg(test)]
+const KEY_NO_LOAD_FUEL_FRACTION: &str = "no_load_fuel_fraction";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -409,6 +424,12 @@ const DEFAULT_STACK_COOLER_R3: f64 = 0.0;
 const DEFAULT_STACK_NOMINAL_TEMP_C: f64 = 70.0;
 
 const IDLE_KW_THRESHOLD: f64 = 1e-6;
+
+/// Fuel consumption at no-load idle as a fraction of full-load fuel rate.
+/// Generac Guardian 22 kW: ~56% (180k BTU/hr idle / 320k BTU/hr full).
+/// Kohler 20RESCL: ~40–45%. 0.40 is a conservative midpoint.
+/// Default per vendor spec sheets for residential standby generators.
+const DEFAULT_NO_LOAD_FUEL_FRACTION: f64 = 0.40;
 
 /// Compute stack cooler heat removal using the EnergyPlus polynomial.
 ///
@@ -778,6 +799,10 @@ pub struct Generator {
     /// Maximum heat recovery fluid temperature (°C). None = no capping.
     heat_rec_max_temp_c: Option<f64>,
 
+    /// Fuel consumption at no-load idle, as a fraction of full-load fuel rate.
+    /// Residential standby generators: 0.30–0.50 per vendor spec sheets.
+    no_load_fuel_fraction: f64,
+
     // Dynamic state
     current_power_kw: f64,
     mode: OperatingMode,
@@ -935,6 +960,10 @@ impl Generator {
                 .and_then(|c| c.stack_nominal_temp_c)
                 .unwrap_or(DEFAULT_STACK_NOMINAL_TEMP_C),
             heat_rec_max_temp_c: typed.as_ref().and_then(|c| c.heat_rec_max_temp_c),
+            no_load_fuel_fraction: typed
+                .as_ref()
+                .and_then(|c| c.no_load_fuel_fraction)
+                .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
             power_setpoint_kw: None,
@@ -1044,6 +1073,9 @@ impl Generator {
         self.stack_cooler_r3 = c.stack_cooler_r3.unwrap_or(self.stack_cooler_r3);
         self.stack_nominal_temp_c = c.stack_nominal_temp_c.unwrap_or(self.stack_nominal_temp_c);
         self.heat_rec_max_temp_c = c.heat_rec_max_temp_c;
+        self.no_load_fuel_fraction = c
+            .no_load_fuel_fraction
+            .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION);
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
@@ -1180,11 +1212,51 @@ impl Equipment for Generator {
 
         // Derive fuel and heat flows.
         // Fuel is computed from DC stack power, not AC output.
-        let fuel_w = if output_kw > IDLE_KW_THRESHOLD && eta > 0.0 {
+        let is_running = output_kw > IDLE_KW_THRESHOLD;
+        let load_fuel_w = if is_running && eta > 0.0 {
             dc_power_w / eta
         } else {
             0.0
         };
+        // Idle fuel consumption: real residential generators consume 30-50% of
+        // full-load fuel even at zero electrical output. Generac Guardian 22 kW
+        // spec sheet: ~56% at idle. Kohler 20RESCL: ~40-45%.
+        // Full-load reference fuel rate uses rated stack power: P_rated / eta_rated.
+        // For fuel cells, rated_power_kw is the DC stack rating (max_ac_kw =
+        // rated_power_kw * inverter_efficiency).
+        let rated_eta = self.efficiency.rated();
+        let idle_fuel_w = if is_running && rated_eta > 0.0 {
+            (power_kw_to_w(self.rated_power_kw) / rated_eta) * self.no_load_fuel_fraction
+        } else {
+            0.0
+        };
+        let fuel_w = idle_fuel_w.max(load_fuel_w);
+
+        // Observer capture: record idle vs load fuel contributions.
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                fuel_idle_w = idle_fuel_w,
+                fuel_load_w = load_fuel_w,
+                fuel_total_w = fuel_w,
+                no_load_fuel_fraction = self.no_load_fuel_fraction,
+                is_running,
+                "Generator fuel breakdown — idle vs load-dependent",
+            );
+        }
+
+        // Invariant: when the generator is running, total fuel rate must never
+        // fall below the idle consumption floor.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if is_running {
+                debug_assert!(
+                    fuel_w >= idle_fuel_w - f64::EPSILON * idle_fuel_w.abs().max(1.0),
+                    "generator fuel_w ({fuel_w} W) must not fall below idle_fuel_w ({idle_fuel_w} W) when running"
+                );
+            }
+        }
+
         let electrical_w = power_kw_to_w(output_kw);
         // EnergyPlus FuelCellElectricGenerator.cc:2112-2116 — inverter model.
         let inverter_loss_w = if is_fuel_cell {
@@ -1450,6 +1522,8 @@ impl Equipment for Generator {
 
         self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
+        self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
+        self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
         self.telemetry
             .set(tk::RAMP_LIMITED, if ramp_limited { 1.0 } else { 0.0 });
@@ -1589,15 +1663,25 @@ impl Equipment for Generator {
         };
         let capacity_ratio = dc_kw / self.rated_power_kw;
         let eta = self.efficiency.evaluate(capacity_ratio);
-        let fuel_w = if self.current_power_kw > IDLE_KW_THRESHOLD && eta > 0.0 {
+        let is_running = self.current_power_kw > IDLE_KW_THRESHOLD;
+        let rated_eta = self.efficiency.rated();
+        let idle_fuel_w = if is_running && rated_eta > 0.0 {
+            (power_kw_to_w(self.rated_power_kw) / rated_eta) * self.no_load_fuel_fraction
+        } else {
+            0.0
+        };
+        let load_fuel_w = if is_running && eta > 0.0 {
             power_kw_to_w(dc_kw) / eta
         } else {
             0.0
         };
+        let fuel_w = idle_fuel_w.max(load_fuel_w);
 
         self.telemetry
             .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
+        self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
+        self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
 
         let has_thermal =
@@ -1774,12 +1858,15 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
-    // Base: 4 fields. CHP: 11 extra (thermal, available, delivered, ratio, loop_return,
+    // Base: 6 fields (electric, fuel, idle, load, eta, ramp).
+    // CHP: 11 extra (thermal, available, delivered, ratio, loop_return,
     // flue, jacket, lube, exhaust, +2 supply temps).
-    let capacity = if has_chp { 15 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
+    let capacity = if has_chp { 15 } else { 6 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
+    t.insert(tk::FUEL_IDLE_W, 0.0);
+    t.insert(tk::FUEL_LOAD_W, 0.0);
     t.insert(tk::ETA_ELECTRIC, 0.0);
     t.insert(tk::RAMP_LIMITED, 0.0);
     if has_chp {
@@ -1814,6 +1901,16 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
             name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Fuel input power (P_electric / eta)".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_IDLE_W.to_string(),
+            unit: "W".to_string(),
+            description: "Idle fuel consumption floor (no-load fuel rate)".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_LOAD_W.to_string(),
+            unit: "W".to_string(),
+            description: "Load-dependent fuel consumption before idle floor".to_string(),
         },
         TelemetryField {
             name: tk::ETA_ELECTRIC.to_string(),
@@ -2011,6 +2108,7 @@ mod tests {
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
+            no_load_fuel_fraction: None,
         };
         for (k, v) in overrides {
             match (*k, v) {
@@ -2064,6 +2162,9 @@ mod tests {
                 }
                 (KEY_HEAT_REC_MAX_TEMP_C, ConfigValue::Float(value)) => {
                     cfg.heat_rec_max_temp_c = Some(*value)
+                }
+                (KEY_NO_LOAD_FUEL_FRACTION, ConfigValue::Float(value)) => {
+                    cfg.no_load_fuel_fraction = Some(*value)
                 }
                 (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
@@ -2227,6 +2328,8 @@ mod tests {
         for expected in &[
             tk::ELECTRIC_OUTPUT_KW,
             tk::FUEL_INPUT_W,
+            tk::FUEL_IDLE_W,
+            tk::FUEL_LOAD_W,
             tk::ETA_ELECTRIC,
             tk::RAMP_LIMITED,
         ] {
@@ -2241,6 +2344,207 @@ mod tests {
     fn fuel_cell_descriptor_has_distinct_equipment_type() {
         let fc = Generator::new(gen_config(&[]), GeneratorKind::FuelCell);
         assert_eq!(fc.descriptor().equipment_type, "Gas Fuel Cell");
+    }
+
+    // =======================================================================
+    // Idle fuel consumption (T-0288)
+    // =======================================================================
+
+    #[test]
+    fn idle_fuel_floor_applies_when_running_at_low_output() {
+        // A generator running at very low output must consume at least the idle
+        // fuel rate. At 0.001 kW with eta=0.30, load fuel ≈ 3.3 W, idle fuel =
+        // 10 kW / 0.30 * 0.40 ≈ 13333 W. The total fuel_w should be the max.
+        let config = gen_config(&[
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_NO_LOAD_FUEL_FRACTION, 0.40.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 0.001,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let idle_fuel_w = generator.telemetry().get(tk::FUEL_IDLE_W).unwrap();
+        let load_fuel_w = generator.telemetry().get(tk::FUEL_LOAD_W).unwrap();
+
+        assert!(
+            idle_fuel_w > 0.0,
+            "idle fuel should be positive when running"
+        );
+        assert!(
+            load_fuel_w < idle_fuel_w,
+            "load fuel ({load_fuel_w} W) should be less than idle fuel ({idle_fuel_w} W) at low output"
+        );
+        assert!(
+            (fuel_w - idle_fuel_w).abs() < 1.0,
+            "total fuel_w should equal idle fuel at very low output, got fuel_w={fuel_w}, idle={idle_fuel_w}"
+        );
+        assert!(
+            fuel_w > 0.0,
+            "running generator must consume fuel even at near-zero output"
+        );
+    }
+
+    #[test]
+    fn idle_fuel_zero_when_generator_off() {
+        // When the generator is off (output_kw == 0), idle fuel must be zero.
+        let config = gen_config(&[(KEY_NO_LOAD_FUEL_FRACTION, 0.40.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let idle_fuel_w = generator.telemetry().get(tk::FUEL_IDLE_W).unwrap();
+        let electric_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+
+        assert!(electric_kw < IDLE_KW_THRESHOLD, "generator should be off");
+        assert!(
+            fuel_w < IDLE_KW_THRESHOLD,
+            "off generator must have zero fuel consumption"
+        );
+        assert!(
+            idle_fuel_w < IDLE_KW_THRESHOLD,
+            "off generator must have zero idle fuel"
+        );
+    }
+
+    #[test]
+    fn full_load_fuel_exceeds_idle_floor() {
+        // At full load, the load-dependent fuel dominates the idle floor.
+        let config = gen_config(&[(KEY_NO_LOAD_FUEL_FRACTION, 0.40.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let idle_fuel_w = generator.telemetry().get(tk::FUEL_IDLE_W).unwrap();
+        let load_fuel_w = generator.telemetry().get(tk::FUEL_LOAD_W).unwrap();
+
+        assert!(
+            load_fuel_w > idle_fuel_w,
+            "at full load, load fuel ({load_fuel_w} W) must exceed idle fuel ({idle_fuel_w} W)"
+        );
+        assert!(
+            (fuel_w - load_fuel_w).abs() < 1.0,
+            "at full load, total fuel_w should equal load fuel, got fuel_w={fuel_w}, load={load_fuel_w}"
+        );
+        assert!(
+            fuel_w >= idle_fuel_w,
+            "fuel_w ({fuel_w}) must never drop below idle floor ({idle_fuel_w})"
+        );
+    }
+
+    #[test]
+    fn idle_fuel_scales_with_no_load_fuel_fraction() {
+        // Higher no_load_fuel_fraction produces proportionally higher idle fuel.
+        let run_with_fraction = |fraction: f64| -> f64 {
+            let config = gen_config(&[
+                (KEY_DELTA_KW_PER_S, 100.0.into()),
+                (KEY_NO_LOAD_FUEL_FRACTION, fraction.into()),
+            ]);
+            let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+            generator.init(&config, &base_env()).unwrap();
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 0.001,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+            generator.telemetry().get(tk::FUEL_IDLE_W).unwrap()
+        };
+
+        let idle_30 = run_with_fraction(0.30);
+        let idle_40 = run_with_fraction(0.40);
+        let idle_50 = run_with_fraction(0.50);
+
+        assert!(
+            idle_40 > idle_30,
+            "idle fuel should increase with fraction: 0.30→{idle_30}, 0.40→{idle_40}"
+        );
+        assert!(
+            idle_50 > idle_40,
+            "idle fuel should increase with fraction: 0.40→{idle_40}, 0.50→{idle_50}"
+        );
+        // Linear scaling: idle_50 / idle_30 ≈ 0.50 / 0.30 = 1.667
+        let ratio = idle_50 / idle_30;
+        assert!(
+            (ratio - 5.0 / 3.0).abs() < 0.01,
+            "idle fuel should scale linearly: idle(0.50)/idle(0.30)={ratio:.4}, expected ~1.667"
+        );
+    }
+
+    #[test]
+    fn load_state_applies_idle_fuel_floor_at_low_output() {
+        // After an init→step→save→load round-trip at very low output,
+        // fuel_w must match idle_fuel_w (the floor), not load_fuel_w.
+        let config = gen_config(&[
+            (KEY_NO_LOAD_FUEL_FRACTION, 0.40.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 0.001,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let bytes = generator.save_state().unwrap();
+
+        let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator2.init(&config, &base_env()).unwrap();
+        generator2.load_state(&bytes).unwrap();
+
+        let fuel_w = generator2.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let idle_fuel_w = generator2.telemetry().get(tk::FUEL_IDLE_W).unwrap();
+        let load_fuel_w = generator2.telemetry().get(tk::FUEL_LOAD_W).unwrap();
+
+        assert!(
+            idle_fuel_w > 0.0,
+            "idle fuel should be positive at low output after load_state"
+        );
+        assert!(
+            load_fuel_w < idle_fuel_w,
+            "load fuel ({load_fuel_w} W) should be below idle fuel ({idle_fuel_w} W) at low output"
+        );
+        assert!(
+            (fuel_w - idle_fuel_w).abs() < 1.0,
+            "after load_state, total fuel_w ({fuel_w} W) must equal idle fuel ({idle_fuel_w} W) at low output"
+        );
     }
 
     // =======================================================================
@@ -3700,6 +4004,7 @@ mod tests {
             .unwrap();
 
         assert!(generator.telemetry().get(tk::FUEL_INPUT_W).unwrap() < IDLE_KW_THRESHOLD);
+        assert!(generator.telemetry().get(tk::FUEL_IDLE_W).unwrap() < IDLE_KW_THRESHOLD);
         assert!(generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() < IDLE_KW_THRESHOLD);
         assert!(slots.electrical.generation_power_w.abs() < IDLE_KW_THRESHOLD);
         assert!(slots.fuel.get(FuelType::Gas) < IDLE_KW_THRESHOLD);
@@ -3947,6 +4252,7 @@ mod tests {
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
+            no_load_fuel_fraction: None,
         }
     }
 

@@ -42,6 +42,12 @@ pub const REACTIVE_POWER_KVAR: &str = "reactive_power_kvar";
 pub const FUEL_INPUT_W: &str = "fuel_input_w";
 
 /// scope: internal
+pub const FUEL_IDLE_W: &str = "fuel_idle_w";
+
+/// scope: internal
+pub const FUEL_LOAD_W: &str = "fuel_load_w";
+
+/// scope: internal
 pub const THERMAL_OUTPUT_W: &str = "thermal_output_w";
 
 /// scope: internal
@@ -871,6 +877,8 @@ mod tests {
             REACTIVE_POWER_KVAR,
             // Fuel & thermal
             FUEL_INPUT_W,
+            FUEL_IDLE_W,
+            FUEL_LOAD_W,
             THERMAL_OUTPUT_W,
             FLUE_LOSS_W,
             JACKET_LOSS_W,

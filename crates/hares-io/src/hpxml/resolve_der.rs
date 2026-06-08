@@ -306,6 +306,7 @@ pub(super) fn resolve_generators(
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
+            no_load_fuel_fraction: None,
         };
 
         let mut spec = build_typed_spec("Gas Generator".to_string(), fuel, cfg, defaults);

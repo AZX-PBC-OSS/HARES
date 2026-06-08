@@ -1148,6 +1148,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 stack_cooler_r3: None,
                 stack_nominal_temp_c: None,
                 heat_rec_max_temp_c: None,
+                no_load_fuel_fraction: None,
             },
         ),
         "HRV" => typed_alias_config(
