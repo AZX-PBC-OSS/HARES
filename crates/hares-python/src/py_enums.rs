@@ -107,6 +107,46 @@ impl PyEndUse {
         inner: RustEndUse::OTHER,
     };
 
+    #[classattr]
+    const COOKING: Self = Self {
+        inner: RustEndUse::COOKING,
+    };
+
+    #[classattr]
+    const LAUNDRY: Self = Self {
+        inner: RustEndUse::LAUNDRY,
+    };
+
+    #[classattr]
+    const DISHWASHER: Self = Self {
+        inner: RustEndUse::DISHWASHER,
+    };
+
+    #[classattr]
+    const POOL_PUMP: Self = Self {
+        inner: RustEndUse::POOL_PUMP,
+    };
+
+    #[classattr]
+    const POOL_HEATER: Self = Self {
+        inner: RustEndUse::POOL_HEATER,
+    };
+
+    #[classattr]
+    const SPA_PUMP: Self = Self {
+        inner: RustEndUse::SPA_PUMP,
+    };
+
+    #[classattr]
+    const SPA_HEATER: Self = Self {
+        inner: RustEndUse::SPA_HEATER,
+    };
+
+    #[classattr]
+    const CEILING_FAN: Self = Self {
+        inner: RustEndUse::CEILING_FAN,
+    };
+
     #[staticmethod]
     fn custom(name: &str) -> Self {
         Self {

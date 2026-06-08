@@ -140,7 +140,7 @@ pub(super) fn build_spec(
     }
 }
 
-pub(super) fn build_typed_spec<T>(
+pub fn build_typed_spec<T>(
     name: String,
     fuel_type: FuelType,
     config: T,

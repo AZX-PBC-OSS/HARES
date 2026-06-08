@@ -128,6 +128,7 @@ pub fn equipment_name_to_end_use(name: &str) -> EndUse {
 
         // Water Heating
         "Gas Water Heater"
+        | "Electric Resistance Water Heater"
         | "Resistance Water Heater"
         | "Heat Pump Water Heater"
         | "Tankless Water Heater"

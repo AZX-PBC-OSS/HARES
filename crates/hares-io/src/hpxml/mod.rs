@@ -26,7 +26,7 @@ pub use building::{
     SiteType, Window, Zone, ZoneType,
 };
 pub use data_patches::HpxmlDataPatches;
-pub use equipment::{EquipmentSpec, nested_update, resolve_equipment};
+pub use equipment::{EquipmentSpec, build_typed_spec, nested_update, resolve_equipment};
 pub use resolve_water_heater::extract_bedroom_count;
 pub use validation::{ValidationReport, ValidationWarning};
 

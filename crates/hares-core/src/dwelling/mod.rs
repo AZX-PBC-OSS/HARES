@@ -1,11 +1,13 @@
 //! Dwelling orchestrator: integrates environment, equipment, solvers, and output.
 
 mod autosize;
+pub mod blueprint;
 mod conversions;
 mod loop_allocator;
 mod solver_builder;
 mod synthetic;
 
+pub use blueprint::DwellingBlueprint;
 pub use conversions::{
     building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone, stage_rank,
 };
@@ -31,7 +33,7 @@ use hares_equipment::{
 };
 use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
-    DEFROST_STATE_SUFFIX, DefaultsStore, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
+    DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
     HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MODE_SUFFIX,
@@ -43,7 +45,6 @@ use hares_io::{
     SimulationConfig, StreamingRecorder, WeatherTimeSeries, build_schema,
     end_use_electric_power_column, equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev,
     is_heat_pump_heater, is_hvac_or_wh, is_pv, parse_hpxml, parse_schedule_csv, parse_weather,
-    resolve_equipment, resolve_site_location,
 };
 
 use hares_physics::constants::{
@@ -96,7 +97,7 @@ use conversions::{
     merged_equipment_config, required_datetime, required_duration, required_path,
     validate_sim_config,
 };
-use solver_builder::{build_default_solvers, compute_weather_averages};
+use solver_builder::build_default_solvers;
 use synthetic::{
     SyntheticTomlConfig, build_synthetic_building, build_synthetic_schedule,
     build_synthetic_weather,
@@ -1674,822 +1675,763 @@ impl Dwelling {
 
     fn from_preparsed(
         config: DwellingConfig,
-        mut building: Building,
-        mut weather: WeatherTimeSeries,
+        building: Building,
+        weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
-        // Resolve the authoritative site location ONCE from all available
-        // sources (explicit override → HPXML → weather file), then make it the
-        // single source of truth: written into both the weather metadata (which
-        // drives solar position) and the building's Site (which drives autosize
-        // and equipment placement). This guarantees solar geometry, weather
-        // magnitudes, and the start-time UTC offset are all mutually
-        // consistent. See `hares_io::site_location`.
-        let site_location = resolve_site_location(
-            &building.site,
-            &weather.meta,
-            &config.sim_config.site_location,
+        let blueprint = DwellingBlueprint::from_parts(config, building, weather, schedule)?;
+        build_from_blueprint(blueprint)
+    }
+}
+
+pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
+
+    let site_location = bp.site_location;
+    let local_start = bp.local_start;
+    let mut defaults = bp.defaults;
+    let config = bp.config;
+    let rng = bp.rng;
+
+    let mut equipment_specs = bp.equipment_specs;
+
+    let mut clock = SimClock::new(
+        local_start,
+        config.sim_config.time_res,
+        config.sim_config.duration + bp.init_chrono,
+    );
+    #[cfg(feature = "dst")]
+    {
+        clock.civil_tz = bp.parsed_civil_tz;
+    }
+
+    let mut environment = EnvironmentManager::new_with_resample(
+        bp.weather,
+        bp.schedule,
+        &bp.building,
+        bp.time_res,
+        local_start,
+        EnvironmentInitOptions {
+            civil_timezone: config.sim_config.civil_timezone.as_deref(),
+            resample_overrides: config.resample_overrides.as_ref(),
+            initial_rng: Some(rng.clone()),
+            setpoint_deadband_c: config.sim_config.setpoint_deadband_c,
+        },
+    )
+    .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
+
+    let mut warnings = Vec::new();
+
+    // ── WH typed_config debug assertion ─────────────────────────────────
+    #[cfg(debug_assertions)]
+    for spec in &equipment_specs {
+        if matches!(spec.name.as_str(), "Electric Resistance Water Heater"
+            | "Gas Water Heater" | "Heat Pump Water Heater"
+            | "Tankless Water Heater" | "Gas Tankless Water Heater")
+        {
+            assert!(spec.typed_config.is_some(),
+                "WH spec '{}' has no typed_config — schedule injection will panic", spec.name);
+        }
+    }
+
+    // Centralized fluid loop ID allocation — must run after wiring
+    // (resolve_loop_wiring, inside resolve_equipment) and before
+    // equipment construction so every instance receives a unique
+    // loop ID above the wired range.
+    loop_allocator::allocate_loop_ids(&mut equipment_specs);
+
+    // Register PV surfaces with the environment so Perez irradiance is
+    // computed for PV orientations (which may not match any envelope surface).
+    register_pv_surfaces(&equipment_specs, &mut environment);
+
+    // Auto-attach PV arrays to the closest matching roof surface and
+    // register shading coverage on attached roofs.
+    attach_pv_to_roofs(&mut equipment_specs, &bp.building);
+    register_pv_roof_shading(&equipment_specs, &bp.building, &mut environment);
+
+    let initial_env = environment.update(&clock, &[])?;
+
+    let solvers = build_default_solvers(
+        &initial_env,
+        &config.sim_config,
+        &bp.building,
+        &defaults,
+            &bp.weather_avgs,
+        &equipment_specs,
+    )?;
+
+    // ── Autosize HVAC capacities at design conditions ──────────────────────
+    //
+    // When HPXML omits HeatingCapacity/CoolingCapacity, compute the required
+    // capacity from the building's thermal envelope model at ASHRAE design
+    // outdoor conditions. Uses EPW "Extremes" header (preferred) or ASHRAE 152
+    // climate station lookup (fallback).
+    //
+    // Must run after the thermal solver is built (it needs the RC model) and
+    // before equipment creation (it sets capacities on equipment specs).
+    // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
+    {
+        let duct_params =
+            match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building) {
+                Ok(dp) => dp,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "autosizing: duct DSE params unavailable; using defaults"
+                    );
+                    hares_io::hpxml::resolve_hvac::DuctDseParams::default()
+                }
+            };
+
+        let indoor_zone = solvers.thermal.config().indoor_zone_id;
+
+        let ctx = crate::dwelling::autosize::AutosizeContext {
+            design_conditions: bp.design_conditions,
+            weather_lat: site_location.latitude_deg,
+            weather_lon: site_location.longitude_deg,
+            duct_params,
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+
+        crate::dwelling::autosize::autosize_equipment_capacities(
+            &mut equipment_specs,
+            &solvers.thermal,
+            &ctx,
+            &bp.building,
+            indoor_zone,
         );
-        weather.meta.latitude = site_location.latitude_deg;
-        weather.meta.longitude = site_location.longitude_deg;
-        weather.meta.elevation_m = site_location.elevation_m;
-        weather.meta.timezone_offset_h = site_location.utc_offset_h;
-        weather.meta.has_embedded_location = true;
-        building.site.latitude_deg = Some(site_location.latitude_deg);
-        building.site.longitude_deg = Some(site_location.longitude_deg);
-        building.site.elevation_m = Some(site_location.elevation_m);
-        building.site.utc_offset_h = Some(site_location.utc_offset_h);
+    }
 
-        // Reinterpret the user's start time in the site's resolved standard-time
-        // zone. The naive wall-clock components (year, month, day, hour, minute,
-        // second) are preserved — the user passes local wall-clock time — and
-        // the offset is set to the resolved UTC offset so `solar_position`'s
-        // internal `to_utc()` yields the correct sun geometry. DST, when
-        // requested, is applied separately via `civil_timezone`.
-        let tz_offset =
-            chrono::FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
-                .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
-        let local_start = config
-            .sim_config
-            .start_time
-            .naive_local()
-            .and_local_timezone(tz_offset)
-            .single()
-            .unwrap_or_else(|| config.sim_config.start_time.with_timezone(&tz_offset));
+    // ── Autosize water heater capacities ────────────────────────────────
+    //
+    // When HPXML water heaters omit HeatingCapacity or TankVolume,
+    // compute the required capacity and storage volume using a First-Hour
+    // Rating methodology (DOE 10 CFR Part 430 Subpart B Appendix E).
+    // Tank volume is sized by bedroom count; heating capacity is computed
+    // from the required FHR, usable tank volume, and design temperature
+    // rise (setpoint − mains temperature).
+    //
+    // Runs after HVAC autosizing (no dependency between them) and before
+    // equipment creation.
+    {
+        // FHR sizing by bedroom count is a structural property (number of
+        // bedrooms), not an occupancy proxy. The occupancy-adjusted bedroom
+        // count used by parse_avg_water_draw_and_bedrooms for draw estimation
+        // is intentionally NOT used here so the structural count drives the
+        // per-bedroom FHR values (DOE 10 CFR Part 430 App E test procedure
+        // bases sizing on the dwelling, not on occupancy).
+        let n_bedrooms =
+            hares_io::hpxml::extract_bedroom_count(&bp.building, config.patches.as_ref());
+        crate::dwelling::autosize::autosize_water_heater_capacities(
+            &mut equipment_specs,
+            Some(n_bedrooms),
+            initial_env.weather.mains_temp_c,
+        );
+    }
 
-        let init_chrono = config
-            .initialization_duration
-            .map(|d| Duration::seconds(d.as_secs() as i64))
-            .unwrap_or(Duration::zero());
+    // Enable ideal HVAC on the indoor zone when both heating AND cooling
+    // setpoints are configured -- the thermal solver back-calculates the exact
+    // load needed to maintain the setpoint at each timestep.
+    hares_io::inject_schedule_into_specs(
+        &mut equipment_specs,
+        environment.schedule_mut(),
+        Some(&bp.defaults_path.clone().unwrap_or_else(|| PathBuf::from("defaults"))),
+    );
 
-        #[cfg(feature = "dst")]
-        let parsed_civil_tz: Option<chrono_tz::Tz> = config
-            .sim_config
-            .civil_timezone
-            .as_deref()
-            .map(|name| {
-                name.parse::<chrono_tz::Tz>()
-                    .map_err(|_| HaresError::Io(format!("invalid civil timezone: {name}")))
+    // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
+    // which may generate an occupancy column from HPXML extension fractions or
+    // the default schedule profile when the schedule CSV lacks one.
+    let occupancy_column_idx = environment.occupancy_column_idx();
+
+    // Gated invariant: ensure every HVAC spec has a setpoint source.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        hares_io::check_hvac_setpoint_invariants(&equipment_specs);
+        hares_io::check_foundation_zone_invariant(&bp.building);
+        hares_io::check_mode_ordinals_invariant();
+    }
+    let override_root = config
+        .overrides
+        .clone()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    // Read number_of_occupants from the Occupancy spec to scale the raw
+    // schedule fraction (0–1) into a person count for internal heat gains.
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    let has_occupancy_spec;
+    let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
+        Some(spec) => {
+            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+            {
+                has_occupancy_spec = true;
+            }
+            let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
+                HaresError::Equipment(
+                    "Occupancy spec is missing required key 'number_of_occupants'".into(),
+                )
+            })?;
+            val.as_f64().ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "Occupancy 'number_of_occupants' must be a valid number, got: {val}"
+                ))
+            })?
+        }
+        None => {
+            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+            {
+                has_occupancy_spec = false;
+            }
+            1.0
+        }
+    };
+
+    // Invariant: number_of_occupants must be non-negative regardless of
+    // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
+    // A negative value indicates a data error in the parser or input.
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    if has_occupancy_spec && occupancy_scale < 0.0 {
+        return Err(HaresError::Dwelling(format!(
+            "Occupancy 'number_of_occupants' must be non-negative; got {}; \
+             this indicates a data problem in the HPXML parser's occupant-count \
+             derivation",
+            occupancy_scale
+        )));
+    }
+
+    // Invariant: if an Occupancy spec was configured the schedule MUST have an
+    // occupancy column. `inject_schedule_into_specs` is responsible for generating
+    // the column from HPXML extension fractions or the default profile when the
+    // schedule CSV lacks one. Absence of both a column AND schedule fractions on the
+    // spec is a data integrity error — either the defaults CSV is missing or the
+    // Occupancy spec was created without any schedule data source.
+    //
+    // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
+    // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
+    // cooling load; silently zeroing it produces a systematic underestimate.
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    if has_occupancy_spec && occupancy_column_idx.is_none() {
+        let has_hpxml_fractions = equipment_specs
+            .iter()
+            .find(|s| s.name == "Occupancy")
+            .map(|s| {
+                s.parameters.contains_key("weekday_schedule_fractions")
+                    || s.parameters.contains_key("weekend_schedule_fractions")
             })
-            .transpose()?;
+            .unwrap_or(false);
+        let detail = if has_hpxml_fractions {
+            "Occupancy spec has HPXML extension schedule fractions but the \
+             occupancy column was not generated in the schedule timeseries. \
+             This is a bug in schedule_resolve::inject_occupancy_schedule — \
+             the HPXML profile should have been converted to a schedule column."
+        } else {
+            "Occupancy spec configured but no occupancy column found in schedule \
+             AND no HPXML schedule fractions available on the spec. The default \
+             Occupancy profile from Default Schedule Parameters.csv may be missing \
+             or unreadable."
+        };
+        return Err(HaresError::Dwelling(detail.into()));
+    }
 
-        let mut clock = SimClock::new(
+    // Build zone-to-role map for equipment auto-routing.
+    // Maps semantic zone roles (Indoor, Garage, Basement, etc.) to concrete
+    // ZoneId values derived from the sorted building zone list.
+    let zone_map = {
+        let mut map = ZoneMap::new();
+        for (idx, zone) in bp.building.zones.iter().enumerate() {
+            let id = ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX));
+            match &zone.zone_type {
+                hares_io::hpxml::ZoneType::Conditioned => {
+                    map.insert(ZoneRole::Indoor, id);
+                }
+                hares_io::hpxml::ZoneType::Garage => {
+                    map.insert(ZoneRole::Garage, id);
+                }
+                hares_io::hpxml::ZoneType::Foundation => {
+                    map.insert(ZoneRole::Basement, id);
+                    map.insert(ZoneRole::Crawlspace, id);
+                }
+                hares_io::hpxml::ZoneType::Attic => {
+                    map.insert(ZoneRole::Attic, id);
+                }
+                // Not modelled thermal zones — intentionally excluded from ZoneMap.
+                hares_io::hpxml::ZoneType::Outdoor
+                | hares_io::hpxml::ZoneType::Ground
+                | hares_io::hpxml::ZoneType::Adjacent => {}
+                hares_io::hpxml::ZoneType::Other(_) => {}
+            }
+        }
+        map
+    };
+
+    // Invariant: after zone map construction, verify that every Attic zone's
+    // `vented` flag is consistent. By default (no `<Attics>` group in HPXML),
+    // attics are vented (ASHRAE 152-2004 default; OCHRE hpxml.py:635 Vented=True).
+    // An unvented attic must come from an explicit `<AtticType><Attic><Vented>false`
+    // declaration.
+    //
+    // Known limitation: this block emits observability logs but does not assert.
+    // The fix at crates/hares-io/src/hpxml/building.rs (T-0206) makes the
+    // `ensure_referenced_zones_exist` / `build_zone_map` divergence structurally
+    // impossible — both paths now set `vented: true` for attics — so a runtime
+    // assertion would never fire in practice. The `tracing::debug!` log remains as
+    // a low-cost diagnostic to confirm attic zone vented status during development.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for zone in &bp.building.zones {
+            if zone.zone_type == hares_io::hpxml::ZoneType::Attic {
+                tracing::debug!(
+                    vented = zone.vented,
+                    floor_area_m2 = zone.floor_area_m2,
+                    "dwelling assembly: Attic zone vented status"
+                );
+            }
+        }
+    }
+
+    // Equipment names whose loads are handled outside the registry (e.g. directly in the
+    // simulation loop) -- silently skip them rather than emitting a warning.
+    const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
+
+    let mut setpoints_reconciled_by_equipment: HashMap<
+        String,
+        Option<Vec<SetpointReconciliation>>,
+    > = HashMap::new();
+
+    let registry = EquipmentRegistry::new();
+    let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
+    let mut rng_event_stream_idx: u64 = 0;
+    for spec in &equipment_specs {
+        if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
+            continue;
+        }
+        let sub_rng = derive_sub_rng(&rng, RNG_STREAM_EVENT_LOAD_BASE + rng_event_stream_idx);
+        rng_event_stream_idx += 1;
+        let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
+
+        let mut merged_cfg = merged_equipment_config(spec, &override_root);
+        setpoints_reconciled_by_equipment.insert(
+            merged_cfg.name.clone(),
+            merged_cfg.setpoints_reconciled.clone(),
+        );
+        merged_cfg.zone_map = Some(zone_map.clone());
+        merged_cfg.rng_seed = Some(sub_rng.get_seed());
+        match eq.init(&merged_cfg, &initial_env) {
+            Ok(()) => equipment.push(eq),
+            Err(err) => {
+                let end_use = eq.descriptor().end_use.clone();
+                let is_critical = end_use == EndUse::HVAC_HEATING
+                    || end_use == EndUse::HVAC_COOLING
+                    || end_use == EndUse::WATER_HEATING
+                    || end_use == EndUse::EV
+                    || end_use == EndUse::BATTERY
+                    || end_use == EndUse::PV;
+                if is_critical {
+                    return Err(HaresError::Equipment(format!(
+                        "equipment '{}' init failed: {err}",
+                        merged_cfg.name
+                    )));
+                }
+                let msg = format!(
+                    "equipment '{}' init failed, skipping: {err}",
+                    merged_cfg.name
+                );
+                tracing::error!("{msg}");
+                warnings.push(msg);
+            }
+        }
+    }
+    let mut equipment_id_by_name = HashMap::with_capacity(equipment.len());
+    for eq in &equipment {
+        let desc = eq.descriptor();
+        if equipment_id_by_name
+            .insert(desc.name.clone(), desc.id)
+            .is_some()
+        {
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment name '{}' is not allowed",
+                desc.name
+            )));
+        }
+    }
+
+    let mut declarations: Vec<PortDeclaration> = Vec::new();
+    for eq in &equipment {
+        declarations.extend_from_slice(eq.ports());
+    }
+
+    let env_zone_ids: HashSet<ZoneId> = initial_env.zones.iter().map(|z| z.id).collect();
+    validate_equipment_zones(&declarations, &env_zone_ids)?;
+
+    let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs);
+    // Sentinel loop IDs always valid — well-known addresses used by
+    // equipment as sentinels when no typed config is available (0) or
+    // for the shared DHW demand loop (u16::MAX - 1).
+    allocated_loop_ids.insert(0); // LoopId::default() — fallback for raw-config equipment
+    allocated_loop_ids.insert(hares_equipment::DHW_DEMAND_LOOP.0);
+    validate_equipment_loops(&declarations, &allocated_loop_ids)?;
+
+    let ports = PortSlots::from_declarations(&declarations);
+    let rollback_ports = PortSlots::from_declarations(&declarations);
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Invariant: every thermal accumulator must have at least one
+        // equipment declarant matching its zone. A thermal accumulator
+        // with no equipment declarant indicates the env-zone safety-net
+        // loop was reintroduced, weakening wire-to-slot safety.
+        let declared_thermal_zones: HashSet<ZoneId> = declarations
+            .iter()
+            .filter(|d| d.port_type == hares_types::PortType::Thermal)
+            .filter_map(|d| d.zone)
+            .collect();
+        for acc in &ports.thermal {
+            if !declared_thermal_zones.contains(&acc.zone) {
+                tracing::warn!(
+                    zone = ?acc.zone,
+                    "thermal accumulator created for zone with no equipment declarant"
+                );
+            }
+        }
+    }
+
+    // Reject equipment configurations where two pieces of equipment wired
+    // to the same fluid loop_id declare different fluid types. This is a
+    // configuration error that would silently produce incorrect simulation
+    // results — the fluid solver groups by loop_id alone and uses the
+    // first entry's fluid_type for all entries, discarding contributions
+    // from the mismatched accumulator.
+    validate_fluid_type_consistency(&declarations).map_err(|err| {
+        HaresError::Dwelling(format!("fluid type consistency validation failed: {err}"))
+    })?;
+
+    let zone_types = environment.zone_types().to_vec();
+    let indoor_zone = solvers.thermal.config().indoor_zone_id;
+    let zone_names: Vec<(ZoneId, String)> = initial_env
+        .zones
+        .iter()
+        .map(|z| {
+            let zone_type = initial_env
+                .zones
+                .iter()
+                .position(|zt| zt.id == z.id)
+                .and_then(|idx| zone_types.get(idx));
+            (z.id, zone_display_name(z.id, indoor_zone, zone_type))
+        })
+        .collect();
+    let schema = build_schema(
+        &equipment_specs,
+        config.sim_config.output_verbosity,
+        &zone_names,
+    );
+    let output_value_count = schema.fields().len() - 1; // exclude timestamp
+    let output_column_index = build_output_column_index(&schema);
+    let output_path = config
+        .sim_config
+        .output_path
+        .clone()
+        .unwrap_or_else(|| default_output_path(&config));
+    let recorder = if config.sim_config.write_output {
+        Some(
+            StreamingRecorder::new(
+                schema,
+                config.sim_config.output_chunk_size,
+                config.sim_config.output_format,
+                &output_path,
+                config.sim_config.retain_batches,
+                config.sim_config.rotation,
+            )
+            .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?,
+        )
+    } else {
+        None
+    };
+
+    let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&bp.building);
+    let latitude_deg = bp.building.site.latitude_deg;
+    let facility_type = bp.building.residential_facility_type.clone();
+
+    let equipment_column_map = build_equipment_column_map(
+        &equipment,
+        &output_column_index,
+        config.sim_config.output_verbosity,
+    );
+    let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
+        .iter()
+        .map(|spec| {
+            let end_use = equipment_name_to_end_use(&spec.name);
+            let col_name = end_use_electric_power_column(&end_use);
+            output_column_index.get(&col_name).copied()
+        })
+        .collect();
+    let zone_types = environment.zone_types().to_vec();
+    let zone_caches = build_zone_column_caches(
+        &initial_env.zones,
+        &zone_types,
+        solvers.thermal.config().indoor_zone_id,
+        &output_column_index,
+    );
+    let record_scratch = vec![0.0; output_value_count];
+    let equipment_execution_order = compute_equipment_execution_order(&equipment);
+    let mut solver_feedback_actor = SolverFeedbackActor::new();
+    solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    let init_humidity_ratios: Vec<(ZoneId, f64)> = solvers
+        .humidity
+        .humidity_ratios
+        .iter()
+        .map(|(&z, &w)| (z, w))
+        .collect();
+
+    let mut dwelling = Dwelling {
+        bldg_id: config.bldg_id,
+        failed: false,
+        restored_from_checkpoint: false,
+        #[cfg(debug_assertions)]
+        test_panic_on_step: false,
+        #[cfg(debug_assertions)]
+        test_assert_panic_on_step: false,
+        #[cfg(debug_assertions)]
+        test_thermal_invariant_failure: false,
+        #[cfg(debug_assertions)]
+        test_hvac_negative_energy_failure: false,
+        equipment,
+        equipment_id_by_name,
+        thermal_solver: solvers.thermal,
+        humidity_solver: solvers.humidity,
+        electrical_solver: solvers.electrical,
+        fluid_solver: solvers.fluid,
+        clock: clock.clone(),
+        environment,
+        ports,
+        rollback_ports,
+        recorder,
+        rng,
+        warnings,
+        setpoints_reconciled_by_equipment,
+        roof_info,
+        wall_azimuths,
+        latitude_deg,
+        facility_type,
+        pv_panel_defaults: defaults.take_pv_panel_map(),
+        control_dispatcher: ControlDispatcher::default(),
+        price_signal: PriceSignal::default(),
+        tariff_evaluator: None,
+        billing_summaries: Vec::new(),
+        prior_electrical_summary: ElectricalSummary::default(),
+        latest_env: initial_env,
+        simulation_results: SimulationResults::default(),
+        custom_domain_solvers: Vec::new(),
+        thermal_update_buf: hares_types::DomainUpdate::empty(hares_types::THERMAL),
+        humidity_update_buf: hares_types::DomainUpdate::empty(hares_types::HUMIDITY),
+        electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
+        fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
+        custom_update_bufs: Vec::new(),
+        #[cfg(debug_assertions)]
+        stage_snapshot: None,
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        thermal_consistency_flag: true,
+        equipment_column_map,
+        end_use_aggregate_indices,
+        output_column_index,
+        output_value_count,
+        record_scratch,
+        timestamp_buf: String::with_capacity(32),
+        zone_temp_columns: zone_caches.temp_columns,
+        zone_infiltration_columns: zone_caches.infiltration_columns,
+        zone_lwr_columns: zone_caches.lwr_columns,
+        zone_hvac_columns: zone_caches.hvac_columns,
+        zone_temp_scratch: zone_caches
+            .sorted_zone_ids
+            .iter()
+            .map(|&z| (z, 0.0))
+            .collect(),
+        sorted_zone_ids: zone_caches.sorted_zone_ids,
+        zone_env_indices: zone_caches.zone_env_indices,
+        zone_temp_col_indices: zone_caches.zone_temp_col_indices,
+        occupancy_column_idx,
+        occupancy_scale,
+        zone_capacitances_j_k: solvers.zone_capacitances_j_k,
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        prev_humidity_ratios: init_humidity_ratios,
+        actors: Vec::new(),
+        scheduler: StepScheduler::default(),
+        actor_column_map: Vec::new(),
+        auto_registered_actor_names: HashSet::new(),
+        actor_dispatch_buf: Vec::with_capacity(16),
+        solver_feedback_actor,
+        prev_zone_temps: HashMap::new(),
+        prior_zone_temps: HashMap::new(),
+        prev_price_signal: PriceSignal::default(),
+        prev_equipment_modes: HashMap::new(),
+        equipment_execution_order,
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_checker: InvariantChecker::new(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_conditioned_temps: Vec::with_capacity(bp.building.zones.len()),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_unconditioned_temps: Vec::with_capacity(bp.building.zones.len()),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_tank_temps: Vec::new(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        tank_node_keys: (0..24).map(tk::tank_node_key).collect(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_infiltration_latent: Vec::new(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_infiltration_m_dot: HashMap::new(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        invariant_infiltration_w_outdoor: HashMap::new(),
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        is_warming_up: false,
+        #[cfg(all(
+            feature = "observe",
+            any(debug_assertions, feature = "check_invariants")
+        ))]
+        invariant_moisture_capture: Vec::new(),
+    zone_is_conditioned: if bp.building.zones.is_empty() {
+        vec![true]
+    } else {
+        bp.building
+            .zones
+            .iter()
+            .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+            .collect()
+    },
+        output_verbosity: config.sim_config.output_verbosity,
+        output_chunk_size: config.sim_config.output_chunk_size,
+        output_format: config.sim_config.output_format,
+        output_path: output_path.clone(),
+        write_output: config.sim_config.write_output,
+        retain_batches: config.sim_config.retain_batches,
+        output_rotation: config.sim_config.rotation,
+        diagnostic_writer: None,
+        #[cfg(feature = "profiling")]
+        profiling: DwellingProfilingSummary::default(),
+        #[cfg(feature = "actor_profiling")]
+        per_actor_timing: Vec::new(),
+        #[cfg(feature = "actor_profiling")]
+        actor_name_cache: Vec::new(),
+        #[cfg(feature = "observe")]
+        observer_buf: None,
+        #[cfg(feature = "observe")]
+        rolled_back_port_equipment: 0,
+        #[cfg(feature = "observe")]
+        nan_temperature_count: 0,
+        #[cfg(feature = "observe")]
+        unresolved_column_count: 0,
+        #[cfg(feature = "observe")]
+        diagnostic_accum: None,
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        envelope_diagnostics: solvers.envelope_diagnostics,
+    };
+
+    dwelling.auto_register_actors();
+
+    if let Some(_init_dur) = config.initialization_duration {
+        // Save RNG state before warmup. The clock is reset after warmup for
+        // weather replay; restoring the RNG ensures the production phase
+        // starts from the same RNG position regardless of how many warmup
+        // iterations were needed. Two runs with the same initial seed
+        // produce identical stochastic output even when warmup converges
+        // in a different number of iterations.
+        let rng_seed_before = dwelling.rng.get_seed();
+        let rng_stream_before = dwelling.rng.get_stream();
+        let rng_word_pos_before = dwelling.rng.get_word_pos();
+
+        #[allow(
+            unused_variables,
+            reason = "iterations is logged in the observe feature block below; #[cfg(feature = \"observe\")] gates the only use site"
+        )]
+        let iterations = dwelling.run_warmup_converged(0.5, 25)?;
+
+        #[cfg(feature = "observe")]
+        let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
+
+        // Restore RNG state to pre-warmup position.
+        let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
+        restored_rng.set_stream(rng_stream_before);
+        restored_rng.set_word_pos(rng_word_pos_before);
+        dwelling.rng = restored_rng;
+
+        #[cfg(feature = "observe")]
+        {
+            let rng_delta = (rng_word_pos_after_warmup as i128) - (rng_word_pos_before as i128);
+            tracing::debug!(
+                warmup_iterations = iterations,
+                rng_word_pos_delta = rng_delta,
+                "warmup complete; RNG restored for production-phase reproducibility"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert_eq!(
+                dwelling.rng.get_word_pos(),
+                rng_word_pos_before,
+                "RNG word_pos changed during warmup; restoration failed"
+            );
+        }
+
+        clock = SimClock::new(
             local_start,
             config.sim_config.time_res,
-            config.sim_config.duration + init_chrono,
+            config.sim_config.duration,
         );
         #[cfg(feature = "dst")]
         {
             clock.civil_tz = parsed_civil_tz;
         }
-
-        let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
-        let weather_avgs = compute_weather_averages(&weather);
-        let weather_design_conditions = weather.design_conditions;
-        let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
-        let mut environment = EnvironmentManager::new_with_resample(
-            weather,
-            schedule,
-            &building,
-            time_res,
-            local_start,
-            EnvironmentInitOptions {
-                civil_timezone: config.sim_config.civil_timezone.as_deref(),
-                resample_overrides: config.resample_overrides.as_ref(),
-                initial_rng: Some(rng.clone()),
-                setpoint_deadband_c: config.sim_config.setpoint_deadband_c,
-            },
-        )
-        .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
-
-        let mut warnings = Vec::new();
-        let defaults_dir = config
-            .defaults_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("defaults"));
-        let resolved_defaults_dir = if defaults_dir.exists() {
-            defaults_dir.clone()
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
-        };
-        let mut defaults = match DefaultsStore::load(&resolved_defaults_dir) {
-            Ok(store) => store,
-            Err(err) => {
-                warnings.push(format!(
-                    "defaults load failed; using empty defaults store: {err}"
-                ));
-                DefaultsStore::empty()
-            }
-        };
-
-        let empty_overrides = Value::Object(Map::new());
-
-        let mut equipment_specs = resolve_equipment(
-            &building,
-            &defaults,
-            &empty_overrides,
-            config.patches.as_ref(),
-        )
-        .map_err(|e| HaresError::Io(e.to_string()))?;
-
-        // Centralized fluid loop ID allocation — must run after wiring
-        // (resolve_loop_wiring, inside resolve_equipment) and before
-        // equipment construction so every instance receives a unique
-        // loop ID above the wired range.
-        loop_allocator::allocate_loop_ids(&mut equipment_specs);
-
-        // Register PV surfaces with the environment so Perez irradiance is
-        // computed for PV orientations (which may not match any envelope surface).
-        register_pv_surfaces(&equipment_specs, &mut environment);
-
-        // Auto-attach PV arrays to the closest matching roof surface and
-        // register shading coverage on attached roofs.
-        attach_pv_to_roofs(&mut equipment_specs, &building);
-        register_pv_roof_shading(&equipment_specs, &building, &mut environment);
-
-        let initial_env = environment.update(&clock, &[])?;
-
-        let solvers = build_default_solvers(
-            &initial_env,
-            &config.sim_config,
-            &building,
-            &defaults,
-            &weather_avgs,
-            &equipment_specs,
-        )?;
-
-        // ── Autosize HVAC capacities at design conditions ──────────────────────
-        //
-        // When HPXML omits HeatingCapacity/CoolingCapacity, compute the required
-        // capacity from the building's thermal envelope model at ASHRAE design
-        // outdoor conditions. Uses EPW "Extremes" header (preferred) or ASHRAE 152
-        // climate station lookup (fallback).
-        //
-        // Must run after the thermal solver is built (it needs the RC model) and
-        // before equipment creation (it sets capacities on equipment specs).
-        // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
-        {
-            let duct_params =
-                match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&building) {
-                    Ok(dp) => dp,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "autosizing: duct DSE params unavailable; using defaults"
-                        );
-                        hares_io::hpxml::resolve_hvac::DuctDseParams::default()
-                    }
-                };
-
-            let indoor_zone = solvers.thermal.config().indoor_zone_id;
-
-            let ctx = crate::dwelling::autosize::AutosizeContext {
-                design_conditions: weather_design_conditions,
-                weather_lat: site_location.latitude_deg,
-                weather_lon: site_location.longitude_deg,
-                duct_params,
-                internal_gains_w: 0.0,
-                internal_gains_latent_w: 0.0,
-            };
-
-            crate::dwelling::autosize::autosize_equipment_capacities(
-                &mut equipment_specs,
-                &solvers.thermal,
-                &ctx,
-                &building,
-                indoor_zone,
-            );
-        }
-
-        // ── Autosize water heater capacities ────────────────────────────────
-        //
-        // When HPXML water heaters omit HeatingCapacity or TankVolume,
-        // compute the required capacity and storage volume using a First-Hour
-        // Rating methodology (DOE 10 CFR Part 430 Subpart B Appendix E).
-        // Tank volume is sized by bedroom count; heating capacity is computed
-        // from the required FHR, usable tank volume, and design temperature
-        // rise (setpoint − mains temperature).
-        //
-        // Runs after HVAC autosizing (no dependency between them) and before
-        // equipment creation.
-        {
-            // FHR sizing by bedroom count is a structural property (number of
-            // bedrooms), not an occupancy proxy. The occupancy-adjusted bedroom
-            // count used by parse_avg_water_draw_and_bedrooms for draw estimation
-            // is intentionally NOT used here so the structural count drives the
-            // per-bedroom FHR values (DOE 10 CFR Part 430 App E test procedure
-            // bases sizing on the dwelling, not on occupancy).
-            let n_bedrooms =
-                hares_io::hpxml::extract_bedroom_count(&building, config.patches.as_ref());
-            crate::dwelling::autosize::autosize_water_heater_capacities(
-                &mut equipment_specs,
-                Some(n_bedrooms),
-                initial_env.weather.mains_temp_c,
-            );
-        }
-
-        // Enable ideal HVAC on the indoor zone when both heating AND cooling
-        // setpoints are configured -- the thermal solver back-calculates the exact
-        // load needed to maintain the setpoint at each timestep.
-        hares_io::inject_schedule_into_specs(
-            &mut equipment_specs,
-            environment.schedule_mut(),
-            Some(&resolved_defaults_dir),
+        dwelling.clock = clock;
+    } else {
+        tracing::warn!(
+            bldg_id = config.bldg_id,
+            "initialization_duration is None — no warm-up period will run; \
+             this produces biased heat-transfer predictions for heavyweight \
+             construction. Set initialization_duration to at least 7 days \
+             (604800 s) for concrete/masonry buildings."
         );
-
-        // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
-        // which may generate an occupancy column from HPXML extension fractions or
-        // the default schedule profile when the schedule CSV lacks one.
-        let occupancy_column_idx = environment.occupancy_column_idx();
-
-        // Gated invariant: ensure every HVAC spec has a setpoint source.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            hares_io::check_hvac_setpoint_invariants(&equipment_specs);
-            hares_io::check_foundation_zone_invariant(&building);
-            hares_io::check_mode_ordinals_invariant();
-        }
-        let override_root = config
-            .overrides
-            .clone()
-            .unwrap_or_else(|| Value::Object(Map::new()));
-
-        // Read number_of_occupants from the Occupancy spec to scale the raw
-        // schedule fraction (0–1) into a person count for internal heat gains.
-        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
-        let has_occupancy_spec;
-        let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
-            Some(spec) => {
-                #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
-                {
-                    has_occupancy_spec = true;
-                }
-                let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
-                    HaresError::Equipment(
-                        "Occupancy spec is missing required key 'number_of_occupants'".into(),
-                    )
-                })?;
-                val.as_f64().ok_or_else(|| {
-                    HaresError::Equipment(format!(
-                        "Occupancy 'number_of_occupants' must be a valid number, got: {val}"
-                    ))
-                })?
-            }
-            None => {
-                #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
-                {
-                    has_occupancy_spec = false;
-                }
-                1.0
-            }
-        };
-
-        // Invariant: number_of_occupants must be non-negative regardless of
-        // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
-        // A negative value indicates a data error in the parser or input.
-        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
-        if has_occupancy_spec && occupancy_scale < 0.0 {
-            return Err(HaresError::Dwelling(format!(
-                "Occupancy 'number_of_occupants' must be non-negative; got {}; \
-                 this indicates a data problem in the HPXML parser's occupant-count \
-                 derivation",
-                occupancy_scale
-            )));
-        }
-
-        // Invariant: if an Occupancy spec was configured the schedule MUST have an
-        // occupancy column. `inject_schedule_into_specs` is responsible for generating
-        // the column from HPXML extension fractions or the default profile when the
-        // schedule CSV lacks one. Absence of both a column AND schedule fractions on the
-        // spec is a data integrity error — either the defaults CSV is missing or the
-        // Occupancy spec was created without any schedule data source.
-        //
-        // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
-        // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
-        // cooling load; silently zeroing it produces a systematic underestimate.
-        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
-        if has_occupancy_spec && occupancy_column_idx.is_none() {
-            let has_hpxml_fractions = equipment_specs
-                .iter()
-                .find(|s| s.name == "Occupancy")
-                .map(|s| {
-                    s.parameters.contains_key("weekday_schedule_fractions")
-                        || s.parameters.contains_key("weekend_schedule_fractions")
-                })
-                .unwrap_or(false);
-            let detail = if has_hpxml_fractions {
-                "Occupancy spec has HPXML extension schedule fractions but the \
-                 occupancy column was not generated in the schedule timeseries. \
-                 This is a bug in schedule_resolve::inject_occupancy_schedule — \
-                 the HPXML profile should have been converted to a schedule column."
-            } else {
-                "Occupancy spec configured but no occupancy column found in schedule \
-                 AND no HPXML schedule fractions available on the spec. The default \
-                 Occupancy profile from Default Schedule Parameters.csv may be missing \
-                 or unreadable."
-            };
-            return Err(HaresError::Dwelling(detail.into()));
-        }
-
-        // Build zone-to-role map for equipment auto-routing.
-        // Maps semantic zone roles (Indoor, Garage, Basement, etc.) to concrete
-        // ZoneId values derived from the sorted building zone list.
-        let zone_map = {
-            let mut map = ZoneMap::new();
-            for (idx, zone) in building.zones.iter().enumerate() {
-                let id = ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX));
-                match &zone.zone_type {
-                    hares_io::hpxml::ZoneType::Conditioned => {
-                        map.insert(ZoneRole::Indoor, id);
-                    }
-                    hares_io::hpxml::ZoneType::Garage => {
-                        map.insert(ZoneRole::Garage, id);
-                    }
-                    hares_io::hpxml::ZoneType::Foundation => {
-                        map.insert(ZoneRole::Basement, id);
-                        map.insert(ZoneRole::Crawlspace, id);
-                    }
-                    hares_io::hpxml::ZoneType::Attic => {
-                        map.insert(ZoneRole::Attic, id);
-                    }
-                    // Not modelled thermal zones — intentionally excluded from ZoneMap.
-                    hares_io::hpxml::ZoneType::Outdoor
-                    | hares_io::hpxml::ZoneType::Ground
-                    | hares_io::hpxml::ZoneType::Adjacent => {}
-                    hares_io::hpxml::ZoneType::Other(_) => {}
-                }
-            }
-            map
-        };
-
-        // Invariant: after zone map construction, verify that every Attic zone's
-        // `vented` flag is consistent. By default (no `<Attics>` group in HPXML),
-        // attics are vented (ASHRAE 152-2004 default; OCHRE hpxml.py:635 Vented=True).
-        // An unvented attic must come from an explicit `<AtticType><Attic><Vented>false`
-        // declaration.
-        //
-        // Known limitation: this block emits observability logs but does not assert.
-        // The fix at crates/hares-io/src/hpxml/building.rs (T-0206) makes the
-        // `ensure_referenced_zones_exist` / `build_zone_map` divergence structurally
-        // impossible — both paths now set `vented: true` for attics — so a runtime
-        // assertion would never fire in practice. The `tracing::debug!` log remains as
-        // a low-cost diagnostic to confirm attic zone vented status during development.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            for zone in &building.zones {
-                if zone.zone_type == hares_io::hpxml::ZoneType::Attic {
-                    tracing::debug!(
-                        vented = zone.vented,
-                        floor_area_m2 = zone.floor_area_m2,
-                        "dwelling assembly: Attic zone vented status"
-                    );
-                }
-            }
-        }
-
-        // Equipment names whose loads are handled outside the registry (e.g. directly in the
-        // simulation loop) -- silently skip them rather than emitting a warning.
-        const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
-
-        let mut setpoints_reconciled_by_equipment: HashMap<
-            String,
-            Option<Vec<SetpointReconciliation>>,
-        > = HashMap::new();
-
-        let registry = EquipmentRegistry::new();
-        let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
-        let mut rng_event_stream_idx: u64 = 0;
-        for spec in &equipment_specs {
-            if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
-                continue;
-            }
-            let sub_rng = derive_sub_rng(&rng, RNG_STREAM_EVENT_LOAD_BASE + rng_event_stream_idx);
-            rng_event_stream_idx += 1;
-            let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
-
-            let mut merged_cfg = merged_equipment_config(spec, &override_root);
-            setpoints_reconciled_by_equipment.insert(
-                merged_cfg.name.clone(),
-                merged_cfg.setpoints_reconciled.clone(),
-            );
-            merged_cfg.zone_map = Some(zone_map.clone());
-            merged_cfg.rng_seed = Some(sub_rng.get_seed());
-            match eq.init(&merged_cfg, &initial_env) {
-                Ok(()) => equipment.push(eq),
-                Err(err) => {
-                    let end_use = eq.descriptor().end_use.clone();
-                    let is_critical = end_use == EndUse::HVAC_HEATING
-                        || end_use == EndUse::HVAC_COOLING
-                        || end_use == EndUse::WATER_HEATING
-                        || end_use == EndUse::EV
-                        || end_use == EndUse::BATTERY
-                        || end_use == EndUse::PV;
-                    if is_critical {
-                        return Err(HaresError::Equipment(format!(
-                            "equipment '{}' init failed: {err}",
-                            merged_cfg.name
-                        )));
-                    }
-                    let msg = format!(
-                        "equipment '{}' init failed, skipping: {err}",
-                        merged_cfg.name
-                    );
-                    tracing::error!("{msg}");
-                    warnings.push(msg);
-                }
-            }
-        }
-        let mut equipment_id_by_name = HashMap::with_capacity(equipment.len());
-        for eq in &equipment {
-            let desc = eq.descriptor();
-            if equipment_id_by_name
-                .insert(desc.name.clone(), desc.id)
-                .is_some()
-            {
-                return Err(HaresError::Equipment(format!(
-                    "duplicate equipment name '{}' is not allowed",
-                    desc.name
-                )));
-            }
-        }
-
-        let mut declarations: Vec<PortDeclaration> = Vec::new();
-        for eq in &equipment {
-            declarations.extend_from_slice(eq.ports());
-        }
-
-        let env_zone_ids: HashSet<ZoneId> = initial_env.zones.iter().map(|z| z.id).collect();
-        validate_equipment_zones(&declarations, &env_zone_ids)?;
-
-        let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs);
-        // Sentinel loop IDs always valid — well-known addresses used by
-        // equipment as sentinels when no typed config is available (0) or
-        // for the shared DHW demand loop (u16::MAX - 1).
-        allocated_loop_ids.insert(0); // LoopId::default() — fallback for raw-config equipment
-        allocated_loop_ids.insert(hares_equipment::DHW_DEMAND_LOOP.0);
-        validate_equipment_loops(&declarations, &allocated_loop_ids)?;
-
-        let ports = PortSlots::from_declarations(&declarations);
-        let rollback_ports = PortSlots::from_declarations(&declarations);
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            // Invariant: every thermal accumulator must have at least one
-            // equipment declarant matching its zone. A thermal accumulator
-            // with no equipment declarant indicates the env-zone safety-net
-            // loop was reintroduced, weakening wire-to-slot safety.
-            let declared_thermal_zones: HashSet<ZoneId> = declarations
-                .iter()
-                .filter(|d| d.port_type == hares_types::PortType::Thermal)
-                .filter_map(|d| d.zone)
-                .collect();
-            for acc in &ports.thermal {
-                if !declared_thermal_zones.contains(&acc.zone) {
-                    tracing::warn!(
-                        zone = ?acc.zone,
-                        "thermal accumulator created for zone with no equipment declarant"
-                    );
-                }
-            }
-        }
-
-        // Reject equipment configurations where two pieces of equipment wired
-        // to the same fluid loop_id declare different fluid types. This is a
-        // configuration error that would silently produce incorrect simulation
-        // results — the fluid solver groups by loop_id alone and uses the
-        // first entry's fluid_type for all entries, discarding contributions
-        // from the mismatched accumulator.
-        validate_fluid_type_consistency(&declarations).map_err(|err| {
-            HaresError::Dwelling(format!("fluid type consistency validation failed: {err}"))
-        })?;
-
-        let zone_types = environment.zone_types().to_vec();
-        let indoor_zone = solvers.thermal.config().indoor_zone_id;
-        let zone_names: Vec<(ZoneId, String)> = initial_env
-            .zones
-            .iter()
-            .map(|z| {
-                let zone_type = initial_env
-                    .zones
-                    .iter()
-                    .position(|zt| zt.id == z.id)
-                    .and_then(|idx| zone_types.get(idx));
-                (z.id, zone_display_name(z.id, indoor_zone, zone_type))
-            })
-            .collect();
-        let schema = build_schema(
-            &equipment_specs,
-            config.sim_config.output_verbosity,
-            &zone_names,
-        );
-        let output_value_count = schema.fields().len() - 1; // exclude timestamp
-        let output_column_index = build_output_column_index(&schema);
-        let output_path = config
-            .sim_config
-            .output_path
-            .clone()
-            .unwrap_or_else(|| default_output_path(&config));
-        let recorder = if config.sim_config.write_output {
-            Some(
-                StreamingRecorder::new(
-                    schema,
-                    config.sim_config.output_chunk_size,
-                    config.sim_config.output_format,
-                    &output_path,
-                    config.sim_config.retain_batches,
-                    config.sim_config.rotation,
-                )
-                .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?,
-            )
-        } else {
-            None
-        };
-
-        let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
-        let latitude_deg = building.site.latitude_deg;
-        let facility_type = building.residential_facility_type.clone();
-
-        let equipment_column_map = build_equipment_column_map(
-            &equipment,
-            &output_column_index,
-            config.sim_config.output_verbosity,
-        );
-        let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
-            .iter()
-            .map(|spec| {
-                let end_use = equipment_name_to_end_use(&spec.name);
-                let col_name = end_use_electric_power_column(&end_use);
-                output_column_index.get(&col_name).copied()
-            })
-            .collect();
-        let zone_types = environment.zone_types().to_vec();
-        let zone_caches = build_zone_column_caches(
-            &initial_env.zones,
-            &zone_types,
-            solvers.thermal.config().indoor_zone_id,
-            &output_column_index,
-        );
-        let record_scratch = vec![0.0; output_value_count];
-        let equipment_execution_order = compute_equipment_execution_order(&equipment);
-        let mut solver_feedback_actor = SolverFeedbackActor::new();
-        solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        let init_humidity_ratios: Vec<(ZoneId, f64)> = solvers
-            .humidity
-            .humidity_ratios
-            .iter()
-            .map(|(&z, &w)| (z, w))
-            .collect();
-
-        let mut dwelling = Self {
-            bldg_id: config.bldg_id,
-            failed: false,
-            restored_from_checkpoint: false,
-            #[cfg(debug_assertions)]
-            test_panic_on_step: false,
-            #[cfg(debug_assertions)]
-            test_assert_panic_on_step: false,
-            #[cfg(debug_assertions)]
-            test_thermal_invariant_failure: false,
-            #[cfg(debug_assertions)]
-            test_hvac_negative_energy_failure: false,
-            equipment,
-            equipment_id_by_name,
-            thermal_solver: solvers.thermal,
-            humidity_solver: solvers.humidity,
-            electrical_solver: solvers.electrical,
-            fluid_solver: solvers.fluid,
-            clock: clock.clone(),
-            environment,
-            ports,
-            rollback_ports,
-            recorder,
-            rng,
-            warnings,
-            setpoints_reconciled_by_equipment,
-            roof_info,
-            wall_azimuths,
-            latitude_deg,
-            facility_type,
-            pv_panel_defaults: defaults.take_pv_panel_map(),
-            control_dispatcher: ControlDispatcher::default(),
-            price_signal: PriceSignal::default(),
-            tariff_evaluator: None,
-            billing_summaries: Vec::new(),
-            prior_electrical_summary: ElectricalSummary::default(),
-            latest_env: initial_env,
-            simulation_results: SimulationResults::default(),
-            custom_domain_solvers: Vec::new(),
-            thermal_update_buf: hares_types::DomainUpdate::empty(hares_types::THERMAL),
-            humidity_update_buf: hares_types::DomainUpdate::empty(hares_types::HUMIDITY),
-            electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
-            fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
-            custom_update_bufs: Vec::new(),
-            #[cfg(debug_assertions)]
-            stage_snapshot: None,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            thermal_consistency_flag: true,
-            equipment_column_map,
-            end_use_aggregate_indices,
-            output_column_index,
-            output_value_count,
-            record_scratch,
-            timestamp_buf: String::with_capacity(32),
-            zone_temp_columns: zone_caches.temp_columns,
-            zone_infiltration_columns: zone_caches.infiltration_columns,
-            zone_lwr_columns: zone_caches.lwr_columns,
-            zone_hvac_columns: zone_caches.hvac_columns,
-            zone_temp_scratch: zone_caches
-                .sorted_zone_ids
-                .iter()
-                .map(|&z| (z, 0.0))
-                .collect(),
-            sorted_zone_ids: zone_caches.sorted_zone_ids,
-            zone_env_indices: zone_caches.zone_env_indices,
-            zone_temp_col_indices: zone_caches.zone_temp_col_indices,
-            occupancy_column_idx,
-            occupancy_scale,
-            zone_capacitances_j_k: solvers.zone_capacitances_j_k,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            prev_humidity_ratios: init_humidity_ratios,
-            actors: Vec::new(),
-            scheduler: StepScheduler::default(),
-            actor_column_map: Vec::new(),
-            auto_registered_actor_names: HashSet::new(),
-            actor_dispatch_buf: Vec::with_capacity(16),
-            solver_feedback_actor,
-            prev_zone_temps: HashMap::new(),
-            prior_zone_temps: HashMap::new(),
-            prev_price_signal: PriceSignal::default(),
-            prev_equipment_modes: HashMap::new(),
-            equipment_execution_order,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_checker: InvariantChecker::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_conditioned_temps: Vec::with_capacity(building.zones.len()),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_unconditioned_temps: Vec::with_capacity(building.zones.len()),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_tank_temps: Vec::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            tank_node_keys: (0..24).map(tk::tank_node_key).collect(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_infiltration_latent: Vec::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_infiltration_m_dot: HashMap::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            invariant_infiltration_w_outdoor: HashMap::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            is_warming_up: false,
-            #[cfg(all(
-                feature = "observe",
-                any(debug_assertions, feature = "check_invariants")
-            ))]
-            invariant_moisture_capture: Vec::new(),
-            zone_is_conditioned: if building.zones.is_empty() {
-                vec![true]
-            } else {
-                building
-                    .zones
-                    .iter()
-                    .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
-                    .collect()
-            },
-            output_verbosity: config.sim_config.output_verbosity,
-            output_chunk_size: config.sim_config.output_chunk_size,
-            output_format: config.sim_config.output_format,
-            output_path: output_path.clone(),
-            write_output: config.sim_config.write_output,
-            retain_batches: config.sim_config.retain_batches,
-            output_rotation: config.sim_config.rotation,
-            diagnostic_writer: None,
-            #[cfg(feature = "profiling")]
-            profiling: DwellingProfilingSummary::default(),
-            #[cfg(feature = "actor_profiling")]
-            per_actor_timing: Vec::new(),
-            #[cfg(feature = "actor_profiling")]
-            actor_name_cache: Vec::new(),
-            #[cfg(feature = "observe")]
-            observer_buf: None,
-            #[cfg(feature = "observe")]
-            rolled_back_port_equipment: 0,
-            #[cfg(feature = "observe")]
-            nan_temperature_count: 0,
-            #[cfg(feature = "observe")]
-            unresolved_column_count: 0,
-            #[cfg(feature = "observe")]
-            diagnostic_accum: None,
-            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            envelope_diagnostics: solvers.envelope_diagnostics,
-        };
-
-        dwelling.auto_register_actors();
-
-        if let Some(_init_dur) = config.initialization_duration {
-            // Save RNG state before warmup. The clock is reset after warmup for
-            // weather replay; restoring the RNG ensures the production phase
-            // starts from the same RNG position regardless of how many warmup
-            // iterations were needed. Two runs with the same initial seed
-            // produce identical stochastic output even when warmup converges
-            // in a different number of iterations.
-            let rng_seed_before = dwelling.rng.get_seed();
-            let rng_stream_before = dwelling.rng.get_stream();
-            let rng_word_pos_before = dwelling.rng.get_word_pos();
-
-            #[allow(
-                unused_variables,
-                reason = "iterations is logged in the observe feature block below; #[cfg(feature = \"observe\")] gates the only use site"
-            )]
-            let iterations = dwelling.run_warmup_converged(0.5, 25)?;
-
-            #[cfg(feature = "observe")]
-            let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
-
-            // Restore RNG state to pre-warmup position.
-            let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
-            restored_rng.set_stream(rng_stream_before);
-            restored_rng.set_word_pos(rng_word_pos_before);
-            dwelling.rng = restored_rng;
-
-            #[cfg(feature = "observe")]
-            {
-                let rng_delta = (rng_word_pos_after_warmup as i128) - (rng_word_pos_before as i128);
-                tracing::debug!(
-                    warmup_iterations = iterations,
-                    rng_word_pos_delta = rng_delta,
-                    "warmup complete; RNG restored for production-phase reproducibility"
-                );
-            }
-
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                assert_eq!(
-                    dwelling.rng.get_word_pos(),
-                    rng_word_pos_before,
-                    "RNG word_pos changed during warmup; restoration failed"
-                );
-            }
-
-            clock = SimClock::new(
-                local_start,
-                config.sim_config.time_res,
-                config.sim_config.duration,
-            );
-            #[cfg(feature = "dst")]
-            {
-                clock.civil_tz = parsed_civil_tz;
-            }
-            dwelling.clock = clock;
-        } else {
-            tracing::warn!(
-                bldg_id = config.bldg_id,
-                "initialization_duration is None — no warm-up period will run; \
-                 this produces biased heat-transfer predictions for heavyweight \
-                 construction. Set initialization_duration to at least 7 days \
-                 (604800 s) for concrete/masonry buildings."
-            );
-        }
-
-        // Initialise diagnostic CSV when output_verbosity >= 4.
-        dwelling.diagnostic_writer = if dwelling.output_verbosity >= 4 {
-            let stem = output_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
-            let diag_path = output_path.with_file_name(format!("{stem}_diagnostics.csv"));
-            tracing::info!(
-                path = %diag_path.display(),
-                "diagnostic CSV output enabled (output_verbosity >= 4)"
-            );
-            let file = std::fs::File::create(&diag_path)
-                .map_err(|err| HaresError::Io(format!("diagnostic file create failed: {err}")))?;
-            let mut writer = std::io::BufWriter::new(file);
-            let n_zones = dwelling.latest_env.zones.len();
-            diagnostics::write_header(&mut writer, n_zones);
-            // Emit equipment zone-id mapping so zone routing is traceable.
-            let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
-                .equipment
-                .iter()
-                .filter_map(|eq| {
-                    eq.descriptor().zone.map(|z| {
-                        (
-                            eq.descriptor().name.clone(),
-                            z.0,
-                            eq.descriptor().zone_type.clone(),
-                        )
-                    })
-                })
-                .collect();
-            diagnostics::write_equipment_init(&mut writer, &equipment_zones);
-            Some(writer)
-        } else {
-            None
-        };
-
-        Ok(dwelling)
     }
 
+    // Initialise diagnostic CSV when output_verbosity >= 4.
+    dwelling.diagnostic_writer = if dwelling.output_verbosity >= 4 {
+        let stem = output_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
+        let diag_path = output_path.with_file_name(format!("{stem}_diagnostics.csv"));
+        tracing::info!(
+            path = %diag_path.display(),
+            "diagnostic CSV output enabled (output_verbosity >= 4)"
+        );
+        let file = std::fs::File::create(&diag_path)
+            .map_err(|err| HaresError::Io(format!("diagnostic file create failed: {err}")))?;
+        let mut writer = std::io::BufWriter::new(file);
+        let n_zones = dwelling.latest_env.zones.len();
+        diagnostics::write_header(&mut writer, n_zones);
+        // Emit equipment zone-id mapping so zone routing is traceable.
+        let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
+            .equipment
+            .iter()
+            .filter_map(|eq| {
+                eq.descriptor().zone.map(|z| {
+                    (
+                        eq.descriptor().name.clone(),
+                        z.0,
+                        eq.descriptor().zone_type.clone(),
+                    )
+                })
+            })
+            .collect();
+        diagnostics::write_equipment_init(&mut writer, &equipment_zones);
+        Some(writer)
+    } else {
+        None
+    };
+
+    Ok(dwelling)
+}
+
+impl Dwelling {
     /// Runs the full configured horizon and returns accumulated results.
     pub fn simulate(&mut self) -> Result<SimulationResults> {
         while self.clock.current_step() < self.clock.total_steps() {

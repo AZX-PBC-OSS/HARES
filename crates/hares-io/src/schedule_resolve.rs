@@ -504,6 +504,8 @@ pub fn inject_schedule_into_specs(
 pub(crate) const HEATING_EQUIPMENT: &[&str] = &[
     "ASHP Heater",
     "MSHP Heater",
+    "GSHP Heater",
+    "WSHP Heater",
     "Gas Furnace",
     "Electric Furnace",
     "Oil Furnace",
@@ -515,7 +517,7 @@ pub(crate) const HEATING_EQUIPMENT: &[&str] = &[
 
 /// HVAC equipment names that consume cooling setpoints.
 pub(crate) const COOLING_EQUIPMENT: &[&str] =
-    &["ASHP Cooler", "MSHP Cooler", "Air Conditioner", "Room AC"];
+    &["ASHP Cooler", "MSHP Cooler", "GSHP Cooler", "WSHP Cooler", "Air Conditioner", "Room AC"];
 
 fn spec_has_setpoint_source(spec: &EquipmentSpec, prefix: &str) -> bool {
     let key = format!("{prefix}_setpoint_source");
