@@ -333,7 +333,7 @@ pub(super) fn parse_usize(raw: Option<f64>) -> Option<usize> {
 ///
 /// Implements the OCHRE ZIP model (Equipment.py `run_zip`, lines 200-218):
 /// - `P_actual = P_rated * (z * V² + i * V + p)` where V = v / v0 (per-unit)
-/// - `Q_actual = P_actual * pf * (zq * V² + iq * V + pq)`
+/// - `Q_actual = P_actual * tan(acos(pf)) * (zq * V² + iq * V + pq)`
 ///
 /// Default is constant-power load (z=0, i=0, p=1, pf=0).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -404,6 +404,8 @@ impl WaterHeaterZip {
     ///
     /// Returns `(active_power_w, reactive_power_kvar)`.
     /// Returns `(0.0, 0.0)` when `rated_w` is zero or voltage is zero (grid outage).
+    /// When `pf ≈ 0`, no reactive power is produced — `pf = 0` is the
+    /// default sentinel for "no ZIP reactive coefficients configured."
     pub(super) fn apply(&self, rated_w: f64, voltage_pu: f64) -> (f64, f64) {
         if rated_w == 0.0 || voltage_pu == 0.0 {
             return (0.0, 0.0);
@@ -412,10 +414,16 @@ impl WaterHeaterZip {
         let real_mult = self.z * v_norm * v_norm + self.i * v_norm + self.p;
         let actual_w = rated_w * real_mult;
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
+        // pf = 0 is the sentinel for "no reactive ZIP configured" — skip
+        // tan(acos(0.0)) which diverges, and produce zero reactive power.
         // Q = P × tan(acos(pf)) × reactive_base
         // tan(acos(pf)) converts from power factor to reactive/active power ratio.
-        let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
-        let reactive_kvar = actual_w / 1_000.0 * tan_phi * reactive_base;
+        let reactive_kvar = if self.pf.abs() < 1e-9 {
+            0.0
+        } else {
+            let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
+            actual_w / 1_000.0 * tan_phi * reactive_base
+        };
         (actual_w, reactive_kvar)
     }
 }

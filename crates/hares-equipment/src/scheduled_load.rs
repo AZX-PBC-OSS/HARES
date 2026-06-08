@@ -67,12 +67,35 @@ pub(crate) struct ZipCoefficients {
 }
 
 impl ZipCoefficients {
+    /// Apply ZIP voltage-dependent scaling to scheduled power.
+    ///
+    /// Returns `(real_kw, reactive_kvar)`.
+    /// `pf` is a power factor (cos φ); reactive power converts via
+    /// `tan(acos(pf))` to obtain the reactive/active power ratio.
+    /// OCHRE Equipment.py:74 constructs `pf_mult = np.tan(np.arccos(kwargs["pf"]))`.
+    /// When `pf ≈ 0`, no reactive power is produced — `pf = 0` is the
+    /// default sentinel for "no ZIP reactive coefficients configured."
     pub(crate) fn apply(&self, p_kw: f64, voltage_pu: f64) -> (f64, f64) {
         let v_norm = voltage_pu / self.v0;
         let zip_multiplier = self.z * v_norm * v_norm + self.i * v_norm + self.p_coeff;
         let real_kw = p_kw * zip_multiplier;
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
-        let reactive_kvar = real_kw * self.pf * reactive_base;
+        // pf = 0 is the sentinel for "no reactive ZIP configured" — skip
+        // tan(acos(0.0)) which diverges, and produce zero reactive power.
+        let reactive_kvar = if self.pf.abs() < 1e-9 {
+            0.0
+        } else {
+            let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
+            real_kw * tan_phi * reactive_base
+        };
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if (self.pf - 1.0).abs() < 1e-9 {
+            debug_assert!(
+                reactive_kvar.abs() < 1e-9,
+                "pf=1.0 should produce zero reactive power, got {} kVAR",
+                reactive_kvar
+            );
+        }
         (real_kw, reactive_kvar)
     }
 }
@@ -864,6 +887,22 @@ impl Equipment for ScheduledLoad {
                 (real_kw, reactive_kvar, gas_w)
             };
 
+        #[cfg(feature = "observe")]
+        {
+            let tan_phi = if self.zip.pf.abs() < 1e-9 {
+                0.0
+            } else {
+                self.zip.pf.clamp(-1.0, 1.0).acos().tan()
+            };
+            tracing::debug!(
+                scheduled_load_reactive_kvar = reactive_power_kvar,
+                scheduled_load_real_kw = electric_power_kw,
+                scheduled_load_pf = self.zip.pf,
+                scheduled_load_tan_phi = tan_phi,
+                "scheduled load ZIP reactive power diagnostic",
+            );
+        }
+
         if electric_power_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_power_kw),
@@ -1576,7 +1615,7 @@ mod tests {
         KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
         KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
         KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
-        KEY_ZIP_Z, ScheduledLoad,
+        KEY_ZIP_Z, ScheduledLoad, ZipCoefficients,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
@@ -2454,7 +2493,7 @@ mod tests {
     #[test]
     fn reactive_zip_coefficients_produce_correct_kvar() {
         // zq=0, iq=0, pq=1 → reactive_base = 1.0 at any voltage.
-        // reactive_kvar = real_kw * pf * 1.0.
+        // pf=0.8 → tan(acos(0.8)) = 0.75; reactive = real_kw * 0.75 * 1.0.
         let config = config_with_extras(
             "s",
             "Lighting",
@@ -2476,8 +2515,8 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        // real_kw = 2.0 (all-P load at nominal voltage); reactive = 2.0 * 0.8 * 1.0 = 1.6
-        assert!((ports.electrical.reactive_power_kvar - 1.6).abs() < 1e-12);
+        // real_kw = 2.0 (all-P load at nominal voltage); reactive = 2.0 * 0.75 * 1.0 = 1.5
+        assert!((ports.electrical.reactive_power_kvar - 1.5).abs() < 1e-12);
     }
 
     #[test]
@@ -2501,7 +2540,7 @@ mod tests {
     #[test]
     fn reactive_zip_voltage_sensitivity() {
         // zq=1, iq=0, pq=0 → reactive_base = v_norm².
-        // At v=0.9, v_norm=0.9; reactive = real_kw * 0.9 * 0.81.
+        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive = real_kw * 0.4843 * v_norm².
         // Explicit pure-P real ZIP (z=0, i=0, p=1) keeps real_kw independent of voltage.
         let config = config_with_extras(
             "s",
@@ -2526,13 +2565,136 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         let v_norm = 0.9_f64;
-        // real_kw = 1.0 (pure-P real ZIP); reactive = 1.0 * 0.9 * v_norm²
-        let expected_kvar = 0.9 * v_norm * v_norm;
+        // real_kw = 1.0 (pure-P real ZIP); reactive = 1.0 * tan(acos(0.9)) * v_norm²
+        let tan_phi = 0.9_f64.clamp(-1.0, 1.0).acos().tan();
+        let expected_kvar = tan_phi * v_norm * v_norm;
         assert!(
             (ports.electrical.reactive_power_kvar - expected_kvar).abs() < 1e-12,
             "reactive={} expected={expected_kvar}",
             ports.electrical.reactive_power_kvar
         );
+    }
+
+    #[test]
+    fn pf_1_0_produces_zero_reactive_power_at_nominal_voltage() {
+        // pf=1.0 → tan(acos(1.0)) = 0.0 → reactive power must be zero.
+        // Regression: before the fix, pf was treated as a raw multiplier,
+        // so pf=1.0 produced reactive = real * 1.0 instead of 0.0.
+        let config = config_with_extras(
+            "s",
+            "Lighting",
+            &[5.0],
+            &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
+                (super::KEY_ZIP_ZQ, 0.0.into()),
+                (super::KEY_ZIP_IQ, 0.0.into()),
+                (super::KEY_ZIP_PQ, 1.0.into()),
+                (super::KEY_ZIP_PF, 1.0.into()),
+            ],
+        );
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert!(
+            ports.electrical.reactive_power_kvar.abs() < 1e-12,
+            "pf=1.0 should produce zero reactive power, got {}",
+            ports.electrical.reactive_power_kvar
+        );
+    }
+
+    #[test]
+    fn scheduled_load_zip_matches_water_heater_reactive_formula() {
+        // Verify that ZipCoefficients::apply uses tan(acos(pf)) matching
+        // the correct formula used by water_heater WaterHeaterZip::apply.
+        let zip = ZipCoefficients {
+            z: 0.1,
+            i: 0.3,
+            p_coeff: 0.6,
+            v0: 1.0,
+            zq: 0.2,
+            iq: 0.3,
+            pq: 0.5,
+            pf: 0.65,
+        };
+        let p_kw = 3.0;
+        let voltage_pu = 0.95;
+        let (real_kw, reactive_kvar) = zip.apply(p_kw, voltage_pu);
+
+        // Compute expected values from the water heater formula:
+        // v_norm = voltage_pu / v0
+        // real_kw_expected = p_kw * (z * v_norm² + i * v_norm + p_coeff)
+        // reactive_base = zq * v_norm² + iq * v_norm + pq
+        // tan_phi = tan(acos(pf))
+        // reactive_kvar_expected = real_kw_expected * tan_phi * reactive_base
+        let v_norm = voltage_pu / zip.v0;
+        let expected_real = p_kw * (zip.z * v_norm * v_norm + zip.i * v_norm + zip.p_coeff);
+        let expected_base = zip.zq * v_norm * v_norm + zip.iq * v_norm + zip.pq;
+        let tan_phi = zip.pf.clamp(-1.0, 1.0).acos().tan();
+        let expected_reactive = expected_real * tan_phi * expected_base;
+
+        assert!(
+            (real_kw - expected_real).abs() < 1e-12,
+            "real_kw mismatch: got {real_kw}, expected {expected_real}"
+        );
+        assert!(
+            (reactive_kvar - expected_reactive).abs() < 1e-12,
+            "reactive_kvar mismatch: got {reactive_kvar}, expected {expected_reactive}"
+        );
+    }
+
+    #[test]
+    fn pf_0_99_produces_correct_reactive_power_ratio() {
+        // Regression: before the fix, pf=0.99 produced reactive ≈ 0.99× real
+        // (a 7× overestimate). The correct ratio is tan(acos(0.99)) ≈ 0.1425.
+        let zip = ZipCoefficients {
+            z: 0.0,
+            i: 0.0,
+            p_coeff: 1.0,
+            v0: 1.0,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 1.0,
+            pf: 0.99,
+        };
+        let p_kw = 4.0;
+        let (_real_kw, reactive_kvar) = zip.apply(p_kw, 1.0);
+        let tan_phi = 0.99_f64.clamp(-1.0, 1.0).acos().tan();
+        let expected_reactive = p_kw * tan_phi;
+        assert!(
+            (reactive_kvar - expected_reactive).abs() < 1e-12,
+            "pf=0.99: expected reactive {expected_reactive} ≈ 0.1425× real, got {reactive_kvar}"
+        );
+        // Confirm the bug is fixed: reactive should be ~14% of real, not ~99%.
+        let ratio = reactive_kvar / p_kw;
+        assert!(
+            ratio < 0.20,
+            "pf=0.99: reactive/real ratio {ratio} should be < 0.20 (was 0.99 before fix)"
+        );
+    }
+
+    #[test]
+    fn pf_1_0_produces_zero_reactive_at_any_voltage() {
+        // pf=1.0 → tan(acos(1.0)) = 0.0 → reactive zero regardless of voltage.
+        for voltage_pu in [0.8, 0.9, 0.95, 1.0, 1.05] {
+            let zip = ZipCoefficients {
+                z: 0.2,
+                i: 0.3,
+                p_coeff: 0.5,
+                v0: 1.0,
+                zq: 0.15,
+                iq: 0.35,
+                pq: 0.5,
+                pf: 1.0,
+            };
+            let (_real_kw, reactive_kvar) = zip.apply(3.0, voltage_pu);
+            assert!(
+                reactive_kvar.abs() < 1e-12,
+                "pf=1.0 at v={voltage_pu}: reactive should be 0, got {reactive_kvar}"
+            );
+        }
     }
 
     #[test]
@@ -2776,13 +2938,13 @@ mod tests {
         );
     }
 
-    // --- Reactive power telemetry tests (Ticket 5) ---
+    // --- Reactive power telemetry tests ---
 
     #[test]
     fn zip_reactive_power_emitted_to_telemetry() {
         // Iq=0.8 (pure current reactive term), pq=0.2, zq=0, pf=0.9 at nominal voltage v=1.0.
         // reactive_base = zq*v² + iq*v + pq = 0.0 + 0.8*1.0 + 0.2 = 1.0
-        // reactive_kvar = real_kw * pf * reactive_base = 2.0 * 0.9 * 1.0 = 1.8
+        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive_kvar = real_kw * 0.4843 * reactive_base
         let config = config_with_extras(
             "s",
             "Lighting",
@@ -2802,7 +2964,8 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
 
-        let expected_kvar = 2.0_f64 * 0.9 * (0.0 + 0.8 * 1.0 + 0.2);
+        let tan_phi = 0.9_f64.clamp(-1.0, 1.0).acos().tan();
+        let expected_kvar = 2.0_f64 * tan_phi * (0.0 + 0.8 * 1.0 + 0.2);
         let telemetry_kvar = eq
             .telemetry()
             .get(tk::REACTIVE_POWER_KVAR)
@@ -3027,7 +3190,8 @@ mod tests {
     #[test]
     fn lighting_zip_produces_reactive_power_at_nominal_voltage() {
         // Lighting with type-specific defaults: pf=1.0, zq=0.46, iq=0.51, pq=0.03
-        // At 1.0 pu: reactive_base = 0.46+0.51+0.03 = 1.0, reactive = real_kw * 1.0 * 1.0
+        // At 1.0 pu: reactive_base = 0.46+0.51+0.03 = 1.0
+        // pf=1.0 → tan(acos(1.0)) = 0.0 → reactive power must be zero.
         let config = config_with_schedule("s", "Lighting", &[2.0]);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
@@ -3037,8 +3201,9 @@ mod tests {
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert!((ports.electrical.net_active_w() - 2000.0).abs() < 10.0);
         assert!(
-            (ports.electrical.reactive_power_kvar - 2.0).abs() < 1e-12,
-            "Lighting with pf=1.0 and reactive_base=1.0 should produce kvar == kW"
+            ports.electrical.reactive_power_kvar.abs() < 1e-12,
+            "Lighting with pf=1.0 should produce zero reactive power, got {}",
+            ports.electrical.reactive_power_kvar
         );
     }
 }

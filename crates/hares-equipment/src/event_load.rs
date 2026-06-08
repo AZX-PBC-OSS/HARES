@@ -3688,7 +3688,7 @@ mod tests {
         );
 
         // At nominal voltage (1.0 pu), ZIP should produce reactive power
-        // proportional to real power × pf.
+        // proportional to real power × tan(acos(pf)).
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
@@ -3699,12 +3699,13 @@ mod tests {
             reactive_kvar > 0.0,
             "expected non-zero reactive power at nominal voltage, got {reactive_kvar}"
         );
-        // Clothes Washer has pf=0.65, so reactive should be roughly real * pf
-        // (at v=1.0, multiplier=1.0 and base=1.0, so reactive = real * pf * 1.0).
-        let expected_reactive = real_kw * 0.65;
+        // Clothes Washer has pf=0.65, so tan(acos(0.65)) ≈ 1.169
+        // (at v=1.0, multiplier=1.0 and base=1.0, so reactive = real * 1.169 * 1.0).
+        let tan_phi = 0.65_f64.clamp(-1.0, 1.0).acos().tan();
+        let expected_reactive = real_kw * tan_phi;
         assert!(
             (reactive_kvar - expected_reactive).abs() < 1e-9,
-            "expected reactive {expected_reactive} ≈ real × 0.65, got {reactive_kvar}"
+            "expected reactive {expected_reactive} ≈ real × {tan_phi}, got {reactive_kvar}"
         );
 
         // Test at sag voltage (0.95 pu) with a fresh instance.
