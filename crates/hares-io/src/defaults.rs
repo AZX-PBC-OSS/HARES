@@ -1865,7 +1865,7 @@ fn check_csv_header_invariants(defaults_dir: &Path) {
 ///
 /// Returns human-readable strings describing each violation found.
 /// Callers convert these to warnings, errors, or test assertions.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(any(test, debug_assertions, feature = "check_invariants"))]
 fn check_dir_for_foreign_csv_params(dir: &Path, foreign_params: &[&str]) -> Vec<String> {
     let mut findings = Vec::new();
     if !dir.exists() {

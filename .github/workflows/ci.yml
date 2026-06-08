@@ -35,6 +35,14 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
 
+  bench-check:
+    name: "cargo bench --no-run"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --no-run --workspace
+
   test:
     name: "cargo nextest run"
     runs-on: ubuntu-latest
