@@ -139,12 +139,62 @@ fn bestest_case_600ff() {
 // temperature [-6.4, -1.6]°C (ASHRAE 140-2017 Table B8-3a). ASHRAE 140
 // bands are published oracles and must NOT be widened.
 #[test]
-#[should_panic(expected = "metric=min_zone_temp_c")]
 #[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
 fn bestest_case_900ff() {
-    // Verifies the test still correctly detects the known min-temp exceedance.
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
-    run_single_case(&case);
+    let observation = run_case(&case);
+    let bands = core_reference_bands(case.id);
+    assert!(!bands.is_empty(), "case={} has no reference bands", case.id);
+
+    let checks = evaluate_bands(&observation, &bands);
+    let failures: Vec<_> = checks.iter().filter(|c| !c.passed).collect();
+
+    // Known issue: min_zone_temp_c exceeds the ASHRAE 140-2017 band.
+    // Current value ≈3.33°C vs band [-6.4, -1.6]°C (≈4.93°C above upper bound).
+    // Root causes: S4/S5 warmup, B1 internal gain split, B2 window interior LWR,
+    // B6 window exterior LWR per docs/findings/consolidated.md.
+    assert!(
+        !failures.is_empty(),
+        "expected at least one band failure (known min_zone_temp_c outlier), but all bands passed"
+    );
+
+    // Assert that the known min_zone_temp_c outlier is present.
+    let min_zone_failures: Vec<_> = failures
+        .iter()
+        .filter(|c| c.metric == BestestMetric::MinZoneTempC)
+        .collect();
+    assert_eq!(
+        min_zone_failures.len(),
+        1,
+        "expected exactly one MinZoneTempC failure, got {failures:#?}"
+    );
+
+    // PeakZoneTempC is also outside band (≈46.5°C vs [41.6, 44.8]). Verify it
+    // is the ONLY other failure so new regressions are not masked.
+    let other_failures: Vec<_> = failures
+        .iter()
+        .filter(|c| c.metric != BestestMetric::MinZoneTempC)
+        .collect();
+    for check in &other_failures {
+        assert_eq!(
+            check.metric,
+            BestestMetric::PeakZoneTempC,
+            "unexpected band failure (known: MinZoneTempC + PeakZoneTempC): {check:#?}"
+        );
+    }
+
+    // Verify the min_zone_temp_c value is within plausible range.
+    // Current value ≈3.33°C. Range [2.5, 4.5] tolerates small shifts
+    // from unrelated physics changes until root-cause fixes land.
+    let min_zone = min_zone_failures[0];
+    assert!(
+        (2.5..=4.5).contains(&min_zone.value),
+        "min_zone_temp_c value {:.3}°C outside plausible range [2.5, 4.5]°C; \
+         band [{:.1}, {:.1}]°C",
+        min_zone.value,
+        min_zone.min,
+        min_zone.max,
+    );
 }
 
 // ASHRAE 140-2017 Case 640: setback thermostat on lightweight building.
