@@ -1500,6 +1500,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "non-finite active_power_w")]
     fn non_finite_active_power_triggers_debug_assert() {
         let mut slots = PortSlots::default();
@@ -1510,6 +1511,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "non-finite reactive_power_kvar")]
     fn non_finite_reactive_power_triggers_debug_assert() {
         let mut slots = PortSlots::default();

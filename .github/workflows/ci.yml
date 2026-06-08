@@ -35,28 +35,16 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
 
   test:
-    name: "test (${{ matrix.crate }})"
+    name: "cargo nextest run"
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        crate:
-          - hares-types
-          - hares-physics
-          - hares-envelope
-          - hares-control
-          - hares-equipment
-          - hares-io
-          - hares-core
-          - hares-tariff
-          - hares-fleet
-          - hares-python
     steps:
       - uses: actions/checkout@v4
       - name: Init OCHRE submodule
         run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p ${{ matrix.crate }}
+      - uses: taiki-e/install-action@cargo-nextest
+      - run: cargo nextest run --workspace --no-fail-fast
+      - run: cargo nextest run --workspace --release -F check_invariants --no-fail-fast
 
   python-test:
     name: "pytest"

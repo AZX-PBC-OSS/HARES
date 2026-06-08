@@ -1523,6 +1523,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "zero-width")]
     fn time_window_zero_width_panics_in_debug() {
         TimeWindow::new(DayFilter::Any, 420, 420, 21.0);

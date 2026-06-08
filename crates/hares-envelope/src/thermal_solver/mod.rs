@@ -5842,6 +5842,7 @@ mod tests {
     /// - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, Eq. 90.
     /// - EnergyPlus Engineering Reference "Interior Convection / TARP Algorithm".
     #[test]
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     fn rc_node_boundary_diagnostic_uses_tarp_natural_convection() {
         let indoor = 20.0;
         let outdoor = 20.0; // same as zone air — outdoor does not drive a gradient
