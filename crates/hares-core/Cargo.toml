@@ -43,6 +43,7 @@ criterion = { workspace = true }
 hares-fleet = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
+libc = "0.2"
 
 [[test]]
 name = "regression"
@@ -89,5 +90,10 @@ harness = false
 [[bench]]
 name = "rl_step"
 path = "../../benches/rl_step.rs"
+harness = false
+
+[[bench]]
+name = "aggregation"
+path = "../../benches/aggregation.rs"
 harness = false
 

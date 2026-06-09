@@ -732,4 +732,74 @@ mod tests {
         let expected_soc = (0.8 + 0.5 * 2.0 + 0.2 * 3.0) / 6.0;
         assert!((soc - expected_soc).abs() < 1e-9);
     }
+
+    #[test]
+    fn aggregate_empty_dwellings_returns_empty_results() {
+        let fleet = aggregate(&[], AggregationResolution::FifteenMin);
+        assert!(fleet.per_dwelling_metrics.is_empty());
+        assert_eq!(fleet.aggregate_timeseries.num_rows(), 0);
+
+        let fleet_hourly = aggregate(&[], AggregationResolution::Hourly);
+        assert!(fleet_hourly.per_dwelling_metrics.is_empty());
+        assert_eq!(fleet_hourly.aggregate_timeseries.num_rows(), 0);
+    }
+
+    #[test]
+    fn aggregate_identical_dwellings_preserves_weighted_mean_identity_and_sums_correctly() {
+        let t0 = "2021-01-01T00:00:00Z";
+        let t1 = "2021-01-01T00:15:00Z";
+
+        // Two dwellings with identical timeseries but different weights.
+        // Weighted-sum columns (kW, kWh): fleet = value * (w1 + w2)
+        // Weighted-mean columns (C, -): fleet = (value*w1 + value*w2) / (w1+w2) = value
+        let make_dwelling = |weight: f64| -> DwellingOutcome {
+            outcome(
+                weight,
+                SimStatus::Ok,
+                sample_metrics(10.0, 1.0),
+                Some(batch(
+                    &[t0, t1],
+                    vec![
+                        ("Total Electric Power (kW)", vec![Some(1.5), Some(3.0)]),
+                        ("Battery Energy (kWh)", vec![Some(0.2), Some(0.4)]),
+                        ("Temperature - Indoor (C)", vec![Some(21.0), Some(22.0)]),
+                        ("Battery SOC (-)", vec![Some(0.7), Some(0.8)]),
+                    ],
+                )),
+            )
+        };
+
+        let d1 = make_dwelling(1.0);
+        let d2 = make_dwelling(2.0);
+
+        let fleet = aggregate(&[d1, d2], AggregationResolution::FifteenMin);
+        assert_eq!(fleet.per_dwelling_metrics.len(), 2);
+        assert_eq!(fleet.aggregate_timeseries.num_rows(), 2);
+
+        let col = |idx: usize, row: usize| -> f64 {
+            fleet
+                .aggregate_timeseries
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(row)
+        };
+
+        // Power (kW): weighted sum = 1.5*1 + 1.5*2 = 4.5 at t0, 3.0*1 + 3.0*2 = 9.0 at t1
+        assert!((col(1, 0) - 4.5).abs() < 1e-9);
+        assert!((col(1, 1) - 9.0).abs() < 1e-9);
+
+        // Energy (kWh): weighted sum = 0.2*1 + 0.2*2 = 0.6, 0.4*1 + 0.4*2 = 1.2
+        assert!((col(2, 0) - 0.6).abs() < 1e-9);
+        assert!((col(2, 1) - 1.2).abs() < 1e-9);
+
+        // Temperature (C): weighted mean = (21*1 + 21*2)/(1+2) = 21.0, (22*1 + 22*2)/(1+2) = 22.0
+        assert!((col(3, 0) - 21.0).abs() < 1e-9);
+        assert!((col(3, 1) - 22.0).abs() < 1e-9);
+
+        // SOC (-): weighted mean = (0.7*1 + 0.7*2)/(1+2) = 0.7, (0.8*1 + 0.8*2)/(1+2) = 0.8
+        assert!((col(4, 0) - 0.7).abs() < 1e-9);
+        assert!((col(4, 1) - 0.8).abs() < 1e-9);
+    }
 }

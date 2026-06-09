@@ -1037,6 +1037,7 @@ dependencies = [
  "hares-physics",
  "hares-tariff",
  "hares-types",
+ "libc",
  "nalgebra",
  "parquet",
  "postcard",
