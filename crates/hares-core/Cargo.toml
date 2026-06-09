@@ -77,6 +77,10 @@ path = "../../tests/warmup_regression.rs"
 name = "resstock_smoke"
 path = "../../tests/resstock_smoke.rs"
 
+[[test]]
+name = "batch_step_tests"
+path = "../../tests/batch_step_tests.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"
@@ -95,5 +99,10 @@ harness = false
 [[bench]]
 name = "aggregation"
 path = "../../benches/aggregation.rs"
+harness = false
+
+[[bench]]
+name = "rl_episode"
+path = "../../benches/rl_episode.rs"
 harness = false
 

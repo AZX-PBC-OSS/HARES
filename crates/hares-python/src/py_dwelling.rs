@@ -1324,7 +1324,9 @@ impl PyDwelling {
         let checkpoint: DwellingCheckpoint =
             serde_json::from_slice(state).map_err(to_py_err_display)?;
         let mut dwelling = self.acquire()?;
-        dwelling.restore_building_state(&checkpoint).map_err(to_py_err)
+        dwelling
+            .restore_building_state(&checkpoint)
+            .map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {
@@ -1641,10 +1643,7 @@ impl PyDwelling {
 }
 
 impl PyDwelling {
-    pub(crate) fn from_blueprint_build(
-        dwelling: Dwelling,
-        config: DwellingConfig,
-    ) -> Self {
+    pub(crate) fn from_blueprint_build(dwelling: Dwelling, config: DwellingConfig) -> Self {
         let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
         Self {
             dwelling: Mutex::new(dwelling),

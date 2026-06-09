@@ -33,7 +33,10 @@
 use hares_envelope::ThermalSolver;
 use hares_io::{
     Building, DesignConditions, EquipmentSpec,
-    hpxml::{rebuild_wh_typed_config, resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config}},
+    hpxml::{
+        rebuild_wh_typed_config,
+        resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
+    },
 };
 use hares_physics::ashrae152::design_temperatures_f;
 use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
@@ -803,7 +806,6 @@ pub fn autosize_water_heater_capacities(
                     spec.name
                 );
             }
-
         } else {
             // Autosizing computed zero or negative capacity — fall back to a
             // minimum safe default so the simulation can still run.
@@ -827,8 +829,10 @@ pub fn autosize_water_heater_capacities(
             spec.parameters.remove("autosize_water_heater_max_w");
 
             let fallback_vol_m3 = hares_physics::units::volume_gal_to_m3(DEFAULT_TANK_VOLUME_GAL);
-            spec.parameters
-                .insert("heating_capacity_w".to_string(), json!(DEFAULT_ELEMENT_CAPACITY_W));
+            spec.parameters.insert(
+                "heating_capacity_w".to_string(),
+                json!(DEFAULT_ELEMENT_CAPACITY_W),
+            );
             if !spec.parameters.contains_key("tank_volume_m3") {
                 spec.parameters
                     .insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
@@ -3063,7 +3067,9 @@ mod tests {
         // 3 BR → FHR = 48, tank = 50 gal
         // usable = 35 gal, deficit = 13 gal
         // capacity = 13 × 4.395 × 26.67 ≈ 1524 W
-        let expected = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - DEFAULT_MAINS_TEMP_C);
+        let expected = (48.0 - 0.7 * 50.0)
+            * WATER_ENERGY_FACTOR
+            * (DEFAULT_WH_SETPOINT_C - DEFAULT_MAINS_TEMP_C);
         assert!(
             (capacity_w - expected).abs() < 1e-3,
             "with unreasonable mains temp 60 °C, should fall back to 25 °C \

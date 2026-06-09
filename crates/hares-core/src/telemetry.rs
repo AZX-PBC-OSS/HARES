@@ -226,6 +226,44 @@ mod tests {
     }
 
     #[test]
+    fn observation_vec_length_matches_field_count_narrow() {
+        let t = sample();
+        let fields = &[
+            "outdoor_temp",
+            "zone_temp[Indoor]",
+            "total_power_kw",
+            "equipment_soc[Battery]",
+            "setpoint_heat[Indoor]",
+        ];
+        let obs = t.to_observation_vec(fields).unwrap();
+        assert_eq!(obs.len(), fields.len());
+    }
+
+    #[test]
+    fn observation_vec_length_matches_field_count_wide() {
+        let t = sample();
+        let base = &[
+            "outdoor_temp",
+            "outdoor_humidity_ratio",
+            "total_power_kw",
+            "reactive_power_kvar",
+            "zone_temp[Indoor]",
+            "setpoint_heat[Indoor]",
+            "setpoint_cool[Indoor]",
+            "zone_energy_balance[Indoor]",
+            "equipment_soc[Battery]",
+            "equipment_power[Battery]",
+        ];
+        let mut fields = Vec::new();
+        while fields.len() < 55 {
+            fields.extend_from_slice(base);
+        }
+        fields.truncate(55);
+        let obs = t.to_observation_vec(&fields).unwrap();
+        assert_eq!(obs.len(), 55);
+    }
+
+    #[test]
     fn observation_vec_includes_reactive_power() {
         let mut t = sample();
         t.reactive_power_kvar = 1.5;

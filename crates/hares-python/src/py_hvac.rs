@@ -1,19 +1,19 @@
 //! Python bindings for typed HVAC heating/cooling equipment configuration.
 
-use serde_json::{json, Map};
-use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
-use hares_types::FuelType;
-use hares_io::EquipmentSpec;
 use hares_equipment::EquipmentConfig;
-use hares_equipment::hvac::heating_config::{
-    GasFurnaceConfig, HvacSetpointConfig, ElectricBaseboardConfig, IdealHvacConfig, DuctConfig,
-    GasBoilerConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
-};
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::heat_pump_config::{
-    HeatPumpHeaterConfig, HeatPumpCoolerConfig, HeatPumpCommonConfig,
+    HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
+use hares_equipment::hvac::heating_config::{
+    DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
+    GasBoilerConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig,
+};
+use hares_io::EquipmentSpec;
+use hares_types::FuelType;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use serde_json::{Map, json};
 
 use crate::utils::{insert_opt, make_spec};
 
@@ -38,22 +38,34 @@ fn setpoint_config(
 #[pyclass(name = "GasFurnace", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyGasFurnace {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub afue: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub fan_power_w: Option<f64>,
-    #[pyo3(get)] pub number_of_speeds: Option<u8>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub afue: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub fan_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub number_of_speeds: Option<u8>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyGasFurnace {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, afue=None, zone_id=None, fan_power_w=None, number_of_speeds=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         autosize: bool,
@@ -156,18 +168,30 @@ pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> EquipmentSpec {
 #[pyclass(name = "AirConditioner", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyAirConditioner {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub eir: Option<f64>,
-    #[pyo3(get)] pub seer: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub shr: Option<f64>,
-    #[pyo3(get)] pub number_of_speeds: Option<u8>,
-    #[pyo3(get)] pub fan_power_w: Option<f64>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub eir: Option<f64>,
+    #[pyo3(get)]
+    pub seer: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub shr: Option<f64>,
+    #[pyo3(get)]
+    pub number_of_speeds: Option<u8>,
+    #[pyo3(get)]
+    pub fan_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
@@ -304,7 +328,13 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
         ))
     };
 
-    make_spec("Air Conditioner", &ac.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "Air Conditioner",
+        &ac.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -315,20 +345,32 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
 #[pyclass(name = "ASHPHeater", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyASHPHeater {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub hspf: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub is_mini_split: Option<bool>,
-    #[pyo3(get)] pub backup_capacity_w: Option<f64>,
-    #[pyo3(get)] pub backup_fuel: Option<String>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub hspf: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub is_mini_split: Option<bool>,
+    #[pyo3(get)]
+    pub backup_capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub backup_fuel: Option<String>,
     /// Pre-parsed fuel type, validated during construction.
     pub(crate) backup_fuel_parsed: Option<FuelType>,
-    #[pyo3(get)] pub fan_power_w: Option<f64>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub fan_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
@@ -364,9 +406,7 @@ impl PyASHPHeater {
         }
         if let Some(v) = hspf {
             if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ASHPHeater: hspf must be positive",
-                ));
+                return Err(PyValueError::new_err("ASHPHeater: hspf must be positive"));
             }
         }
         let backup_fuel_parsed = parse_fuel_type(backup_fuel.as_deref())?;
@@ -466,7 +506,13 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> EquipmentSpec {
         ))
     };
 
-    make_spec("ASHP Heater", &hp.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "ASHP Heater",
+        &hp.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -477,17 +523,28 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> EquipmentSpec {
 #[pyclass(name = "ASHPCooler", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyASHPCooler {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub seer: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub is_mini_split: Option<bool>,
-    #[pyo3(get)] pub shr: Option<f64>,
-    #[pyo3(get)] pub fan_power_w: Option<f64>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub seer: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub is_mini_split: Option<bool>,
+    #[pyo3(get)]
+    pub shr: Option<f64>,
+    #[pyo3(get)]
+    pub fan_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
@@ -522,9 +579,7 @@ impl PyASHPCooler {
         }
         if let Some(v) = seer {
             if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ASHPCooler: seer must be positive",
-                ));
+                return Err(PyValueError::new_err("ASHPCooler: seer must be positive"));
             }
         }
         Ok(Self {
@@ -599,7 +654,13 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> EquipmentSpec {
         ))
     };
 
-    make_spec("ASHP Cooler", &hp.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "ASHP Cooler",
+        &hp.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -610,20 +671,30 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> EquipmentSpec {
 #[pyclass(name = "ElectricBaseboard", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElectricBaseboard {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub eir: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub eir: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyElectricBaseboard {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, eir=None, zone_id=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         autosize: bool,
@@ -709,7 +780,13 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> EquipmentSpec {
         ))
     };
 
-    make_spec("Electric Baseboard", &bb.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "Electric Baseboard",
+        &bb.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -720,21 +797,32 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> EquipmentSpec {
 #[pyclass(name = "IdealHVAC", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyIdealHVAC {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub heating_capacity_w: Option<f64>,
-    #[pyo3(get)] pub cooling_capacity_w: Option<f64>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub deadband_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub heating_capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub deadband_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyIdealHVAC {
     #[new]
     #[pyo3(signature = (name, autosize=false, zone_id=None, heating_capacity_w=None, cooling_capacity_w=None, heating_setpoint_c=None, cooling_setpoint_c=None, deadband_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         autosize: bool,
@@ -807,7 +895,13 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> EquipmentSpec {
         ))
     };
 
-    make_spec("Ideal HVAC", &ih.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "Ideal HVAC",
+        &ih.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -818,20 +912,30 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> EquipmentSpec {
 #[pyclass(name = "GasBoiler", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyGasBoiler {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub afue: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub afue: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyGasBoiler {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, afue=None, zone_id=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         autosize: bool,
@@ -926,20 +1030,30 @@ pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> EquipmentSpec {
 #[pyclass(name = "ElectricBoiler", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElectricBoiler {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub eir: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub eir: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyElectricBoiler {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, eir=None, zone_id=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         autosize: bool,
@@ -1025,7 +1139,13 @@ pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> EquipmentSpec {
         ))
     };
 
-    make_spec("Electric Boiler", &eb.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "Electric Boiler",
+        &eb.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,15 +1156,24 @@ pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> EquipmentSpec {
 #[pyclass(name = "ElectricFurnace", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElectricFurnace {
-    #[pyo3(get)] pub name: String,
-    #[pyo3(get)] pub autosize: bool,
-    #[pyo3(get)] pub capacity_w: Option<f64>,
-    #[pyo3(get)] pub eir: Option<f64>,
-    #[pyo3(get)] pub zone_id: Option<u16>,
-    #[pyo3(get)] pub fan_power_w: Option<f64>,
-    #[pyo3(get)] pub heating_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub cooling_setpoint_c: Option<f64>,
-    #[pyo3(get)] pub oversizing_factor: Option<f64>,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub autosize: bool,
+    #[pyo3(get)]
+    pub capacity_w: Option<f64>,
+    #[pyo3(get)]
+    pub eir: Option<f64>,
+    #[pyo3(get)]
+    pub zone_id: Option<u16>,
+    #[pyo3(get)]
+    pub fan_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub heating_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub cooling_setpoint_c: Option<f64>,
+    #[pyo3(get)]
+    pub oversizing_factor: Option<f64>,
 }
 
 #[pymethods]
@@ -1141,5 +1270,11 @@ pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> EquipmentSpec {
         ))
     };
 
-    make_spec("Electric Furnace", &ef.name, FuelType::Electric, params, typed_config)
+    make_spec(
+        "Electric Furnace",
+        &ef.name,
+        FuelType::Electric,
+        params,
+        typed_config,
+    )
 }

@@ -6,7 +6,7 @@ use hares_io::{EquipmentSpec, ResampleMethod};
 use hares_types::{DayFilter, FuelType};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Insert an optional value into a JSON map under the given key.
 /// Generic over any `Serialize` type (f64, u16, u8, bool, String, etc.).

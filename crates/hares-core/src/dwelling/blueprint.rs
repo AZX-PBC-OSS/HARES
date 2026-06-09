@@ -4,11 +4,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{
-    defaults::DefaultsStore,
-    epw::DesignConditions,
-    hpxml::resolve_equipment,
-    site_location::resolve_site_location,
-    EquipmentSpec, ScheduleTimeSeries, SiteLocation, WeatherTimeSeries,
+    EquipmentSpec, ScheduleTimeSeries, SiteLocation, WeatherTimeSeries, defaults::DefaultsStore,
+    epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError};
 use serde_json::{Map, Value};
@@ -47,13 +44,8 @@ impl DwellingBlueprint {
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
         let schedule_raw = if config.schedule_path.exists() {
-            hares_io::parse_schedule_csv(
-                &config.schedule_path,
-                &[],
-                Some(&weather.meta),
-                None,
-            )
-            .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
+            hares_io::parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
+                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
         } else {
             hares_io::hpxml_schedule::generate_schedule_from_hpxml(
                 &building,
@@ -95,9 +87,8 @@ impl DwellingBlueprint {
         building.site.elevation_m = Some(site_location.elevation_m);
         building.site.utc_offset_h = Some(site_location.utc_offset_h);
 
-        let tz_offset =
-            FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
-                .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset"));
+        let tz_offset = FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
+            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset"));
         let local_start = config
             .sim_config
             .start_time
@@ -122,8 +113,7 @@ impl DwellingBlueprint {
             })
             .transpose()?;
 
-        let time_res =
-            super::conversions::chrono_to_std_duration(config.sim_config.time_res)?;
+        let time_res = super::conversions::chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
         let design_conditions = weather.design_conditions;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
@@ -135,9 +125,7 @@ impl DwellingBlueprint {
         let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
             Ok(store) => store,
             Err(err) => {
-                tracing::warn!(
-                    "defaults load failed; using empty defaults store: {err}"
-                );
+                tracing::warn!("defaults load failed; using empty defaults store: {err}");
                 DefaultsStore::empty()
             }
         };
@@ -189,10 +177,7 @@ impl DwellingBlueprint {
             .iter()
             .position(|s| s.name == name || s.instance_name.as_deref() == Some(name))
             .ok_or_else(|| {
-                HaresError::Dwelling(format!(
-                    "equipment '{}' not found in blueprint",
-                    name
-                ))
+                HaresError::Dwelling(format!("equipment '{}' not found in blueprint", name))
             })?;
         self.equipment_specs.remove(pos);
         Ok(())
@@ -214,9 +199,11 @@ impl DwellingBlueprint {
     /// exists in the blueprint.
     pub fn add_equipment_spec(&mut self, spec: EquipmentSpec) -> Result<(), HaresError> {
         let name = spec.instance_name.as_deref().unwrap_or(&spec.name);
-        if self.equipment_specs.iter().any(|s| {
-            s.instance_name.as_deref().unwrap_or(&s.name) == name
-        }) {
+        if self
+            .equipment_specs
+            .iter()
+            .any(|s| s.instance_name.as_deref().unwrap_or(&s.name) == name)
+        {
             return Err(HaresError::Dwelling(format!(
                 "duplicate equipment name '{name}' — each equipment must have a unique name"
             )));

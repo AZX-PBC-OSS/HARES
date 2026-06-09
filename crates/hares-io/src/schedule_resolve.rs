@@ -516,8 +516,14 @@ pub(crate) const HEATING_EQUIPMENT: &[&str] = &[
 ];
 
 /// HVAC equipment names that consume cooling setpoints.
-pub(crate) const COOLING_EQUIPMENT: &[&str] =
-    &["ASHP Cooler", "MSHP Cooler", "GSHP Cooler", "WSHP Cooler", "Air Conditioner", "Room AC"];
+pub(crate) const COOLING_EQUIPMENT: &[&str] = &[
+    "ASHP Cooler",
+    "MSHP Cooler",
+    "GSHP Cooler",
+    "WSHP Cooler",
+    "Air Conditioner",
+    "Room AC",
+];
 
 fn spec_has_setpoint_source(spec: &EquipmentSpec, prefix: &str) -> bool {
     let key = format!("{prefix}_setpoint_source");

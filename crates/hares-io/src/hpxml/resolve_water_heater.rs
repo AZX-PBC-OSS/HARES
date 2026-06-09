@@ -967,10 +967,7 @@ fn try_build_indirect_tank_config(
 /// Called after autosizing to replace placeholder capacities and volumes
 /// with computed values. Matches on the canonical equipment name to select
 /// the correct config builder.
-pub fn rebuild_wh_typed_config(
-    name: &str,
-    params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+pub fn rebuild_wh_typed_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
     match name {
         "Gas Water Heater" => try_build_gas_wh_config(name, params),
         "Electric Resistance Water Heater" => try_build_elec_res_wh_config(name, params),

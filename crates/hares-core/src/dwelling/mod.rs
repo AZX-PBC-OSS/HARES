@@ -1686,7 +1686,6 @@ impl Dwelling {
 }
 
 pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
-
     let site_location = bp.site_location;
     let local_start = bp.local_start;
     let mut defaults = bp.defaults;
@@ -1728,18 +1727,25 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // typed_config before schedule injection consumes it.
     #[cfg(debug_assertions)]
     for spec in &equipment_specs {
-        if matches!(spec.name.as_str(), "Electric Resistance Water Heater"
-            | "Gas Water Heater" | "Heat Pump Water Heater"
-            | "Tankless Water Heater" | "Gas Tankless Water Heater")
-        {
+        if matches!(
+            spec.name.as_str(),
+            "Electric Resistance Water Heater"
+                | "Gas Water Heater"
+                | "Heat Pump Water Heater"
+                | "Tankless Water Heater"
+                | "Gas Tankless Water Heater"
+        ) {
             let will_be_autosized = spec
                 .parameters
                 .get("autosize_water_heater")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !will_be_autosized {
-                assert!(spec.typed_config.is_some(),
-                    "WH spec '{}' has no typed_config — schedule injection will panic", spec.name);
+                assert!(
+                    spec.typed_config.is_some(),
+                    "WH spec '{}' has no typed_config — schedule injection will panic",
+                    spec.name
+                );
             }
         }
     }
@@ -1766,7 +1772,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         &config.sim_config,
         &bp.building,
         &defaults,
-            &bp.weather_avgs,
+        &bp.weather_avgs,
         &equipment_specs,
     )?;
 
@@ -1781,17 +1787,17 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // before equipment creation (it sets capacities on equipment specs).
     // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
     {
-        let duct_params =
-            match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building) {
-                Ok(dp) => dp,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "autosizing: duct DSE params unavailable; using defaults"
-                    );
-                    hares_io::hpxml::resolve_hvac::DuctDseParams::default()
-                }
-            };
+        let duct_params = match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building)
+        {
+            Ok(dp) => dp,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "autosizing: duct DSE params unavailable; using defaults"
+                );
+                hares_io::hpxml::resolve_hvac::DuctDseParams::default()
+            }
+        };
 
         let indoor_zone = solvers.thermal.config().indoor_zone_id;
 
@@ -1846,7 +1852,11 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     hares_io::inject_schedule_into_specs(
         &mut equipment_specs,
         environment.schedule_mut(),
-        Some(&bp.defaults_path.clone().unwrap_or_else(|| PathBuf::from("defaults"))),
+        Some(
+            &bp.defaults_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("defaults")),
+        ),
     );
 
     // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
@@ -2305,15 +2315,15 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             any(debug_assertions, feature = "check_invariants")
         ))]
         invariant_moisture_capture: Vec::new(),
-    zone_is_conditioned: if bp.building.zones.is_empty() {
-        vec![true]
-    } else {
-        bp.building
-            .zones
-            .iter()
-            .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
-            .collect()
-    },
+        zone_is_conditioned: if bp.building.zones.is_empty() {
+            vec![true]
+        } else {
+            bp.building
+                .zones
+                .iter()
+                .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+                .collect()
+        },
         output_verbosity: config.sim_config.output_verbosity,
         output_chunk_size: config.sim_config.output_chunk_size,
         output_format: config.sim_config.output_format,
@@ -3809,9 +3819,11 @@ impl Dwelling {
 
         self.thermal_solver
             .restore_state(&cp.envelope_state, &cp.thermal_last_u, &cp.lwr_t_prev_c)
-            .map_err(|err| HaresError::Envelope(format!(
-                "restore_building_state: thermal solver restore failed: {err}"
-            )))?;
+            .map_err(|err| {
+                HaresError::Envelope(format!(
+                    "restore_building_state: thermal solver restore failed: {err}"
+                ))
+            })?;
 
         let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.iter().copied().collect();
         for zone in &mut self.latest_env.zones {
@@ -3829,9 +3841,11 @@ impl Dwelling {
 
         self.fluid_solver
             .restore_from_payload(&cp.fluid_states)
-            .map_err(|err| HaresError::Envelope(format!(
-                "restore_building_state: fluid solver restore failed: {err}"
-            )))?;
+            .map_err(|err| {
+                HaresError::Envelope(format!(
+                    "restore_building_state: fluid solver restore failed: {err}"
+                ))
+            })?;
 
         self.prior_electrical_summary = cp.prior_electrical_summary.clone();
 
