@@ -33,7 +33,7 @@ pub struct StratifiedTankConfig {
     /// (approximately 10% of total UA for typical cylindrical aspect ratios).
     ///
     /// OCHRE Water.py:250-258: top and bottom nodes get additional parallel UA
-    /// for flat end caps. Reference: EnergyPlus Engineering Reference, §14.8.
+    /// for flat end caps. Reference: EnergyPlus ERM 26.1 — Water Thermal Tanks (includes Water Heaters): Stratified Water Thermal Tank.
     pub ua_end_cap_w_per_k: Option<f64>,
 }
 
@@ -157,7 +157,7 @@ impl StratifiedTank {
         // Build per-node UA values from the uniform volume-fraction allocation,
         // then add end-cap UA to the top (index 0) and bottom (last index) nodes.
         // OCHRE Water.py:250-258: top/bottom nodes get additional parallel UA for
-        // flat end caps. Reference: EnergyPlus Engineering Reference, §14.8.
+        // flat end caps. Reference: EnergyPlus ERM 26.1 — Water Thermal Tanks (includes Water Heaters): Stratified Water Thermal Tank.
         let ua_end = config.ua_end_cap_w_per_k.unwrap_or(config.ua_w_per_k * 0.1);
         let mut ua_per_node: Vec<f64> = node_volumes_m3
             .iter()

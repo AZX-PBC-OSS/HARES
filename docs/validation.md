@@ -155,9 +155,9 @@ PsychroLib:
 ### Convection and film coefficients
 
 - **TARP natural convection**: h = 1.31 × ΔT^(1/3) verified at multiple
-  ΔT values (EnergyPlus Engineering Reference §9.4, ASHRAE HOF Ch. 25)
+  ΔT values (EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm, ASHRAE HOF Ch. 25)
 - **DOE-2 exterior film**: monotonically decreasing exterior film
-  resistance with increasing wind speed (EnergyPlus §9.5)
+  resistance with increasing wind speed (EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection)
 
 ### Infiltration
 

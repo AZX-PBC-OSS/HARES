@@ -55,22 +55,22 @@ pub struct GeneratorConfig {
     /// eta_jacket_water / eta_lube_oil / eta_exhaust. When only eta_thermal
     /// is provided and the per-stream fields are absent, it is distributed
     /// using engineering-estimate split fractions: jacket ~30 %, lube ~10 %,
-    /// exhaust ~60 %. EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// exhaust ~60 %. EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
     /// per-stream heat recovery fractions are manufacturer-supplied PLR-dependent
     /// curves, not fixed values.
     pub eta_thermal: Option<f64>,
     /// Recoverable jacket water heat fraction at ~90°C.
-    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
     /// jacket water heat recovery fraction is a manufacturer-supplied quadratic
     /// PLR curve (b₁ + b₂·PLR + b₃·PLR²).
     pub eta_jacket_water: Option<f64>,
     /// Recoverable lube oil heat fraction at ~85°C.
-    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
     /// lube oil heat recovery fraction is a manufacturer-supplied quadratic
     /// PLR curve (c₁ + c₂·PLR + c₃·PLR²).
     pub eta_lube_oil: Option<f64>,
     /// Recoverable exhaust heat fraction at ~400–500°C.
-    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
     /// exhaust heat recovery fraction is a manufacturer-supplied quadratic
     /// PLR curve (d₁ + d₂·PLR + d₃·PLR²).
     pub eta_exhaust: Option<f64>,
@@ -334,21 +334,21 @@ const DEFAULT_ETA_ELECTRIC: f64 = 0.30;
 const DEFAULT_ETA_THERMAL: f64 = 0.0;
 
 /// Engineering estimate: jacket water heat fraction at rated PLR.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: jacket fraction
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: jacket fraction
 /// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
 /// 0.30 is an engineering estimate consistent with typical IC engine heat rejection
 /// at rated load; no primary-source measurement available for this field split.
 const JACKET_FRACTION_OF_THERMAL: f64 = 0.30;
 
 /// Engineering estimate: lube oil heat fraction at rated PLR.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: lube oil fraction
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: lube oil fraction
 /// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
 /// 0.10 is an engineering estimate consistent with typical IC engine heat rejection
 /// at rated load; no primary-source measurement available for this field split.
 const LUBE_FRACTION_OF_THERMAL: f64 = 0.10;
 
 /// Engineering estimate: exhaust heat fraction at rated PLR.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: exhaust fraction
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: exhaust fraction
 /// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
 /// 0.60 is an engineering estimate consistent with typical IC engine heat rejection
 /// at rated load; no primary-source measurement available for this field split.
@@ -383,13 +383,13 @@ const DEFAULT_SUPPLY_TEMP_C: f64 = 70.0;
 const DEFAULT_RETURN_TEMP_C: f64 = 60.0;
 
 /// Engineering estimate: typical IC engine jacket water supply temperature (°C).
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: jacket water
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: jacket water
 /// temperature emerges from PLR-dependent curves and the heat recovery loop model;
 /// no standard fixed value exists. 90°C is a typical residential IC engine value.
 const DEFAULT_SUPPLY_TEMP_JACKET_C: f64 = 90.0;
 
 /// Engineering estimate: typical IC engine exhaust temperature at HX inlet (°C).
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: exhaust temperature
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: exhaust temperature
 /// is modelled via PLR-dependent exhaust gas temperature curves and NTU-effectiveness
 /// HX; no standard fixed value exists. 450°C is a midpoint in the typical 400–500°C
 /// range for IC engines.

@@ -88,7 +88,7 @@ pub const HEATER_TELEMETRY_CAPACITY: usize = 55;
 
 // Discrete defrost cycle parameters (HARES-specific enhancement, not from EnergyPlus)
 /// Default defrost cycle duration [s]. 3.5 min ≈ typical residential ASHP reverse-cycle
-/// defrost period. EnergyPlus §15.2.11.4 uses a continuous model; HARES adds discrete
+/// defrost period. EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation uses a continuous model; HARES adds discrete
 /// ON/OFF cycling for subhourly dispatch fidelity.
 pub const DEFAULT_DEFROST_CYCLE_DURATION_S: f64 = 210.0;
 /// Maximum defrost cycle duration [s]. Hard cap prevents runaway defrost; 10 min

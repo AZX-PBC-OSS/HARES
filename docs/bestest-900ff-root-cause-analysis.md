@@ -80,7 +80,7 @@ In a real building that has been running all year, the concrete walls in early J
 
 **Code location**: `crates/hares-core/src/environment.rs:751` — `DEFAULT_SETPOINT_C = 21.0` is used when no HVAC setpoints exist. `crates/hares-envelope/src/thermal_solver/initialization.rs:27-53` — steady-state solve uses `env.weather.outdoor_temp_c` (Jan 1, −19°C) and `indoor_temp_c` (21°C) as boundary conditions.
 
-**Correct fix**: Implement a warmup period — run N iterations of the first week of weather forcing until the RC state vector converges (change in node temperatures < threshold). This is the standard approach (EnergyPlus Engineering Reference §1.2, "Warmup Convergence"). Alternative: use annual-mean weather conditions (`weather_avgs.avg_ambient_c`) as the outdoor boundary in `initialize_steady_state`, and set the free-float zone initial temperature to the annual-mean zone temperature (estimated as `avg_ambient_c + internal_gain_w / H_building`).
+**Correct fix**: Implement a warmup period — run N iterations of the first week of weather forcing until the RC state vector converges (change in node temperatures < threshold). This is the standard approach (EnergyPlus ERM 26.1 — Warmup Convergence). Alternative: use annual-mean weather conditions (`weather_avgs.avg_ambient_c`) as the outdoor boundary in `initialize_steady_state`, and set the free-float zone initial temperature to the annual-mean zone temperature (estimated as `avg_ambient_c + internal_gain_w / H_building`).
 
 ---
 
@@ -206,7 +206,7 @@ Option A is more general and matches EnergyPlus behavior. Option B is cheaper bu
 ## Sources
 
 - ASHRAE 140-2017 §5.2.4.3, Table B8-3a — minimum zone temperature reference band [−6.4, −1.6°C] for Case 900FF, internal gains specification (60% radiant / 40% convective).
-- [EnergyPlus Engineering Reference §1.2: Warmup Convergence](https://bigladdersoftware.com/epx/docs/9-6/engineering-reference/initializing-the-simulation.html) — documents ≥20 warmup day requirement and convergence criterion.
+- [EnergyPlus ERM 26.1 — Warmup Convergence](https://bigladdersoftware.com/epx/docs/26-1/engineering-reference/warmup-convergence.html) — documents ≥20 warmup day requirement and convergence criterion.
 - [NREL BESTEST-GSR Repository](https://github.com/NREL/BESTEST-GSR) — `Fraction_Radiant: 0.6` on OtherEquipment in reference EnergyPlus simulation confirms ASHRAE 140 radiant split.
 - [EnergyPlus Engineering Reference: Zone Internal Gains](https://bigladdersoftware.com/epx/docs/8-3/engineering-reference/zone-internal-gains.html) — 60% radiant / 40% convective default for internal equipment gains.
 - [LBNL Modelica Buildings Library BESTEST Cases9xx](https://simulationresearch.lbl.gov/modelica/releases/latest/help/Buildings_ThermalZones_Detailed_Validation_BESTEST_Cases9xx.html) — confirms 2007-edition reference range [0.6, 2.2°C] for 900FF min temp (looser than 2017 band used here).

@@ -910,8 +910,8 @@ impl ThermalSolver {
         // solver.  With coupling, including h in the gain terms makes the
         // balance exact.
         //
-        // Reference: EnergyPlus Engineering Reference §"Basis for the Zone and
-        // Air System Integration" — heat balance method must conserve energy.
+        // Reference: EnergyPlus ERM 26.1 — Basis for the Zone and
+        // Air System Integration — heat balance method must conserve energy.
         // ASHRAE HoF 2021 Ch.18 — first-law requirement for zone heat balance.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {

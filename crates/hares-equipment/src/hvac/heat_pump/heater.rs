@@ -1635,7 +1635,7 @@ impl HeatPumpHeaterCore {
                     // Reverse-cycle: compressor reverses; zone capacity = 0 (no net
                     // heating or cooling). Indoor coil absorbs heat from zone air to
                     // defrost outdoor coil. Electric power follows defrost EIR curve.
-                    // EnergyPlus §15.2.11.4 continuous model averages this penalty;
+                    // EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation continuous model averages this penalty;
                     // HARES discrete model applies it at full intensity for cycle_duration_s.
                     defrost_capacity_multiplier = 0.0;
                     defrost_q_w = 0.0;

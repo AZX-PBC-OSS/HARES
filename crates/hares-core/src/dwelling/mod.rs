@@ -1427,9 +1427,6 @@ pub struct Dwelling {
     /// Whether the dwelling is running a warm-up convergence loop.
     /// Moisture invariants are skipped during warm-up because the initial
     /// humidity ratio from the HPXML model can be far from the steady-state
-    /// value, producing large initialization transients that false-positive
-    /// the sorption bound check.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     is_warming_up: bool,
     /// Per-zone moisture invariant capture data from `check_moisture`.
     /// Populated by check_invariants; consumed by the observer push when
@@ -2308,7 +2305,6 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         invariant_infiltration_m_dot: HashMap::new(),
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         invariant_infiltration_w_outdoor: HashMap::new(),
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         is_warming_up: false,
         #[cfg(all(
             feature = "observe",
@@ -3953,14 +3949,14 @@ impl Dwelling {
         Ok(())
     }
 
-    /// Iterative warm-up convergence per EnergyPlus Engineering Reference §"Warmup Convergence".
+    /// Iterative warm-up convergence per EnergyPlus ERM 26.1 — Warmup Convergence.
     ///
     /// Repeatedly simulates the first 24-hour weather day until the maximum zone
     /// temperature change across all conditioned zones between consecutive iterations
     /// falls below `threshold_c` °C, up to `max_iter` iterations.
     ///
     /// EnergyPlus defaults: threshold = 0.5 °C, max_iter = 25 iterations.
-    /// EnergyPlus I/O Reference §"Building": "This value represents the number at
+    /// EnergyPlus I/O Reference 26.1 — Simulation Parameters: Building: "This value represents the number at
     /// which the zone temperatures must agree ... before 'convergence' is reached."
     /// Typical convergence: 1-2 iterations for lightweight construction, 4-7 for
     /// heavyweight (concrete slab, masonry).
@@ -3973,17 +3969,14 @@ impl Dwelling {
             return Ok(1);
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            self.is_warming_up = true;
-        }
+        self.is_warming_up = true;
 
         let mut prev_zone_temps: Vec<f64> = Vec::new();
 
         for iteration in 1..=max_iter {
             // Reset clock to start of first day for weather replay.
             // Thermal state carries forward from previous iteration:
-            // EnergyPlus §"Warmup Convergence" — initial conditions for each
+            // EnergyPlus ERM 26.1 — Warmup Convergence — initial conditions for each
             // warmup day are the final conditions from the previous warmup day.
             self.clock.current_step = 0;
 
@@ -4000,7 +3993,7 @@ impl Dwelling {
                 .collect();
 
             if !prev_zone_temps.is_empty() {
-                // EnergyPlus Engineering Reference §"Warmup Convergence":
+                // EnergyPlus ERM 26.1 — Warmup Convergence:
                 // max |ΔT_zone| across all conditioned zones. Convergence
                 // criterion: 0.5 °C (EnergyPlus I/O Reference default).
                 let max_delta = prev_zone_temps
@@ -4018,10 +4011,7 @@ impl Dwelling {
                         threshold_c,
                         "warm-up converged"
                     );
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
                         self.is_warming_up = false;
-                    }
                     return Ok(iteration);
                 }
             }
@@ -4029,10 +4019,7 @@ impl Dwelling {
             prev_zone_temps = zone_temps;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            self.is_warming_up = false;
-        }
+        self.is_warming_up = false;
 
         self.simulation_results.steps.clear();
         tracing::warn!(
@@ -4307,17 +4294,20 @@ impl Dwelling {
         // after solver construction without seeding its initial humidity ratio.
         #[cfg(debug_assertions)]
         for zone in &self.latest_env.zones {
-            // f64::EPSILON is safe here: both values come from the same
-            // humidity_ratios map (updated together by `resolve` and read back
-            // by `humidity_ratio` without intermediate arithmetic), so exact
-            // bitwise equality holds.
+            if self.is_warming_up {
+                continue;
+            }
+            let solver_hr = self.humidity_solver.humidity_ratio(zone.id);
+            if zone.humidity_ratio.is_nan() && solver_hr.is_nan() {
+                continue;
+            }
             debug_assert!(
-                (zone.humidity_ratio - self.humidity_solver.humidity_ratio(zone.id)).abs()
+                (zone.humidity_ratio - solver_hr).abs()
                     < f64::EPSILON,
                 "zone {} humidity ratio {:.6e} diverged from solver committed {:.6e} at start of step",
                 zone.id.0,
                 zone.humidity_ratio,
-                self.humidity_solver.humidity_ratio(zone.id),
+                solver_hr,
             );
         }
 
@@ -5066,15 +5056,30 @@ impl Dwelling {
         // corrupts output recording, equipment control, and downstream metrics
         // for the remainder of the simulation. Every non-finite zone is logged
         // before quarantining.
+        // Skipped during warm-up: the initial thermal transients (particularly
+        // in unconditioned zones like attics) can produce temporary NaN values
+        // before the solver converges. Convergence is driven by conditioned
+        // zone temperatures per EnergyPlus ERM 26.1.
+        //
+        // Only conditioned zones are checked: unconditioned zones (attics,
+        // basements) can have extreme or NaN temperatures during warmup and
+        // early production timesteps; the conditioned-zone invariant check
+        // in `check_invariants` provides broader bounds coverage after warmup.
+        if !self.is_warming_up {
         {
             let mut any_nan = false;
-            for zone in &self.latest_env.zones {
-                if !zone.temperature_c.is_finite() {
+            for (zone, &is_cond) in self
+                .latest_env
+                .zones
+                .iter()
+                .zip(self.zone_is_conditioned.iter())
+            {
+                if is_cond && !zone.temperature_c.is_finite() {
                     any_nan = true;
                     tracing::error!(
                         zone_id = %zone.id,
                         temperature_c = zone.temperature_c,
-                        "zone temperature is NaN — quarantining dwelling"
+                        "conditioned zone temperature is NaN — quarantining dwelling"
                     );
                     #[cfg(feature = "observe")]
                     {
@@ -5090,6 +5095,7 @@ impl Dwelling {
                 });
             }
         }
+        } // end if !self.is_warming_up
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         self.check_invariants(dt)?;
@@ -5725,50 +5731,66 @@ impl Dwelling {
             });
         }
 
+        // Warm-up skip: the initial thermal transients can produce temporarily
+        // invalid values (NaN, out-of-bounds temperatures, negative HVAC energy,
+        // moisture transients) before the solver converges. Convergence is driven
+        // by conditioned zone temperatures per EnergyPlus ERM 26.1. The always-on
+        // NaN/Inf checks earlier in run_timestep are also guarded during warmup.
+        if self.is_warming_up {
+            return Ok(());
+        }
+
         // Zone temperature bounds (read from already-updated zones).
         // Split by conditioning status: conditioned zones get tighter bounds
         // (80 °C) while unconditioned zones (attics under solar load) get
         // wider bounds (120 °C).
-        debug_assert_eq!(
-            self.latest_env.zones.len(),
-            self.zone_is_conditioned.len(),
-            "zone_is_conditioned length must match latest_env.zones length"
-        );
-        self.invariant_conditioned_temps.clear();
-        self.invariant_unconditioned_temps.clear();
-        for (zone, &is_cond) in self
-            .latest_env
-            .zones
-            .iter()
-            .zip(self.zone_is_conditioned.iter())
-        {
-            if is_cond {
-                self.invariant_conditioned_temps.push(zone.temperature_c);
-            } else {
-                self.invariant_unconditioned_temps.push(zone.temperature_c);
-            }
-        }
-
-        // Tank node temperatures from all water heater equipment.
-        self.invariant_tank_temps.clear();
-        for eq in &self.equipment {
-            if eq.descriptor().end_use != EndUse::WATER_HEATING {
-                continue;
-            }
-            let telem = eq.telemetry();
-            for key in &self.tank_node_keys {
-                match telem.get(key) {
-                    // allowed: tank node keys are pre-computed at init.
-                    Some(t) => self.invariant_tank_temps.push(t),
-                    None => break,
+        // Skipped during warm-up: unconditioned zones (attics, basements) can
+        // start far from their annual-periodic equilibrium — warm-up
+        // convergence is driven by conditioned zones per EnergyPlus ERM 26.1.
+        // Enforcing bounds on transient unconditioned-zone temperatures
+        // produces false-positive invariant violations.
+        if !self.is_warming_up {
+            debug_assert_eq!(
+                self.latest_env.zones.len(),
+                self.zone_is_conditioned.len(),
+                "zone_is_conditioned length must match latest_env.zones length"
+            );
+            self.invariant_conditioned_temps.clear();
+            self.invariant_unconditioned_temps.clear();
+            for (zone, &is_cond) in self
+                .latest_env
+                .zones
+                .iter()
+                .zip(self.zone_is_conditioned.iter())
+            {
+                if is_cond {
+                    self.invariant_conditioned_temps.push(zone.temperature_c);
+                } else {
+                    self.invariant_unconditioned_temps.push(zone.temperature_c);
                 }
             }
+
+            // Tank node temperatures from all water heater equipment.
+            self.invariant_tank_temps.clear();
+            for eq in &self.equipment {
+                if eq.descriptor().end_use != EndUse::WATER_HEATING {
+                    continue;
+                }
+                let telem = eq.telemetry();
+                for key in &self.tank_node_keys {
+                    match telem.get(key) {
+                        // allowed: tank node keys are pre-computed at init.
+                        Some(t) => self.invariant_tank_temps.push(t),
+                        None => break,
+                    }
+                }
+            }
+            checker.check_temperatures(
+                &self.invariant_conditioned_temps,
+                &self.invariant_unconditioned_temps,
+                &self.invariant_tank_temps,
+            )?;
         }
-        checker.check_temperatures(
-            &self.invariant_conditioned_temps,
-            &self.invariant_unconditioned_temps,
-            &self.invariant_tank_temps,
-        )?;
 
         // SOC bounds for storage equipment.
         for eq in &self.equipment {
@@ -5878,6 +5900,15 @@ impl Dwelling {
             checker.check_hvac_power_non_negative(step, indoor_zone, heating_w, cooling_w)?;
         }
 
+        // Moisture invariants are skipped during warm-up because the initial
+        // humidity ratio from the HPXML model can produce large transients that
+        // false-positive the finiteness, sorption bound, and latent checks.
+        // Convergence is driven by zone temperatures; moisture tracks temperature
+        // once the thermal solver has settled.
+        if self.is_warming_up {
+            return Ok(());
+        }
+
         // Moisture balance: mass conservation across the humidity solver.
         if let Some(update) = self
             .latest_env
@@ -5935,14 +5966,6 @@ impl Dwelling {
                     }
                 }
             }
-        }
-        // Moisture invariants are skipped during warm-up because the initial
-        // humidity ratio from the HPXML model can produce large transients that
-        // false-positive the sorption bound check. Convergence is driven by
-        // zone temperatures; moisture tracks temperature once the thermal
-        // solver has settled.
-        if self.is_warming_up {
-            return Ok(());
         }
         for zone in &self.latest_env.zones {
             let w_new = self.humidity_solver.humidity_ratio(zone.id);

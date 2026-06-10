@@ -698,21 +698,21 @@ pub const THERMAL_AVAILABLE_W: &str = "thermal_available_w";
 pub const LOOP_RETURN_TEMP_C: &str = "loop_return_temp_c";
 
 /// Jacket water heat recovery power in watts.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
 /// jacket water heat recovery is a manufacturer-supplied PLR-dependent curve.
 ///
 /// scope: internal
 pub const JACKET_WATER_W: &str = "jacket_water_w";
 
 /// Lube oil heat recovery power in watts.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
 /// lube oil heat recovery is a manufacturer-supplied PLR-dependent curve.
 ///
 /// scope: internal
 pub const LUBE_OIL_W: &str = "lube_oil_w";
 
 /// Exhaust heat recovery power in watts.
-/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine:
 /// exhaust heat recovery is modelled via PLR-dependent curves and
 /// NTU-effectiveness HX; no standard fixed value exists.
 ///

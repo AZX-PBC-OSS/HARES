@@ -63,11 +63,11 @@ mod tests {
 
         // Fix the relative EPW path to be absolute.
         let epw_abs = project_root()
-            .join("vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+            .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
         let fixed = shortened.replace(
-            "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
+            "../../../data/examples/USA_CO_Denver.epw",
             &epw_abs,
         );
 
@@ -93,11 +93,11 @@ mod tests {
             .collect();
 
         let epw_abs = project_root()
-            .join("vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+            .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
         let fixed = stripped.replace(
-            "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
+            "../../../data/examples/USA_CO_Denver.epw",
             &epw_abs,
         );
 
@@ -121,11 +121,11 @@ mod tests {
         let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
 
         let epw_abs = project_root()
-            .join("vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+            .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
         let fixed = shortened.replace(
-            "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
+            "../../../data/examples/USA_CO_Denver.epw",
             &epw_abs,
         );
 
@@ -232,7 +232,7 @@ mod tests {
     /// Verifies `run_warmup_converged` converges within 25 iterations for
     /// BESTEST 900FF (heavyweight concrete, free-float, no HVAC).
     ///
-    /// EnergyPlus Engineering Reference §"Warmup Convergence": the iterative
+    /// EnergyPlus ERM 26.1 — Warmup Convergence: the iterative
     /// first-day procedure must converge to max |ΔT_zone| < 0.5 °C within
     /// 25 iterations for all construction types.
     ///

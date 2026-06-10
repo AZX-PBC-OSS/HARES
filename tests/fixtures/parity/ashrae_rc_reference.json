@@ -4,14 +4,14 @@
     "hpxml_input": "data/examples/BEopt_example.xml",
     "independent_from_hares": true,
     "citations": {
-      "interior_film_r": "ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 (still-air + radiation, eps=0.9, T=293.15 K); EnergyPlus Engineering Reference v25.1.0 §9.4 (TARP).",
-      "exterior_film_r": "EnergyPlus Engineering Reference v25.1.0 §9.5 (DOE-2 forced convection, r_f=1.67 'Rough' per the §9.5 Surface Roughness Multipliers table -- residential BEopt/OCHRE convention for shingle/clapboard).",
-      "window_u_factor_ip_to_si": "ASHRAE 90.1-2022 Appendix A unit-conversion factor 5.678263 W/(m^2*K) per Btu/(hr*ft^2*F); Simple Glazing interior-film decomposition per EnergyPlus Eng. Ref. §3.2 (Arasteh et al., LBNL 2009).",
+      "interior_film_r": "ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 (still-air + radiation, eps=0.9, T=293.15 K); EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm.",
+      "exterior_film_r": "EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection (r_f=1.67 'Rough' per the Surface Roughness Multipliers table — residential BEopt/OCHRE convention for shingle/clapboard).",
+      "window_u_factor_ip_to_si": "ASHRAE 90.1-2022 Appendix A unit-conversion factor 5.678263 W/(m^2*K) per Btu/(hr*ft^2*F); Simple Glazing interior-film decomposition per EnergyPlus ERM 26.1 — Window Calculation Module: Simple Window Model (Arasteh et al., LBNL 2009).",
       "assembly_layer_r_and_capacitance": "ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 4 'Thermal Properties of Typical Building and Insulating Materials' -- conductivity, density, and specific heat used for each layer in the ASSEMBLY_LAYERS tables.  Layer R = thickness / k; capacitance = thickness * density * cp summed across layers per BEopt Residential Construction Reference (NREL/TP-5500-64459, Apr 2016) App. C canonical build-ups.",
       "slab_on_grade_build_up": "ASHRAE HoF 2021 Ch. 18.31 F-factor perimeter method: Q = F2 × P × (T_indoor - T_ground), where F2 = 1.17 W/(m·K) for uninsulated slab per ASHRAE HoF Ch. 18.31 simplified perimeter values; concrete thermal mass = 211 kJ/(m²·K) per ASHRAE HoF Ch. 33 Table 1 (2400 kg/m³, 880 J/(kg·K), 0.1 m thick). Intentionally diverges from OCHRE area-UA fictitious insulation layer — the F-factor method is the ASHRAE standard for slab-on-grade heat loss.",
       "same_zone_halving": "EnergyPlus documentation of interior-partition RC equivalent network (both ends at same air node): r_total = r_layer / 2 + r_film_int.",
       "attic_volume_geometry": "BEopt Residential Construction Reference §3.3 (triangular gable roof, 0.5 * footprint * sqrt(gable_area * tan_pitch)).",
-      "typical_zone_temperatures": "EnergyPlus Engineering Reference §9.4 idealised interior/exterior anchors (conditioned 20 C, outdoor = avg_ambient + 5 C, ground = avg_ground); linear interpolation for unconditioned intermediate zones."
+      "typical_zone_temperatures": "EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm — idealised interior/exterior anchors (conditioned 20 C, outdoor = avg_ambient + 5 C, ground = avg_ground); linear interpolation for unconditioned intermediate zones."
     },
     "location": {
       "avg_wind_speed_m_s": 2.0,

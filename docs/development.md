@@ -389,16 +389,44 @@ production.
 
 | Resource | URL | Use |
 |----------|-----|-----|
-| EnergyPlus Engineering Reference (v25.2) | https://bigladdersoftware.com/epx/docs/25-2/engineering-reference/index.html | Physics model validation — DX coil curves, defrost, zone heat balance, psychrometrics |
-| EnergyPlus I/O Reference (v25.2) | https://bigladdersoftware.com/epx/docs/25-2/input-output-reference/index.html | Object/field names for `Coil:Heating:DX`, `Coil:Cooling:DX`, `Curve:Biquadratic`, etc. |
+| EnergyPlus Engineering Reference (v26.1) | https://bigladdersoftware.com/epx/docs/26-1/engineering-reference/index.html | Physics model validation — DX coil curves, defrost, zone heat balance, psychrometrics |
+| EnergyPlus I/O Reference (v26.1) | https://bigladdersoftware.com/epx/docs/26-1/input-output-reference/index.html | Object/field names for `Coil:Heating:DX`, `Coil:Cooling:DX`, `Curve:Biquadratic`, etc. |
 | EnergyPlus Docs (all versions) | https://bigladdersoftware.com/epx/docs/ | Version-specific engineering and I/O reference |
 | HPXML Specification v4.2 | https://github.com/hpxmlwg/hpxml/releases/tag/v4.2 | Residential building XML schema — HVAC equipment, duct systems, envelope |
 | HPXML Schema Definitions | https://github.com/hpxmlwg/hpxml/tree/master/schemas | XSD files for HPXML validation — field names, types, enumerations |
 
-When citing EnergyPlus in tickets or code comments, reference the **specific object name**
-(e.g., `Coil:Heating:DX:SingleSpeed`) and **field name** (e.g., `Defrost Strategy`),
-not just the section title. The I/O Reference is the canonical source for field names;
-the Engineering Reference provides the physics equations and model descriptions.
+When citing EnergyPlus in code comments, use the following format:
+
+- **Abbreviated form:** `EnergyPlus ERM 26.1 — [Page Title]: [Section Heading]`
+- **Full form:** `EnergyPlus Engineering Reference 26.1 — [Page Title]: [Section Heading]`
+
+Examples:
+```
+// EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model
+// EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection
+// EnergyPlus I/O Reference 26.1 — Simulation Parameters: Building
+```
+
+Use descriptive heading names from the EnergyPlus Engineering Reference 26.1
+web-hosted documentation (not numeric §-style section numbers, which are
+unverifiable against heading-based web navigation). The local copy of the
+Engineering Reference is at `docs/eplus/26-1_engineering-reference_*.html.md`.
+
+**Version policy:** EnergyPlus 26.1 is the pinned algorithmic reference version.
+All `docs/eplus/` content is extracted from v26.1. The `vendors/EnergyPlus/`
+tree is a recent v24.x development snapshot used for implementation
+cross-checking when the Engineering Reference leaves algorithmic details
+ambiguous; it is not the reference version for section numbering or
+documentation claims.
+
+A CI check at `scripts/check-energyplus-sections.sh` greps for remaining
+§-style EnergyPlus references and fails if any are found.
+
+When referencing EnergyPlus object names or field names, use the **specific
+object name** (e.g., `Coil:Heating:DX:SingleSpeed`) and **field name** (e.g.,
+`Defrost Strategy`), not just the section title. The I/O Reference is the
+canonical source for field names; the Engineering Reference provides the
+physics equations and model descriptions.
 
 ---
 

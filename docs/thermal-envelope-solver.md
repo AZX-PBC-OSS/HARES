@@ -241,7 +241,7 @@ For each `ExteriorSurfaceInfo` (non-window):
 Two paths depending on film resistance coupling:
 
 **Simple** (rad_frac ≤ 0): Single call to `exterior_longwave_w()` using the
-EnergyPlus 4-component model (Engineering Reference §External Longwave
+EnergyPlus 4-component model (Engineering Reference — Outside Surface Heat Balance: External Longwave
 Radiation):
 
 ```
@@ -325,7 +325,7 @@ vector. Instead, `apply_infiltration_and_ventilation()` returns per-zone
 `InfiltrationCoupling` structs containing `h_inf_w_k` (sensible conductance
 [W/K]) and `t_forcing_c` (outdoor driving temperature). In `resolve_internal()`,
 the temperature-dependent term `−h_inf·T_zone` is moved to the implicit (M)
-side of the CN system following EnergyPlus Engineering Reference §13.3. This
+side of the CN system following EnergyPlus ERM 26.1 — Basis for the Zone and Air System Integration. This
 guarantees monotonic, oscillation-free convergence even when the infiltration
 time constant is much smaller than the timestep.
 

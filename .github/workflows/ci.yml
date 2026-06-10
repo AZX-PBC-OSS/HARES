@@ -35,6 +35,13 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
 
+  docs-lint:
+    name: "docs: EnergyPlus section citations"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-energyplus-sections.sh
+
   bench-check:
     name: "cargo bench --no-run"
     runs-on: ubuntu-latest

@@ -44,7 +44,7 @@ pub(crate) const DEG_TO_RAD: f64 = PI / 180.0;
 const MAINS_TEMP_MIN_F: f64 = 32.0;
 
 /// Upper bound of the Burch-Christensen calibration range [°F].
-/// EnergyPlus ERM 24.1 §5.3.2: the model is calibrated for annual average
+/// EnergyPlus ERM 26.1 — Climate Calculations: Site:WaterMainsTemperature: the model is calibrated for annual average
 /// −5 °C to 30 °C (≈ 23 °F to 86 °F). Mains temperatures above 104 °F (40 °C)
 /// indicate the model is extrapolating beyond its valid range.
 const MAINS_CALIBRATION_MAX_F: f64 = 104.0;

@@ -8,9 +8,9 @@
 //! All inputs and outputs are in SI units.
 //!
 //! # References
-//! - EnergyPlus Engineering Reference §9.4 (ASHRAE Simple / TARP interior).
+//! - EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm.
 //! - EnergyPlus ConvectionCoefficients.cc `CalcASHRAESimpleIntConvCoeff`.
-//! - EnergyPlus Engineering Reference §9.5 (DOE-2 exterior convection).
+//! - EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection.
 //! - OCHRE reference implementation `calculate_film_resistances`.
 //! - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, pp 79.
 //! - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.

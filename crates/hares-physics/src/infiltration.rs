@@ -25,7 +25,7 @@
 //! - Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
 //!   and Wind Driven Air Infiltration Calculations", *HVAC&R Research*.
 //! - ASHRAE Handbook of Fundamentals 2017, Chapter 16.
-//! - EnergyPlus Engineering Reference §15.4 (AIM-2 / Sherman-Grimsrud).
+//! - EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 
 use crate::units::*;
 
@@ -390,7 +390,7 @@ pub fn terrain_wind_speed_for_class_typed(
 //   Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
 //   and Wind Driven Air Infiltration Calculations", HVAC&R Research 4(2).
 //   ASHRAE Handbook of Fundamentals 2021, Chapter 16.
-//   EnergyPlus Engineering Reference §15.4 (AIM-2 Enhanced Model).
+//   EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 //   OCHRE: vendors/OCHRE/ochre/utils/envelope.py:488-633.
 // ---------------------------------------------------------------------------
 

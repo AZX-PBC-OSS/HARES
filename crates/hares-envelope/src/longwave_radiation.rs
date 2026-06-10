@@ -12,7 +12,7 @@
 //!                   + β·F_sky·(T_sky⁴ − T_surf⁴)
 //!                   + (1−β)·F_sky·(T_air⁴ − T_surf⁴) ]
 //!
-//! View factors and β (EnergyPlus Engineering Reference, §External Longwave Radiation):
+//! View factors and β (EnergyPlus ERM 26.1 — Outside Surface Heat Balance: External Longwave Radiation):
 //!   F_sky = 0.5·(1 + cos φ)          where φ is the surface tilt from horizontal
 //!   F_gnd = 1 − F_sky = 0.5·(1 − cos φ)
 //!   β     = √(0.5·(1 + cos φ)) = √(F_sky)
@@ -34,7 +34,7 @@
 //! iterative surface temperature update).
 //!
 //! # References
-//! - EnergyPlus Engineering Reference 9.6: "External Longwave Radiation"
+//! - EnergyPlus ERM 26.1 — Outside Surface Heat Balance: External Longwave Radiation
 //! - ASHRAE HOF 2021, Ch. 25: "Heat, Air, and Moisture Control in Building Assemblies"
 //! - OCHRE Envelope.py: `_solve_exterior_radiation`, `_solve_interior_radiation`
 

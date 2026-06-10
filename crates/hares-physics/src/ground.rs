@@ -1,7 +1,7 @@
 //! Ground heat transfer models.
 //!
 //! Implements the Kusuda-Achenbach undisturbed ground temperature model
-//! (EnergyPlus Engineering Reference Ch. 3.17), the ASHRAE 90.1-2022
+//! (EnergyPlus ERM 26.1 — Ground Heat Transfer: Undisturbed Ground Temperature Model — Kusuda-Achenbach), the ASHRAE 90.1-2022
 //! perimeter conduction factor (F2) method for slab-on-grade heat loss,
 //! and the `SourceTemperature` enum for heat pump source-side temperature
 //! selection (air-source, ground-source, water-source).
@@ -204,7 +204,7 @@ pub enum SourceTemperature {
     /// Use ground temperature at specified depth via the Kusuda-Achenbach model.
     ///
     /// # References
-    /// - EnergyPlus Engineering Reference Ch. 3.17: Undisturbed Ground Temperature Model
+    /// - EnergyPlus ERM 26.1 — Undisturbed Ground Temperature Model: Kusuda-Achenbach
     /// - Kusuda & Achenbach (1965), ASHRAE Trans. 71(1):61-74
     KusudaAchenbach {
         /// Borehole depth below ground surface [m].

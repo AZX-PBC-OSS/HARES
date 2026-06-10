@@ -190,7 +190,7 @@ impl Default for DefrostConfig {
 /// Discrete defrost cycle state.
 ///
 /// HARES-specific enhancement: models explicit ON/OFF defrost cycling rather than
-/// the continuous/fractional approach in EnergyPlus §15.2.11.4. The continuous model
+/// the continuous/fractional approach in EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation. The continuous model
 /// averages the defrost penalty across each timestep, underestimating peak power draw
 /// and overestimating average capacity. The discrete model transitions between frost
 /// accumulation and active defrost with distinct capacity/EIR in each phase.
@@ -227,7 +227,7 @@ impl std::fmt::Display for DefrostCycleState {
 /// The inter-defrost interval is derived from `cycle_duration_s / time_fraction`:
 /// at a given `time_fraction`, this produces the same average time-in-defrost as the
 /// continuous model but with distinct ON/OFF phases. Source: mathematically equivalent
-/// to the EnergyPlus §15.2.11.4 continuous model when averaged over full cycles; the
+/// to the EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation continuous model when averaged over full cycles; the
 /// formula `interval = duration / dtf` is HARES-specific (not from E+ source).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefrostCycleTracker {

@@ -2172,12 +2172,12 @@ mod tests {
     }
 
     /// When field 33 contains the EPW missing-data sentinel
-    /// (999 per EnergyPlus EPW Data Dictionary §N33, \missing 999),
+    /// (999 per EnergyPlus EPW Data Dictionary 26.1 — Field 33 (Liquid Precipitation Depth), \missing 999),
     /// the value is detected and treated as missing data (0.0), and
     /// a `tracing::debug!` is emitted at file level.
     ///
     /// Note: the original report incorrectly cites the sentinel as 9999; the correct
-    /// EnergyPlus value is 999 (verified against E+ 9.6 and 24.2 docs).
+    /// EnergyPlus value is 999 (verified against E+ 26.1 docs).
     /// The threshold `>= 900.0` catches 999 and common sentinel variants.
     #[test]
     fn sentinel_999_in_field_33_treated_as_missing() {

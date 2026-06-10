@@ -219,7 +219,7 @@ fn denver_altitude_reduces_density() {
 /// resistance (increasing h). Tested on a vertical wall (tilt = 90°) exposed
 /// to outdoor conditions using the DOE-2 model.
 ///
-/// Reference: EnergyPlus Engineering Reference §9.5 (DOE-2 exterior convection).
+/// Reference: EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection.
 #[test]
 fn film_coefficient_increases_with_wind() {
     let tilt = 90.0_f64; // vertical wall
@@ -262,7 +262,7 @@ fn film_coefficient_increases_with_wind() {
 /// The above_hotter flag has no effect for vertical surfaces -- both branches
 /// must return the same value.
 ///
-/// Reference: EnergyPlus Engineering Reference §9.4, Eq. 9.4-1;
+/// Reference: EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm, Eq. 9.4-1;
 /// ASHRAE HOF 2021 Ch. 25, natural convection correlations.
 #[test]
 fn tarp_h_natural_vertical_surface() {
@@ -547,7 +547,7 @@ fn infiltration_increases_with_delta_t() {
 /// - Annual mean ≈ T_avg + 6 °F offset (≈ 3.33 °C).
 ///
 /// Reference: Burch & Christensen (2007), ASES National Solar Conference;
-/// EnergyPlus Engineering Reference §11.2; OCHRE water_heater.py.
+/// EnergyPlus ERM 26.1 — Climate Calculations: Site:WaterMainsTemperature; OCHRE water_heater.py.
 #[test]
 fn water_mains_temp_seasonal_variation() {
     let t_avg_c = 12.0_f64; // representative US mid-latitude site
@@ -624,7 +624,7 @@ fn water_mains_temp_seasonal_variation() {
 /// Verify that `biquadratic` evaluates `a + b·x1 + c·x1² + d·x2 + e·x2² + f·x1·x2`
 /// exactly, and that `BiquadraticCurve::evaluate` correctly clamps inputs to bounds.
 ///
-/// Reference: EnergyPlus Engineering Reference §15.1 (performance curve types);
+/// Reference: EnergyPlus ERM 26.1 — Performance Curves and Lookup Tables (performance curve types);
 /// OCHRE HVAC performance curves (vendors/OCHRE/defaults/HVAC Cooling/
 /// Biquadratic Air Conditioner.csv).
 #[test]
@@ -1402,7 +1402,7 @@ fn water_density_matches_eplus_glycol_table_0_to_80c() {
 /// References:
 /// - Kell (1975) J. Chem. Eng. Data 20(1):97–105 — density polynomial
 /// - NIST WebBook IAPWS — ρ(50°C) ≈ 988.0 kg/m³, ρ(15°C) ≈ 999.1 kg/m³
-/// - EnergyPlus Engineering Reference §14.8 — stratified tank model
+/// - EnergyPlus ERM 26.1 — Water Thermal Tanks (includes Water Heaters): Stratified Water Thermal Tank
 /// - ASHRAE HoF 2021 Ch. 1 Eq. 30 — water specific heat ≈ 4180 J/(kg·K)
 #[test]
 fn tank_thermal_mass_and_recovery_energy_physically_self_consistent() {
