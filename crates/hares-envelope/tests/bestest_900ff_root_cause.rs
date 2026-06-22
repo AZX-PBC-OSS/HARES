@@ -37,7 +37,7 @@ use hares_physics::air_properties::{dry_air_density_kg_m3, standard_pressure_pa}
 /// zone air (157 kJ/K) is <1.1 % of total effective thermal mass (~14.3 MJ/K).
 #[test]
 fn zone_air_capacitance_uses_sea_level_density() {
-    let rho_sea_level = AIR_DENSITY_KG_M3;
+    let rho_sea_level = dry_air_density_kg_m3(standard_pressure_pa(0.0), 20.0);
     let rho_denver = dry_air_density_kg_m3(standard_pressure_pa(1609.0), 20.0);
 
     assert!(
@@ -279,7 +279,7 @@ fn concrete_walls_dominate_zone_thermal_memory() {
     let wall_area_total = 9.6 + 21.6 + 16.2 + 16.2; // m², four walls
     let concrete_cap_walls = 1400.0 * 1000.0 * 0.100 * wall_area_total; // J/K
     let floor_cap = 1400.0 * 1000.0 * 0.080 * 48.0; // J/K, floor slab
-    let zone_air_cap = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 129.6; // J/K
+    let zone_air_cap = dry_air_density_kg_m3(standard_pressure_pa(0.0), 20.0) * AIR_CP_J_KG_K * 129.6; // J/K
 
     let total_concrete = concrete_cap_walls + floor_cap;
     let ratio = total_concrete / zone_air_cap;

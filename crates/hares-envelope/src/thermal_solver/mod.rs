@@ -48,6 +48,9 @@ pub use config::{
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use hares_physics::air_properties::moist_air_density_kg_m3;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
@@ -975,6 +978,16 @@ impl ThermalSolver {
             raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
             natural_vent_m3_s: indoor_inf.map(|c| c.nat_flow_m3_s).unwrap_or(0.0),
+            air_density_kg_m3: {
+                let rho = moist_air_density_kg_m3(
+                    env.weather.pressure_pa(),
+                    env.weather.outdoor_temp_c,
+                    env.weather.outdoor_humidity_ratio,
+                );
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                check_air_density_plausible(rho, "thermal solver component gains");
+                rho
+            },
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag: self.ext_surface_diag_buf.clone(),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -1558,8 +1571,8 @@ mod tests {
     /// difference. With the old 2450 kJ/kg bug, the implied h_fg would fall ~2%
     /// outside the acceptable range.
     #[test]
-    fn infiltration_latent_energy_consistent_with_moisture_mass_flow() {
-        use hares_physics::air_properties::moist_air_density_kg_m3;
+     fn infiltration_latent_energy_consistent_with_moisture_mass_flow() {
+use hares_physics::air_properties::moist_air_density_kg_m3;
         use hares_physics::infiltration::ach_infiltration;
 
         let ach = 0.5;

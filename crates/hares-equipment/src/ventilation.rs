@@ -13,8 +13,9 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::constants::{
-    CP_DRY_AIR_J_KG_K, DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3, LATENT_HEAT_VAPORISATION_0C_J_KG,
+    CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
 use hares_physics::units::power_w_to_kw;
 use hares_types::{
@@ -651,8 +652,17 @@ impl Equipment for Ventilation {
         let t_supply_c = t_outdoor_c + eff_s * (t_indoor_c - t_outdoor_c);
         let w_supply = w_outdoor + eff_l * (w_indoor - w_outdoor);
 
-        // Mass flow rate [kg/s]
-        let m_dot_kg_s = effective_flow_rate_m3_s * DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3;
+        // Mass flow rate [kg/s]. Density computed from outdoor T, P each timestep
+        // so mass flow is altitude-aware. Falls back to sea-level pressure when
+        // pressure data is not available (pressure_kpa <= 0).
+        // ASHRAE HoF 2021 Ch.1 Eq.28: ρ = P / (R_da × T)
+        let pressure_pa = if env.weather.pressure_kpa > 0.0 {
+            env.weather.pressure_kpa * 1000.0
+        } else {
+            SEA_LEVEL_PRESSURE_PA
+        };
+        let rho_kg_m3 = dry_air_density_kg_m3(pressure_pa, env.weather.outdoor_temp_c);
+        let m_dot_kg_s = effective_flow_rate_m3_s * rho_kg_m3;
 
         // Sensible ventilation load to zone [W]:
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
@@ -1101,11 +1111,10 @@ mod tests {
             .expect("recovery");
         assert!(recovery > 0.0, "HRV should recover positive sensible heat");
 
-        // m_dot = 0.035 * 1.2 = 0.042 kg/s
-        // Raw load = 0.042 * 1006 * 20 = 845 W
-        // Recovery = 0.042 * 1006 * 0.70 * 20 = 591 W
-        // Reduction = 591/845 = 70%
-        let m_dot = 0.035 * DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3;
+        // Density computed at sea-level pressure (default when pressure_kpa=0 in test)
+        // and 0 °C outdoor, consistent with the env() used in step().
+        let rho = dry_air_density_kg_m3(SEA_LEVEL_PRESSURE_PA, 0.0);
+        let m_dot = 0.035 * rho;
         let raw_load = m_dot * CP_DRY_AIR_J_KG_K * 20.0;
         let reduction = recovery / raw_load;
         assert!(

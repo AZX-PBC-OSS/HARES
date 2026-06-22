@@ -296,24 +296,18 @@ pub fn canonical_instance_namer(name: &str, count: usize) -> String {
 pub fn assign_instance_names(specs: &mut [EquipmentSpec]) {
     use std::collections::HashMap;
 
-    let effective_names: Vec<String> = specs
-        .iter()
-        .map(|s| s.instance_name.clone().unwrap_or_else(|| s.name.clone()))
-        .collect();
-
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for name in &effective_names {
-        *counts.entry(name.as_str()).or_insert(0) += 1;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for spec in specs.iter() {
+        *counts.entry(spec.name.clone()).or_insert(0) += 1;
     }
 
-    let mut indices: HashMap<&str, usize> = HashMap::new();
-    for (i, spec) in specs.iter_mut().enumerate() {
-        let effective = &effective_names[i];
-        let total = counts.get(effective.as_str()).copied().unwrap_or(1);
+    let mut indices: HashMap<String, usize> = HashMap::new();
+    for spec in specs.iter_mut() {
+        let total = counts.get(&spec.name).copied().unwrap_or(1);
         if total > 1 {
-            let idx = indices.entry(effective.as_str()).or_insert(0);
+            let idx = indices.entry(spec.name.clone()).or_insert(0);
             *idx += 1;
-            let new_name = canonical_instance_namer(effective, *idx);
+            let new_name = canonical_instance_namer(&spec.name, *idx);
             spec.instance_name = Some(new_name.clone());
             if let Some(ref mut typed) = spec.typed_config {
                 typed.name = new_name;

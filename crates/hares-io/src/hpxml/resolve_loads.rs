@@ -10,7 +10,7 @@ use hares_types::FuelType;
 
 use super::HpxmlError;
 use super::building::{Building, XmlNode, ZoneType};
-use super::equipment::{EquipmentSpec, build_spec, build_typed_spec};
+use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::xml_helpers::{
     capitalize, child_f64, child_load_kwh, child_load_therms, child_text, parse_fuel,
@@ -504,7 +504,7 @@ pub(super) fn resolve_scheduled_loads(
 
                 let mut spec = build_spec(name.to_string(), fuel, params, defaults);
                 if counter > 1 {
-                    spec.instance_name = Some(format!("{name} {counter}"));
+                    spec.instance_name = Some(canonical_instance_namer(name, counter as usize));
                 }
                 if is_non_primary_fridge {
                     spec.instance_name = Some(format!("{name} (Secondary)"));

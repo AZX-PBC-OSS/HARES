@@ -4975,6 +4975,7 @@ impl Dwelling {
                 internal_gain_w: gains.internal_gain_w,
                 port_convective_w: gains.port_convective_w,
                 port_radiant_w: gains.port_radiant_w,
+                air_density_kg_m3: gains.air_density_kg_m3,
             };
             let step = self.clock.current_step();
             let diag = diagnostics::capture(step, &self.latest_env, &self.ports, Some(envelope));

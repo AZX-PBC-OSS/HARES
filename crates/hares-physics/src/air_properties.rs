@@ -52,6 +52,25 @@ pub fn dry_air_density(p: Pressure, t: Temperature) -> f64 {
     dry_air_density_kg_m3(pressure_to_pascal(p), temperature_to_celsius(t))
 }
 
+/// Invariant: air density must be within plausible atmospheric range [0.8, 1.5] kg/m³
+/// and finite. Range covers Death Valley summer (hot, low density) to high-altitude
+/// winter (cold, high density). Values outside this range indicate either a unit
+/// error (Pa vs kPa) or corrupted weather data.
+///
+/// Gated behind `debug_assertions` or `check_invariants` feature to avoid per-timestep
+/// overhead in production release builds.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub fn check_air_density_plausible(rho: f64, context: &str) {
+    assert!(
+        rho.is_finite(),
+        "air density is non-finite: {rho} at {context}"
+    );
+    assert!(
+        (0.8..=1.5).contains(&rho),
+        "air density {rho:.5} kg/m³ out of plausible range [0.8, 1.5] at {context}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +177,61 @@ mod tests {
         let raw = dry_air_density_kg_m3(p_pa, t_c);
         let typed = dry_air_density(pressure_from_pascal(p_pa), temperature_from_celsius(t_c));
         approx_eq(typed, raw, 1e-12);
+    }
+
+    #[test]
+    fn dry_air_density_sea_level_20c_matches_expected() {
+        // ASHRAE HoF 2021 Ch.1 Eq.28: ρ = P / (R_da × T)
+        // At sea level (101325 Pa) and 20°C (293.15 K):
+        // ρ = 101325 / (287.058 × 293.15) ≈ 1.2041 kg/m³
+        let rho = dry_air_density_kg_m3(101_325.0, 20.0);
+        let expected = 101_325.0 / (crate::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
+        approx_eq(rho, expected, 1e-12);
+        assert!(
+            (rho - 1.2041).abs() < 0.001,
+            "sea-level dry air density at 20°C: {rho}, expected ~1.2041"
+        );
+    }
+
+    #[test]
+    fn dry_air_density_denver_altitude_correction() {
+        // Denver ~1609 m: ISA standard pressure ≈ 83431 Pa
+        // ρ_denver = 83431 / (287.058 × 293.15) ≈ 0.992 kg/m³
+        // Reduction vs sea level: 1 − 0.992/1.204 ≈ 17.6%
+        let p_sea = standard_pressure_pa(0.0);
+        let p_denver = standard_pressure_pa(1609.0);
+        let t_c = 20.0;
+
+        let rho_sea = dry_air_density_kg_m3(p_sea, t_c);
+        let rho_denver = dry_air_density_kg_m3(p_denver, t_c);
+
+        let reduction_pct = (1.0 - rho_denver / rho_sea) * 100.0;
+        assert!(
+            reduction_pct > 16.0 && reduction_pct < 19.0,
+            "Denver density reduction: {reduction_pct:.1}%, expected ~17.6%"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn invariant_check_accepts_plausible_density() {
+        check_air_density_plausible(1.2041, "sea level 20°C");
+        check_air_density_plausible(0.99, "Denver 20°C");
+        check_air_density_plausible(1.30, "cold day");
+        check_air_density_plausible(0.85, "Death Valley summer");
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[should_panic(expected = "out of plausible range")]
+    fn invariant_check_rejects_too_low_density() {
+        check_air_density_plausible(0.5, "too low");
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[should_panic(expected = "out of plausible range")]
+    fn invariant_check_rejects_too_high_density() {
+        check_air_density_plausible(2.0, "too high");
     }
 }

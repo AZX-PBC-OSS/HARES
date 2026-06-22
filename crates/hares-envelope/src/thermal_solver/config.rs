@@ -754,6 +754,10 @@ pub struct EnvelopeComponentGains {
     pub forced_vent_m3_s: f64,
     /// Natural ventilation flow rate [m³/s].
     pub natural_vent_m3_s: f64,
+    /// Outdoor moist-air density used for infiltration/ventilation mass flow conversion [kg/m³].
+    /// Computed per timestep from outdoor T, P, and humidity ratio via ASHRAE HoF 2021 Ch.1 Eq.28.
+    /// Included in diagnostic CSV (verbosity ≥ 4) for altitude-aware density verification.
+    pub air_density_kg_m3: f64,
     /// Per-exterior-surface energy diagnostics (solar absorbed, LWR, surface temp).
     /// Parallel to `ThermalSolverConfig::exterior_surfaces`.
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]

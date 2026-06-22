@@ -15,11 +15,10 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 
 // ── Physical constants ──────────────────────────────────────────────────────
 
-/// Dry air density at ~20 °C, 101.325 kPa [kg/m³].
-/// Matches OCHRE's 1.2041 for parity.
-pub const AIR_DENSITY_KG_M3: f64 = 1.2041;
 /// Specific heat of dry air [J/(kg·K)].
-pub const AIR_CP_J_KG_K: f64 = 1006.0;
+/// Re-exported from hares_physics::constants::CP_DRY_AIR_J_KG_K for convenience.
+/// ASHRAE 2017 HOF Ch. 1, Table 2 footnote, valid 0–60°C range.
+pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
 /// Default zone volume when floor area is unknown [m³].
 pub const DEFAULT_VOLUME_M3: f64 = 200.0;
 /// Default storey height [m].
