@@ -4022,6 +4022,63 @@ impl Dwelling {
         self.is_warming_up = false;
 
         self.simulation_results.steps.clear();
+
+        // NaN recovery: after warmup exhausts without convergence, unconditioned
+        // zones can have NaN humidity ratios that propagate into conditioned zone
+        // temperatures on the next step. Reset NaN conditioned zone temperatures
+        // to the outdoor temperature and NaN humidity ratios to outdoor humidity
+        // so the production phase starts from a physically plausible state.
+        // EnergyPlus ERM 26.1 — Warmup Convergence: the iterative procedure
+        // tolerates NaN from thermal transients; the production phase must not.
+        {
+            let t_outdoor = self.latest_env.weather.outdoor_temp_c;
+            let w_outdoor = self.latest_env.weather.outdoor_humidity_ratio;
+            for (zone, &is_cond) in self
+                .latest_env
+                .zones
+                .iter_mut()
+                .zip(self.zone_is_conditioned.iter())
+            {
+                if !zone.temperature_c.is_finite() {
+                    tracing::warn!(
+                        zone_id = %zone.id,
+                        temperature_c = zone.temperature_c,
+                        t_outdoor,
+                        "warmup produced NaN zone temperature — resetting to outdoor temperature"
+                    );
+                    zone.temperature_c = t_outdoor;
+                }
+                if !zone.humidity_ratio.is_finite() || zone.humidity_ratio < 0.0 {
+                    tracing::warn!(
+                        zone_id = %zone.id,
+                        humidity_ratio = zone.humidity_ratio,
+                        w_outdoor,
+                        "warmup produced NaN or negative humidity ratio — resetting to outdoor humidity"
+                    );
+                    zone.humidity_ratio = w_outdoor.clamp(0.0, 1.0);
+                }
+                // Conditioned zones: bounds check after NaN recovery
+                if is_cond {
+                    if zone.temperature_c < -50.0 {
+                        tracing::warn!(
+                            zone_id = %zone.id,
+                            temperature_c = zone.temperature_c,
+                            "warmup produced implausibly cold conditioned zone — clamping"
+                        );
+                        zone.temperature_c = t_outdoor;
+                    }
+                    if zone.temperature_c > 100.0 {
+                        tracing::warn!(
+                            zone_id = %zone.id,
+                            temperature_c = zone.temperature_c,
+                            "warmup produced implausibly hot conditioned zone — clamping"
+                        );
+                        zone.temperature_c = t_outdoor;
+                    }
+                }
+            }
+        }
+
         tracing::warn!(
             iterations = max_iter,
             "warm-up failed to converge within {} iterations; \
