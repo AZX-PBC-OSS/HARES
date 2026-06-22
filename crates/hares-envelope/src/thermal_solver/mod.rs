@@ -157,6 +157,23 @@ pub struct ThermalSolver {
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
     custom_payload_buf: Vec<f64>,
+    /// Per-surface linearised exterior LWR coupling data for semi-implicit
+    /// integration: (state_idx, input_idx, h_total_w_k, t_eff_c).
+    ///
+    /// Populated by `apply_exterior_longwave_inputs_iterative` for surfaces
+    /// with `rad_frac == 0` (no exterior film resistance in the RC network).
+    /// Consumed by `build_coupling`, which aggregates entries per state
+    /// index and adds semi-implicit coupling to `coupling_buf`.
+    ///
+    /// The linearised LWR splits the T⁴ radiative flux into:
+    /// - **Forcing** `h_total · T_eff` (external, sky/air temperature) →
+    ///   handled through the coupling forcing term.
+    /// - **Conductance** `h_total · T_surf` (state-dependent, zone air
+    ///   temperature) → handled through the coupling diagonal damping.
+    ///
+    /// This prevents the nonlinear T⁴ feedback that occurs when the full
+    /// radiative flux is injected as a B·u input with T_surf = T_zone.
+    lwr_coupling_buf: Vec<(usize, usize, f64, f64)>,
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
@@ -715,6 +732,7 @@ impl ThermalSolver {
             cached_outdoor_temp_c: env.weather.outdoor_temp_c,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             cached_ground_temps_c: Vec::with_capacity(n_ground_depths),
+            lwr_coupling_buf: Vec::with_capacity(n_ext_surfaces),
         })
     }
 

@@ -36,7 +36,8 @@ impl ThermalSolver {
         self.window_exterior_lwr_w = 0.0;
 
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
-            if info.input_index >= u.len() || info.state_index >= self.x.len() {
+            let skip = info.input_index >= u.len() || info.state_index >= self.x.len();
+            if skip {
                 continue;
             }
 
@@ -66,9 +67,6 @@ impl ThermalSolver {
                 let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
                 let t_air_k = t_ext + CELSIUS_TO_KELVIN;
 
-                // Net LWR flux density beyond U-factor's T_sky ≈ T_air assumption:
-                // Δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴) [W/m²]
-                // Walton (1983) tilted-sky model; E+ Eng.Ref "External Longwave Radiation".
                 let delta_q_w_m2 = info.emissivity
                     * STEFAN_BOLTZMANN
                     * beta
@@ -164,30 +162,109 @@ impl ThermalSolver {
                 continue;
             }
 
-            // For surfaces with no film resistance in the conduction path (rad_frac == 0),
-            // fall back to the simple (non-iterative) calculation.
+            // For surfaces with no separate RC node for the exterior film resistance
+            // (rad_frac == 0), the A-matrix drives the zone air or wall node toward
+            // the outdoor boundary temperature via a conductance that includes the
+            // combined exterior film coefficient h_out = h_c + h_r (convective plus
+            // linearized radiative). When h_out > 0, the linearized LWR exchange is
+            // already embedded in the A-matrix conductance. Injecting the full T⁴ LWR
+            // flux on top would double-count the radiation.
+            //
+            // The correct injection is the **sky-temperature correction**: the
+            // additional heat loss (or gain) from T_sky ≠ T_air that the A-matrix's
+            // linearised film coefficient does not capture. This mirrors the window
+            // branch's T_eff correction (Walton 1983 tilted-sky model; EnergyPlus
+            // Eng. Ref. "External Longwave Radiation").
+            //
+            // When h_out == 0, the A-matrix has no film resistance at all (r_film_ext
+            // is zero), so no LWR is embedded and the full T⁴ flux is injected.
             if info.rad_frac <= 0.0 {
                 let t_node_c = self.x[info.state_index];
-                let surface = ExteriorSurface {
-                    area_m2: info.area_m2,
-                    emissivity: info.emissivity,
-                    sky_view_factor: sky_view_factor(info.tilt_deg),
-                    beta: beta_factor(info.tilt_deg),
+                let f_sky = sky_view_factor(info.tilt_deg);
+                let beta = beta_factor(info.tilt_deg);
+
+                let (injected, q_lw_full) = if info.h_out_w_m2_k >= 1.0 {
+                    // A-matrix includes the combined film coefficient.
+                    // Inject only the sky-temperature correction.
+                    let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
+                    let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
+                    let t_air_k = t_ext + CELSIUS_TO_KELVIN;
+                    // Net LWR flux density from T_sky ≠ T_air:
+                    //   Δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴) [W/m²]
+                    let delta_q_w_m2 = info.emissivity
+                        * STEFAN_BOLTZMANN
+                        * beta
+                        * f_sky
+                        * (t_sky_k.powi(4) - t_air_k.powi(4));
+                    // T_eff approach (same as window branch):
+                    //   ΔQ_zone = (1/h_out) · Δq · A = Δq · A / h_out
+                    // The A-matrix conductance from node to outdoor already passes
+                    // through the film resistance, so the correction fraction that
+                    // reaches the zone air node is 1.0 (the film is in series with
+                    // the wall, and the correction replaces the T_air assumption
+                    // with T_eff at the film boundary).
+                    let delta_q_w = delta_q_w_m2 * info.area_m2 / info.h_out_w_m2_k;
+                    // For diagnostics: also compute the full T⁴ flux.
+                    let surface = ExteriorSurface {
+                        area_m2: info.area_m2,
+                        emissivity: info.emissivity,
+                        sky_view_factor: f_sky,
+                        beta,
+                    };
+                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
+                    (delta_q_w, q_lw_full)
+                } else if info.h_out_w_m2_k > 0.0 {
+                    // h_out is positive but below the 1.0 W/(m²·K) natural convection
+                    // floor. Use ASHRAE conventional fallback (same as window branch).
+                    let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
+                    let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
+                    let t_air_k = t_ext + CELSIUS_TO_KELVIN;
+                    let delta_q_w_m2 = info.emissivity
+                        * STEFAN_BOLTZMANN
+                        * beta
+                        * f_sky
+                        * (t_sky_k.powi(4) - t_air_k.powi(4));
+                    let delta_q_w = delta_q_w_m2 * info.area_m2 / H_OUT_ASHRAE_PEAK;
+                    let surface = ExteriorSurface {
+                        area_m2: info.area_m2,
+                        emissivity: info.emissivity,
+                        sky_view_factor: f_sky,
+                        beta,
+                    };
+                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
+                    (delta_q_w, q_lw_full)
+                } else {
+                    // No film resistance in A-matrix: inject full T⁴ LWR flux.
+                    let surface = ExteriorSurface {
+                        area_m2: info.area_m2,
+                        emissivity: info.emissivity,
+                        sky_view_factor: f_sky,
+                        beta,
+                    };
+                    let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
+                    (q_lw, q_lw)
                 };
-                let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                u[info.input_index] += q_lw;
+
+                u[info.input_index] += injected;
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.ext_surface_diag_buf
                     .push(super::config::ExtSurfaceDiag {
                         surface_id: info.surface_id,
                         category: info.boundary_category,
                         solar_absorbed_w: 0.0,
-                        lwr_gain_w: q_lw,
+                        lwr_gain_w: q_lw_full,
                         surface_temp_c: t_node_c,
-                        injected_w: q_lw,
-                        h_out_computed_w_m2_k: 0.0,
-                        h_out_effective_w_m2_k: 0.0,
-                        h_out_fallback_triggered: false,
+                        injected_w: injected,
+                        h_out_computed_w_m2_k: info.h_out_w_m2_k,
+                        h_out_effective_w_m2_k: if info.h_out_w_m2_k >= 1.0 {
+                            info.h_out_w_m2_k
+                        } else if info.h_out_w_m2_k > 0.0 {
+                            H_OUT_ASHRAE_PEAK
+                        } else {
+                            0.0
+                        },
+                        h_out_fallback_triggered: info.h_out_w_m2_k > 0.0
+                            && info.h_out_w_m2_k < 1.0,
                     });
                 continue;
             }
@@ -196,6 +273,10 @@ impl ThermalSolver {
             let f_sky = sky_view_factor(info.tilt_deg);
             let beta = beta_factor(info.tilt_deg);
             let t_node_c = self.x[info.state_index];
+
+            if !t_node_c.is_finite() {
+                continue;
+            }
 
             // Per-surface solar gain [W] for the iteration (no allocation).
             let solar_w = env
@@ -226,11 +307,14 @@ impl ThermalSolver {
             let mut t_surf = self.exterior_surface_temps[i];
             let mut t_surf_prev = self.exterior_surface_temps[i];
 
-            for _ in 0..info.n_iter {
+            for _iter in 0..info.n_iter {
                 let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
                 let t_new = t_surf_init + (solar_w + lwr) * info.rad_res_k_w;
                 let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
                 let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_surf_prev);
+                if !t_next.is_finite() {
+                    break;
+                }
                 t_surf_prev = t_surf;
                 t_surf = t_next;
                 // Converged when the per-iteration surface-temperature step is small.
@@ -243,6 +327,9 @@ impl ThermalSolver {
 
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
             let injected = (solar_w + q_lw) * info.rad_frac;
+            if !injected.is_finite() {
+                continue;
+            }
             u[info.input_index] += injected;
 
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -260,8 +347,6 @@ impl ThermalSolver {
                 });
         }
     }
-
-    /// Applies interior longwave radiation exchange for each configured zone.
     ///
     /// Uses ScriptF grey interchange (Gebhart factors) when pre-computed at init,
     /// falling back to linearized h_r approximation otherwise. The ScriptF path

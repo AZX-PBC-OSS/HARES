@@ -620,9 +620,28 @@ impl StateSpaceModel {
         );
 
         self.build_coupled_rhs(x, u, buf, couplings);
+
+        // Aggregate diagonal damping per state index before dividing.
+        //
+        // Multiple coupling entries for the same state (e.g. infiltration +
+        // linearised exterior LWR) must be summed before the implicit
+        // division to maintain the correct semi-implicit scheme:
+        //
+        //   x_next[i] = rhs[i] / (1 + Σ d_j)   for all couplings j at state i
+        //
+        // Applying `buf[i] /= 1 + d_j` sequentially for each entry gives
+        // `rhs[i] / Π(1 + d_j)`, which is incorrect when more than one
+        // coupling acts on the same state.
+        let n = self.state_dim();
+        let mut d_agg = vec![0.0f64; n];
         for &(idx, d_diag, _) in couplings {
-            debug_assert!(idx < self.state_dim(), "coupling index {idx} out of bounds");
-            buf[idx] /= 1.0 + d_diag;
+            debug_assert!(idx < n, "coupling index {idx} out of bounds");
+            d_agg[idx] += d_diag;
+        }
+        for i in 0..n {
+            if d_agg[i] != 0.0 {
+                buf[i] /= 1.0 + d_agg[i];
+            }
         }
     }
 

@@ -282,15 +282,15 @@ fn build_solver_boundaries(
             .get(&surface_idx)
             .and_then(|d| d.r_outer_half_m2_k_w)
             .unwrap_or(0.0);
-        let (exterior_rad_frac, exterior_rad_res_k_w) =
+            let (exterior_rad_frac, exterior_rad_res_k_w) =
             if r_outermost_half > 0.0 && boundary.area_m2 > 0.0 {
-                (
-                    r_film_ext / (r_film_ext + r_outermost_half),
-                    r_film_ext / boundary.area_m2,
-                )
-            } else {
-                (0.0, 0.0)
-            };
+                    (
+                        r_film_ext / (r_film_ext + r_outermost_half),
+                        r_film_ext / boundary.area_m2,
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
 
         let r_inner_half = diag_by_idx
             .get(&surface_idx)
