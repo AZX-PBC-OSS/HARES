@@ -188,9 +188,7 @@ fn test_two_zone_coupled_wall_heat_direction() {
     // to establish the initial temperature gradient required by this test.
     let mut snap = solver.snapshot_state();
     snap.x[1] = t2_init; // zone 2 state index
-    solver
-        .restore_state(&snap)
-        .expect("restore must succeed");
+    solver.restore_state(&snap).expect("restore must succeed");
 
     let ports = two_zone_ports();
 

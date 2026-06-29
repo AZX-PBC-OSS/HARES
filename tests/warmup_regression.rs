@@ -66,10 +66,7 @@ mod tests {
             .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
-        let fixed = shortened.replace(
-            "../../../data/examples/USA_CO_Denver.epw",
-            &epw_abs,
-        );
+        let fixed = shortened.replace("../../../data/examples/USA_CO_Denver.epw", &epw_abs);
 
         let mut tmp = tempfile::Builder::new()
             .suffix(".toml")
@@ -96,10 +93,7 @@ mod tests {
             .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
-        let fixed = stripped.replace(
-            "../../../data/examples/USA_CO_Denver.epw",
-            &epw_abs,
-        );
+        let fixed = stripped.replace("../../../data/examples/USA_CO_Denver.epw", &epw_abs);
 
         let mut tmp = tempfile::Builder::new()
             .suffix(".toml")
@@ -124,10 +118,7 @@ mod tests {
             .join("data/examples/USA_CO_Denver.epw")
             .display()
             .to_string();
-        let fixed = shortened.replace(
-            "../../../data/examples/USA_CO_Denver.epw",
-            &epw_abs,
-        );
+        let fixed = shortened.replace("../../../data/examples/USA_CO_Denver.epw", &epw_abs);
 
         let mut tmp = tempfile::Builder::new()
             .suffix(".toml")

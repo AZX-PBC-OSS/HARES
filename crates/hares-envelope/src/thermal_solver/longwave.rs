@@ -225,8 +225,7 @@ impl ThermalSolver {
 
                 // Incoming radiative flux [W] (independent of T_surf).
                 let h_lwr_inj = e_factor
-                    * ((1.0 - beta * f_sky) * t_air_k.powi(4)
-                        + beta * f_sky * t_sky_k.powi(4));
+                    * ((1.0 - beta * f_sky) * t_air_k.powi(4) + beta * f_sky * t_sky_k.powi(4));
 
                 // Linearised radiation coefficient [W/K].
                 let h_rad = 4.0 * e_factor * t_surf_k.powi(3);
@@ -1142,9 +1141,7 @@ mod tests {
     /// Build a minimal one-zone solver with a single opaque exterior surface
     /// having rad_frac == 0 (no RC film node). The surface is a 20 m² wall
     /// at emissivity 0.9, tilt 90° (vertical), with convection-only film.
-    fn opaque_lwr_solver(
-        env: &EnvironmentState,
-    ) -> crate::thermal_solver::ThermalSolver {
+    fn opaque_lwr_solver(env: &EnvironmentState) -> crate::thermal_solver::ThermalSolver {
         use std::collections::HashMap;
 
         use crate::state_space::{OutputMapping, StateSpaceModel};
@@ -1194,8 +1191,7 @@ mod tests {
             ..Default::default()
         };
 
-        crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 20.0)
-            .unwrap()
+        crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 20.0).unwrap()
     }
 
     /// Verify that the opaque rad_frac == 0 branch:

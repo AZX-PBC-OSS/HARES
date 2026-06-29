@@ -2244,8 +2244,7 @@ mod tests {
         let u = DVector::from_fn(n, |i, _| 5.0 + 0.5 * i as f64);
 
         // Two couplings on state 0 (d=0.5 and d=0.3), one on state 1 (d=0.2).
-        let couplings: Vec<(usize, f64, f64)> =
-            vec![(0, 0.5, 1.0), (0, 0.3, 2.0), (1, 0.2, 0.5)];
+        let couplings: Vec<(usize, f64, f64)> = vec![(0, 0.5, 1.0), (0, 0.3, 2.0), (1, 0.2, 0.5)];
 
         // Identity path
         let mut buf_id = DVector::zeros(n);
@@ -2415,8 +2414,7 @@ mod tests {
         let u = DVector::from_fn(m, |i, _| 5.0 + (i as f64) * 0.5);
 
         // Two couplings on state 0 (d=0.4 and d=0.2), one on state 1 (d=0.3).
-        let couplings: Vec<(usize, f64, f64)> =
-            vec![(0, 0.4, 1.0), (0, 0.2, 0.5), (1, 0.3, -0.5)];
+        let couplings: Vec<(usize, f64, f64)> = vec![(0, 0.4, 1.0), (0, 0.2, 0.5), (1, 0.3, -0.5)];
 
         let mut m_scratch = DMatrix::zeros(n, n);
         let lu = model.build_coupled_lu(&mut m_scratch, &couplings);

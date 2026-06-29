@@ -911,7 +911,8 @@ impl ThermalSolver {
         } else {
             self.last_u = DVector::from_column_slice(&snap.last_u);
         }
-        self.exterior_surface_temps.copy_from_slice(&snap.lwr_t_prev_c);
+        self.exterior_surface_temps
+            .copy_from_slice(&snap.lwr_t_prev_c);
         for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
             self.interior_surface_temps[i].copy_from_slice(zone_temps);
         }
@@ -1333,6 +1334,7 @@ mod tests {
     };
     use nalgebra::{DMatrix, DVector};
 
+    use crate::ThermalSnapshot;
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
@@ -1342,7 +1344,6 @@ mod tests {
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
         WindowSolarProperties,
     };
-    use crate::ThermalSnapshot;
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
         EnvironmentState {
@@ -6566,7 +6567,10 @@ mod tests {
         };
 
         let result = solver.restore_state(&bad_snap);
-        assert!(result.is_err(), "restore with NaN interior surface temp must return Err");
+        assert!(
+            result.is_err(),
+            "restore with NaN interior surface temp must return Err"
+        );
 
         assert_eq!(
             solver.x[0], original_x,

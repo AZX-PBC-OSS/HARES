@@ -234,4 +234,5 @@ mod tests {
     #[should_panic(expected = "out of plausible range")]
     fn invariant_check_rejects_too_high_density() {
         check_air_density_plausible(2.0, "too high");
-    }}
+    }
+}

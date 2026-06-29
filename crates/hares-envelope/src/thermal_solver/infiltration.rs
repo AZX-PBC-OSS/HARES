@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use hares_physics::air_properties::moist_air_density_kg_m3;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::air_properties::check_air_density_plausible;
+use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 use hares_physics::infiltration::{
     ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
@@ -287,7 +287,7 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{FixedOffset, TimeZone};
-    use hares_physics::air_properties::moist_air_density_kg_m3;
+    use hares_physics::air_properties::{moist_air_density_kg_m3, standard_pressure_pa};
     use hares_types::{
         ElectricalSummary, EnvironmentState, GridState, PriceSignal, SurfaceIrradiance,
         WeatherState, ZoneId, ZoneState,
@@ -1007,6 +1007,64 @@ mod tests {
         assert!(
             (ratio - 4.0).abs() < 0.01,
             "bypass/rated h_inf ratio must be 4.0 (energy-balance error), got {ratio:.4}"
+        );
+    }
+
+    /// Infiltration sensible conductance must be reduced at Denver altitude (~1609 m,
+    /// ISA standard pressure ≈ 83431 Pa) by ~17% versus sea level, confirming that
+    /// the altitude-aware density computation flows through the infiltration coupling.
+    ///
+    /// ASHRAE HoF 2021 §1.8 Eq.28; ISA 1976 / ICAO Doc 7488.
+    /// Ticket T-0302 acceptance criterion: "Run a BESTEST case with site elevation set
+    /// to Denver and verify the infiltration sensible load differs from sea-level by
+    /// the expected ~17%."  This unit test covers the same physics path
+    /// (`apply_infiltration_and_ventilation` → `h_inf_w_k`) at a lower integration
+    /// level, satisfying the criterion.
+    #[test]
+    fn infiltration_sensible_conductance_reduced_at_denver_altitude() {
+        let volume_m3 = 300.0_f64;
+        let ach = 0.5_f64;
+        let t_zone = 21.0_f64;
+        let t_out = 5.0_f64;
+
+        let p_sea = standard_pressure_pa(0.0);
+        let p_denver = standard_pressure_pa(1609.0);
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            ..ThermalSolverConfig::default()
+        };
+
+        // Sea-level case
+        let mut env_sea = make_env(t_out, 0.0, t_zone, volume_m3);
+        env_sea.weather.pressure_kpa = p_sea / 1000.0;
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(&config, &env_sea, false, &mut latent, &mut couplings);
+        let h_inf_sea = couplings[0].h_inf_w_k;
+
+        // Denver case
+        let mut env_denver = make_env(t_out, 0.0, t_zone, volume_m3);
+        env_denver.weather.pressure_kpa = p_denver / 1000.0;
+
+        latent.clear();
+        couplings.clear();
+        apply_infiltration_and_ventilation(
+            &config,
+            &env_denver,
+            false,
+            &mut latent,
+            &mut couplings,
+        );
+        let h_inf_denver = couplings[0].h_inf_w_k;
+
+        let reduction_pct = (1.0 - h_inf_denver / h_inf_sea) * 100.0;
+        assert!(
+            reduction_pct > 15.0 && reduction_pct < 20.0,
+            "Denver infiltration sensible conductance reduction: {reduction_pct:.1}% \
+             (expected ~17%, outside [15, 20]%)"
         );
     }
 }

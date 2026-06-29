@@ -26,7 +26,9 @@ use hares_control::{
 };
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
-use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSnapshot, ThermalSolver};
+use hares_envelope::{
+    ElectricalSolver, FluidSolver, HumiditySolver, ThermalSnapshot, ThermalSolver,
+};
 use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
     SetpointReconciliation, UNegTable,
@@ -4039,7 +4041,7 @@ impl Dwelling {
                         threshold_c,
                         "warm-up converged"
                     );
-                        self.is_warming_up = false;
+                    self.is_warming_up = false;
                     return Ok(iteration);
                 }
             }
@@ -4331,8 +4333,7 @@ impl Dwelling {
                 continue;
             }
             debug_assert!(
-                (zone.humidity_ratio - solver_hr).abs()
-                    < f64::EPSILON,
+                (zone.humidity_ratio - solver_hr).abs() < f64::EPSILON,
                 "zone {} humidity ratio {:.6e} diverged from solver committed {:.6e} at start of step",
                 zone.id.0,
                 zone.humidity_ratio,
@@ -5096,35 +5097,35 @@ impl Dwelling {
         // early production timesteps; the conditioned-zone invariant check
         // in `check_invariants` provides broader bounds coverage after warmup.
         if !self.is_warming_up {
-        {
-            let mut any_nan = false;
-            for (zone, &is_cond) in self
-                .latest_env
-                .zones
-                .iter()
-                .zip(self.zone_is_conditioned.iter())
             {
-                if is_cond && !zone.temperature_c.is_finite() {
-                    any_nan = true;
-                    tracing::error!(
-                        zone_id = %zone.id,
-                        temperature_c = zone.temperature_c,
-                        "conditioned zone temperature is NaN — quarantining dwelling"
-                    );
-                    #[cfg(feature = "observe")]
-                    {
-                        self.nan_temperature_count += 1;
+                let mut any_nan = false;
+                for (zone, &is_cond) in self
+                    .latest_env
+                    .zones
+                    .iter()
+                    .zip(self.zone_is_conditioned.iter())
+                {
+                    if is_cond && !zone.temperature_c.is_finite() {
+                        any_nan = true;
+                        tracing::error!(
+                            zone_id = %zone.id,
+                            temperature_c = zone.temperature_c,
+                            "conditioned zone temperature is NaN — quarantining dwelling"
+                        );
+                        #[cfg(feature = "observe")]
+                        {
+                            self.nan_temperature_count += 1;
+                        }
                     }
                 }
+                if any_nan {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "zone_temperature_nan".to_string(),
+                        value: f64::NAN,
+                        tolerance: 0.0,
+                    });
+                }
             }
-            if any_nan {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "zone_temperature_nan".to_string(),
-                    value: f64::NAN,
-                    tolerance: 0.0,
-                });
-            }
-        }
         } // end if !self.is_warming_up
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]

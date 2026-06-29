@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use nalgebra::DMatrix;
 use thiserror::Error;
 
+use hares_physics::air_properties::dry_air_density_kg_m3;
+
 use crate::NodeId;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::rc_network::sorted_internal_nodes;
@@ -413,20 +415,16 @@ pub fn derive_zone_capacitances(
     zones: &[ZoneInput],
     site_pressure_pa: f64,
 ) -> Result<Vec<f64>, BoundaryRcError> {
-    /// Reference temperature for zone air density computation [K].
-    /// 20 °C matches the linearization operating point used throughout the
-    /// RC network (star-mesh LWR, TARP film coefficients).
-    const T_REF_K: f64 = 293.15;
-
     if site_pressure_pa <= 0.0 {
         return Err(BoundaryRcError::InvalidSitePressure {
             value: site_pressure_pa,
         });
     }
 
-    // Ideal gas law for dry air: ρ = p / (R_da × T)
-    // Cite: ASHRAE HoF 2021 §1.8 Eq.28
-    let rho = site_pressure_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * T_REF_K);
+    // Dry air density at 20 °C (293.15 K) — the RC network linearization
+    // reference temperature used for star-mesh LWR and TARP film coefficients.
+    // ASHRAE HoF 2021 §1.8 Eq.28.
+    let rho = dry_air_density_kg_m3(site_pressure_pa, 20.0);
 
     Ok(zones
         .iter()

@@ -24,19 +24,18 @@ use hares_envelope::boundary_rc::*;
 use hares_physics::air_properties::{dry_air_density_kg_m3, standard_pressure_pa};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Root cause 1: Zone air capacitance defect (real but negligible on BESTEST)
+// Root cause 1: Zone air density correction — negligible BESTEST impact
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Zone air capacitance uses sea-level density (1.2041 kg/m³) instead of
-/// altitude-corrected density for Denver (~0.987 kg/m³ at 1609 m).
-///
-/// This is a real defect: the infiltration solver uses altitude-corrected
-/// density, but the zone capacitance does not. The inconsistency means heat
-/// is removed at Denver rate but stored at sea-level rate. However, the
-/// measured simulation impact on 900FF minimum temperature is <0.05 °C because
-/// zone air (157 kJ/K) is <1.1 % of total effective thermal mass (~14.3 MJ/K).
+/// Denver altitude reduces air density by ~18% vs sea level. T-0302 fixed
+/// `derive_zone_capacitances` to use altitude-corrected density, eliminating
+/// the sea-level constant. However, the measured simulation impact on 900FF
+/// minimum zone temperature is <0.05 °C because zone air (157 kJ/K) is
+/// <1.1 % of total effective thermal mass (~14.3 MJ/K). This test documents
+/// that quantitative fact; `derive_zone_capacitances_uses_altitude_corrected_density`
+/// verifies the fix itself.
 #[test]
-fn zone_air_capacitance_uses_sea_level_density() {
+fn denver_altitude_air_density_error_is_negligible_fraction_of_concrete_mass() {
     let rho_sea_level = dry_air_density_kg_m3(standard_pressure_pa(0.0), 20.0);
     let rho_denver = dry_air_density_kg_m3(standard_pressure_pa(1609.0), 20.0);
 
@@ -48,7 +47,7 @@ fn zone_air_capacitance_uses_sea_level_density() {
     let overestimate_pct = (rho_sea_level / rho_denver - 1.0) * 100.0;
     assert!(
         overestimate_pct > 15.0,
-        "sea-level constant overstates Denver density by {overestimate_pct:.1}% (expected >15 %)"
+        "sea-level density exceeds Denver density by {overestimate_pct:.1}% (expected >15 %)"
     );
 
     let volume = 129.6_f64;
@@ -279,7 +278,8 @@ fn concrete_walls_dominate_zone_thermal_memory() {
     let wall_area_total = 9.6 + 21.6 + 16.2 + 16.2; // m², four walls
     let concrete_cap_walls = 1400.0 * 1000.0 * 0.100 * wall_area_total; // J/K
     let floor_cap = 1400.0 * 1000.0 * 0.080 * 48.0; // J/K, floor slab
-    let zone_air_cap = dry_air_density_kg_m3(standard_pressure_pa(0.0), 20.0) * AIR_CP_J_KG_K * 129.6; // J/K
+    let zone_air_cap =
+        dry_air_density_kg_m3(standard_pressure_pa(0.0), 20.0) * AIR_CP_J_KG_K * 129.6; // J/K
 
     let total_concrete = concrete_cap_walls + floor_cap;
     let ratio = total_concrete / zone_air_cap;
