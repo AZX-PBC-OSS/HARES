@@ -1609,3 +1609,39 @@ fn weather_state_default_is_psychrometrically_self_consistent() {
         w.mains_temp_c,
     );
 }
+
+// ===========================================================================
+// Occupant heat gain constants: ASHRAE HoF 2021 Ch.18 Table 1
+// ===========================================================================
+
+/// Verify that occupant heat gain constants match the ASHRAE HoF 2021 Ch.18
+/// Table 1 values for seated adult office work: 75 W sensible, 55 W latent = 130 W total.
+///
+/// These values replace the previous OCHRE legacy values of 66 W sensible /
+/// 51.2 W latent derived from 400 BTU/h × 0.563/0.437 split.
+///
+/// # Reference
+/// - ASHRAE HoF 2021 Ch.18 Table 1 — Metabolic Rates for Typical Activities
+#[test]
+fn occupant_heat_gain_constants_match_ashrae_hof_2021_ch18_table1() {
+    use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
+
+    // 75 W sensible per ASHRAE HoF 2021 Ch.18 Table 1
+    assert_eq!(
+        OCCUPANT_SENSIBLE_GAIN_W, 75.0,
+        "OCCUPANT_SENSIBLE_GAIN_W must be 75 W/person per ASHRAE HoF 2021 Ch.18 Table 1"
+    );
+
+    // 55 W latent per ASHRAE HoF 2021 Ch.18 Table 1
+    assert_eq!(
+        OCCUPANT_LATENT_GAIN_W, 55.0,
+        "OCCUPANT_LATENT_GAIN_W must be 55 W/person per ASHRAE HoF 2021 Ch.18 Table 1"
+    );
+
+    // Total = 130 W for seated adult office work
+    assert_eq!(
+        OCCUPANT_SENSIBLE_GAIN_W + OCCUPANT_LATENT_GAIN_W,
+        130.0,
+        "total occupant gain must be 130 W (75 sensible + 55 latent) per ASHRAE HoF 2021 Ch.18 Table 1"
+    );
+}

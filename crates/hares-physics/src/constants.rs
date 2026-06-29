@@ -258,19 +258,15 @@ pub const CONCRETE_CP_J_KG_K: f64 = 880.0;
 
 /// Total sensible heat gain per occupant [W/person].
 ///
-/// OCHRE Envelope.py:904-907: total gain = 400 BTU/h per person; sensible fraction = 0.563
-/// (convective only -- radiative fraction is 0 by default in OCHRE residential model).
-/// 400 BTU/h × (1055.055_852_62 J / BTU) / 3600 s = 117.228 W; × 0.563 ≈ 66.0 W.
-/// Value kept as the OCHRE-matched rounded constant.
+/// ASHRAE HoF 2021 Ch.18 Table 1: 75 W sensible for seated adult office work.
 /// Split into convective (70%) and radiative (30%) via OCCUPANT_CONVECTIVE_FRACTION and
 /// OCCUPANT_RADIATIVE_FRACTION per ASHRAE HoF 2021 Ch.18 Table 1.
-pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 66.0;
+pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 75.0;
 
 /// Latent heat gain per occupant [W/person].
 ///
-/// OCHRE Envelope.py:908: latent fraction = 0.437 of 400 BTU/h total.
-/// 117.228 W × 0.437 ≈ 51.2 W.
-pub const OCCUPANT_LATENT_GAIN_W: f64 = 51.2;
+/// ASHRAE HoF 2021 Ch.18 Table 1: 55 W latent for seated adult office work.
+pub const OCCUPANT_LATENT_GAIN_W: f64 = 55.0;
 
 /// Fraction of occupant sensible gain delivered as longwave radiation to surrounding
 /// surfaces [-]. ASHRAE Handbook of Fundamentals 2021, Chapter 18, Table 1 specifies

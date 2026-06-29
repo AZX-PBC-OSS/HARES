@@ -155,14 +155,14 @@ pub struct AutosizeContext {
     ///
     /// ACCA Manual J-2016 §7: cooling design loads must include sensible
     /// internal gains from occupancy, lighting, and appliances.
-    /// Default: 2 occupants × 66 W/person (ASHRAE HoF 2021 Ch.18 Table 1)
-    /// = 132 W + 5 W/m² lights/plug loads.
+    /// Default: 2 occupants × 75 W/person (ASHRAE HoF 2021 Ch.18 Table 1) = 150 W
+    /// + 5 W/m² lights/plug loads.
+    ///
     /// Overridable via HPXML internal gains data.
     pub internal_gains_w: f64,
     /// Latent internal gains [W] for cooling autosizing latent load estimation.
     ///
-    /// Default: 2 occupants × 51.2 W/person (ASHRAE HoF 2021 Ch.18 Table 1)
-    /// = 102.4 W.
+    /// Default: 2 occupants × 55 W/person (ASHRAE HoF 2021 Ch.18 Table 1) = 110 W.
     /// Overridable via HPXML internal gains data.
     pub internal_gains_latent_w: f64,
 }
@@ -189,8 +189,8 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
     }
 
     // Occupancy: DEFAULT_OCCUPANTS × per-capita gains.
-    // ASHRAE HoF 2021 Ch.18 Table 1: sedentary occupant sensible = 66 W,
-    // latent = 51.2 W at typical indoor comfort conditions.
+    // ASHRAE HoF 2021 Ch.18 Table 1: seated adult
+    // sensible = 75 W, latent = 55 W.
     let occ_sensible = DEFAULT_OCCUPANTS * OCCUPANT_SENSIBLE_GAIN_W;
     let occ_latent = DEFAULT_OCCUPANTS * OCCUPANT_LATENT_GAIN_W;
 
@@ -1504,7 +1504,7 @@ mod tests {
             .and_then(|v| v.as_f64())
             .expect("cooling_capacity_w must be set after autosizing");
 
-        // minimal_building() has no floor area → occupancy-only gains: 132 W.
+        // minimal_building() has no floor area → occupancy-only gains: 2 × 75 = 150 W.
         let (internal_gains_w, _internal_gains_latent_w) =
             compute_default_internal_gains(&ctx, &building);
         let raw_capacity = thermal
@@ -2751,9 +2751,9 @@ mod tests {
     #[test]
     fn compute_default_internal_gains_matches_ashrae_defaults() {
         // Verify that the default internal gains match:
-        // - Occupancy: 2 × 66 W/person = 132 W sensible (ASHRAE HoF 2021 Ch.18 Table 1)
+        // - Occupancy: 2 × 75 W/person = 150 W sensible (ASHRAE HoF 2021 Ch.18 Table 1)
         // - Lighting/plug: 5 W/m² per ASHRAE 62.2-2022 Appendix B
-        // - Occupancy latent: 2 × 51.2 W/person = 102.4 W (ASHRAE HoF 2021 Ch.18 Table 1)
+        // - Occupancy latent: 2 × 55 W/person = 110 W (ASHRAE HoF 2021 Ch.18 Table 1)
 
         let building = minimal_building();
         let ctx = AutosizeContext {
@@ -2770,8 +2770,8 @@ mod tests {
         let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
 
         // Sensible from occupancy only (no floor area → no lights/plug component).
-        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W; // 132 W
-        let expected_occ_latent = 2.0 * OCCUPANT_LATENT_GAIN_W; // 102.4 W
+        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W; // 150 W
+        let expected_occ_latent = 2.0 * OCCUPANT_LATENT_GAIN_W; // 110 W
 
         assert!(
             (sensible - expected_occ_sensible).abs() < 1e-6,
@@ -2817,18 +2817,18 @@ mod tests {
         let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
 
         // conditioned_volume / ceiling_height = 180 / 2.4 = 75 m²
-        // Occupancy: 2 × 66 = 132 W
+        // Occupancy: 2 × 75 = 150 W
         // Lighting/plug: 75 × 5 = 375 W
-        // Total sensible: 132 + 375 = 507 W
-        let expected_sensible = 132.0 + 75.0 * 5.0;
+        // Total sensible: 150 + 375 = 525 W
+        let expected_sensible = 150.0 + 75.0 * 5.0;
         assert!(
             (sensible - expected_sensible).abs() < 1e-6,
             "gains with floor area: sensible {sensible} should match \
-             occupancy (132 W) + lighting/plug (75m² × 5W/m² = 375 W) = {expected_sensible} W"
+             occupancy (150 W) + lighting/plug (75m² × 5W/m² = 375 W) = {expected_sensible} W"
         );
         assert!(
-            (latent - 102.4).abs() < 1e-6,
-            "latent gains {latent} should match 2 × {OCCUPANT_LATENT_GAIN_W} = 102.4 W"
+            (latent - 110.0).abs() < 1e-6,
+            "latent gains {latent} should match 2 × {OCCUPANT_LATENT_GAIN_W} = 110 W"
         );
     }
 

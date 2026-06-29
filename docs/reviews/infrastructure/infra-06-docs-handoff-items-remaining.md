@@ -300,7 +300,7 @@ This is worse than the HANDOFF state: the two xfails were acknowledged technical
 
 3. **Update occupant gain constants** (medium priority, Item 3c):
    - Change `OCCUPANT_SENSIBLE_GAIN_W` from 66.0 to 75.0 and `OCCUPANT_LATENT_GAIN_W` from 51.2 to 55.0
-   - Update source comment from OCHRE to ASHRAE 62.1-2022 Table 6.2.1.1 / HoF 2021 Ch.18 Table 1
+    - Update source comment from OCHRE to ASHRAE HoF 2021 Ch.18 Table 1
    - Re-run BESTEST 600/640 (conditioned cases) to verify heating-to-cooling balance shift
 
 4. **Complete air density altitude correction** (medium priority, Item 3b):
@@ -328,7 +328,7 @@ This is worse than the HANDOFF state: the two xfails were acknowledged technical
 - Repo rules: `feedback_ashrae_not_ochre.md`, `feedback_no_silent_defaults.md`, `feedback_best_physics.md`
 - ASHRAE 140-2017 BESTEST bands: `tests/bestest/reference_bands.rs`
 - Related reviews: `infra-02` (xfail soundness), `infra-01` (dead module check), `infra-03` (empty fixture directories), `core-10` (occupancy gains), `core-03` (solver feedback), `air-03` (dry air density)
-- ASHRAE 62.1-2022 Table 6.2.1.1 — seated adult heat gain: 75 W sensible / 55 W latent
+- ASHRAE HoF 2021 Ch.18 Table 1 — seated adult heat gain: 75 W sensible / 55 W latent
 - ASHRAE HoF 2021 Ch.1 Eq.28 — air density from T, P, humidity (ISA 1976 / ICAO Doc 7488)
 - EnergyPlus Engineering Reference §3.2.4 — exterior convection and absorption defaults
 - Walker & Wilson (1998) AIM-2 model — infiltration coefficients

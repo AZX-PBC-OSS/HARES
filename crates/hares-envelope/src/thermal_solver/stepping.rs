@@ -303,8 +303,8 @@ impl ThermalSolver {
         // ── Internal gains ────────────────────────────────────────────────
         // ACCA Manual J-2016 §7: cooling design loads must include sensible
         // internal gains from occupancy, lighting, and appliances.
-        // ASHRAE HoF 2021 Ch.18 Table 1: occupant sensible gain = 66 W/person,
-        //     latent gain = 51.2 W/person at typical indoor conditions.
+        // ASHRAE HoF 2021 Ch.18 Table 1: seated adult
+        //     sensible = 75 W, latent = 55 W.
         // ASHRAE 62.2-2022 Appendix B: typical lights/plug density ≈ 5 W/m².
         // Internal gains enter through the zone sensible input column; the DC
         // gain method saves/restores this value, so the perturbation is

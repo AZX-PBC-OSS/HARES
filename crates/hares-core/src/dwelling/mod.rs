@@ -10141,9 +10141,9 @@ occupancy = 1.0
             .expect("apply_occupancy_gains");
 
         // Expected n_occupants = 0.5 * 4.0 = 2.0
-        // Convective sensible = 2.0 × 66.0 × 0.70 = 92.4 W
-        // Radiative sensible  = 2.0 × 66.0 × 0.30 = 39.6 W
-        // Latent              = 2.0 × 51.2 = 102.4 W
+        // Convective sensible = 2.0 × 75.0 × 0.70 = 105.0 W
+        // Radiative sensible  = 2.0 × 75.0 × 0.30 = 45.0 W
+        // Latent              = 2.0 × 55.0 = 110.0 W
         let expected_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
         let expected_radiant = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_RADIATIVE_FRACTION;
         let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
