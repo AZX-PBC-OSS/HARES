@@ -5472,7 +5472,7 @@ mod tests {
         };
         let eff = model.evaluate(0.5);
         assert!(
-            eff >= 0.80 && eff <= 0.90,
+            (0.80..=0.90).contains(&eff),
             "efficiency at 50% load must be 0.80-0.90 (realistic for residential spark-ignited \
              generators per Generac/Kohler data), got {eff}"
         );

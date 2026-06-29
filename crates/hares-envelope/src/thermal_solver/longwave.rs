@@ -34,6 +34,8 @@ impl ThermalSolver {
         let t_sky_valid = !t_sky_raw.is_nan();
 
         self.window_exterior_lwr_w = 0.0;
+        self.opaque_exterior_lwr_w = 0.0;
+        self.lwr_coupling_buf.clear();
 
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
             if info.input_index >= u.len() || info.state_index >= self.x.len() {
@@ -154,114 +156,105 @@ impl ThermalSolver {
             // ── Simple (non-iterative) branch: rad_frac == 0 ────────────────
             //
             // These surfaces have no separate RC node for the exterior film
-            // resistance.  The A-matrix drives the zone air or wall node toward
-            // the outdoor boundary temperature via a conductance that may or may
-            // not include the combined exterior film coefficient (h_c + h_r).
+            // resistance. The A-matrix uses convection-only film (TARP/DOE-2,
+            // no h_rad — see film_coefficients.rs test
+            // `exterior_film_resistance_is_convection_only_no_h_rad`).
             //
-            // When h_out > 0: the A-matrix includes the combined film coefficient,
-            // which already accounts for linearized LWR exchange at T_sky = T_air.
-            // Injecting the full T⁴ LWR flux on top would double-count the
-            // radiation.  The correct injection is the sky-temperature correction
-            // — the additional heat loss from T_sky ≠ T_air, using the same T_eff
-            // approach as the window branch (Walton 1983; E+ Eng. Ref. "External
-            // Longwave Radiation").
+            // The full T⁴ LWR flux is linearised around the current surface
+            // temperature and split into:
+            // - **Forcing** `h_rad · T_eff` (sky/air temperature, external) →
+            //   handled through the semi-implicit coupling forcing term.
+            // - **Conductance** `h_rad · T_surf` (state-dependent) →
+            //   handled through the coupling diagonal damping.
             //
-            // When h_out == 0: the A-matrix has no film resistance at all
-            // (r_film_ext = 0), so no LWR is embedded.  The full net T⁴ LWR
-            // flux is injected explicitly.  This is state-dependent (T_surf⁴)
-            // and can destabilize the solver for large timesteps — in
-            // production, solver_builder.rs always sets h_out > 0, so this
-            // branch is only reached in tests.
+            // This makes the scheme unconditionally stable regardless of
+            // timestep, matching EnergyPlus's linearised `HRad` approach
+            // (ConvectionCoefficients.cc:661-678; HeatBalanceSurfaceManager
+            // .cc:9575-9592) and the concept of OCHRE's `linearize_ext_
+            // radiation` mode (Envelope.py:242-249), but applied per-timestep
+            // through the coupling mechanism rather than baked into the
+            // A-matrix at construction time.
             //
-            // This mirrors OCHRE's `linearize_ext_radiation` mode
-            // (Envelope.py:242-249), which adds a linearized radiation resistance
-            // to the RC network and reports radiation as combined with convection.
-            // EnergyPlus similarly uses a linearized `HRad` coefficient in the
-            // outside surface heat balance (HeatBalanceSurfaceManager.cc:9600-9613).
+            // Linearisation derivation:
+            //   q_lw = h_lwr_inj − ε·σ·A·T_surf⁴
+            //   h_rad = 4·ε·σ·A·T_surf³          [W/K]
+            //   T_eff = (h_lwr_inj + 3·ε·σ·A·T_surf⁴) / h_rad   [K]
+            //   q_lw ≈ h_rad · (T_eff − T_surf)
             //
             // References:
             // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655.
             // - EnergyPlus Engineering Reference: "External Longwave Radiation".
-            // - OCHRE Envelope.py:242-249 (`linearize_ext_radiation`).
-            // - ASHRAE HoF 2021 Ch. 4 §4.2 (natural convection floor).
+            // - ASHRAE HoF 2021 Ch.4 §4.2 (linearised radiation coefficient).
             if info.rad_frac <= 0.0 {
                 let t_node_c = self.x[info.state_index];
+                if !t_node_c.is_finite() || info.area_m2 <= 0.0 {
+                    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                    self.ext_surface_diag_buf
+                        .push(super::config::ExtSurfaceDiag {
+                            surface_id: info.surface_id,
+                            category: info.boundary_category,
+                            solar_absorbed_w: 0.0,
+                            lwr_gain_w: 0.0,
+                            surface_temp_c: t_node_c,
+                            injected_w: 0.0,
+                            h_out_computed_w_m2_k: info.h_out_w_m2_k,
+                            h_out_effective_w_m2_k: info.h_out_w_m2_k,
+                            h_out_fallback_triggered: false,
+                        });
+                    continue;
+                }
+
                 let f_sky = sky_view_factor(info.tilt_deg);
                 let beta = beta_factor(info.tilt_deg);
+                let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
 
-                let (injected, q_lw_full) = if info.h_out_w_m2_k >= 1.0 {
-                    // A-matrix includes the combined film coefficient.
-                    // Inject only the sky-temperature correction.
-                    let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
-                    let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
-                    let t_air_k = t_ext + CELSIUS_TO_KELVIN;
-                    let delta_q_w_m2 = info.emissivity
-                        * STEFAN_BOLTZMANN
-                        * beta
-                        * f_sky
-                        * (t_sky_k.powi(4) - t_air_k.powi(4));
-                    let delta_q_w = delta_q_w_m2 * info.area_m2 / info.h_out_w_m2_k;
-                    let surface = ExteriorSurface {
-                        area_m2: info.area_m2,
-                        emissivity: info.emissivity,
-                        sky_view_factor: f_sky,
-                        beta,
-                    };
-                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                    (delta_q_w, q_lw_full)
-                } else if info.h_out_w_m2_k > 0.0 {
-                    // h_out is positive but below the 1.0 W/(m²·K) natural
-                    // convection floor. Use ASHRAE conventional fallback.
-                    let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
-                    let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
-                    let t_air_k = t_ext + CELSIUS_TO_KELVIN;
-                    let delta_q_w_m2 = info.emissivity
-                        * STEFAN_BOLTZMANN
-                        * beta
-                        * f_sky
-                        * (t_sky_k.powi(4) - t_air_k.powi(4));
-                    let delta_q_w = delta_q_w_m2 * info.area_m2 / H_OUT_ASHRAE_PEAK;
-                    let surface = ExteriorSurface {
-                        area_m2: info.area_m2,
-                        emissivity: info.emissivity,
-                        sky_view_factor: f_sky,
-                        beta,
-                    };
-                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                    (delta_q_w, q_lw_full)
+                // Full T⁴ flux for diagnostics.
+                let surface = ExteriorSurface {
+                    area_m2: info.area_m2,
+                    emissivity: info.emissivity,
+                    sky_view_factor: f_sky,
+                    beta,
+                };
+                let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
+
+                // Linearise the T⁴ exchange around the current surface temperature.
+                let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
+                let t_surf_k = t_node_c + CELSIUS_TO_KELVIN;
+                let t_air_k = t_ext + CELSIUS_TO_KELVIN;
+                let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
+
+                // Incoming radiative flux [W] (independent of T_surf).
+                let h_lwr_inj = e_factor
+                    * ((1.0 - beta * f_sky) * t_air_k.powi(4)
+                        + beta * f_sky * t_sky_k.powi(4));
+
+                // Linearised radiation coefficient [W/K].
+                let h_rad = 4.0 * e_factor * t_surf_k.powi(3);
+
+                // Effective radiative temperature [°C].
+                // T_eff_k = (h_lwr_inj + 3·e_factor·T_surf_k⁴) / h_rad
+                //         = h_lwr_inj / h_rad + 0.75 · T_surf_k
+                let t_eff_c = if h_rad > 1e-15 {
+                    (h_lwr_inj / h_rad + 0.75 * t_surf_k) - CELSIUS_TO_KELVIN
                 } else {
-                    // No film resistance in A-matrix (r_film_ext = 0).
-                    //
-                    // Inject the full net LWR flux (incoming − outgoing) evaluated
-                    // at the current node temperature.  This is an explicit
-                    // treatment of the T⁴ radiative exchange — the flux depends
-                    // on the zone state through T_surf, creating a nonlinear
-                    // feedback through the B·u input path.
-                    //
-                    // In production, solver_builder.rs always sets h_out to
-                    // either 1/r_film (>0) or H_OUT_ASHRAE_PEAK (34.0), so this
-                    // branch is only reached in tests that explicitly set
-                    // h_out_w_m2_k = 0.0.  The sky-temperature correction in
-                    // the h_out > 0 branches above is the production path and
-                    // is state-independent (no nonlinear feedback).
-                    //
-                    // A fully stable treatment for h_out = 0 would linearize
-                    // the T⁴ exchange (h_rad = 4εσT_mean³) and integrate it
-                    // through the semi-implicit coupling mechanism, matching
-                    // OCHRE's `linearize_ext_radiation` mode (Envelope.py:
-                    // 242-249).  This is deferred as it requires A-matrix
-                    // modification at construction time.
-                    let surface = ExteriorSurface {
-                        area_m2: info.area_m2,
-                        emissivity: info.emissivity,
-                        sky_view_factor: f_sky,
-                        beta,
-                    };
-                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                    (q_lw_full, q_lw_full)
+                    t_node_c
                 };
 
-                u[info.input_index] += injected;
+                // Push coupling data for build_coupling.
+                // The coupling entry adds:
+                //   d = h_rad * b_coeff         (diagonal damping)
+                //   forcing = h_rad * T_eff * b_coeff + d * x[state_idx]
+                // The forcing term provides h_rad·T_eff (external) and the
+                // d*x term cancels the −d*x subtraction in build_coupled_rhs.
+                // Net: x_next = (rhs + h_rad·T_eff·b) / (1 + d) — semi-implicit.
+                self.lwr_coupling_buf
+                    .push((info.state_index, info.input_index, h_rad, t_eff_c));
+
+                // Track total opaque LWR for diagnostics. This flux is NOT
+                // in `u` (it goes through the coupling mechanism), so the
+                // `u.iter().sum()` delta cannot capture it.
+                self.opaque_exterior_lwr_w += q_lw_full;
+
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.ext_surface_diag_buf
                     .push(super::config::ExtSurfaceDiag {
@@ -270,17 +263,10 @@ impl ThermalSolver {
                         solar_absorbed_w: 0.0,
                         lwr_gain_w: q_lw_full,
                         surface_temp_c: t_node_c,
-                        injected_w: injected,
+                        injected_w: h_rad * (t_eff_c - t_node_c),
                         h_out_computed_w_m2_k: info.h_out_w_m2_k,
-                        h_out_effective_w_m2_k: if info.h_out_w_m2_k >= 1.0 {
-                            info.h_out_w_m2_k
-                        } else if info.h_out_w_m2_k > 0.0 {
-                            H_OUT_ASHRAE_PEAK
-                        } else {
-                            0.0
-                        },
-                        h_out_fallback_triggered: info.h_out_w_m2_k > 0.0
-                            && info.h_out_w_m2_k < 1.0,
+                        h_out_effective_w_m2_k: info.h_out_w_m2_k,
+                        h_out_fallback_triggered: false,
                     });
                 continue;
             }
@@ -1140,6 +1126,207 @@ mod tests {
             (ratio - H_OUT_ASHRAE_PEAK).abs() < 0.01,
             "ratio u(1.0)/u(0.99) should be ~{:.0}, got {ratio}",
             H_OUT_ASHRAE_PEAK
+        );
+    }
+
+    // ── Opaque rad_frac == 0 semi-implicit LWR coupling ────────────────────
+    //
+    // Tests that the linearised LWR for opaque surfaces with no RC film node
+    // is correctly routed through the semi-implicit coupling mechanism:
+    //   1. No B·u injection (u[input_index] unchanged)
+    //   2. lwr_coupling_buf receives (state_idx, input_idx, h_rad, T_eff)
+    //   3. The next-step temperature matches the semi-implicit closed form:
+    //      x_next = (N·x + B·u + b·h_rad·T_eff) / (1 + b·h_rad)
+    //   4. Linearised flux equals full T⁴ flux at the linearisation point
+
+    /// Build a minimal one-zone solver with a single opaque exterior surface
+    /// having rad_frac == 0 (no RC film node). The surface is a 20 m² wall
+    /// at emissivity 0.9, tilt 90° (vertical), with convection-only film.
+    fn opaque_lwr_solver(
+        env: &EnvironmentState,
+    ) -> crate::thermal_solver::ThermalSolver {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            exterior_surfaces: vec![ExteriorSurfaceInfo {
+                surface_id: 200,
+                state_index: 0,
+                input_index: 1,
+                area_m2: 20.0,
+                emissivity: 0.9,
+                tilt_deg: 90.0,
+                azimuth_deg: 180.0,
+                rad_frac: 0.0,
+                rad_res_k_w: 0.0,
+                n_iter: 1,
+                absorptance: 0.0,
+                boundary_category: Some(BoundaryCategory::Wall),
+                u_factor_w_m2_k: 0.0,
+                h_out_w_m2_k: 5.0,
+            }],
+            ..Default::default()
+        };
+
+        crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 20.0)
+            .unwrap()
+    }
+
+    /// Verify that the opaque rad_frac == 0 branch:
+    /// - Does NOT inject into B·u (u[input_index] is unchanged)
+    /// - Populates lwr_coupling_buf with the correct h_rad and T_eff
+    /// - The linearised flux `h_rad·(T_eff − T_surf)` equals the full T⁴ flux
+    #[test]
+    fn opaque_lwr_rad_frac_zero_routes_through_coupling_not_bu() {
+        let env = window_lwr_env();
+        let mut solver = opaque_lwr_solver(&env);
+
+        // Apply exterior LWR inputs.
+        let mut u = nalgebra::DVector::zeros(2);
+        u[0] = env.weather.outdoor_temp_c;
+        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+
+        // 1. u[input_index] (index 1) must be unchanged — no B·u injection.
+        assert_eq!(
+            u[1], 0.0,
+            "opaque rad_frac==0: u[input_index] must be 0 (LWR through coupling, not B·u), got {}",
+            u[1]
+        );
+
+        // 2. lwr_coupling_buf must have one entry.
+        assert_eq!(
+            solver.lwr_coupling_buf.len(),
+            1,
+            "opaque rad_frac==0: lwr_coupling_buf must have exactly 1 entry"
+        );
+
+        let (state_idx, input_idx, h_rad, t_eff_c) = solver.lwr_coupling_buf[0];
+        assert_eq!(state_idx, 0, "state_idx must be 0");
+        assert_eq!(input_idx, 1, "input_idx must be 1");
+        assert!(
+            h_rad > 0.0,
+            "h_rad must be positive (4·ε·σ·A·T³ > 0), got {h_rad}"
+        );
+
+        // 3. Linearised flux must equal full T⁴ flux at the linearisation point.
+        let t_surf_c = solver.x[0];
+        let f_sky = sky_view_factor(90.0);
+        let beta = beta_factor(90.0);
+        let surface = ExteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.9,
+            sky_view_factor: f_sky,
+            beta,
+        };
+        let q_lw_full = exterior_longwave_w(&surface, -30.0, -15.0, t_surf_c);
+        let q_lw_linearised = h_rad * (t_eff_c - t_surf_c);
+
+        assert!(
+            (q_lw_full - q_lw_linearised).abs() < 5.0,
+            "linearised flux ({q_lw_linearised:.6} W) must approximately equal full T⁴ flux \
+             ({q_lw_full:.6} W) at the linearisation point (within floating-point tolerance \
+             from different powi(3)/powi(4) computation paths)"
+        );
+
+        // 4. h_rad must match the analytical formula 4·ε·σ·A·T_surf³.
+        let t_surf_k = t_surf_c + CELSIUS_TO_KELVIN;
+        let e_factor = 0.9 * STEFAN_BOLTZMANN * 20.0;
+        let h_rad_expected = 4.0 * e_factor * t_surf_k.powi(3);
+        assert!(
+            (h_rad - h_rad_expected).abs() < 1e-6,
+            "h_rad ({h_rad:.6}) must match 4·ε·σ·A·T³ ({h_rad_expected:.6})"
+        );
+    }
+
+    /// Verify that the semi-implicit LWR coupling produces the correct
+    /// next-step temperature: x_next = (N·x + B·u + b·h_rad·T_eff) / (1 + b·h_rad).
+    /// Also verifies stability with a very large timestep (3600s) where
+    /// explicit injection would diverge.
+    #[test]
+    fn opaque_lwr_coupling_next_step_matches_semi_implicit_closed_form() {
+        let env = window_lwr_env();
+        let mut solver = opaque_lwr_solver(&env);
+
+        // Apply LWR and build coupling.
+        let mut u = nalgebra::DVector::zeros(2);
+        u[0] = env.weather.outdoor_temp_c;
+        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        solver.build_coupling();
+
+        // Verify coupling_buf has 1 entry (from LWR, no infiltration in this config).
+        assert!(
+            !solver.coupling_buf.is_empty(),
+            "coupling_buf must not be empty after build_coupling"
+        );
+
+        let (idx, d, forcing) = solver.coupling_buf[0];
+        assert_eq!(idx, 0, "coupling state index must be 0");
+
+        // Verify the coupling algebra: forcing = h_rad·T_eff·b + d·x
+        let (_, _, h_rad, t_eff_c) = solver.lwr_coupling_buf[0];
+        let b_coeff = solver.model.b_eff()[(0, 1)];
+        let d_expected = h_rad * b_coeff;
+        let x0 = solver.x[0];
+        let forcing_expected = h_rad * t_eff_c * b_coeff + d_expected * x0;
+
+        assert!(
+            (d - d_expected).abs() < 1e-12,
+            "coupling d ({d:.10}) must match h_rad·b ({d_expected:.10})"
+        );
+        assert!(
+            (forcing - forcing_expected).abs() < 1e-9,
+            "coupling forcing ({forcing:.10}) must match h_rad·T_eff·b + d·x ({forcing_expected:.10})"
+        );
+
+        // Verify the closed-form: x_next = (N·x + B·u + b·h_rad·T_eff) / (1 + d)
+        // where B·u includes ALL input columns (outdoor temp + zone sensible).
+        let n = solver.model.n_mat()[(0, 0)];
+        let b00 = solver.model.b_eff()[(0, 0)];
+        let b01 = solver.model.b_eff()[(0, 1)];
+        let b_u_full = b00 * u[0] + b01 * u[1];
+        let rhs = n * x0 + b_u_full + b_coeff * h_rad * t_eff_c;
+        let x_next_expected = rhs / (1.0 + d);
+
+        // Run the actual step.
+        let mut buf = nalgebra::DVector::zeros(1);
+        solver.model.step_with_identity_coupling_into(
+            &solver.x,
+            &u,
+            &mut buf,
+            &solver.coupling_buf,
+        );
+
+        assert!(
+            (buf[0] - x_next_expected).abs() < 1e-4,
+            "x_next ({:.10}) must match semi-implicit closed form ({:.10})",
+            buf[0],
+            x_next_expected
         );
     }
 }

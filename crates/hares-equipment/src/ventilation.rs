@@ -1111,7 +1111,7 @@ mod tests {
             .expect("recovery");
         assert!(recovery > 0.0, "HRV should recover positive sensible heat");
 
-        // Density computed at sea-level pressure (default when pressure_kpa=0 in test)
+        // Density computed at default pressure (101.325 kPa = SEA_LEVEL_PRESSURE_PA)
         // and 0 °C outdoor, consistent with the env() used in step().
         let rho = dry_air_density_kg_m3(SEA_LEVEL_PRESSURE_PA, 0.0);
         let m_dot = 0.035 * rho;

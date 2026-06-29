@@ -512,7 +512,7 @@ impl ThermalSolver {
         }
     }
 
-    fn build_coupling(&mut self) {
+    pub(super) fn build_coupling(&mut self) {
         self.coupling_buf.clear();
         for inf in &self.infiltration_buf {
             if inf.h_inf_w_k.abs() < 1e-15 {
@@ -527,6 +527,26 @@ impl ThermalSolver {
             let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
             let d = inf.h_inf_w_k * b_coeff;
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
+            self.coupling_buf.push((state_idx, d, forcing));
+        }
+
+        // Linearised exterior LWR coupling for rad_frac == 0 surfaces.
+        //
+        // The full T⁴ LWR flux is split into a forcing part (h_rad · T_eff,
+        // dependent on sky/air temperature only) and a conductance part
+        // (h_rad · T_surf, dependent on the zone state).  The conductance
+        // is integrated semi-implicitly through the coupling diagonal,
+        // making the scheme unconditionally stable regardless of timestep.
+        //
+        // See `apply_exterior_longwave_inputs_iterative` for the linearisation
+        // derivation (exact factored form of the Stefan-Boltzmann equation).
+        for &(state_idx, input_idx, h_rad_w_k, t_eff_c) in &self.lwr_coupling_buf {
+            if h_rad_w_k.abs() < 1e-15 {
+                continue;
+            }
+            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
+            let d = h_rad_w_k * b_coeff;
+            let forcing = h_rad_w_k * t_eff_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }
     }
@@ -969,21 +989,38 @@ impl ThermalSolver {
                 let g_u = balance_bufs.1;
                 let f_minus_i_x = balance_bufs.2;
 
+                // Aggregate diagonal damping per state index before dividing.
+                //
+                // Multiple coupling entries for the same state must be summed
+                // before the implicit division so the semi-implicit scheme
+                // gives `rhs[i] / (1 + Σ d_j)` rather than the buggy
+                // `rhs[i] / Π(1 + d_j)`. See `state_space.rs` for the same
+                // fix on the step and scalar-solve paths.
+                //
+                // `balance_d_agg` is pre-allocated and reused each call.
+                let d_agg = &mut self.balance_d_agg;
+                d_agg[..n_states].fill(0.0);
+                for &(idx, d, _) in &self.coupling_buf {
+                    if idx < n_states {
+                        d_agg[idx] += d;
+                    }
+                }
+
                 // h  = coupled_step(0, 0)
                 self.model
                     .build_coupled_rhs(x_zero, u_zero, h, &self.coupling_buf);
-                for &(idx, d, _) in &self.coupling_buf {
-                    if idx < n_states {
-                        h[idx] /= 1.0 + d;
+                for i in 0..n_states {
+                    if d_agg[i] != 0.0 {
+                        h[i] /= 1.0 + d_agg[i];
                     }
                 }
 
                 // g_u = coupled_step(0, u) − h
                 self.model
                     .build_coupled_rhs(x_zero, &u, g_u, &self.coupling_buf);
-                for &(idx, d, _) in &self.coupling_buf {
-                    if idx < n_states {
-                        g_u[idx] /= 1.0 + d;
+                for i in 0..n_states {
+                    if d_agg[i] != 0.0 {
+                        g_u[i] /= 1.0 + d_agg[i];
                     }
                 }
                 for i in 0..n_states {
@@ -997,9 +1034,9 @@ impl ThermalSolver {
                     f_minus_i_x,
                     &self.coupling_buf,
                 );
-                for &(idx, d, _) in &self.coupling_buf {
-                    if idx < n_states {
-                        f_minus_i_x[idx] /= 1.0 + d;
+                for i in 0..n_states {
+                    if d_agg[i] != 0.0 {
+                        f_minus_i_x[i] /= 1.0 + d_agg[i];
                     }
                 }
                 for i in 0..n_states {

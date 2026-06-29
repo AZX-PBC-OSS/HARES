@@ -12,7 +12,7 @@
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
@@ -37,7 +37,7 @@ mod tests {
         dirs
     }
 
-    fn weather_path(version: &str, bldg_dir: &PathBuf) -> PathBuf {
+    fn weather_path(version: &str, bldg_dir: &Path) -> PathBuf {
         let hpxml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips_from_hpxml(&hpxml);
 
@@ -98,7 +98,7 @@ mod tests {
         }
     }
 
-    fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
+    fn parse_csv_columns(path: &Path) -> BTreeMap<String, Vec<f64>> {
         let contents = fs::read_to_string(path).expect("read CSV");
         let mut lines = contents.lines();
         let header = lines.next().expect("header line");
@@ -123,7 +123,7 @@ mod tests {
         data
     }
 
-    fn assert_physics_bounds(csv_path: &PathBuf) {
+    fn assert_physics_bounds(csv_path: &Path) {
         let data = parse_csv_columns(csv_path);
 
         for (col, values) in &data {
@@ -147,7 +147,7 @@ mod tests {
         }
     }
 
-    fn run_resstock_smoke(version: &str, bldg_dir: &PathBuf) {
+    fn run_resstock_smoke(version: &str, bldg_dir: &Path) {
         let hpxml_path = bldg_dir.join("home.xml");
         let schedule_path = bldg_dir.join("in.schedules.csv");
         let weather_path = weather_path(version, bldg_dir);

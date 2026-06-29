@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use hares_physics::air_properties::moist_air_density_kg_m3;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 use hares_physics::infiltration::{
     ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
@@ -91,6 +93,8 @@ pub(crate) fn apply_infiltration_and_ventilation(
     // moist_air_density_kg_m3 inverts ASHRAE HOF 2021 Ch.1 Eq.28 specific volume
     // (v = R_da·T·(1+W/ε)/p [m³/kg_da]), so it already yields kg_da/m³.
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    check_air_density_plausible(rho, "infiltration mass flow");
 
     for zone in &env.zones {
         // Look up per-zone infiltration; default to zero ACH if not configured.

@@ -52,10 +52,10 @@ pub fn dry_air_density(p: Pressure, t: Temperature) -> f64 {
     dry_air_density_kg_m3(pressure_to_pascal(p), temperature_to_celsius(t))
 }
 
-/// Invariant: air density must be within plausible atmospheric range [0.8, 1.5] kg/m³
-/// and finite. Range covers Death Valley summer (hot, low density) to high-altitude
-/// winter (cold, high density). Values outside this range indicate either a unit
-/// error (Pa vs kPa) or corrupted weather data.
+/// Invariant: air density must be within plausible atmospheric range [0.6, 1.5] kg/m³
+/// and finite. Range covers high-altitude locations (e.g., La Paz, Bolivia at ~4000m,
+/// ρ ≈ 0.73 kg/m³) to cold sea-level winter (ρ ≈ 1.4 kg/m³). Values outside this
+/// range indicate either a unit error (Pa vs kPa) or corrupted weather data.
 ///
 /// Gated behind `debug_assertions` or `check_invariants` feature to avoid per-timestep
 /// overhead in production release builds.
@@ -66,8 +66,8 @@ pub fn check_air_density_plausible(rho: f64, context: &str) {
         "air density is non-finite: {rho} at {context}"
     );
     assert!(
-        (0.8..=1.5).contains(&rho),
-        "air density {rho:.5} kg/m³ out of plausible range [0.8, 1.5] at {context}"
+        (0.6..=1.5).contains(&rho),
+        "air density {rho:.5} kg/m³ out of plausible range [0.6, 1.5] at {context}"
     );
 }
 
@@ -218,7 +218,7 @@ mod tests {
         check_air_density_plausible(1.2041, "sea level 20°C");
         check_air_density_plausible(0.99, "Denver 20°C");
         check_air_density_plausible(1.30, "cold day");
-        check_air_density_plausible(0.85, "Death Valley summer");
+        check_air_density_plausible(0.73, "La Paz 4000m");
     }
 
     #[test]

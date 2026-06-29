@@ -632,6 +632,14 @@ impl StateSpaceModel {
         // Applying `buf[i] /= 1 + d_j` sequentially for each entry gives
         // `rhs[i] / Π(1 + d_j)`, which is incorrect when more than one
         // coupling acts on the same state.
+        //
+        // Note: `d_agg` is allocated every timestep on this hot production
+        // path. The public signature has no scratch-buffer parameter, so we
+        // cannot reuse a caller-owned buffer without an API change. A future
+        // optimization could add a private `_with_scratch` overload taking a
+        // `&mut [f64]` and have this method allocate and delegate; the
+        // `ThermalSolver` already pre-allocates an analogous `balance_d_agg`
+        // buffer for the debug invariant-check path.
         let n = self.state_dim();
         let mut d_agg = vec![0.0f64; n];
         for &(idx, d_diag, _) in couplings {
@@ -793,15 +801,38 @@ impl StateSpaceModel {
             rhs_fixed[idx] += forcing;
         }
 
-        // Closed-form solve: (I + D)⁻¹ · rhs_fixed
+        // Aggregate diagonal damping per state index before dividing.
+        //
+        // Multiple coupling entries for the same state (e.g. infiltration +
+        // linearised exterior LWR) must be summed before the implicit
+        // division to maintain the correct semi-implicit scheme:
+        //
+        //   x_next[i] = rhs[i] / (1 + Σ d_j)   for all couplings j at state i
+        //
+        // Applying `rhs[i] /= 1 + d_j` sequentially for each entry gives
+        // `rhs[i] / Π(1 + d_j)`, which is incorrect when more than one
+        // coupling acts on the same state. See `step_with_identity_coupling_into`
+        // for the same fix on the step path.
+        let n = self.state_dim();
+        let mut d_agg = vec![0.0f64; n];
         for &(idx, d_diag, _) in couplings {
-            rhs_fixed[idx] /= 1.0 + d_diag;
+            debug_assert!(idx < n, "coupling index {idx} out of bounds");
+            d_agg[idx] += d_diag;
+        }
+
+        // Closed-form solve: (I + D)⁻¹ · rhs_fixed
+        for i in 0..n {
+            if d_agg[i] != 0.0 {
+                rhs_fixed[i] /= 1.0 + d_agg[i];
+            }
         }
 
         // Gain: g = (I + D)⁻¹ · b_col
         let mut g = self.b_eff.column(input_index).into_owned();
-        for &(idx, d_diag, _) in couplings {
-            g[idx] /= 1.0 + d_diag;
+        for i in 0..n {
+            if d_agg[i] != 0.0 {
+                g[i] /= 1.0 + d_agg[i];
+            }
         }
 
         let c_row = self.c.row(output_index);
@@ -2174,6 +2205,93 @@ mod tests {
         }
     }
 
+    /// Multiple coupling entries on the *same* state index must be aggregated
+    /// (`rhs / (1 + Σ d_j)`) rather than sequentially divided
+    /// (`rhs / Π(1 + d_j)`). This regression test places two couplings on
+    /// state 0 and verifies the identity path matches the LU path and the
+    /// closed-form aggregated value, not the buggy product form.
+    #[test]
+    fn identity_coupled_step_aggregates_multiple_couplings_same_state() {
+        let n = 3;
+        let mut a_c = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            a_c[(i, i)] = -(0.02 + 0.001 * i as f64);
+        }
+        for i in 1..n {
+            a_c[(i, i - 1)] = 0.001;
+        }
+
+        let mut b_c = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            b_c[(i, i)] = a_c[(i, i)].abs();
+        }
+
+        let mapping = OutputMapping {
+            output_count: n,
+            node_to_output: (0..n).map(|i| (i, i, 1.0)).collect(),
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+            .expect("model should build");
+        assert!(model.m_is_identity());
+
+        let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
+        let u = DVector::from_fn(n, |i, _| 5.0 + 0.5 * i as f64);
+
+        // Two couplings on state 0 (d=0.5 and d=0.3), one on state 1 (d=0.2).
+        let couplings: Vec<(usize, f64, f64)> =
+            vec![(0, 0.5, 1.0), (0, 0.3, 2.0), (1, 0.2, 0.5)];
+
+        // Identity path
+        let mut buf_id = DVector::zeros(n);
+        model.step_with_identity_coupling_into(&x, &u, &mut buf_id, &couplings);
+
+        // LU path (ground truth: solves (I + D)·x_next = rhs with D aggregated)
+        let mut buf_lu = DVector::zeros(n);
+        let mut m_scratch = DMatrix::zeros(n, n);
+        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
+        model.step_with_coupled_lu_into(&x, &u, &mut buf_lu, &lu, &couplings);
+
+        for i in 0..n {
+            let delta = (buf_id[i] - buf_lu[i]).abs();
+            assert!(
+                delta <= 1e-10,
+                "row {i}: identity={} lu={} delta={delta:e}",
+                buf_id[i],
+                buf_lu[i]
+            );
+        }
+
+        // Explicit closed-form check on state 0: the aggregated divisor must
+        // be (1 + 0.5 + 0.3) = 1.8, NOT the sequential product (1.5 * 1.3) = 1.95.
+        // Rebuild the raw RHS (before damping) the same way build_coupled_rhs does:
+        //   rhs = N·x + B_eff·u, then for each coupling subtract d·x[idx] and add f.
+        let raw_rhs = model.n_mat() * &x + model.b_eff() * &u;
+        let mut rhs0 = raw_rhs[0];
+        for &(idx, d_diag, forcing) in &couplings {
+            if idx == 0 {
+                rhs0 -= d_diag * x[idx];
+                rhs0 += forcing;
+            }
+        }
+        let aggregated = rhs0 / (1.0 + 0.5 + 0.3);
+        let sequential_product = rhs0 / ((1.0 + 0.5) * (1.0 + 0.3));
+
+        assert!(
+            (buf_id[0] - aggregated).abs() <= 1e-10,
+            "state 0: identity={} should equal aggregated={} (divisor 1.8)",
+            buf_id[0],
+            aggregated
+        );
+        assert!(
+            (buf_id[0] - sequential_product).abs() > 1e-6,
+            "state 0: identity={} must NOT match the buggy sequential product={}",
+            buf_id[0],
+            sequential_product
+        );
+    }
+
     /// The identity-coupled scalar solve path produces numerically identical
     /// results to the LU-coupled scalar solve when M = I.
     #[test]
@@ -2254,6 +2372,87 @@ mod tests {
                     "n={n} row={row}: id={solved_id:e} lu={solved_lu:e} delta={delta:e}"
                 );
             }
+        }
+    }
+
+    /// Scalar-solve counterpart of
+    /// `identity_coupled_step_aggregates_multiple_couplings_same_state`:
+    /// with duplicate coupling entries on the same state index, the identity
+    /// scalar solve must aggregate damping (`(I + Σ d_j)⁻¹`) and match the LU
+    /// path, not the buggy sequential-product form.
+    #[test]
+    fn identity_scalar_solve_aggregates_multiple_couplings_same_state() {
+        let n = 3;
+        let mut a_c = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            a_c[(i, i)] = -(0.02 + 0.001 * i as f64);
+        }
+        for i in 1..n {
+            a_c[(i, i - 1)] = 0.001;
+        }
+
+        let m = n;
+        let mut b_c = DMatrix::<f64>::zeros(n, m);
+        for i in 0..n {
+            b_c[(i, i)] = a_c[(i, i)].abs();
+        }
+
+        let mapping = OutputMapping {
+            output_count: n,
+            node_to_output: (0..n).map(|i| (i, i, 1.0)).collect(),
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+            .expect("model should build");
+        assert!(model.m_is_identity());
+
+        let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
+        let u = DVector::from_fn(m, |i, _| 5.0 + (i as f64) * 0.5);
+
+        // Two couplings on state 0 (d=0.4 and d=0.2), one on state 1 (d=0.3).
+        let couplings: Vec<(usize, f64, f64)> =
+            vec![(0, 0.4, 1.0), (0, 0.2, 0.5), (1, 0.3, -0.5)];
+
+        let mut m_scratch = DMatrix::zeros(n, n);
+        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
+
+        // With diagonal B_eff and identity C, gain is non-zero when
+        // input_idx == output_idx and the row is coupled. State 0 carries two
+        // couplings, so it is the discriminating case for aggregation.
+        for &(row, _, _) in &couplings {
+            let input_idx = row;
+            let output_idx = row;
+            if input_idx >= m || output_idx >= model.c.nrows() {
+                continue;
+            }
+            let y_target = 21.0 + output_idx as f64;
+
+            let solved_id = model
+                .solve_for_scalar_input_identity_coupled(
+                    &x, &u, y_target, output_idx, input_idx, &couplings,
+                )
+                .expect("identity scalar solve should succeed");
+
+            let solved_lu = model
+                .solve_for_scalar_input_coupled(
+                    &x,
+                    &u,
+                    y_target,
+                    output_idx,
+                    input_idx,
+                    &CouplingData {
+                        lu: &lu,
+                        couplings: &couplings,
+                    },
+                )
+                .expect("LU scalar solve should succeed");
+
+            let delta = (solved_id - solved_lu).abs();
+            assert!(
+                delta <= 1e-10,
+                "row={row}: id={solved_id:e} lu={solved_lu:e} delta={delta:e}"
+            );
         }
     }
 

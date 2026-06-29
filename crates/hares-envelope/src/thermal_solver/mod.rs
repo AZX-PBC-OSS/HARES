@@ -49,8 +49,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use hares_physics::air_properties::moist_air_density_kg_m3;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
@@ -128,6 +126,11 @@ pub struct ThermalSolver {
     /// Accumulator for window exterior LWR beyond U-factor assumption [W].
     /// Set during `apply_exterior_longwave_inputs_iterative`.
     window_exterior_lwr_w: f64,
+    /// Total opaque exterior LWR flux [W] routed through the semi-implicit
+    /// coupling mechanism (rad_frac == 0 surfaces). This flux is NOT injected
+    /// into `u`, so the `u.iter().sum()` delta does not capture it. Tracked
+    /// separately for diagnostic reporting (`opaque_solar_lwr_w`).
+    opaque_exterior_lwr_w: f64,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
@@ -157,6 +160,29 @@ pub struct ThermalSolver {
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
     custom_payload_buf: Vec<f64>,
+    /// Per-surface linearised exterior LWR coupling data for semi-implicit
+    /// integration: `(state_idx, input_idx, h_rad_w_k, t_eff_c)`.
+    ///
+    /// Populated by `apply_exterior_longwave_inputs_iterative` for surfaces
+    /// with `rad_frac == 0` (no exterior film resistance in the RC network).
+    /// Consumed by `build_coupling`, which adds semi-implicit coupling entries
+    /// to `coupling_buf`.
+    ///
+    /// The linearised LWR splits the T⁴ radiative flux into:
+    /// - **Forcing** `h_rad · T_eff` (external, sky/air temperature) →
+    ///   handled through the coupling forcing term.
+    /// - **Conductance** `h_rad · T_surf` (state-dependent) →
+    ///   handled through the coupling diagonal damping.
+    ///
+    /// This prevents the nonlinear T⁴ feedback that occurs when the full
+    /// radiative flux is injected as a B·u input, making the scheme
+    /// unconditionally stable regardless of timestep.
+    ///
+    /// References:
+    /// - EnergyPlus `ConvectionCoefficients.cc:661-678` (linearised `HRad`)
+    /// - EnergyPlus `HeatBalanceSurfaceManager.cc:9575-9592` (combined film)
+    /// - ASHRAE HoF 2021 Ch.4 §4.2 (linearised radiation coefficient)
+    lwr_coupling_buf: Vec<(usize, usize, f64, f64)>,
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
@@ -179,6 +205,13 @@ pub struct ThermalSolver {
     balance_buf_b: DVector<f64>,
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_buf_c: DVector<f64>,
+    /// Pre-allocated per-state diagonal-damping aggregation buffer for the
+    /// identity-M coupled balance decomposition. Holds `Σ d_j` for all
+    /// coupling entries sharing a state index, so the semi-implicit solve
+    /// applies `rhs[i] / (1 + Σ d_j)` rather than the buggy sequential
+    /// `rhs[i] / Π(1 + d_j)`. Kept zeroed and refilled each invocation.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_d_agg: Vec<f64>,
     /// Zero vector for the input dimension (avoids per-step allocation).
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_u_zero: DVector<f64>,
@@ -700,6 +733,7 @@ impl ThermalSolver {
             solar_absorbed_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             window_exterior_lwr_w: 0.0,
+            opaque_exterior_lwr_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
             convection_forcing,
@@ -719,6 +753,7 @@ impl ThermalSolver {
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
             custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 5),
+            lwr_coupling_buf: Vec::with_capacity(n_ext_surfaces),
             full_system_stored_energy_w: 0.0,
             thermal_balance_q_gains: Vec::with_capacity(n_zones_for_latent.max(1)),
             thermal_balance_q_loss: 0.0,
@@ -728,6 +763,8 @@ impl ThermalSolver {
             balance_buf_b: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_c: DVector::<f64>::zeros(n_states),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_d_agg: vec![0.0f64; n_states],
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_u_zero: DVector::<f64>::zeros(n_inputs),
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -764,13 +801,24 @@ impl ThermalSolver {
     }
 
     /// Restores thermal state vectors from checkpoint payloads.
+    ///
+    /// All validation is performed before any mutation, ensuring the solver
+    /// is left unchanged if the snapshot is invalid (atomic restore).
     pub fn restore_state(&mut self, snap: &ThermalSnapshot) -> Result<()> {
+        // ── Phase 1: validate all lengths and finiteness ─────────────────
         if snap.x.len() != self.x.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid x state length: got {}, expected {}",
                 snap.x.len(),
                 self.x.len()
             )));
+        }
+        for (i, &v) in snap.x.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "non-finite x state at index {i}: {v}"
+                )));
+            }
         }
         if !snap.last_u.is_empty() && snap.last_u.len() != self.last_u.len() {
             return Err(ThermalSolverError::Initialization(format!(
@@ -779,12 +827,12 @@ impl ThermalSolver {
                 self.last_u.len()
             )));
         }
-
-        self.x = DVector::from_column_slice(&snap.x);
-        if snap.last_u.is_empty() {
-            self.last_u.fill(0.0);
-        } else {
-            self.last_u = DVector::from_column_slice(&snap.last_u);
+        for (i, &v) in snap.last_u.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "non-finite last_u at index {i}: {v}"
+                )));
+            }
         }
 
         if snap.lwr_t_prev_c.len() != self.exterior_surface_temps.len() {
@@ -801,7 +849,6 @@ impl ThermalSolver {
                 )));
             }
         }
-        self.exterior_surface_temps.copy_from_slice(&snap.lwr_t_prev_c);
 
         if snap.interior_surface_temps.len() != self.interior_surface_temps.len() {
             return Err(ThermalSolverError::Initialization(format!(
@@ -826,7 +873,13 @@ impl ThermalSolver {
                     self.interior_surface_temps[i].len()
                 )));
             }
-            self.interior_surface_temps[i].copy_from_slice(zone_temps);
+            for (j, &t) in zone_temps.iter().enumerate() {
+                if !t.is_finite() {
+                    return Err(ThermalSolverError::Initialization(format!(
+                        "non-finite interior surface temperature at zone {i}, surface {j}: {t}"
+                    )));
+                }
+            }
         }
         for (i, zone_temps) in snap.interior_surface_prev_temps.iter().enumerate() {
             if zone_temps.len() != self.interior_surface_prev_temps[i].len() {
@@ -837,6 +890,27 @@ impl ThermalSolver {
                     self.interior_surface_prev_temps[i].len()
                 )));
             }
+            for (j, &t) in zone_temps.iter().enumerate() {
+                if !t.is_finite() {
+                    return Err(ThermalSolverError::Initialization(format!(
+                        "non-finite interior surface prev temperature at zone {i}, surface {j}: {t}"
+                    )));
+                }
+            }
+        }
+
+        // ── Phase 2: all validation passed — apply mutations ─────────────
+        self.x = DVector::from_column_slice(&snap.x);
+        if snap.last_u.is_empty() {
+            self.last_u.fill(0.0);
+        } else {
+            self.last_u = DVector::from_column_slice(&snap.last_u);
+        }
+        self.exterior_surface_temps.copy_from_slice(&snap.lwr_t_prev_c);
+        for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
+            self.interior_surface_temps[i].copy_from_slice(zone_temps);
+        }
+        for (i, zone_temps) in snap.interior_surface_prev_temps.iter().enumerate() {
             self.interior_surface_prev_temps[i].copy_from_slice(zone_temps);
         }
 
@@ -877,7 +951,7 @@ impl ThermalSolver {
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.ext_surface_diag_buf.clear();
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
-        let exterior_lwr_w = u.iter().sum::<f64>() - u_pre;
+        let exterior_lwr_w = u.iter().sum::<f64>() - u_pre + self.opaque_exterior_lwr_w;
         let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w - self.window_exterior_lwr_w;
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -1039,14 +1113,11 @@ impl ThermalSolver {
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
             natural_vent_m3_s: indoor_inf.map(|c| c.nat_flow_m3_s).unwrap_or(0.0),
             air_density_kg_m3: {
-                let rho = moist_air_density_kg_m3(
+                moist_air_density_kg_m3(
                     env.weather.pressure_pa(),
                     env.weather.outdoor_temp_c,
                     env.weather.outdoor_humidity_ratio,
-                );
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                check_air_density_plausible(rho, "thermal solver component gains");
-                rho
+                )
             },
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag: self.ext_surface_diag_buf.clone(),
@@ -1631,8 +1702,8 @@ mod tests {
     /// difference. With the old 2450 kJ/kg bug, the implied h_fg would fall ~2%
     /// outside the acceptable range.
     #[test]
-     fn infiltration_latent_energy_consistent_with_moisture_mass_flow() {
-use hares_physics::air_properties::moist_air_density_kg_m3;
+    fn infiltration_latent_energy_consistent_with_moisture_mass_flow() {
+        use hares_physics::air_properties::moist_air_density_kg_m3;
         use hares_physics::infiltration::ach_infiltration;
 
         let ach = 0.5;
