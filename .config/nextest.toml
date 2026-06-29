@@ -1,0 +1,2 @@
+[profile.ci]
+junit.path = "nextest-results.xml"

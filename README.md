@@ -1,5 +1,7 @@
 # HARES
 
+[![CI](https://github.com/NREL/HARES/actions/workflows/ci.yml/badge.svg)](https://github.com/NREL/HARES/actions/workflows/ci.yml)
+
 HARES — High-performance Agent-based Residential Energy Simulation
 
 A Rust workspace for whole-building energy simulation with Python bindings
