@@ -9,7 +9,7 @@ use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever checkpoint schema or state encoding changes.
-pub const CHECKPOINT_VERSION: u32 = 5;
+pub const CHECKPOINT_VERSION: u32 = 6;
 
 /// Serializable snapshot of all state required to resume a dwelling run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,6 +28,12 @@ pub struct DwellingCheckpoint {
     pub thermal_last_u: Vec<f64>,
     /// Per-exterior-surface converged LWR surface temperatures [°C].
     pub lwr_t_prev_c: Vec<f64>,
+    /// Per-zone interior LWR surface temperatures [°C] (ScriptF warm-start).
+    /// Outer vec indexed by zone, inner vec by surface.
+    pub interior_surface_temps: Vec<Vec<f64>>,
+    /// Previous-step per-zone interior LWR surface temperatures [°C]
+    /// (heavy-ball damping warm-start). Same shape as `interior_surface_temps`.
+    pub interior_surface_prev_temps: Vec<Vec<f64>>,
     /// Actor decision-state blobs, one per registered actor (name, blob).
     /// Actors with no mutable state contribute an empty blob.
     pub actor_states: Vec<(String, Vec<u8>)>,
@@ -156,6 +162,8 @@ mod tests {
             rng_word_pos: 8,
             thermal_last_u: vec![0.1],
             lwr_t_prev_c: vec![15.0, 18.0],
+            interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
+            interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
             actor_states: vec![("test_actor".into(), vec![1, 2, 3])],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -183,6 +191,8 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -213,6 +223,8 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -244,6 +256,8 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -295,6 +309,8 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: summary.clone(),
         };

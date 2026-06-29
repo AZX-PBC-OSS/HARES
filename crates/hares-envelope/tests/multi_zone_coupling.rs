@@ -186,10 +186,10 @@ fn test_two_zone_coupled_wall_heat_direction() {
     // initialize_steady_state pins only the configured indoor zone; zone 2 is
     // left to solve by conduction. Override zone 2 to 15°C via restore_state
     // to establish the initial temperature gradient required by this test.
-    let (mut x_state, last_u, lwr_temps) = solver.snapshot_state();
-    x_state[1] = t2_init; // zone 2 state index
+    let mut snap = solver.snapshot_state();
+    snap.x[1] = t2_init; // zone 2 state index
     solver
-        .restore_state(&x_state, &last_u, &lwr_temps)
+        .restore_state(&snap)
         .expect("restore must succeed");
 
     let ports = two_zone_ports();
@@ -255,13 +255,13 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
 
     let solver = build_two_zone_solver(&env, indoor_setpoint, config);
 
-    let (x_state, _last_u, _lwr_temps) = solver.snapshot_state();
+    let snap = solver.snapshot_state();
 
     // Zone 1 (conditioned) must be pinned at the setpoint.
     assert!(
-        (x_state[0] - indoor_setpoint).abs() < 1e-6,
+        (snap.x[0] - indoor_setpoint).abs() < 1e-6,
         "zone 1 (conditioned) must be pinned at setpoint: expected {indoor_setpoint}, got {}",
-        x_state[0]
+        snap.x[0]
     );
 
     // Zone 2 (unconditioned) must solve by conduction -- strictly between
@@ -276,19 +276,19 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
     let ua_ext: f64 = 43.0;
     let expected_zone2 = (ua_inter * indoor_setpoint + ua_ext * outdoor) / (ua_ext + ua_inter);
     assert!(
-        (x_state[1] - expected_zone2).abs() < 1e-3,
+        (snap.x[1] - expected_zone2).abs() < 1e-3,
         "zone 2 (unconditioned) must solve by conduction: expected {expected_zone2}, got {}",
-        x_state[1]
+        snap.x[1]
     );
     assert!(
-        x_state[1] > outdoor + 1.0,
+        snap.x[1] > outdoor + 1.0,
         "zone 2 must be materially warmer than outdoor (conduction from zone 1): zone2={}, outdoor={outdoor}",
-        x_state[1]
+        snap.x[1]
     );
     assert!(
-        x_state[1] < indoor_setpoint - 1.0,
+        snap.x[1] < indoor_setpoint - 1.0,
         "zone 2 must be cooler than conditioned zone (heat flows outward): zone2={}, indoor={indoor_setpoint}",
-        x_state[1]
+        snap.x[1]
     );
 }
 

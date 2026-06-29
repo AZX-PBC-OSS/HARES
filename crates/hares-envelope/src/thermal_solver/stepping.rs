@@ -529,26 +529,6 @@ impl ThermalSolver {
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }
-
-        // Linearised exterior LWR coupling for rad_frac == 0 surfaces.
-        //
-        // The full T⁴ LWR flux is split into a forcing part (h_total · T_eff,
-        // dependent on sky/air temperature only) and a conductance part
-        // (h_total · T_surf, dependent on the zone state).  The conductance
-        // is integrated semi-implicitly through the coupling diagonal,
-        // making the scheme unconditionally stable regardless of timestep.
-        //
-        // See `apply_exterior_longwave_inputs_iterative` for the linearisation
-        // derivation (exact factored form of the Stefan-Boltzmann equation).
-        for &(state_idx, input_idx, h_total_w_k, t_eff_c) in &self.lwr_coupling_buf {
-            if h_total_w_k.abs() < 1e-15 {
-                continue;
-            }
-            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
-            let d = h_total_w_k * b_coeff;
-            let forcing = h_total_w_k * t_eff_c * b_coeff + d * self.x[state_idx];
-            self.coupling_buf.push((state_idx, d, forcing));
-        }
     }
 
     /// Compute per-step interior convection correction using semi-implicit coupling.

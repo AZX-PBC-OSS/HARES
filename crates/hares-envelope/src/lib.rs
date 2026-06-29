@@ -38,6 +38,7 @@ pub use thermal_solver::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
-    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties, ZoneSensibleBreakdown,
+    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSnapshot,
+    ThermalSolver, ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
+    ZoneSensibleBreakdown,
 };

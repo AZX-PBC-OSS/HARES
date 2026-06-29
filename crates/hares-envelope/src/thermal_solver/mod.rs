@@ -157,23 +157,6 @@ pub struct ThermalSolver {
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
     custom_payload_buf: Vec<f64>,
-    /// Per-surface linearised exterior LWR coupling data for semi-implicit
-    /// integration: (state_idx, input_idx, h_total_w_k, t_eff_c).
-    ///
-    /// Populated by `apply_exterior_longwave_inputs_iterative` for surfaces
-    /// with `rad_frac == 0` (no exterior film resistance in the RC network).
-    /// Consumed by `build_coupling`, which aggregates entries per state
-    /// index and adds semi-implicit coupling to `coupling_buf`.
-    ///
-    /// The linearised LWR splits the T⁴ radiative flux into:
-    /// - **Forcing** `h_total · T_eff` (external, sky/air temperature) →
-    ///   handled through the coupling forcing term.
-    /// - **Conductance** `h_total · T_surf` (state-dependent, zone air
-    ///   temperature) → handled through the coupling diagonal damping.
-    ///
-    /// This prevents the nonlinear T⁴ feedback that occurs when the full
-    /// radiative flux is injected as a B·u input with T_surf = T_zone.
-    lwr_coupling_buf: Vec<(usize, usize, f64, f64)>,
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
@@ -307,9 +290,36 @@ impl ZoneSensibleBreakdown {
     }
 }
 
+/// Captured thermal state for checkpoint save/restore.
+#[derive(Clone, Debug)]
+pub struct ThermalSnapshot {
+    pub x: Vec<f64>,
+    pub last_u: Vec<f64>,
+    pub lwr_t_prev_c: Vec<f64>,
+    pub interior_surface_temps: Vec<Vec<f64>>,
+    pub interior_surface_prev_temps: Vec<Vec<f64>>,
+}
+
 impl ThermalSolver {
     pub fn state_vector(&self) -> &[f64] {
         self.x.as_slice()
+    }
+
+    /// Returns current zone temperatures [°C] derived from the state vector,
+    /// using the `zone_state_indices` wiring (zone air is a state node).
+    pub fn zone_temperatures_c(&self) -> Vec<(ZoneId, f64)> {
+        self.wiring
+            .zone_state_indices
+            .iter()
+            .map(|(&zone_id, &state_idx)| {
+                let temp = if state_idx < self.x.len() {
+                    self.x[state_idx]
+                } else {
+                    f64::NAN
+                };
+                (zone_id, temp)
+            })
+            .collect()
     }
 
     pub fn config(&self) -> &ThermalSolverConfig {
@@ -732,7 +742,6 @@ impl ThermalSolver {
             cached_outdoor_temp_c: env.weather.outdoor_temp_c,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             cached_ground_temps_c: Vec::with_capacity(n_ground_depths),
-            lwr_coupling_buf: Vec::with_capacity(n_ext_surfaces),
         })
     }
 
@@ -743,61 +752,94 @@ impl ThermalSolver {
 
     /// Returns checkpointable thermal state vectors.
     ///
-    /// Returns `(x, last_u, lwr_t_prev_c)` where `lwr_t_prev_c` contains the
-    /// per-exterior-surface converged surface temperatures for LWR continuity.
     #[must_use]
-    pub fn snapshot_state(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        (
-            self.x.iter().copied().collect(),
-            self.last_u.iter().copied().collect(),
-            self.exterior_surface_temps.clone(),
-        )
+    pub fn snapshot_state(&self) -> ThermalSnapshot {
+        ThermalSnapshot {
+            x: self.x.iter().copied().collect(),
+            last_u: self.last_u.iter().copied().collect(),
+            lwr_t_prev_c: self.exterior_surface_temps.clone(),
+            interior_surface_temps: self.interior_surface_temps.clone(),
+            interior_surface_prev_temps: self.interior_surface_prev_temps.clone(),
+        }
     }
 
     /// Restores thermal state vectors from checkpoint payloads.
-    pub fn restore_state(
-        &mut self,
-        x_state: &[f64],
-        last_u_state: &[f64],
-        lwr_t_prev_c: &[f64],
-    ) -> Result<()> {
-        if x_state.len() != self.x.len() {
+    pub fn restore_state(&mut self, snap: &ThermalSnapshot) -> Result<()> {
+        if snap.x.len() != self.x.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid x state length: got {}, expected {}",
-                x_state.len(),
+                snap.x.len(),
                 self.x.len()
             )));
         }
-        if !last_u_state.is_empty() && last_u_state.len() != self.last_u.len() {
+        if !snap.last_u.is_empty() && snap.last_u.len() != self.last_u.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid last_u length: got {}, expected {}",
-                last_u_state.len(),
+                snap.last_u.len(),
                 self.last_u.len()
             )));
         }
 
-        self.x = DVector::from_column_slice(x_state);
-        if last_u_state.is_empty() {
+        self.x = DVector::from_column_slice(&snap.x);
+        if snap.last_u.is_empty() {
             self.last_u.fill(0.0);
         } else {
-            self.last_u = DVector::from_column_slice(last_u_state);
+            self.last_u = DVector::from_column_slice(&snap.last_u);
         }
 
-        if lwr_t_prev_c.len() != self.exterior_surface_temps.len() {
+        if snap.lwr_t_prev_c.len() != self.exterior_surface_temps.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid lwr_t_prev_c length: got {}, expected {}",
-                lwr_t_prev_c.len(),
+                snap.lwr_t_prev_c.len(),
                 self.exterior_surface_temps.len()
             )));
         }
-        for (i, &t) in lwr_t_prev_c.iter().enumerate() {
+        for (i, &t) in snap.lwr_t_prev_c.iter().enumerate() {
             if !t.is_finite() {
                 return Err(ThermalSolverError::Initialization(format!(
                     "non-finite surface temperature at index {i}: {t}"
                 )));
             }
         }
-        self.exterior_surface_temps.copy_from_slice(lwr_t_prev_c);
+        self.exterior_surface_temps.copy_from_slice(&snap.lwr_t_prev_c);
+
+        if snap.interior_surface_temps.len() != self.interior_surface_temps.len() {
+            return Err(ThermalSolverError::Initialization(format!(
+                "invalid interior_surface_temps length: got {}, expected {}",
+                snap.interior_surface_temps.len(),
+                self.interior_surface_temps.len()
+            )));
+        }
+        if snap.interior_surface_prev_temps.len() != self.interior_surface_prev_temps.len() {
+            return Err(ThermalSolverError::Initialization(format!(
+                "invalid interior_surface_prev_temps length: got {}, expected {}",
+                snap.interior_surface_prev_temps.len(),
+                self.interior_surface_prev_temps.len()
+            )));
+        }
+        for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
+            if zone_temps.len() != self.interior_surface_temps[i].len() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "interior_surface_temps[{}] length mismatch: got {}, expected {}",
+                    i,
+                    zone_temps.len(),
+                    self.interior_surface_temps[i].len()
+                )));
+            }
+            self.interior_surface_temps[i].copy_from_slice(zone_temps);
+        }
+        for (i, zone_temps) in snap.interior_surface_prev_temps.iter().enumerate() {
+            if zone_temps.len() != self.interior_surface_prev_temps[i].len() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "interior_surface_prev_temps[{}] length mismatch: got {}, expected {}",
+                    i,
+                    zone_temps.len(),
+                    self.interior_surface_prev_temps[i].len()
+                )));
+            }
+            self.interior_surface_prev_temps[i].copy_from_slice(zone_temps);
+        }
+
         Ok(())
     }
 

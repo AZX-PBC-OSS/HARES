@@ -36,11 +36,25 @@ impl ThermalSolver {
         self.window_exterior_lwr_w = 0.0;
 
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
-            let skip = info.input_index >= u.len() || info.state_index >= self.x.len();
-            if skip {
+            if info.input_index >= u.len() || info.state_index >= self.x.len() {
                 continue;
             }
 
+            // ── Window branch: sky-temperature correction to U-factor ───────
+            //
+            // The window U-factor already includes a combined exterior film
+            // coefficient (h_out = h_conv + h_rad) that assumes T_sky = T_air.
+            // When T_sky ≠ T_air, the additional heat loss (or gain) is:
+            //
+            //   ΔQ = (U / h_out) · ε·σ·β·F_sky·(T_sky⁴ − T_air⁴) · A
+            //
+            // This avoids double-counting the radiative exchange already embedded
+            // in the U-factor's h_out, and is independent of the zone state (no
+            // nonlinear T⁴ feedback).
+            //
+            // Walton (1983) tilted-sky model; EnergyPlus Eng. Ref. "External
+            // Longwave Radiation"; ASHRAE HoF 2021 Ch. 15 Table 1 (h_out
+            // fallback = 34 W/(m²·K)).
             if info.boundary_category == Some(super::config::BoundaryCategory::Window) {
                 let u_factor = info.u_factor_w_m2_k;
                 if u_factor <= 0.0 || info.area_m2 <= 0.0 {
@@ -63,7 +77,6 @@ impl ThermalSolver {
                 let f_sky = sky_view_factor(info.tilt_deg);
                 let beta = beta_factor(info.tilt_deg);
                 let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
-
                 let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
                 let t_air_k = t_ext + CELSIUS_TO_KELVIN;
 
@@ -73,37 +86,15 @@ impl ThermalSolver {
                     * f_sky
                     * (t_sky_k.powi(4) - t_air_k.powi(4));
 
-                // T_eff approach: the effective outdoor temperature for window conduction
-                // is T_eff = T_air + Δq / h_out. The additional zone cooling beyond the
-                // U-factor (which assumes T_sky = T_air) is:
-                //   ΔQ_zone = U·A·(T_air − T_eff) = (U / h_out) · Δq · A
-                // This avoids double-counting: the U-factor's h_out already includes
-                // radiative exchange at T_sky = T_air; we correct for T_sky ≠ T_air only.
-                // Use actual h_out from boundary film resistance when it is at or
-                // above the physically meaningful natural convection floor of
-                // 1.0 W/(m²·K) (ASHRAE HoF 2021 Ch. 4 §4.2; vertical surface at
-                // ΔT ≈ 0.4°C). Values below 1.0 produce correction factors >34×
-                // relative to the ASHRAE fallback and can produce physically
-                // implausible heat flows (e.g. h_out=0.01 at clear-night yields
-                // ΔQ ≈ −57,600 W for a 12 m² window with U=3.0).
-                //
-                // Fall back to the ASHRAE conventional combined exterior coefficient
-                // (34 W/(m²·K)) — the standard peak-load fallback for fenestration
-                // when explicit film resistance is unavailable or implausibly low.
-                // ASHRAE HoF 2021 Ch. 15, Table 1; Engineers Edge (citing ASHRAE).
+                // Use actual h_out from boundary film resistance when at or above
+                // the natural convection floor of 1.0 W/(m²·K) (ASHRAE HoF 2021
+                // Ch. 4 §4.2). Below 1.0, fall back to the ASHRAE conventional
+                // combined exterior coefficient (34 W/(m²·K)) — the standard
+                // peak-load fallback for fenestration (ASHRAE HoF 2021 Ch. 15,
+                // Table 1).
                 let h_out = if info.h_out_w_m2_k >= 1.0 {
                     info.h_out_w_m2_k
                 } else {
-                    // The fallback value 34 W/(m²·K) is the ASHRAE conventional
-                    // combined (convective + radiative) exterior coefficient for
-                    // peak heating load calculations at ~15 mph wind. It is NOT the
-                    // NFRC 100 / ISO 15099 convective boundary condition (26 W/(m²·K)
-                    // at 5.5 m/s), but is the correct fallback for simplified
-                    // fenestration load-calculation contexts (ASHRAE HoF 2021 Ch. 15).
-                    // A computed h_out_w_m2_k below 1.0 indicates either a
-                    // per-timestep film coefficient below the natural convection
-                    // floor (low-wind, small-ΔT edge case) or a zero/uninitialised
-                    // value from construction.
                     tracing::warn!(
                         surface_id = info.surface_id,
                         h_out_w_m2_k = info.h_out_w_m2_k,
@@ -115,15 +106,13 @@ impl ThermalSolver {
                     H_OUT_ASHRAE_PEAK
                 };
 
-                // Invariant: by this point h_out must be ≥ 1.0. The guard above
-                // either selects a computed value ≥ 1.0 or the ASHRAE fallback (34.0).
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 {
                     assert!(
                         h_out >= 1.0,
                         "invariant violation: h_out ({}) is below the 1.0 W/(m²·K) \
-                         natural convection floor — the guard at line 86 should have \
-                         caught this. surface_id={}",
+                         natural convection floor — the guard above should have caught this. \
+                         surface_id={}",
                         h_out,
                         info.surface_id
                     );
@@ -162,22 +151,39 @@ impl ThermalSolver {
                 continue;
             }
 
-            // For surfaces with no separate RC node for the exterior film resistance
-            // (rad_frac == 0), the A-matrix drives the zone air or wall node toward
-            // the outdoor boundary temperature via a conductance that includes the
-            // combined exterior film coefficient h_out = h_c + h_r (convective plus
-            // linearized radiative). When h_out > 0, the linearized LWR exchange is
-            // already embedded in the A-matrix conductance. Injecting the full T⁴ LWR
-            // flux on top would double-count the radiation.
+            // ── Simple (non-iterative) branch: rad_frac == 0 ────────────────
             //
-            // The correct injection is the **sky-temperature correction**: the
-            // additional heat loss (or gain) from T_sky ≠ T_air that the A-matrix's
-            // linearised film coefficient does not capture. This mirrors the window
-            // branch's T_eff correction (Walton 1983 tilted-sky model; EnergyPlus
-            // Eng. Ref. "External Longwave Radiation").
+            // These surfaces have no separate RC node for the exterior film
+            // resistance.  The A-matrix drives the zone air or wall node toward
+            // the outdoor boundary temperature via a conductance that may or may
+            // not include the combined exterior film coefficient (h_c + h_r).
             //
-            // When h_out == 0, the A-matrix has no film resistance at all (r_film_ext
-            // is zero), so no LWR is embedded and the full T⁴ flux is injected.
+            // When h_out > 0: the A-matrix includes the combined film coefficient,
+            // which already accounts for linearized LWR exchange at T_sky = T_air.
+            // Injecting the full T⁴ LWR flux on top would double-count the
+            // radiation.  The correct injection is the sky-temperature correction
+            // — the additional heat loss from T_sky ≠ T_air, using the same T_eff
+            // approach as the window branch (Walton 1983; E+ Eng. Ref. "External
+            // Longwave Radiation").
+            //
+            // When h_out == 0: the A-matrix has no film resistance at all
+            // (r_film_ext = 0), so no LWR is embedded.  The full net T⁴ LWR
+            // flux is injected explicitly.  This is state-dependent (T_surf⁴)
+            // and can destabilize the solver for large timesteps — in
+            // production, solver_builder.rs always sets h_out > 0, so this
+            // branch is only reached in tests.
+            //
+            // This mirrors OCHRE's `linearize_ext_radiation` mode
+            // (Envelope.py:242-249), which adds a linearized radiation resistance
+            // to the RC network and reports radiation as combined with convection.
+            // EnergyPlus similarly uses a linearized `HRad` coefficient in the
+            // outside surface heat balance (HeatBalanceSurfaceManager.cc:9600-9613).
+            //
+            // References:
+            // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655.
+            // - EnergyPlus Engineering Reference: "External Longwave Radiation".
+            // - OCHRE Envelope.py:242-249 (`linearize_ext_radiation`).
+            // - ASHRAE HoF 2021 Ch. 4 §4.2 (natural convection floor).
             if info.rad_frac <= 0.0 {
                 let t_node_c = self.x[info.state_index];
                 let f_sky = sky_view_factor(info.tilt_deg);
@@ -189,22 +195,12 @@ impl ThermalSolver {
                     let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
                     let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
                     let t_air_k = t_ext + CELSIUS_TO_KELVIN;
-                    // Net LWR flux density from T_sky ≠ T_air:
-                    //   Δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴) [W/m²]
                     let delta_q_w_m2 = info.emissivity
                         * STEFAN_BOLTZMANN
                         * beta
                         * f_sky
                         * (t_sky_k.powi(4) - t_air_k.powi(4));
-                    // T_eff approach (same as window branch):
-                    //   ΔQ_zone = (1/h_out) · Δq · A = Δq · A / h_out
-                    // The A-matrix conductance from node to outdoor already passes
-                    // through the film resistance, so the correction fraction that
-                    // reaches the zone air node is 1.0 (the film is in series with
-                    // the wall, and the correction replaces the T_air assumption
-                    // with T_eff at the film boundary).
                     let delta_q_w = delta_q_w_m2 * info.area_m2 / info.h_out_w_m2_k;
-                    // For diagnostics: also compute the full T⁴ flux.
                     let surface = ExteriorSurface {
                         area_m2: info.area_m2,
                         emissivity: info.emissivity,
@@ -214,8 +210,8 @@ impl ThermalSolver {
                     let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
                     (delta_q_w, q_lw_full)
                 } else if info.h_out_w_m2_k > 0.0 {
-                    // h_out is positive but below the 1.0 W/(m²·K) natural convection
-                    // floor. Use ASHRAE conventional fallback (same as window branch).
+                    // h_out is positive but below the 1.0 W/(m²·K) natural
+                    // convection floor. Use ASHRAE conventional fallback.
                     let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
                     let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
                     let t_air_k = t_ext + CELSIUS_TO_KELVIN;
@@ -234,15 +230,35 @@ impl ThermalSolver {
                     let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
                     (delta_q_w, q_lw_full)
                 } else {
-                    // No film resistance in A-matrix: inject full T⁴ LWR flux.
+                    // No film resistance in A-matrix (r_film_ext = 0).
+                    //
+                    // Inject the full net LWR flux (incoming − outgoing) evaluated
+                    // at the current node temperature.  This is an explicit
+                    // treatment of the T⁴ radiative exchange — the flux depends
+                    // on the zone state through T_surf, creating a nonlinear
+                    // feedback through the B·u input path.
+                    //
+                    // In production, solver_builder.rs always sets h_out to
+                    // either 1/r_film (>0) or H_OUT_ASHRAE_PEAK (34.0), so this
+                    // branch is only reached in tests that explicitly set
+                    // h_out_w_m2_k = 0.0.  The sky-temperature correction in
+                    // the h_out > 0 branches above is the production path and
+                    // is state-independent (no nonlinear feedback).
+                    //
+                    // A fully stable treatment for h_out = 0 would linearize
+                    // the T⁴ exchange (h_rad = 4εσT_mean³) and integrate it
+                    // through the semi-implicit coupling mechanism, matching
+                    // OCHRE's `linearize_ext_radiation` mode (Envelope.py:
+                    // 242-249).  This is deferred as it requires A-matrix
+                    // modification at construction time.
                     let surface = ExteriorSurface {
                         area_m2: info.area_m2,
                         emissivity: info.emissivity,
                         sky_view_factor: f_sky,
                         beta,
                     };
-                    let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                    (q_lw, q_lw)
+                    let q_lw_full = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
+                    (q_lw_full, q_lw_full)
                 };
 
                 u[info.input_index] += injected;
@@ -269,6 +285,14 @@ impl ThermalSolver {
                 continue;
             }
 
+            // ── Iterative branch: rad_frac > 0 ──────────────────────────────
+            //
+            // Converges on the exterior surface temperature by coupling the RC
+            // node temperature with an iterative T⁴ LWR balance, then injects
+            // the fraction of the net flux that reaches the RC node.
+            //
+            // Matches OCHRE `_solve_exterior_radiation` (Envelope.py:125-163)
+            // with heavy-ball damping.
             let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
             let f_sky = sky_view_factor(info.tilt_deg);
             let beta = beta_factor(info.tilt_deg);
@@ -307,7 +331,7 @@ impl ThermalSolver {
             let mut t_surf = self.exterior_surface_temps[i];
             let mut t_surf_prev = self.exterior_surface_temps[i];
 
-            for _iter in 0..info.n_iter {
+            for _ in 0..info.n_iter {
                 let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
                 let t_new = t_surf_init + (solar_w + lwr) * info.rad_res_k_w;
                 let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
@@ -317,7 +341,6 @@ impl ThermalSolver {
                 }
                 t_surf_prev = t_surf;
                 t_surf = t_next;
-                // Converged when the per-iteration surface-temperature step is small.
                 if (t_surf - t_surf_prev).abs() < 0.01 {
                     break;
                 }
@@ -327,9 +350,6 @@ impl ThermalSolver {
 
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
             let injected = (solar_w + q_lw) * info.rad_frac;
-            if !injected.is_finite() {
-                continue;
-            }
             u[info.input_index] += injected;
 
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -347,6 +367,8 @@ impl ThermalSolver {
                 });
         }
     }
+
+    /// Interior longwave radiation exchange.
     ///
     /// Uses ScriptF grey interchange (Gebhart factors) when pre-computed at init,
     /// falling back to linearized h_r approximation otherwise. The ScriptF path
@@ -827,9 +849,9 @@ mod tests {
     #[test]
     fn window_interior_lwr_uses_ochre_full_mode() {
         let radiation_frac = 0.36_f64;
-        let q_window = 669.0_f64;
-        let zone_air_injection = q_window * (1.0 - radiation_frac);
-        let to_cond_path = q_window * radiation_frac;
+        let q_windows = 669.0_f64;
+        let zone_air_injection = q_windows * (1.0 - radiation_frac);
+        let to_cond_path = q_windows * radiation_frac;
 
         assert!(
             (zone_air_injection - 428.0).abs() < 5.0,
@@ -840,7 +862,7 @@ mod tests {
             "to-conduction fraction should be ~241 W, got {to_cond_path:.1}"
         );
         assert!(
-            zone_air_injection < q_window,
+            zone_air_injection < q_windows,
             "zone-air injection must be less than full q"
         );
         assert!(
@@ -848,7 +870,7 @@ mod tests {
             "zone-air injection must be positive for cold window (net LWR gain)"
         );
         assert!(
-            (zone_air_injection + to_cond_path - q_window).abs() < 1e-9,
+            (zone_air_injection + to_cond_path - q_windows).abs() < 1e-9,
             "zone-air + conduction-path must equal full q"
         );
     }
@@ -881,23 +903,11 @@ mod tests {
 
     // ── Regression: window exterior LWR guard threshold at 1.0 W/(m²·K) ──
     //
-    // The guard at longwave.rs:86 uses `>= 1.0` — the natural convection floor
-    // for a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). Values
-    // below 1.0 produce correction factors >34× relative to the ASHRAE fallback
-    // and are physically implausible (the DOE-2 model approaches zero at zero wind
-    // and ΔT → 0, creating an unphysical divisor in the T_eff correction at
-    // line 106).
-    //
-    // `window_lwr_uses_computed_h_out_not_fallback` exercises the production
-    // code path through `apply_exterior_longwave_inputs_iterative` with
-    // h_out=1.5, verifying that computed coefficients at or above the guard
-    // are used directly rather than falling back.
-    //
-    // `window_lwr_falls_back_to_ashrae_below_guard` verifies that h_out=0.0
-    // (and by extension any value below 1.0) triggers the ASHRAE fallback.
-    //
-    // `window_lwr_guard_threshold_applied_at_h_out_one` verifies the boundary:
-    // h_out=1.0 uses computed coefficient, h_out=0.99 triggers fallback.
+    // The guard uses `>= 1.0` — the natural convection floor for a vertical
+    // surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). Values below 1.0
+    // produce correction factors >34× relative to the ASHRAE fallback and are
+    // physically implausible (the DOE-2 model approaches zero at zero wind and
+    // ΔT → 0, creating an unphysical divisor in the T_eff correction).
 
     /// Build a minimal one-zone `ThermalSolver` with a single vertical window
     /// exterior surface having the specified film coefficient [W/(m²·K)].
@@ -1019,14 +1029,6 @@ mod tests {
     /// Regression: a computed h_out of 1.5 W/(m²·K) is above the guard threshold
     /// of 1.0 W/(m²·K) and must be used directly rather than falling back to the
     /// ASHRAE peak-load value of 34 W/(m²·K).
-    ///
-    /// The guard at line 86 requires `>= 1.0` — the natural convection floor for
-    /// a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). A computed
-    /// coefficient of 1.5 is a realistic low-wind value and must be used.
-    ///
-    /// Exercises `apply_exterior_longwave_inputs_iterative` — if the guard
-    /// changes to a threshold above 1.5, h_out=1.5 would trigger the ASHRAE
-    /// fallback and the injected δq would be too small.
     #[test]
     fn window_lwr_uses_computed_h_out_not_fallback() {
         let env = window_lwr_env();
@@ -1041,24 +1043,20 @@ mod tests {
 
         let f_sky = sky_view_factor(90.0);
         let beta = beta_factor(90.0);
-        let t_sky_k = -30.0 + CELSIUS_TO_KELVIN; // 243.15 K
-        let t_air_k = -15.0 + CELSIUS_TO_KELVIN; // 258.15 K
+        let t_sky_k = -30.0 + CELSIUS_TO_KELVIN;
+        let t_air_k = -15.0 + CELSIUS_TO_KELVIN;
         let delta_q_w_m2 =
             0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
 
         let expected_1_5 = (3.0 / 1.5) * delta_q_w_m2 * 12.0;
         let expected_ashrae = (3.0 / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * 12.0;
 
-        // The solver with h_out=1.5 must use 1.5, not the ASHRAE fallback.
         let actual_1_5 = u_1_5[1];
         assert!(
             (actual_1_5 - expected_1_5).abs() < 1e-6,
-            "h_out=1.5: window LWR correction expected {expected_1_5:.6} W, got {actual_1_5:.6} W. \
-             The guard at line 86 may have fallen back to H_OUT_ASHRAE_PEAK instead of using the \
-             computed coefficient."
+            "h_out=1.5: window LWR correction expected {expected_1_5:.6} W, got {actual_1_5:.6} W"
         );
 
-        // The solver with h_out=0.0 must fall back to H_OUT_ASHRAE_PEAK.
         let actual_0 = u_0[1];
         assert!(
             (actual_0 - expected_ashrae).abs() < 1e-6,
@@ -1066,7 +1064,6 @@ mod tests {
              got {actual_0:.6} W"
         );
 
-        // Final sanity: ratio must be 34/1.5 ≈ 22.667.
         let ratio = actual_1_5 / actual_0;
         assert!(
             (ratio - H_OUT_ASHRAE_PEAK / 1.5).abs() < 1e-3,
@@ -1077,12 +1074,6 @@ mod tests {
 
     /// Guard-condition regression: h_out_w_m2_k = 0.0 must still use the
     /// ASHRAE fallback after the threshold is corrected to `>= 1.0`.
-    ///
-    /// Exercises `apply_exterior_longwave_inputs_iterative` — any computed
-    /// coefficient below 1.0 W/(m²·K) (including zero, negative, and near-zero
-    /// positive values) triggers the ASHRAE conventional peak-load fallback
-    /// to prevent division by an unphysically small h_out in the T_eff
-    /// correction at line 106.
     #[test]
     fn window_lwr_falls_back_to_ashrae_below_guard() {
         let env = window_lwr_env();
@@ -1109,11 +1100,6 @@ mod tests {
     /// Guard threshold boundary: h_out = 1.0 W/(m²·K) (exactly at the guard)
     /// must use the computed coefficient; h_out = 0.99 (just below) must
     /// trigger the ASHRAE fallback.
-    ///
-    /// The guard threshold of 1.0 W/(m²·K) is the natural convection floor for
-    /// a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). Values
-    /// below this produce correction factors >34× relative to the ASHRAE
-    /// fallback and are physically implausible.
     #[test]
     fn window_lwr_guard_threshold_applied_at_h_out_one() {
         let env = window_lwr_env();
@@ -1133,7 +1119,6 @@ mod tests {
         let delta_q_w_m2 =
             0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
 
-        // h_out=1.0: exactly at guard — must use computed coefficient.
         let expected_1_0 = (3.0 / 1.0) * delta_q_w_m2 * 12.0;
         let actual_1_0 = u_1_0[1];
         assert!(
@@ -1142,7 +1127,6 @@ mod tests {
              expected {expected_1_0:.6} W, got {actual_1_0:.6} W"
         );
 
-        // h_out=0.99: just below guard — must trigger ASHRAE fallback.
         let expected_fallback = (3.0 / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * 12.0;
         let actual_0_99 = u_0_99[1];
         assert!(
@@ -1151,7 +1135,6 @@ mod tests {
              expected {expected_fallback:.6} W, got {actual_0_99:.6} W"
         );
 
-        // Sanity: the ratio 34/1 = 34.
         let ratio = actual_1_0 / actual_0_99;
         assert!(
             (ratio - H_OUT_ASHRAE_PEAK).abs() < 0.01,
@@ -1159,11 +1142,4 @@ mod tests {
             H_OUT_ASHRAE_PEAK
         );
     }
-
-    // ── H_OUT_ASHRAE_PEAK is now exported from hares-physics::film_coefficients ───
-    //
-    // Both this module and solver_builder.rs import the same constant, eliminating
-    // the duplicate-literal drift risk. The `h_out_ashrae_matches_standard` test
-    // above guards the numeric value (34.0 W/(m²·K) per ASHRAE HoF 2021 Ch. 15,
-    // Table 1).
 }
