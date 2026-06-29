@@ -351,6 +351,133 @@ fn debug_bestest_600ff_observe_peak_terms() {
     );
 }
 
+// Warmup-period observer capture: records the first 100 timesteps for a free-float
+// BESTEST case to verify proper initialization behaviour. Captures zone temperature,
+// outdoor conditions, and envelope component gains at each timestep so the warmup
+// trajectory can be inspected for initialization defects (S4/S5 warmup refinement).
+// Useful for diagnosing why initial-condition-dependent metrics (particularly
+// Case 900FF min_zone_temp) remain outside ASHRAE 140 bands after the free-float
+// init fix in T-0301.  Run with: cargo nextest run bestest_warmup --features observe
+#[cfg(feature = "observe")]
+#[test]
+#[ignore = "diagnostic helper; run with --ignored and --features observe to inspect warmup trajectories"]
+fn debug_bestest_warmup_observe_first_100_steps() {
+    // Use 600FF (lightweight) and 900FF (heavyweight) to compare warmup behavior.
+    for case_id in ["600FF", "900FF"] {
+        let case = core_cases().into_iter().find(|c| c.id == case_id).unwrap();
+        let mut dwelling =
+            Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+                .unwrap_or_else(|err| panic!("failed to load BESTEST case {case_id}: {err}"));
+
+        let warmup_steps = 100usize;
+        dwelling.enable_observer(warmup_steps);
+        for _ in 0..warmup_steps {
+            dwelling.step().unwrap_or_else(|err| {
+                panic!("simulation step failed during warmup for {case_id}: {err}")
+            });
+        }
+        let snapshots = dwelling.drain_observations();
+        assert_eq!(
+            snapshots.len(),
+            warmup_steps,
+            "expected full warmup capture for {case_id}"
+        );
+
+        let t0_zone: Vec<f64> = snapshots[0]
+            .phases
+            .post_environment
+            .as_ref()
+            .expect("post_environment capture missing")
+            .zone_temps_c
+            .iter()
+            .map(|(_, t)| *t)
+            .collect();
+        let t0_out = snapshots[0]
+            .phases
+            .post_environment
+            .as_ref()
+            .unwrap()
+            .outdoor_temp_c;
+
+        let t_end_zone: Vec<f64> = snapshots[warmup_steps - 1]
+            .phases
+            .post_zone_update
+            .as_ref()
+            .expect("post_zone_update capture missing")
+            .zone_temps_c
+            .iter()
+            .map(|(_, t)| *t)
+            .collect();
+
+        let max_temp = snapshots
+            .iter()
+            .flat_map(|s| {
+                s.phases
+                    .post_zone_update
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|z| z.zone_temps_c.iter().map(|(_, t)| *t))
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_temp = snapshots
+            .iter()
+            .flat_map(|s| {
+                s.phases
+                    .post_zone_update
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|z| z.zone_temps_c.iter().map(|(_, t)| *t))
+            })
+            .fold(f64::INFINITY, f64::min);
+
+        eprintln!(
+            "[warmup] case={case_id} t0_zone={:?} t0_out={t0_out:.2}°C t_end_zone={:?} min={min_temp:.3}°C max={max_temp:.3}°C",
+            t0_zone,
+            t_end_zone,
+        );
+
+        // Verify free-float initialization: zone temp at step 0 should be within
+        // ±5 °C of outdoor ambient (T-0301 runtime invariant mirrors this).
+        for (i, t) in t0_zone.iter().enumerate() {
+            let delta = (t - t0_out).abs();
+            if delta > 5.0 {
+                eprintln!(
+                    "[warmup] case={case_id} zone[{i}] t0={t:.2}°C vs outdoor={t0_out:.2}°C delta={delta:.2}°C (exceeds ±5°C)"
+                );
+            }
+        }
+
+        // Trace gains for the first few steps to verify radiant fraction behaviour
+        // and warmup transient.
+        for (idx, snap) in snapshots.iter().take(10).enumerate() {
+            let env = snap.phases.post_environment.as_ref().unwrap();
+            let gains = &snap
+                .phases
+                .post_solvers
+                .as_ref()
+                .unwrap()
+                .envelope_gains;
+            let zone_t = snap
+                .phases
+                .post_zone_update
+                .as_ref()
+                .unwrap()
+                .zone_temps_c
+                .iter()
+                .map(|(_, t)| *t)
+                .collect::<Vec<_>>();
+            let hr = (idx + 1) as f64 * case.timestep_seconds as f64 / 3600.0;
+            eprintln!(
+                "[warmup] case={case_id} hr={hr:.2} zone_t={zone_t:?} out={:.2} int_gain={:.1} conv_to_air={:.1} int_lwr={:.1}",
+                env.outdoor_temp_c,
+                gains.internal_gain_w,
+                gains.internal_gain_w * 0.7, // 70% convective
+                gains.interior_lwr_w,
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "diagnostic helper; run with --ignored to inspect physics breakdowns"]
 fn debug_600ff_matrix_values() {
