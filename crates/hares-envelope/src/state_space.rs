@@ -613,6 +613,22 @@ impl StateSpaceModel {
         buf: &mut DVector<f64>,
         couplings: &[(usize, f64, f64)],
     ) {
+        let n = self.state_dim();
+        let mut d_agg = vec![0.0f64; n];
+        self.step_with_identity_coupling_into_scratch(x, u, buf, couplings, &mut d_agg);
+    }
+
+    /// Same as [`step_with_identity_coupling_into`] but uses a caller-provided
+    /// scratch buffer to avoid per-timestep heap allocation.  The buffer must
+    /// have length ≥ `state_dim()` and will be zeroed before use.
+    pub fn step_with_identity_coupling_into_scratch(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        couplings: &[(usize, f64, f64)],
+        d_agg: &mut [f64],
+    ) {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         debug_assert!(
             self.m_is_identity,
@@ -632,16 +648,14 @@ impl StateSpaceModel {
         // Applying `buf[i] /= 1 + d_j` sequentially for each entry gives
         // `rhs[i] / Π(1 + d_j)`, which is incorrect when more than one
         // coupling acts on the same state.
-        //
-        // Note: `d_agg` is allocated every timestep on this hot production
-        // path. The public signature has no scratch-buffer parameter, so we
-        // cannot reuse a caller-owned buffer without an API change. A future
-        // optimization could add a private `_with_scratch` overload taking a
-        // `&mut [f64]` and have this method allocate and delegate; the
-        // `ThermalSolver` already pre-allocates an analogous `balance_d_agg`
-        // buffer for the debug invariant-check path.
         let n = self.state_dim();
-        let mut d_agg = vec![0.0f64; n];
+        debug_assert!(
+            d_agg.len() >= n,
+            "d_agg scratch buffer too small: {} < state_dim {}",
+            d_agg.len(),
+            n
+        );
+        d_agg[..n].fill(0.0);
         for &(idx, d_diag, _) in couplings {
             debug_assert!(idx < n, "coupling index {idx} out of bounds");
             d_agg[idx] += d_diag;
@@ -802,17 +816,7 @@ impl StateSpaceModel {
         }
 
         // Aggregate diagonal damping per state index before dividing.
-        //
-        // Multiple coupling entries for the same state (e.g. infiltration +
-        // linearised exterior LWR) must be summed before the implicit
-        // division to maintain the correct semi-implicit scheme:
-        //
-        //   x_next[i] = rhs[i] / (1 + Σ d_j)   for all couplings j at state i
-        //
-        // Applying `rhs[i] /= 1 + d_j` sequentially for each entry gives
-        // `rhs[i] / Π(1 + d_j)`, which is incorrect when more than one
-        // coupling acts on the same state. See `step_with_identity_coupling_into`
-        // for the same fix on the step path.
+        // See `step_with_identity_coupling_into_scratch` for derivation.
         let n = self.state_dim();
         let mut d_agg = vec![0.0f64; n];
         for &(idx, d_diag, _) in couplings {

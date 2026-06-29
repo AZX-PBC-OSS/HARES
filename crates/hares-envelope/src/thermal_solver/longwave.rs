@@ -1248,10 +1248,10 @@ mod tests {
         let q_lw_linearised = h_rad * (t_eff_c - t_surf_c);
 
         assert!(
-            (q_lw_full - q_lw_linearised).abs() < 5.0,
-            "linearised flux ({q_lw_linearised:.6} W) must approximately equal full T⁴ flux \
-             ({q_lw_full:.6} W) at the linearisation point (within floating-point tolerance \
-             from different powi(3)/powi(4) computation paths)"
+            (q_lw_full - q_lw_linearised).abs() < 1e-3,
+            "linearised flux ({q_lw_linearised:.6} W) must equal full T⁴ flux ({q_lw_full:.6} W) \
+             at the linearisation point (within floating-point tolerance from different \
+             powi(3)/powi(4) computation paths)"
         );
 
         // 4. h_rad must match the analytical formula 4·ε·σ·A·T_surf³.
@@ -1266,8 +1266,9 @@ mod tests {
 
     /// Verify that the semi-implicit LWR coupling produces the correct
     /// next-step temperature: x_next = (N·x + B·u + b·h_rad·T_eff) / (1 + b·h_rad).
-    /// Also verifies stability with a very large timestep (3600s) where
-    /// explicit injection would diverge.
+    /// The semi-implicit scheme is unconditionally stable for any timestep;
+    /// the warmup regression test (`hpxml_path_applies_default_warmup` at
+    /// 1-hour timesteps) verifies this end-to-end.
     #[test]
     fn opaque_lwr_coupling_next_step_matches_semi_implicit_closed_form() {
         let env = window_lwr_env();

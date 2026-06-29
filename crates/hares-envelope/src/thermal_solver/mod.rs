@@ -160,6 +160,10 @@ pub struct ThermalSolver {
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
     custom_payload_buf: Vec<f64>,
+    /// Pre-allocated aggregation buffer for the semi-implicit coupling diagonal
+    /// damping in `step_with_identity_coupling_into_scratch`. Sized to
+    /// `state_dim` at construction, avoiding per-timestep heap allocation.
+    d_agg_buf: Vec<f64>,
     /// Per-surface linearised exterior LWR coupling data for semi-implicit
     /// integration: `(state_idx, input_idx, h_rad_w_k, t_eff_c)`.
     ///
@@ -753,6 +757,7 @@ impl ThermalSolver {
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
             custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 5),
+            d_agg_buf: vec![0.0f64; n_states],
             lwr_coupling_buf: Vec::with_capacity(n_ext_surfaces),
             full_system_stored_energy_w: 0.0,
             thermal_balance_q_gains: Vec::with_capacity(n_zones_for_latent.max(1)),
@@ -1337,6 +1342,7 @@ mod tests {
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
         WindowSolarProperties,
     };
+    use crate::ThermalSnapshot;
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
         EnvironmentState {
@@ -6491,6 +6497,80 @@ mod tests {
             garage,
             by_zone.get(&garage).copied().unwrap_or(0.0),
             garage_jacket,
+        );
+    }
+
+    // ── restore_state atomicity: validation before mutation ──────────────
+
+    /// `restore_state` must validate ALL fields before mutating any state.
+    /// If any field is non-finite, the solver's existing state must be
+    /// left completely unchanged (atomic restore).
+    #[test]
+    fn restore_state_rejects_non_finite_x_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let original_x = solver.x[0];
+
+        let bad_snap = ThermalSnapshot {
+            x: vec![f64::NAN],
+            last_u: vec![],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
+        };
+
+        let result = solver.restore_state(&bad_snap);
+        assert!(result.is_err(), "restore with NaN x must return Err");
+
+        assert_eq!(
+            solver.x[0], original_x,
+            "solver state must be unchanged after rejected restore (atomicity)"
+        );
+    }
+
+    #[test]
+    fn restore_state_rejects_non_finite_last_u_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let original_x = solver.x[0];
+
+        let bad_snap = ThermalSnapshot {
+            x: vec![25.0],
+            last_u: vec![f64::NAN, 0.0],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
+        };
+
+        let result = solver.restore_state(&bad_snap);
+        assert!(result.is_err(), "restore with NaN last_u must return Err");
+
+        assert_eq!(
+            solver.x[0], original_x,
+            "solver state must be unchanged after rejected restore (atomicity)"
+        );
+    }
+
+    #[test]
+    fn restore_state_rejects_non_finite_interior_surface_temps_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let original_x = solver.x[0];
+
+        let bad_snap = ThermalSnapshot {
+            x: vec![25.0],
+            last_u: vec![],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![vec![20.0, f64::NAN]],
+            interior_surface_prev_temps: vec![],
+        };
+
+        let result = solver.restore_state(&bad_snap);
+        assert!(result.is_err(), "restore with NaN interior surface temp must return Err");
+
+        assert_eq!(
+            solver.x[0], original_x,
+            "solver state must be unchanged after rejected restore (atomicity)"
         );
     }
 }

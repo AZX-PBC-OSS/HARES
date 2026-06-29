@@ -703,11 +703,12 @@ impl ThermalSolver {
 
         if !self.coupling_buf.is_empty() {
             if self.model.m_is_identity() {
-                self.model.step_with_identity_coupling_into(
+                self.model.step_with_identity_coupling_into_scratch(
                     &self.x,
                     &u,
                     &mut self.rhs_buf,
                     &self.coupling_buf,
+                    &mut self.d_agg_buf,
                 );
 
                 self.last_coupled_state = CoupledState::Identity;

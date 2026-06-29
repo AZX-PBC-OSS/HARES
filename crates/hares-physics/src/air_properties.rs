@@ -52,10 +52,11 @@ pub fn dry_air_density(p: Pressure, t: Temperature) -> f64 {
     dry_air_density_kg_m3(pressure_to_pascal(p), temperature_to_celsius(t))
 }
 
-/// Invariant: air density must be within plausible atmospheric range [0.6, 1.5] kg/m³
+/// Invariant: air density must be within plausible atmospheric range [0.6, 1.6] kg/m³
 /// and finite. Range covers high-altitude locations (e.g., La Paz, Bolivia at ~4000m,
-/// ρ ≈ 0.73 kg/m³) to cold sea-level winter (ρ ≈ 1.4 kg/m³). Values outside this
-/// range indicate either a unit error (Pa vs kPa) or corrupted weather data.
+/// ρ ≈ 0.73 kg/m³) to cold sea-level winter (e.g., −40°C at sea level, ρ ≈ 1.51 kg/m³).
+/// Values outside this range indicate either a unit error (Pa vs kPa) or corrupted
+/// weather data.
 ///
 /// Gated behind `debug_assertions` or `check_invariants` feature to avoid per-timestep
 /// overhead in production release builds.
@@ -66,8 +67,8 @@ pub fn check_air_density_plausible(rho: f64, context: &str) {
         "air density is non-finite: {rho} at {context}"
     );
     assert!(
-        (0.6..=1.5).contains(&rho),
-        "air density {rho:.5} kg/m³ out of plausible range [0.6, 1.5] at {context}"
+        (0.6..=1.6).contains(&rho),
+        "air density {rho:.5} kg/m³ out of plausible range [0.6, 1.6] at {context}"
     );
 }
 
@@ -233,5 +234,4 @@ mod tests {
     #[should_panic(expected = "out of plausible range")]
     fn invariant_check_rejects_too_high_density() {
         check_air_density_plausible(2.0, "too high");
-    }
-}
+    }}
