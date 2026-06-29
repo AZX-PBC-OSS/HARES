@@ -179,7 +179,6 @@ impl EnvironmentManager {
     /// Like [`new`] but with optional per-column weather resampling overrides.
     ///
     /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_resample(
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
@@ -1052,7 +1051,7 @@ fn initial_zones(
         }]);
     }
 
-    building
+    let zones: Vec<ZoneState> = building
         .zones
         .iter()
         .enumerate()
@@ -1097,7 +1096,37 @@ fn initial_zones(
                 })
             },
         )
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Free-float invariant: when no HVAC setpoints exist, conditioned-zone
+        // initial temperature must match outdoor ambient within ±5 °C. Starting at
+        // 21 °C (the old DEFAULT_SETPOINT_C fallback) biases multi-week thermal-mass
+        // transients in heavyweight buildings. EnergyPlus ERM 26.1 requires
+        // convergence to periodic steady state before results collection.
+        let has_setpoints = building.heating_weekday_setpoints_c.is_some()
+            || building.heating_weekend_setpoints_c.is_some()
+            || building.cooling_weekday_setpoints_c.is_some()
+            || building.cooling_weekend_setpoints_c.is_some();
+        if !has_setpoints {
+            for (idx, zone_state) in zones.iter().enumerate() {
+                let zone = &building.zones[idx];
+                if matches!(zone.zone_type, hares_io::hpxml::ZoneType::Conditioned) {
+                    let delta = (zone_state.temperature_c - outdoor_temp_c).abs();
+                    assert!(
+                        delta <= 5.0,
+                        "free-float conditioned zone {idx}: initial temp {:.2} °C differs \
+                         from outdoor {:.2} °C by {delta:.2} °C (>5 °C)",
+                        zone_state.temperature_c,
+                        outdoor_temp_c
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(zones)
 }
 
 /// Determines initial indoor temperature from HVAC setpoints and outdoor temp.

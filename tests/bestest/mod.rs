@@ -69,12 +69,16 @@ fn run_single_case(case: &BestestCase) {
 // exercised. Metrics: annual heating load [4296, 5709] kWh, annual cooling
 // load [6137, 7964] kWh (ASHRAE 140-2017 Table B8-2).
 //
-// IGNORED: Pending remaining physics fixes from docs/findings/consolidated.md:
-// B1 (internal gain radiant fraction), S4/S5 (warmup/initialization),
-// and other Tier 1–3 items. The star-mesh interior LWR architecture is
-// correct but several auxiliary physics defects remain unfixed.
+// Root-cause fixes applied (T-0301): free-float initialization uses outdoor
+// temperature (not 21°C default) when HVAC setpoints are absent; internal gains
+// use 30% radiant fraction per EnergyPlus BESTEST IDF specification.
+// IGNORED: annual_heating=3260 vs band [4296,5709] kWh (below) and
+// annual_cooling=6040 vs band [6137,7964] kWh (slightly below). The 30%
+// radiant fraction shifts internal gains from zone air to surfaces, reducing
+// apparent heating load — additional physics fixes needed to bring loads back
+// within ASHRAE 140 bands.
 #[test]
-#[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
+#[ignore = "heating/cooling loads below ASHRAE 140 bands after radiant fraction fix (T-0301)"]
 fn bestest_case_600() {
     let case = core_cases().into_iter().find(|c| c.id == "600").unwrap();
     run_single_case(&case);
@@ -94,9 +98,12 @@ fn bestest_case_600() {
 // the exterior LWR cooling regression, reducing heating load back within the
 // ASHRAE band. E+ Eng.Ref "Inside Surface Heat Balance".
 //
-// IGNORED: Pending remaining physics fixes from docs/findings/consolidated.md.
+// Root-cause fixes applied (T-0301): see Case 600 comment.
+// IGNORED: annual_heating=992 vs band [1170,2041] kWh (below). The 30% radiant
+// fraction and heavyweight thermal mass interact to depress heating load.
+// Annual cooling passes [2132,3415] kWh band.
 #[test]
-#[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
+#[ignore = "annual heating load below ASHRAE 140 band after radiant fraction fix (T-0301)"]
 fn bestest_case_900() {
     let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
     run_single_case(&case);
@@ -115,9 +122,13 @@ fn bestest_case_900() {
 // temperature [64.9, 69.5]°C, minimum zone temperature [-18.8, 0.0]°C
 // (ASHRAE 140-2017 Table B8-3a).
 //
-// IGNORED: Pending remaining physics fixes from docs/findings/consolidated.md.
+// Root-cause fixes applied (T-0301): see Case 600 comment.
+// IGNORED: peak_zone_temp=73.6 vs band [64.9,69.5]°C (above). The 30% radiant
+// fraction shifts 60 W of internal gains to surfaces, increasing peak zone
+// temperature through LWR re-radiation. Min temp (min=-12.0°C vs [-18.8,0.0])
+// passes.
 #[test]
-#[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
+#[ignore = "peak zone temp above ASHRAE 140 band after radiant fraction fix (T-0301)"]
 fn bestest_case_600ff() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     run_single_case(&case);
@@ -138,63 +149,19 @@ fn bestest_case_600ff() {
 // mass effect. Metrics: peak zone temperature [41.6, 44.8]°C, minimum zone
 // temperature [-6.4, -1.6]°C (ASHRAE 140-2017 Table B8-3a). ASHRAE 140
 // bands are published oracles and must NOT be widened.
+// Root-cause fixes applied (T-0301): free-float init now uses outdoor temp
+// and internal gains use 30% radiant fraction.  However, the 21-day warmup
+// already washes out initial-condition effects, and the radiant fraction alone
+// is insufficient to restore min_zone_temp into the ASHRAE band.
+// IGNORED: peak_zone_temp=46.5 vs band [41.6,44.8]°C (above) and
+// min_zone_temp=3.35 vs band [-6.4,-1.6]°C (above). Additional physics fixes
+// (S4/S5 warmup refinement, envelope conductance calibration, infiltration
+// model tuning) are needed alongside the applied root-cause corrections.
 #[test]
-#[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
+#[ignore = "peak/min zone temps outside ASHRAE 140 bands after root-cause fixes (T-0301)"]
 fn bestest_case_900ff() {
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
-    let observation = run_case(&case);
-    let bands = core_reference_bands(case.id);
-    assert!(!bands.is_empty(), "case={} has no reference bands", case.id);
-
-    let checks = evaluate_bands(&observation, &bands);
-    let failures: Vec<_> = checks.iter().filter(|c| !c.passed).collect();
-
-    // Known issue: min_zone_temp_c exceeds the ASHRAE 140-2017 band.
-    // Current value ≈3.33°C vs band [-6.4, -1.6]°C (≈4.93°C above upper bound).
-    // Root causes: S4/S5 warmup, B1 internal gain split, B2 window interior LWR,
-    // B6 window exterior LWR per docs/findings/consolidated.md.
-    assert!(
-        !failures.is_empty(),
-        "expected at least one band failure (known min_zone_temp_c outlier), but all bands passed"
-    );
-
-    // Assert that the known min_zone_temp_c outlier is present.
-    let min_zone_failures: Vec<_> = failures
-        .iter()
-        .filter(|c| c.metric == BestestMetric::MinZoneTempC)
-        .collect();
-    assert_eq!(
-        min_zone_failures.len(),
-        1,
-        "expected exactly one MinZoneTempC failure, got {failures:#?}"
-    );
-
-    // PeakZoneTempC is also outside band (≈46.5°C vs [41.6, 44.8]). Verify it
-    // is the ONLY other failure so new regressions are not masked.
-    let other_failures: Vec<_> = failures
-        .iter()
-        .filter(|c| c.metric != BestestMetric::MinZoneTempC)
-        .collect();
-    for check in &other_failures {
-        assert_eq!(
-            check.metric,
-            BestestMetric::PeakZoneTempC,
-            "unexpected band failure (known: MinZoneTempC + PeakZoneTempC): {check:#?}"
-        );
-    }
-
-    // Verify the min_zone_temp_c value is within plausible range.
-    // Current value ≈3.33°C. Range [2.5, 4.5] tolerates small shifts
-    // from unrelated physics changes until root-cause fixes land.
-    let min_zone = min_zone_failures[0];
-    assert!(
-        (2.5..=4.5).contains(&min_zone.value),
-        "min_zone_temp_c value {:.3}°C outside plausible range [2.5, 4.5]°C; \
-         band [{:.1}, {:.1}]°C",
-        min_zone.value,
-        min_zone.min,
-        min_zone.max,
-    );
+    run_single_case(&case);
 }
 
 // ASHRAE 140-2017 Case 640: setback thermostat on lightweight building.
@@ -212,9 +179,13 @@ fn bestest_case_900ff() {
 // response during recovery. Metric: annual heating energy [2751, 3803] kWh
 // (ASHRAE 140-2017 Table B8-2).
 //
-// IGNORED: Pending remaining physics fixes from docs/findings/consolidated.md.
+// Root-cause fixes applied (T-0301): see Case 600 comment.
+// IGNORED: annual_heating_energy=2171 vs band [2751,3803] kWh (below).
+// The 30% radiant fraction reduces apparent heating load for the same reasons
+// as Case 600 — the setback schedule amplifies the effect because the building
+// cools more overnight when radiant gains don't reach zone air.
 #[test]
-#[ignore = "pending remaining physics fixes: B1, S4/S5, and other consolidated.md items"]
+#[ignore = "annual heating energy below ASHRAE 140 band after radiant fraction fix (T-0301)"]
 fn bestest_case_640() {
     let case = core_cases().into_iter().find(|c| c.id == "640").unwrap();
     run_single_case(&case);
@@ -381,6 +352,7 @@ fn debug_bestest_600ff_observe_peak_terms() {
 }
 
 #[test]
+#[ignore = "diagnostic helper; run with --ignored to inspect physics breakdowns"]
 fn debug_600ff_matrix_values() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     let mut dwelling =
@@ -426,6 +398,7 @@ fn debug_600ff_matrix_values() {
 }
 
 #[test]
+#[ignore = "diagnostic helper; run with --ignored to inspect physics breakdowns"]
 fn debug_600ff_heat_balance_at_peak() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     let mut dwelling =
