@@ -394,6 +394,7 @@ production.
 | EnergyPlus Docs (all versions) | https://bigladdersoftware.com/epx/docs/ | Version-specific engineering and I/O reference |
 | HPXML Specification v4.2 | https://github.com/hpxmlwg/hpxml/releases/tag/v4.2 | Residential building XML schema — HVAC equipment, duct systems, envelope |
 | HPXML Schema Definitions | https://github.com/hpxmlwg/hpxml/tree/master/schemas | XSD files for HPXML validation — field names, types, enumerations |
+| OCHRE (NREL) | https://github.com/NREL/OCHRE | Reference oracle (vendored commit `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`). Published in Applied Energy (Blonsky et al. 2021, doi:10.1016/j.apenergy.2021.116732). Used for equipment-level and whole-building parity tests. |
 
 When citing EnergyPlus in code comments, use the following format:
 

@@ -27,9 +27,12 @@ laws are enforced at runtime via invariant checks.
 
 ## OCHRE Parity Tests
 
-OCHRE (`vendors/OCHRE/`) is the primary reference oracle. HARES runs
-side-by-side simulations on identical inputs (same HPXML building
-description, weather file, and schedules) and compares output columns.
+OCHRE ([Blonsky et al. 2021](https://doi.org/10.1016/j.apenergy.2021.116732),
+repo at https://github.com/NREL/OCHRE) is the primary reference oracle,
+vendored as a git submodule at `vendors/OCHRE/`. The pinned commit is
+`ffc8b56e99c61eb4e42af625bbbc310e198ec58d`. HARES runs side-by-side
+simulations on identical inputs (same HPXML building description, weather
+file, and schedules) and compares output columns.
 
 ### Whole-building parity
 
@@ -254,12 +257,25 @@ Different validation layers use different tolerance strategies:
 | ASHRAE HOF 2021 Ch. 25 | Natural convection (TARP h formula) |
 | ASHRAE 152-2019 | Duct distribution system efficiency |
 | EnergyPlus Engineering Reference | Film coefficients, water mains, performance curves, defrost, latent degradation |
+| OCHRE (NREL) | Primary reference oracle for equipment and whole-building parity testing |
 | PsychroLib | Cross-validation of psychrometric functions |
 | ISA 1976 / ICAO Doc 7488 | Standard atmosphere for altitude corrections |
 | Walker & Wilson 1998 | AIM-2 infiltration model |
 | Burch & Christensen 2007 | Water mains temperature model |
 | Henderson & Rengarajan (ASHRAE RP-1120) | Latent degradation model for cooling coils |
 | AHRI 210/240 | HVAC rating conditions for performance curves |
+
+### OCHRE Reference
+
+- **Repository:** https://github.com/NREL/OCHRE
+- **Vendored commit:** `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`
+- **Publication:** Blonsky, M., Maguire, J., McKenna, K., Cutler, D., Balamurugan, S. P., & Jin, X. (2021). OCHRE: The Object-oriented, Controllable, High-resolution Residential Energy Model for Dynamic Integration Studies. *Applied Energy*, *290*, 116732. https://doi.org/10.1016/j.apenergy.2021.116732
+- **Status:** Published in Applied Energy (peer-reviewed journal). The NREL technical report NREL/TP-5500-84658 (Maguire et al. 2024) is an example of a study using OCHRE.
+
+HARES vendors OCHRE as a git submodule at `vendors/OCHRE/` and uses it as the primary reference oracle for equipment-level and whole-building parity tests. The specific commit pinned in the submodule is the auditable reference version against which all parity assertions are made. If OCHRE's algorithms change in a future commit, HARES parity tests may begin failing unless the submodule is updated and parity re-validated.
+
+Commit hash verification: `git submodule status vendors/OCHRE`
+CI check: `scripts/check-ochre-commit.sh`
 
 ---
 
