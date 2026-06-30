@@ -1,4 +1,4 @@
-# Startup capacity degradation ramp (Winkler 2011) implementation
+# Startup capacity degradation ramp (Winkler 2009) implementation
 **Review ID**: equip-hvac-14
 **Category**: equipment-hvac
 **Date**: 2026-05-26
@@ -27,7 +27,7 @@
 
 **Root Cause**: HARES' `apply_startup_capacity_degradation` (staging.rs:298–316) has no equipment-type guard. The `on_now` signal is derived from generic `duty_cycle > 0.0` (staging.rs:303) rather than a compressor-actually-running check.
 
-**Impact**: Single-speed and two-speed air conditioners (central AC, room AC, ASHP cooler) with non-zero Cd (0.07 – 0.22 by default) experience 2–5 minutes of artificially reduced capacity on every thermostat cycle, even though the Winkler 2011 model was developed for heat pump compressor startups and OCHRE explicitly excludes AC equipment. This depresses seasonal cooling energy efficiency metrics relative to OCHRE, particularly for tight-cycling equipment in moderate climates.
+**Impact**: Single-speed and two-speed air conditioners (central AC, room AC, ASHP cooler) with non-zero Cd (0.07 – 0.22 by default) experience 2–5 minutes of artificially reduced capacity on every thermostat cycle, even though the Winkler (2009) model was developed for heat pump compressor startups and OCHRE explicitly excludes AC equipment. This depresses seasonal cooling energy efficiency metrics relative to OCHRE, particularly for tight-cycling equipment in moderate climates.
 
 ---
 
@@ -39,7 +39,7 @@
 - HARES default: `staging.rs:20` (`pub(super) const DEFAULT_PLF_DEGRADATION_COEFF: f64 = 0.25;`)
 - HARES init: `hvac_core.rs:492–495` (`self.runtime.startup = StartupConfig { c_d: cd, time_since_start_min: 0.0 }`)
 
-**Root Cause**: HARES reuses the same Cd constant for both PLF cycling degradation (AHRI 210/240) and startup capacity ramp (Winkler 2011), conflating two distinct physical phenomena with different defaults. OCHRE keeps them separate and defaults the startup ramp to 0.0.
+**Root Cause**: HARES reuses the same Cd constant for both PLF cycling degradation (AHRI 210/240) and startup capacity ramp (Winkler 2009), conflating two distinct physical phenomena with different defaults. OCHRE keeps them separate and defaults the startup ramp to 0.0.
 
 **Impact**: Equipment that would have no startup penalty in OCHRE experiences a permanent capacity derate in HARES. The energy impact is most pronounced for single-speed ACs with SEER < 13 (Cd=0.20 in HARES, 0.0 in OCHRE).
 
@@ -73,7 +73,7 @@
 ---
 
 ### Finding 5: [Severity: medium]
-**Description**: Neither HARES nor OCHRE models off-time-proportional recovery. A brief off period (e.g., 1 minute) triggers the same full restart degradation as an overnight shutdown. The Winkler 2011 model is a compressor transient model (thermal mass and pressure equalisation), so short off periods should logically produce less severe restarts than cold starts. The review question — "does a brief off period trigger a full restart degradation, or is the degradation proportional to off-time?" — is answered affirmatively: both implementations use full restart degradation regardless of off-duration.
+**Description**: Neither HARES nor OCHRE models off-time-proportional recovery. A brief off period (e.g., 1 minute) triggers the same full restart degradation as an overnight shutdown. The Winkler (2009) model is a compressor transient model (thermal mass and pressure equalisation), so short off periods should logically produce less severe restarts than cold starts. The review question — "does a brief off period trigger a full restart degradation, or is the degradation proportional to off-time?" — is answered affirmatively: both implementations use full restart degradation regardless of off-duration.
 
 **Code Location**:
 - HARES: `speed_control.rs:86` (first on-step initialises `time_since_start_min = 0.5 * dt_min` — no memory of prior off-duration)
@@ -123,6 +123,6 @@
 6. **Review the Room AC Cd default** of 0.22 against the SEER-based central-AC defaults; if Room AC startup physics differ materially from central AC, cite the reference.
 
 ## References / Citations
-- Winkler, J. 2011. Startup capacity degradation model: exponential ramp with `t_full = 20 * Cd + 0.4` minutes, `mult = clamp(0, 1, -1.025 * exp(-3.79936 * t / t_full) + 1.025)`. Referenced in OCHRE `calc_startup_capacity_degredation` (HVAC.py:971–988) and HARES `StartupConfig::capacity_multiplier` (speed_control.rs:71–97).
+- Winkler, J.M. (2009). "Development of a Component Based Simulation Tool for the Steady State and Transient Analysis of Vapor Compression Systems." Ph.D. dissertation, University of Maryland. https://drum.lib.umd.edu/handle/1903/9493 — Startup capacity degradation model: exponential ramp with `t_full = 20 * Cd + 0.4` minutes, `mult = clamp(0, 1, -1.025 * exp(-3.79936 * t / t_full) + 1.025)`. Referenced in OCHRE `calc_startup_capacity_degredation` (HVAC.py:971–988) and HARES `StartupConfig::capacity_multiplier` (speed_control.rs:71–97).
 - AHRI 210/240-2023: PLF degradation coefficient Cd (0.25 default), used by HARES as the root Cd for both PLF and startup models.
 - Cutler, D. et al. 2013. "Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations." NREL. Section 2.2.1 references the biquadratic model but does not specify startup ramp application scope.

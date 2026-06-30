@@ -7,7 +7,7 @@ Rating: Adequate
 Strengths:
 - Thermostat FSM is physically correct with hysteresis, asymmetric deadband offset, and cutout ratio (thermostat.rs:18-30, hvac_core.rs:666-722)
 - Part-load factor follows AHRI 210/240 with proper floor clamping (staging.rs:268-312)
-- Winkler 2011 startup ramp is correctly implemented with mid-step initialization (speed_control.rs:71-97)
+- Winkler (2009) startup ramp is correctly implemented with mid-step initialization (speed_control.rs:71-97). Winkler, J.M. (2009). "Development of a Component Based Simulation Tool for the Steady State and Transient Analysis of Vapor Compression Systems." Ph.D. dissertation, University of Maryland. https://drum.lib.umd.edu/handle/1903/9493
 - Min-cycle and compressor on/off time guards prevent unrealistic short-cycling (hvac_core.rs:724-809)
 - Two-speed time mode correctly detects "moving wrong way" conditions (staging.rs:150-200)
 - Well-separated files: thermostat.rs (184 lines), speed_control.rs (206 lines), staging.rs (422 lines)

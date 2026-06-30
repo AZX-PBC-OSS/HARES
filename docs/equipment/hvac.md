@@ -36,7 +36,7 @@ Speed control modes:
 
 Quadratic EIR PLR curves per stage: `EIR_PLR = a + b*PLR + c*PLR²`
 
-Startup ramp (Winkler 2011): exponential degradation over first ~5-6 minutes per stage; disabled for variable-speed.
+Startup ramp (Winkler 2009): exponential degradation over first ~5-6 minutes per stage; disabled for variable-speed. Winkler, J.M. (2009). "Development of a Component Based Simulation Tool for the Steady State and Transient Analysis of Vapor Compression Systems." Ph.D. dissertation, University of Maryland. https://drum.lib.umd.edu/handle/1903/9493
 
 ### Defrost Model (Heating Only)
 
