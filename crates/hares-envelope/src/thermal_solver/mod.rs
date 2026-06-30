@@ -704,7 +704,8 @@ impl ThermalSolver {
         zone_temps_buf.sort_by_key(|(zone, _)| *zone);
         let n_zones_for_latent = zone_temps_buf.len();
 
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        // Used unconditionally by `lwr_coupling_buf` below (and additionally by
+        // cfg-gated diagnostic buffers), so this binding must not be cfg-gated.
         let n_ext_surfaces = config.exterior_surfaces.len();
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_windows = config.window_properties.len();
