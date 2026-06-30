@@ -13,14 +13,14 @@ hares-envelope/src/
 │   ├── mod.rs           ThermalSolver struct, DomainSolver impl, resolve() dispatch
 │   ├── config.rs        Config types, EnvelopeComponentGains, wiring indices
 │   ├── initialization.rs Steady-state initialization from outdoor conditions
-│   ├── stepping.rs      resolve_internal() CN step, semi-implicit infiltration coupling
+│   ├── stepping.rs      resolve_internal() ZOH step, semi-implicit infiltration coupling
 │   ├── longwave.rs      Exterior iterative + interior linearized LWR application
 │   ├── ports.rs         build_input_vector(): outdoor, solar, LWR, ports, infiltration
 │   ├── solar.rs         Window SHGC + IAM, opaque solar injection
 │   └── infiltration.rs  InfiltrationCoupling: conductance + forcing for semi-implicit
 ├── boundary_rc.rs       Building geometry → RC network assembly
 ├── rc_network.rs        RCNetwork graph → Kirchhoff A_c/B_ext matrices
-├── state_space.rs       Crank-Nicolson implicit model, matrix exponential, stepping
+├── state_space.rs       ZOH discretization, implicit coupling, matrix exponential, stepping
 └── longwave_radiation.rs  4-component EnergyPlus exterior LWR, interior linearized LWR
 
 hares-physics/src/
@@ -91,59 +91,88 @@ Output: continuous-time `(A_c, B_ext)` matrices plus index maps:
 
 ---
 
-## State-Space Model (Crank-Nicolson Implicit)
+## State-Space Model (ZOH Discretization)
 
 **Entry point**: `StateSpaceModel::from_continuous(a_c, b_c, dt, output_mapping)`
 
 The continuous-time RC system `dx/dt = A_c·x + B_c·u` is discretized using the
-Crank-Nicolson (trapezoidal) implicit scheme:
+ZOH (zero-order hold) method:
 
 ```
-(I − dt/2·A_c) · x[k+1] = (I + dt/2·A_c) · x[k] + dt·B_c · u[k]
-      M                          N                     B_eff
+A_d = exp(A_c·dt)                   — matrix exponential (13th-order Padé)
+B_d = A_c⁻¹·(A_d − I)·B_c           — solved via LU factorization
 ```
 
-This is A-stable: any continuous system with Re(λ) ≤ 0 produces a stable
-discrete system regardless of timestep size. This eliminates the overshoot that
-the previous explicit ZOH solver exhibited under large infiltration loads.
+ZOH is the same approach used by OCHRE and is unconditionally stable: every
+stable continuous-time pole maps to a discrete-time pole inside the unit
+circle. Unlike Crank-Nicolson, ZOH is first-order accurate but introduces
+zero numerical oscillation — no overshoot from fast modes.
 
 ### Pre-Computed Matrices
 
-At initialization, three matrices are built and stored:
-- **M** = I − dt/2·A_c (implicit half, LU-factored)
-- **N** = I + dt/2·A_c (explicit half)
-- **B_eff** = dt·B_c (scaled input)
+For the ZOH-discretized model the implicit-half matrix is **M = I** (identity),
+so the base step is a pure explicit multiplication:
 
-The LU factorization of M is computed once. Each timestep step solves
-`M·x[k+1] = N·x[k] + B_eff·u[k]` via forward/back substitution — no per-step
-factorization.
+```
+x[k+1] = A_d·x[k] + B_d·u[k]
+```
+
+with:
+
+- **M** = I (identity matrix — no implicit solve needed for the base step)
+- **N** = A_d (ZOH discrete state matrix)
+- **B_eff** = B_d (ZOH discrete input matrix)
+
+Because M = I, the `m_is_identity` flag is set and the coupled solver takes an
+O(n) closed-form diagonal-scaling path (`x[i] = b[i] / (1 + d_i)` for coupled
+rows) instead of an O(n³) LU factorization. For non-identity M (future CN
+path), per-step coupled LU would be computed — the infrastructure exists but
+is never exercised, since both constructors set `m_is_identity = true`.
 
 ### Zero-Allocation Stepping
 
 `step_into(x, u, buf)` uses a caller-owned buffer:
 ```rust
-buf = N·x           // gemv, zero-alloc
-buf += B_eff·u      // gemv accumulate
-M_lu.solve_mut(buf) // in-place triangular solve
+buf = A_d·x[k]      // gemv, zero-alloc (N = A_d)
+buf += B_d·u[k]     // gemv accumulate (B_eff = B_d)
+M_lu.solve_mut(buf) // identity solve (M = I), or coupled LU solve
 ```
 
 `ThermalSolver` owns `rhs_buf` and swaps it with `x` after each step.
 
+### Discretization Fallback: Van Loan
+
+For singular A_c or severely ill-conditioned A_c (reciprocal condition estimate
+< 1e-12), the direct LU solve for B_d fails. The Van Loan augmented-matrix
+method avoids explicit inversion:
+
+```
+Block = [[A_c, B_c],
+         [ 0 ,  0 ]]
+exp(dt·Block) ⇒ A_d = top-left n×n, B_d = top-right n×m
+```
+
 ### Discrete-Path Compatibility
 
-`StateSpaceModel::from_discrete(A_d, B_d, C, D)` sets M = I so the solve
-degenerates to `x[k+1] = A_d·x + B_d·u` for pre-discretized models.
+`StateSpaceModel::from_discrete(A_d, B_d, C, D)` accepts pre-discretized
+matrices. Both constructors set M = I and `m_is_identity = true`.
 
 ### Stability Verification
 
-For small systems (n ≤ 20), eigenvalues of the equivalent A_d = M⁻¹·N are
-checked:
+A tiered approach avoids full eigenvalue decomposition on every construction:
+
+1. **Gershgorin pass** (O(n²)): Fast spectral bound on the discrete A_d. If
+   the bound is within the unit circle, the system is accepted.
+2. **Singular A_c exemption**: ZOH discretization produces a pole at |λ| = 1
+   for singular A_c; this is permitted when the Gershgorin bound is tolerated.
+3. **Full eigenvalue fallback**: When Gershgorin flags potential instability
+   (false-positive from strong off-diagonal coupling), eigenvalue
+   decomposition is attempted. If that panics (Schur QR), the conservative
+   Gershgorin bound is used.
+
 - Continuous: all Re(λ) < 0
 - Discrete: all |λ| ≤ 1 + 1e-10
-- Exception: singular A_c with marginally-stable A_d is permitted
-
-For larger systems, a Gershgorin bound on the continuous A_c is used — since
-CN is A-stable, continuous stability implies discrete stability.
+- Near-unity eigenvalues (|λ| > 0.99) trigger a `warn!` for slow convergence
 
 ### Steady State
 
@@ -155,8 +184,28 @@ Used for initialization (computing initial state from outdoor conditions).
 
 ### Matrix Exponential (Utility)
 
-`matrix_exp()` is retained for boundary RC assembly and returns `Result` (not
-panic). Uses 13th-order Padé scaling-and-squaring (θ₁₃ ≈ 5.37192).
+`matrix_exp()` uses 13th-order Padé scaling-and-squaring (θ₁₃ ≈ 5.37192).
+Returns `Result` — does not panic. Used by both ZOH discretization and the
+Van Loan fallback.
+
+### Planned Improvement: Crank-Nicolson
+
+Crank-Nicolson (trapezoidal) is a second-order accurate, A-stable implicit
+scheme used by EnergyPlus:
+
+```
+(I − dt/2·A_c)·x[k+1] = (I + dt/2·A_c)·x[k] + dt·B_c·u[k]
+       M                          N                     B_eff
+```
+
+Benefits over ZOH: second-order temporal accuracy and zero numerical
+dissipation for oscillatory modes. The `StateSpaceModel` API already supports
+non-identity M matrices (`m_is_identity = false`) and per-step LU
+factorization — the mechanical foundation is in place. A migration would
+require (1) per-step factorization of M when infiltration coupling modifies
+the diagonal, (2) validation against the ZOH reference for all BESTEST and
+OCHRE parity cases, and (3) performance assessment since per-step
+factorization replaces the O(n) diagonal-scaling path.
 
 ---
 
@@ -164,7 +213,7 @@ panic). Uses 13th-order Padé scaling-and-squaring (θ₁₃ ≈ 5.37192).
 
 `ThermalSolver::resolve(ports, env, dt)` delegates to `resolve_internal()` in
 `stepping.rs`. The resolve is split into two stages: input vector construction
-(`build_input_vector()` in `ports.rs`) and CN stepping with semi-implicit
+(`build_input_vector()` in `ports.rs`) and ZOH stepping with semi-implicit
 infiltration coupling (`resolve_internal()` in `stepping.rs`). All buffers are
 pre-allocated — zero per-step heap allocation.
 
@@ -198,7 +247,7 @@ apply_infiltration_and_ventilation
 resolve_internal()            │ Build semi-implicit coupling tuples         │
                               │ Build coupled LU (M + D) if infiltration    │
                               │ Ideal HVAC solve (coupled or uncoupled)     │
-                              │ CN step: M⁻¹(N·x + B_eff·u + forcing)      │
+                              │ ZOH step: M⁻¹(N·x + B_eff·u + forcing)      │
                               │ Cache coupled LU + couplings for next step  │
                               └─────────────────────────────────────────────┘
  ↓
@@ -325,7 +374,7 @@ vector. Instead, `apply_infiltration_and_ventilation()` returns per-zone
 `InfiltrationCoupling` structs containing `h_inf_w_k` (sensible conductance
 [W/K]) and `t_forcing_c` (outdoor driving temperature). In `resolve_internal()`,
 the temperature-dependent term `−h_inf·T_zone` is moved to the implicit (M)
-side of the CN system following EnergyPlus ERM 26.1 — Basis for the Zone and Air System Integration. This
+side of the state-space system following EnergyPlus ERM 26.1 — Basis for the Zone and Air System Integration. This
 guarantees monotonic, oscillation-free convergence even when the infiltration
 time constant is much smaller than the timestep.
 
@@ -336,21 +385,29 @@ M_coupled = M + diag(d)
 forcing = h_inf × T_out × B_eff + d × x[k]  (compensation for N-side)
 ```
 
-A per-step LU factorization of M_coupled is built once and reused for both
-the ideal HVAC solve and the CN step. The coupled LU is cached for the
-next-step ideal HVAC back-calculation.
+With M = I (the current ZOH path), the coupled step uses an O(n)
+closed-form diagonal solve instead of LU factorization:
+`(I + D)·x = b` ⇒ `x[i] = b[i] / (1 + d_i)` for coupled rows,
+`x[i] = b[i]` for uncoupled rows. When the M matrix is non-identity
+(future CN migration), a per-step `CoupledState::LU` would be built
+from `M + diag(d)` and reused for both the ideal HVAC solve and the
+ZOH step.
 
 ### Ideal HVAC Capacity
 
 For zones configured with ideal HVAC, the solver back-calculates the input
-power needed to hold the setpoint after one CN step. Two paths:
+power needed to hold the setpoint after one ZOH step. Three paths based on
+the `CoupledState` cached from the previous step:
 
-- **Coupled** (infiltration active): `solve_for_scalar_input_coupled()` uses
-  the per-step M_coupled LU factorization
-- **Uncoupled**: `solve_for_output_input()` uses the base M LU
+- **Identity-coupled** (infiltration active, M = I): `solve_for_scalar_input_identity_coupled()`
+  uses the O(n) closed-form diagonal solve `x[i] = b[i] / (1 + d_i)`.
+- **LU-coupled** (infiltration active, non-identity M): `solve_for_scalar_input_coupled()`
+  uses the per-step M_coupled LU factorization — reserved for future CN migration.
+- **Uncoupled** (no infiltration): `solve_for_output_input()` uses the base M LU
+  (trivially identity for ZOH).
 
-Both solve a single linear equation for the HVAC input index that drives the
-zone output to the setpoint.
+All three paths solve a single linear equation for the HVAC input index that
+drives the zone output to the setpoint.
 
 `solve_ideal_capacity()` is called by equipment *before* `resolve()` builds the
 current-step inputs, using `last_u`, `last_coupling`, and `last_coupled_lu`
@@ -389,7 +446,7 @@ Accessible via `solver.component_gains()`.
 |------|---------|
 | `hares-envelope/src/thermal_solver/mod.rs` | ThermalSolver struct, DomainSolver impl |
 | `hares-envelope/src/thermal_solver/config.rs` | Config types, EnvelopeComponentGains, wiring |
-| `hares-envelope/src/thermal_solver/stepping.rs` | resolve_internal(), semi-implicit CN step |
+| `hares-envelope/src/thermal_solver/stepping.rs` | resolve_internal(), semi-implicit ZOH step |
 | `hares-envelope/src/thermal_solver/ports.rs` | build_input_vector(): all input application |
 | `hares-envelope/src/thermal_solver/longwave.rs` | Exterior iterative + interior LWR application |
 | `hares-envelope/src/thermal_solver/solar.rs` | Window SHGC + IAM, opaque solar |
@@ -397,7 +454,7 @@ Accessible via `solver.component_gains()`.
 | `hares-envelope/src/thermal_solver/initialization.rs` | Steady-state init from outdoor conditions |
 | `hares-envelope/src/boundary_rc.rs` | Building geometry → RC network |
 | `hares-envelope/src/rc_network.rs` | Kirchhoff A_c/B_ext matrix assembly |
-| `hares-envelope/src/state_space.rs` | Crank-Nicolson model, matrix_exp, stepping |
+| `hares-envelope/src/state_space.rs` | ZOH discretization, implicit coupling, matrix_exp, stepping |
 | `hares-envelope/src/longwave_radiation.rs` | 4-component exterior LWR, interior linearized |
 | `hares-physics/src/infiltration.rs` | ASHRAE wind-stack, ELA, ACH, natural vent |
 | `hares-physics/src/solar.rs` | EnergyPlus glazing curves, Perez tilted irradiance |
