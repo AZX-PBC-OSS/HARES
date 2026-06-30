@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn ashrae_moisture_balance_dimensional_check() {
-        // ASHRAE 2017 HOF Ch. 24: dW = (Q_latent * dt) / (h_fg * rho * V)
+        // ASHRAE HOF 2021 Ch. 25: dW = (Q_latent * dt) / (h_fg * rho * V)
         // For V=200 m³, T=20°C, P=101325 Pa, Q_latent=100W, dt=3600s:
         // rho ≈ 1.204 kg/m³ (moist air at low humidity)
         // dW = (100 * 3600) / (2_501_000 * rho * 200)

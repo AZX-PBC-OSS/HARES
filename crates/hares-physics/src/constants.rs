@@ -15,14 +15,14 @@ use hares_types::FluidType;
 // --- Dry Air ---
 
 /// Specific gas constant for dry air [J/(kg·K)].
-/// ASHRAE 2017 Handbook of Fundamentals, Ch. 1.
-/// Note: NIST CODATA R/M_air yields 287.055; the ASHRAE value 287.058
-/// uses a slightly different effective molar mass. We use the ASHRAE value
-/// for consistency with psychrometric literature.
+/// ASHRAE HOF 2021 Ch.1. The ASHRAE value (287.058 J/(kg·K)) uses an
+/// effective molar mass of 28.96546 g/mol that differs slightly from NIST
+/// CODATA (R/M_air = 287.055, M = 28.9645 g/mol). HARES uses the ASHRAE
+/// value for consistency with psychrometric literature.
 pub const DRY_AIR_GAS_CONSTANT_J_KG_K: f64 = 287.058;
 
 /// Specific heat of dry air at constant pressure [J/(kg·K)].
-/// ASHRAE 2017 HOF Ch. 1, Table 2 footnote, valid 0–60°C range.
+/// ASHRAE HOF 2021 Ch.1, Table 2 footnote, valid 0–60°C range.
 pub const CP_DRY_AIR_J_KG_K: f64 = 1_006.0;
 
 /// Specific heat of dry air at constant pressure [kJ/(kg·K)].
@@ -32,16 +32,21 @@ pub const CP_DRY_AIR_KJ_KG_K: f64 = 1.006;
 // --- Water Vapour ---
 
 /// Ratio of molecular masses: M_water / M_dry_air = 18.015268 / 28.96546.
-/// ASHRAE 2017 HOF Ch. 1, Eq. 20. Often denoted ε in psychrometric literature.
+/// ASHRAE HOF 2021 Ch.1, Eq. 20. Often denoted ε in psychrometric literature.
+/// The 2021 edition uses the updated dry-air molar mass 28.96546 g/mol
+/// (previously 28.9645 g/mol in the 2017 edition).
 pub const MOLECULAR_WEIGHT_RATIO_WATER_AIR: f64 = 0.621_945;
 
-/// Inverse ratio: M_dry_air / M_water. Used in moist air density correction.
-/// ASHRAE 2017 HOF Ch. 1, Eq. 11.
-pub const HUMIDITY_DENSITY_CORRECTION: f64 = 1.607_768_7;
+/// Inverse ratio: M_dry_air / M_water = 1/ε. Used in moist air density correction
+/// per ASHRAE HOF 2021 Ch.1 Eq.28, which publishes the rounded coefficient
+/// 1.607858. Compiler-computed as the exact reciprocal of
+/// `MOLECULAR_WEIGHT_RATIO_WATER_AIR` (≈ 1.607859) — within 0.00008% of the
+/// Eq.28 published round value and within numerical noise for all simulation paths.
+pub const HUMIDITY_DENSITY_CORRECTION: f64 = 1.0 / MOLECULAR_WEIGHT_RATIO_WATER_AIR;
 
 /// Latent heat of vaporisation at 0°C [kJ/kg].
 ///
-/// ASHRAE 2017 HOF Ch.1, Table 2 at 0°C. Used in psychrometric enthalpy
+/// ASHRAE HOF 2021 Ch.1, Table 2 at 0°C. Used in psychrometric enthalpy
 /// (Eq.30) where h = cp_da×T + W×(h_fg + cp_v×T). The 0°C reference is
 /// standard for moist-air enthalpy calculations across the full operating
 /// range (−20 to 60°C).
@@ -55,7 +60,7 @@ pub const LATENT_HEAT_VAPORISATION_0C_J_KG: f64 = 2_501_000.0;
 
 /// Latent heat of vaporisation at ~20°C [J/kg].
 ///
-/// ASHRAE 2017 HOF Ch.1, Table 2 (interpolated at 20°C: 2454 kJ/kg, rounded
+/// ASHRAE HOF 2021 Ch.1, Table 2 (interpolated at 20°C: 2454 kJ/kg, rounded
 /// to 2450 for the conventional zone-balance approximation). Used in moisture
 /// balance calculations where indoor conditions cluster near 20°C, giving a
 /// more accurate latent load estimate than the 0°C reference value.
@@ -65,11 +70,11 @@ pub const LATENT_HEAT_VAPORISATION_0C_J_KG: f64 = 2_501_000.0;
 pub const LATENT_HEAT_VAPORISATION_J_KG: f64 = 2_450_000.0;
 
 /// Latent heat of sublimation at 0°C [kJ/kg].
-/// ASHRAE 2017 HOF Ch. 1, Table 2, ice surface.
+/// ASHRAE HOF 2021 Ch.1, Table 2, ice surface.
 pub const LATENT_HEAT_SUBLIMATION_KJ_KG: f64 = 2_830.0;
 
 /// Specific heat of water vapour [kJ/(kg·K)].
-/// ASHRAE 2017 HOF Ch. 1, used in Eq. 30 (enthalpy).
+/// ASHRAE HOF 2021 Ch.1, used in Eq. 30 (enthalpy).
 pub const CP_WATER_VAPOUR_KJ_KG_K: f64 = 1.86;
 
 // --- Liquid Water ---

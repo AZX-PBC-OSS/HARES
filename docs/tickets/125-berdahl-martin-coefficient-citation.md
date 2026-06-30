@@ -1,5 +1,10 @@
 # Berdahl-Martin Sky Emissivity Coefficient Citation Wrong
 
+> **Note:** This document contains EnergyPlus Engineering Reference section-number
+> citations (e.g. "EnergyPlus §3.5.6") that are unverifiable against the
+> web-hosted EnergyPlus documentation. These citations are preserved for audit
+> provenance. See `docs/eplus/section-mapping.md` for heading-based citations.
+
 **Severity**: Nit
 **Priority**: P4
 **Status**: Open

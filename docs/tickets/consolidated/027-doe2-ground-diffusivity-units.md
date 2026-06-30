@@ -1,5 +1,11 @@
 # DOE-2 Ground Temperature Model: Diffusivity in m²/hour vs m²/s Inconsistency
 
+> **Note:** This document contains EnergyPlus Engineering Reference section-number
+> citations (e.g. "EnergyPlus §3.1") that are unverifiable against the
+> web-hosted EnergyPlus documentation, which uses heading-based navigation
+> without numeric section designators. These citations are preserved for audit
+> provenance. For heading-based citations, see `docs/eplus/section-mapping.md`.
+
 **Severity**: High
 **Impact on annual kWh**: High
 **Status**: Open

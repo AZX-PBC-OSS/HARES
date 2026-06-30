@@ -139,7 +139,7 @@ Validated against ASHRAE Handbook of Fundamentals 2021 Ch. 1 and
 PsychroLib:
 
 - **Canonical condition** (20 °C, 50% RH): humidity ratio, enthalpy,
-  wet-bulb, dew-point checked against ASHRAE HOF Table 2
+  wet-bulb, dew-point checked against ASHRAE HOF 2021 Table 2
 - **Saturation pressure at 100 °C**: must equal 101,325 Pa ± 200 Pa
   (NIST/ISA 1976)
 - **Round-trip consistency**: T,W → RH → W algebraic closure across a

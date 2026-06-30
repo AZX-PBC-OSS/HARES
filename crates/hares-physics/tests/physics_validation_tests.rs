@@ -148,7 +148,7 @@ fn saturation_pressure_at_boiling_point() {
 /// At constant pressure, ρ ∝ 1/T (ideal gas). Verify strict monotonic decrease
 /// for dry air across a range spanning cold to hot ambient conditions.
 ///
-/// Reference: Ideal gas law pV = nRT; ASHRAE HOF 2017 Ch. 1 Eq. 11.
+/// Reference: Ideal gas law pV = nRT; ASHRAE HOF 2021 Ch.1 Eq. 11.
 #[test]
 fn air_density_decreases_with_temperature() {
     let p_pa = 101_325.0_f64;

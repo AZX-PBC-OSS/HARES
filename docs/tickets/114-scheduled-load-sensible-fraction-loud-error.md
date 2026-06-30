@@ -1,5 +1,10 @@
 # `ScheduledLoad.sensible_gain_fraction` Silent 0.5 Default
 
+> **Note:** This document contains EnergyPlus Engineering Reference section-number
+> citations (e.g. "EnergyPlus §3.6.3") that are unverifiable against the
+> web-hosted EnergyPlus documentation. These citations are preserved for audit
+> provenance. See `docs/eplus/section-mapping.md` for heading-based citations.
+
 **Severity**: Medium
 **Priority**: P2
 **Status**: Open

@@ -1,5 +1,10 @@
 # Interior Film Coefficients Must Recompute Per Timestep, Not Once at Init
 
+> **Note:** This document contains EnergyPlus Engineering Reference section-number
+> citations (e.g. "EnergyPlus §3.5.4") that are unverifiable against the
+> web-hosted EnergyPlus documentation. These citations are preserved for audit
+> provenance. See `docs/eplus/section-mapping.md` for heading-based citations.
+
 **Severity**: Medium
 **Priority**: P2
 **Status**: Open

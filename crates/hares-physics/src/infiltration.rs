@@ -24,7 +24,7 @@
 //! # References
 //! - Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
 //!   and Wind Driven Air Infiltration Calculations", *HVAC&R Research*.
-//! - ASHRAE Handbook of Fundamentals 2017, Chapter 16.
+//! - ASHRAE Handbook of Fundamentals 2021, Chapter 16.
 //! - EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 
 use crate::units::*;
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn ashrae_hof_ch16_table5_coefficients() {
-        // ASHRAE 2017 HOF Ch. 16, Table 5: Cs=0.000290, Cw=0.000231, shelter=1.0
+        // ASHRAE HOF 2021 Ch.16, Table 5: Cs=0.000290, Cw=0.000231, shelter=1.0
         let q = ashrae_wind_stack(0.000290, 0.000231, 10.0, 5.0, 1.0, N_I_DEFAULT);
         assert!(
             q > 0.0 && q < 0.01,

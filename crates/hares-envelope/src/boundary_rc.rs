@@ -19,7 +19,7 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 
 /// Specific heat of dry air [J/(kg·K)].
 /// Re-exported from hares_physics::constants::CP_DRY_AIR_J_KG_K for convenience.
-/// ASHRAE 2017 HOF Ch. 1, Table 2 footnote, valid 0–60°C range.
+/// ASHRAE HOF 2021 Ch.1, Table 2 footnote, valid 0–60°C range.
 pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
 /// Default zone volume when floor area is unknown [m³].
 pub const DEFAULT_VOLUME_M3: f64 = 200.0;

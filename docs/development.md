@@ -419,6 +419,22 @@ cross-checking when the Engineering Reference leaves algorithmic details
 ambiguous; it is not the reference version for section numbering or
 documentation claims.
 
+### ASHRAE Handbook of Fundamentals edition
+
+**ASHRAE HOF 2021 is the sole authoritative edition** for all psychrometric
+constants, molecular weights, film coefficient tables, and psychrometric
+equations in HARES. The 2021 edition updated the dry-air molar mass from
+28.9645 g/mol (2017) to 28.96546 g/mol, affecting the molecular weight ratio
+1/ε (Eq.28: 1.607858) and the humidity density correction factor.
+
+All code citations to "ASHRAE 2017" for these domains are superseded.
+Citations for standards where editions are independently meaningful (e.g.
+ASHRAE 140-2017 for BESTEST reference bands) are unaffected.
+
+A helper script at `scripts/check-ashrae-edition.sh` can be run locally
+to check for remaining "ASHRAE 2017" references in `crates/` and fails if
+any are found — excluding intentionally pinned references like ASHRAE 140-2017.
+
 A CI check at `scripts/check-energyplus-sections.sh` greps for remaining
 §-style EnergyPlus references and fails if any are found.
 

@@ -439,7 +439,7 @@ pub(super) fn coil_bypass_factor(
     // 5–20% depending on humidity ratio. The enthalpy form correctly accounts
     // for both sensible and latent heat transfer across the coil surface.
     //
-    // Ref: ASHRAE 2017 HOF Ch.18 Eq.63; EnergyPlus DXCoils.cc;
+    // Ref: ASHRAE HOF 2021 Ch.18 Eq.63; EnergyPlus DXCoils.cc;
     //      vendors/OCHRE/ochre/utils/equipment.py:872-874
     let w_adp = humidity_ratio_from_rel_hum(t_adp, 1.0, p_pa);
     let h_adp = moist_air_enthalpy(t_adp, w_adp);
@@ -478,7 +478,7 @@ fn calculate_mass_flow_rate(db_in_c: f64, w_in: f64, p_kpa: f64, flow_m3_s: f64)
     // mass flow with a dry-air enthalpy, producing a ~1% error in dH and all
     // downstream quantities (BF, ADP, Ao) at typical humidity ratios.
     //
-    // Reference: ASHRAE 2017 HOF Ch.1 §1.8 "Thermodynamic Properties of
+    // Reference: ASHRAE HOF 2021 Ch.1 §1.8 "Thermodynamic Properties of
     // Moist Air" -- all specific properties are per kg dry air.
     // Ref: EnergyPlus `PsyRhoAirFnPbTdbW` also returns ρ_da.
     let rho_da = moist_air_density_kg_m3(p_kpa * 1000.0, db_in_c, w_in.max(0.0));

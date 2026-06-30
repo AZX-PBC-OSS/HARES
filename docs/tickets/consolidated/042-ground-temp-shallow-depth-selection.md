@@ -1,5 +1,11 @@
 # Ground Temperature Uses Shallowest EPW Depth; Should Use Foundation Depth
 
+> **Note:** This document contains EnergyPlus Engineering Reference section-number
+> citations (e.g. "EnergyPlus §3.17") that are unverifiable against the
+> web-hosted EnergyPlus documentation, which uses heading-based navigation
+> without numeric section designators. These citations are preserved for audit
+> provenance. For heading-based citations, see `docs/eplus/section-mapping.md`.
+
 **Severity**: Medium
 **Priority**: P2
 **Status**: Open

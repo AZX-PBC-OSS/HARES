@@ -432,8 +432,7 @@ fn debug_bestest_warmup_observe_first_100_steps() {
 
         eprintln!(
             "[warmup] case={case_id} t0_zone={:?} t0_out={t0_out:.2}°C t_end_zone={:?} min={min_temp:.3}°C max={max_temp:.3}°C",
-            t0_zone,
-            t_end_zone,
+            t0_zone, t_end_zone,
         );
 
         // Verify free-float initialization: zone temp at step 0 should be within
@@ -451,12 +450,7 @@ fn debug_bestest_warmup_observe_first_100_steps() {
         // and warmup transient.
         for (idx, snap) in snapshots.iter().take(10).enumerate() {
             let env = snap.phases.post_environment.as_ref().unwrap();
-            let gains = &snap
-                .phases
-                .post_solvers
-                .as_ref()
-                .unwrap()
-                .envelope_gains;
+            let gains = &snap.phases.post_solvers.as_ref().unwrap().envelope_gains;
             let zone_t = snap
                 .phases
                 .post_zone_update
