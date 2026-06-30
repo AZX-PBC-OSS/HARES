@@ -173,7 +173,8 @@ fn write_default_profile_csv(path: &std::path::Path) {
 fn io_injection_to_scheduled_load_step_column_source() {
     let mut schedule = make_schedule(&[("lighting_interior", &[0.2, 1.0, 0.4])]);
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     assert_eq!(
         specs[0]
@@ -211,7 +212,8 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
 
     let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0, 1.0])]);
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, Some(defaults_dir.path()));
+    inject_schedule_into_specs(&mut specs, &mut schedule, Some(defaults_dir.path()))
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     assert_eq!(
         specs[0]
@@ -261,7 +263,8 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
 fn io_injection_to_scheduled_load_step_constant_source() {
     let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0])]);
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     assert_eq!(
         specs[0]
@@ -299,7 +302,8 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         ("dishwasher", &[1.0, 1.0]),
     ]);
     let mut specs = vec![make_spec("Dishwasher", 0.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let injected_col = specs[0]
         .parameters
@@ -334,7 +338,8 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
 fn missing_column_index_errors_at_init_not_step() {
     let mut schedule = make_schedule(&[("lighting_interior", &[0.5, 0.5])]);
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let config = equipment_config_from_spec_with_extras(
         &specs[0],
@@ -402,7 +407,8 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     // The refrigerator schedule column uses a constant fraction of 1.0 for all hours.
     let n_steps = 24_usize;
     let mut schedule = make_schedule(&[("refrigerator", &vec![1.0_f64; n_steps])]);
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").unwrap();
     assert!(
@@ -503,7 +509,8 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
     ];
 
     let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0, 1.0])]);
-    inject_schedule_into_specs(&mut specs, &mut schedule, Some(&defaults_dir));
+    inject_schedule_into_specs(&mut specs, &mut schedule, Some(&defaults_dir))
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     // Heater: must receive a heating DailyProfile with max_value = 20°C from HERS defaults.
     let heater_typed = specs[0]
@@ -597,7 +604,8 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
 
     let mut schedule = make_schedule(&[("occupants", &vec![1.0_f64; 48])]);
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+    inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     assert_eq!(
         specs[0]

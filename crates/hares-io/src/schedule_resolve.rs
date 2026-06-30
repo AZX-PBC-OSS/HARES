@@ -13,7 +13,9 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
 };
 use hares_physics::constants::HOURS_PER_YEAR;
-use hares_types::{BoundaryPolicy, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64};
+use hares_types::{
+    BoundaryPolicy, HaresError, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64,
+};
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -404,7 +406,7 @@ pub fn inject_schedule_into_specs(
     specs: &mut [EquipmentSpec],
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
-) {
+) -> Result<(), HaresError> {
     let csv_col_map: HashMap<String, usize> = schedule
         .column_names
         .iter()
@@ -497,7 +499,8 @@ pub fn inject_schedule_into_specs(
     // When neither a schedule CSV column nor HPXML-derived setpoints are
     // present, falls back to the HERS reference-home default profiles
     // loaded from Default Schedule Parameters.csv.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, &profiles);
+    inject_setpoint_schedules(specs, &csv_col_map, schedule, &profiles)?;
+    Ok(())
 }
 
 /// HVAC equipment names that consume heating setpoints.
@@ -595,17 +598,17 @@ fn inject_setpoint_schedules(
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
     profiles: &HashMap<String, DefaultScheduleProfile>,
-) {
+) -> Result<(), HaresError> {
     // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
 
-    inject_water_heater_schedule_columns(specs, csv_col_map, schedule);
+    inject_water_heater_schedule_columns(specs, csv_col_map, schedule)?;
 
     // Skip the entire loop only when there is no work to do at all.
     if heating_col.is_none() && cooling_col.is_none() && profiles.is_empty() {
-        return;
+        return Ok(());
     }
 
     for spec in specs.iter_mut() {
@@ -627,6 +630,7 @@ fn inject_setpoint_schedules(
             }
         }
     }
+    Ok(())
 }
 
 fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) {
@@ -682,12 +686,12 @@ fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
-) {
+) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
     let mains_col = first_present_column(csv_col_map, &["hot_water_mains_temperature"]);
 
     if draw_col.is_none() && mains_col.is_none() {
-        return;
+        return Ok(());
     }
 
     for (i, spec) in specs.iter_mut().enumerate() {
@@ -697,7 +701,7 @@ fn inject_water_heater_schedule_columns(
         let has_typed_sources = !matches!(spec.name.as_str(), "Heat Pump Water Heater");
         if let Some(col_idx) = draw_col {
             let raw_values = schedule.columns[col_idx].clone();
-            let avg_daily_l = water_heater_avg_daily_draw_l(spec);
+            let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
             let kg_s_series: Vec<f64> = normalize_draw_profile(&raw_values, avg_daily_l);
 
             let col_name = format!(
@@ -705,18 +709,18 @@ fn inject_water_heater_schedule_columns(
                 normalize_schedule_col_name(&spec.name),
                 i
             );
-            match schedule.append_derived_column(&col_name, kg_s_series, ColumnAggregation::Mean) {
-                Ok(derived_col_idx) => {
-                    if has_typed_sources {
-                        set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
-                    }
-                }
-                Err(err) => {
-                    panic!(
+            let derived_col_idx = schedule
+                .append_derived_column(&col_name, kg_s_series, ColumnAggregation::Mean)
+                .map_err(|err| {
+                    let msg = format!(
                         "failed to append normalized draw column for {}: {err}",
                         spec.name
                     );
-                }
+                    tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                    HaresError::Io(msg)
+                })?;
+            if has_typed_sources {
+                set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
             }
         }
         if let Some(col_idx) = mains_col {
@@ -725,103 +729,121 @@ fn inject_water_heater_schedule_columns(
             }
         }
     }
+    Ok(())
 }
 
-fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
-    let typed = spec.typed_config.as_ref().unwrap_or_else(|| {
-        panic!(
+fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError> {
+    let typed = spec.typed_config.as_ref().ok_or_else(|| {
+        let msg = format!(
             "tankless water heater '{}' requires typed config",
             spec.name
-        )
-    });
-    let tankless = typed
-        .typed::<TanklessWaterHeaterConfig>()
-        .unwrap_or_else(|err| {
-            panic!(
-                "tankless water heater '{}' typed config failed to decode: {err}",
-                spec.name
-            )
-        });
-    tankless.avg_water_draw_l_per_day.unwrap_or_else(|| {
-        panic!(
+        );
+        tracing::error!(equipment = %spec.name, "{msg}");
+        HaresError::Equipment(msg)
+    })?;
+    let tankless = typed.typed::<TanklessWaterHeaterConfig>().map_err(|err| {
+        let msg = format!(
+            "tankless water heater '{}' typed config failed to decode: {err}",
+            spec.name
+        );
+        tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+        HaresError::Equipment(msg)
+    })?;
+    tankless.avg_water_draw_l_per_day.ok_or_else(|| {
+        let msg = format!(
             "tankless water heater '{}' requires typed avg_water_draw_l_per_day to normalize draw schedule fractions",
             spec.name
-        )
+        );
+        tracing::error!(equipment = %spec.name, "{msg}");
+        HaresError::Equipment(msg)
     })
 }
 
-fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError> {
     match spec.name.as_str() {
         "Tankless Water Heater" | "Gas Tankless Water Heater" => tankless_avg_daily_draw_l(spec),
         "Electric Resistance Water Heater" => {
-            let typed = spec
-                .typed_config
-                .as_ref()
-                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+            let typed = spec.typed_config.as_ref().ok_or_else(|| {
+                let msg = format!(
+                    "electric resistance water heater '{}' requires typed config",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
             let cfg = typed
                 .typed::<ElectricResistanceWaterHeaterConfig>()
-                .unwrap_or_else(|err| {
-                    panic!(
+                .map_err(|err| {
+                    let msg = format!(
                         "electric resistance water heater '{}' typed config failed to decode: {err}",
                         spec.name
-                    )
-                });
-            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
-                panic!(
+                    );
+                    tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                    HaresError::Equipment(msg)
+                })?;
+            cfg.avg_water_draw_l_per_day.ok_or_else(|| {
+                let msg = format!(
                     "electric resistance water heater '{}' requires typed avg_water_draw_l_per_day",
                     spec.name
-                )
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
             })
         }
         "Gas Water Heater" => {
-            let typed = spec
-                .typed_config
-                .as_ref()
-                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
-            let cfg = typed.typed::<GasWaterHeaterConfig>().unwrap_or_else(|err| {
-                panic!(
+            let typed = spec.typed_config.as_ref().ok_or_else(|| {
+                let msg = format!("gas water heater '{}' requires typed config", spec.name);
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            let cfg = typed.typed::<GasWaterHeaterConfig>().map_err(|err| {
+                let msg = format!(
                     "gas water heater '{}' typed config failed to decode: {err}",
                     spec.name
-                )
-            });
-            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
-                panic!(
+                );
+                tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            cfg.avg_water_draw_l_per_day.ok_or_else(|| {
+                let msg = format!(
                     "gas water heater '{}' requires typed avg_water_draw_l_per_day",
                     spec.name
-                )
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
             })
         }
         "Heat Pump Water Heater" => {
-            let typed = spec
-                .typed_config
-                .as_ref()
-                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
-            let cfg = typed
-                .typed::<HeatPumpWaterHeaterConfig>()
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "heat pump water heater '{}' typed config failed to decode: {err}",
-                        spec.name
-                    )
-                });
-            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
-                panic!(
+            let typed = spec.typed_config.as_ref().ok_or_else(|| {
+                let msg = format!(
+                    "heat pump water heater '{}' requires typed config",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            let cfg = typed.typed::<HeatPumpWaterHeaterConfig>().map_err(|err| {
+                let msg = format!(
+                    "heat pump water heater '{}' typed config failed to decode: {err}",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            cfg.avg_water_draw_l_per_day.ok_or_else(|| {
+                let msg = format!(
                     "heat pump water heater '{}' requires typed avg_water_draw_l_per_day",
                     spec.name
-                )
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
             })
         }
-        other => {
-            #[cfg(debug_assertions)]
-            {
-                panic!("unsupported water heater type for draw normalization: {other}");
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                tracing::warn!(equipment = %other, "unknown water heater type, using default daily draw (227 L)");
-                227.0
-            }
-        }
+        other => Err({
+            let msg = format!("unsupported water heater type for draw normalization: {other}");
+            tracing::error!(equipment = %other, "{msg}");
+            HaresError::Equipment(msg)
+        }),
     }
 }
 
@@ -1550,7 +1572,8 @@ mod tests {
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1567,7 +1590,8 @@ mod tests {
 
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let expected = 876.0 / 8760.0;
         let constant_kw = specs[0]
@@ -1588,7 +1612,8 @@ mod tests {
             make_spec("Indoor Lighting", 876.0),
             make_spec("Indoor Lighting", 1752.0),
         ];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let max_a = specs[0]
             .parameters
@@ -1607,7 +1632,8 @@ mod tests {
     fn max_electric_power_w_without_annual_kwh_sets_csv_peak() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", None, Some(500.0))];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1642,7 +1668,8 @@ mod tests {
             Some(1200.0),
             Some(500.0),
         )];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1653,7 +1680,8 @@ mod tests {
     fn annual_kwh_only_behavior_unchanged_csv_branch() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", Some(1200.0), None)];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
 
         let mean_fraction = (0.2 + 1.0 + 0.4) / 3.0;
@@ -1672,7 +1700,8 @@ mod tests {
 
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", None, Some(500.0))];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let peak = specs[0]
             .parameters
@@ -1710,7 +1739,8 @@ mod tests {
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1732,7 +1762,8 @@ mod tests {
         let mut schedule = make_schedule_with_event_column(&[0.0, 1.0, 0.0]);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1749,7 +1780,8 @@ mod tests {
         let mut schedule = make_schedule(4);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1853,7 +1885,8 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let heater_typed = specs[0]
             .typed_config
@@ -2085,7 +2118,8 @@ mod tests {
             make_typed_tankless_spec(Some(200.0)),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         for spec in specs.iter().take(3) {
             let typed = spec
@@ -2168,7 +2202,8 @@ mod tests {
             avg_daily_l,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let draw_col_idx = specs[0]
             .typed_config
@@ -2202,8 +2237,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "requires typed avg_water_draw_l_per_day")]
-    fn tankless_draw_fractions_require_typed_avg_water_draw() {
+    fn tankless_without_avg_water_draw_returns_err() {
         let mut schedule = make_schedule_with_water_heater_columns(
             "hot_water_fixtures",
             &[0.2, 0.0],
@@ -2211,7 +2245,150 @@ mod tests {
         );
         let mut specs = vec![make_typed_tankless_spec(None)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        let result = inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        assert!(result.is_err(), "expected Err, got Ok");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("requires typed avg_water_draw_l_per_day"),
+            "expected error message about missing avg_water_draw_l_per_day, got: {err_msg}"
+        );
+    }
+
+    // =======================================================================
+    // Water heater draw normalization error propagation
+    // =======================================================================
+
+    #[test]
+    fn storage_water_heater_without_draw_field_returns_err() {
+        // Electric resistance water heater without avg_water_draw_l_per_day.
+        let config = ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: Some(0.19),
+            tank_height_m: Some(1.4),
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(4_500.0),
+            ua_w_per_k: None,
+            setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        };
+        let typed_config = EquipmentConfig::from_typed(
+            "electric".to_string(),
+            "Electric Resistance Water Heater".to_string(),
+            config,
+        );
+        let spec = EquipmentSpec {
+            instance_name: None,
+            name: "Electric Resistance Water Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: Some(typed_config),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+
+        let mut schedule = make_schedule_with_water_heater_columns(
+            "hot_water_fixtures",
+            &[0.2, 0.0],
+            &[11.0, 12.0],
+        );
+        let mut specs = vec![spec];
+
+        let result = inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        assert!(result.is_err(), "expected Err, got Ok");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("requires typed avg_water_draw_l_per_day"),
+            "expected error message about missing avg_water_draw_l_per_day, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn unsupported_water_heater_type_returns_err() {
+        // An equipment spec whose name is in STORAGE_WATER_HEATER_EQUIPMENT but is
+        // not handled by water_heater_avg_daily_draw_l triggers the 'other' arm.
+        // Since all current entries are handled, test the defensive arm directly.
+        let spec = EquipmentSpec {
+            instance_name: None,
+            name: "Fusion Water Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+
+        let result = super::water_heater_avg_daily_draw_l(&spec);
+        assert!(result.is_err(), "expected Err for unsupported type, got Ok");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("unsupported water heater type"),
+            "expected error message about unsupported water heater type, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn valid_water_heater_with_draw_produces_correct_schedule_columns() {
+        let mut schedule = make_schedule_with_water_heater_columns(
+            "hot_water_fixtures",
+            &[0.2, 0.0],
+            &[11.0, 12.0],
+        );
+        let mut specs = vec![make_water_heater_spec(
+            "Electric Resistance Water Heater",
+            200.0,
+        )];
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
+
+        let typed = specs[0]
+            .typed_config
+            .as_ref()
+            .expect("spec should retain typed config");
+        let cfg = typed
+            .typed::<ElectricResistanceWaterHeaterConfig>()
+            .expect("typed config should decode");
+        assert!(
+            matches!(
+                cfg.draw_flow_rate_source,
+                Some(ScheduleSourceConfig::ColumnRef { .. })
+            ),
+            "valid water heater should receive draw_flow_rate_source ColumnRef"
+        );
+        assert!(
+            matches!(
+                cfg.mains_temp_c_source,
+                Some(ScheduleSourceConfig::ColumnRef { .. })
+            ),
+            "valid water heater should receive mains_temp_c_source ColumnRef"
+        );
     }
 
     // =======================================================================
@@ -2391,7 +2568,8 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Heater: should receive a heating DailyProfile with max_value = 20 °C.
         let heater_data = typed_data_of_spec(&specs[0]);
@@ -2547,7 +2725,8 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let heater_data = typed_data_of_spec(&specs[0]);
         let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
@@ -2763,7 +2942,8 @@ mod tests {
             3.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify the occupancy column was added
         let col_idx = schedule
@@ -2818,7 +2998,8 @@ mod tests {
             2.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let col_idx = schedule.column_index["occupants"];
         let col = &schedule.columns[col_idx];
@@ -2870,7 +3051,8 @@ mod tests {
             1.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         let col_idx = schedule.column_index["occupants"];
         let col = &schedule.columns[col_idx];
@@ -2907,7 +3089,8 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify the occupancy column was generated from default profile
         assert!(
@@ -2934,7 +3117,8 @@ mod tests {
 
         let mut specs = vec![make_occupancy_spec(&[0.5; 24], &[0.2; 24], &[1.0; 12], 3.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify existing column is preserved (not overwritten)
         let col_idx = schedule.column_index["occupants"];
@@ -2987,7 +3171,8 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
+            .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert!(
             schedule.column_index.contains_key("occupants"),

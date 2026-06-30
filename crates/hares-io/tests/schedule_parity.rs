@@ -129,7 +129,8 @@ fn time_varying_lighting_schedule_is_not_constant() {
 
     let mut schedule = make_hourly_schedule(&[("lighting_interior", &fractions_8760)]);
     let mut specs = vec![make_spec_annual_kwh("Indoor Lighting", 1_200.0)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let kw_series = resolved_kw_series(&specs[0], &schedule);
 
@@ -177,7 +178,8 @@ fn annual_energy_round_trip_matches_configured_kwh() {
     let annual_kwh = 2_500.0_f64;
     let mut schedule = make_hourly_schedule(&[("lighting_interior", &fractions)]);
     let mut specs = vec![make_spec_annual_kwh("Indoor Lighting", annual_kwh)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let kw_series = resolved_kw_series(&specs[0], &schedule);
 
@@ -216,7 +218,8 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
     let mut schedule = make_hourly_schedule(&[("lighting_interior", &fractions_24)]);
     let mut specs = vec![make_spec_with_duty_cycle("Indoor Lighting", 1_200.0, 0.5)];
 
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     // Verify the parameter survives injection in the actual mutated spec.
     assert!(
@@ -315,7 +318,8 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
     let fractions_8760: Vec<f64> = fractions_24h.iter().cycle().take(8760).copied().collect();
     let mut schedule = make_hourly_schedule(&[("lighting_interior", &fractions_8760)]);
     let mut specs = vec![make_spec_annual_kwh("Indoor Lighting", annual_kwh)];
-    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
     let kw_series = resolved_kw_series(&specs[0], &schedule);
 

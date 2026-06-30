@@ -1856,7 +1856,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("defaults")),
         ),
-    );
+    )?;
 
     // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
     // which may generate an occupancy column from HPXML extension fractions or
