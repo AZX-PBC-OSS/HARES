@@ -24,16 +24,23 @@ impl Telemetry {
     }
 
     /// Update an existing key's value without allocating.
-    /// Falls back to insert if key is new (rare, init-time only).
     ///
     /// All keys must be pre-populated via `insert()` at init time.
+    /// Missing keys are a logic error: in debug/test builds this triggers a
+    /// `debug_assert!` panic; in release builds it emits a `tracing::error!`
+    /// and the write is silently dropped (no-op).
     #[inline]
     pub fn set(&mut self, key: &str, value: f64) {
         if let Some(v) = self.0.get_mut(key) {
             *v = value;
         } else {
-            panic!(
+            debug_assert!(
+                false,
                 "Telemetry::set called with unknown key '{key}'; pre-populate via insert() at init"
+            );
+            tracing::error!(
+                key = %key,
+                "Telemetry::set called with unknown key; pre-populate via insert() at init"
             );
         }
     }
@@ -91,5 +98,20 @@ mod tests {
         assert_eq!(telemetry.get("power_kw"), Some(3.2));
         assert_eq!(telemetry.get("soc"), Some(0.8));
         assert_eq!(telemetry.len(), 2);
+    }
+
+    #[test]
+    fn set_updates_registered_key() {
+        let mut t = Telemetry::new();
+        t.insert("v", 1.0);
+        t.set("v", 42.0);
+        assert_eq!(t.get("v"), Some(42.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "Telemetry::set called with unknown key")]
+    fn set_panics_on_unregistered_key_in_debug() {
+        let mut t = Telemetry::new();
+        t.set("nonexistent", 1.0);
     }
 }
