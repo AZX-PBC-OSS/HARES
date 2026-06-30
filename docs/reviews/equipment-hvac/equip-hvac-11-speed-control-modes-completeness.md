@@ -114,5 +114,5 @@ In OCHRE, the fresh-cycle detection is based on `self.mode == "Off"` (`HVAC.py:8
 - OCHRE `HVAC.py:990-1020` — `DynamicHVAC.update_capacity`: variable-speed interpolation via `np.searchsorted` and fractional `speed_idx`
 - OCHRE `HVAC.py:13-18` — `SPEED_TYPES` accepts only `{1, 2, 4}` speeds
 - OCHRE `HVAC.py:1371-1394` — TODO for staged backup heat (same gap as HARES)
-- Cutler et al. (2013) "Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations" — biquadratic speed model foundation
+- Cutler, D., Winkler, J., Kruis, N., Christensen, C., Brandemuehl, M. (2013). *Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations*. NREL/TP-5500-56354. — biquadratic speed model foundation
 - AHRI 210/240-2023 S6.6.3 — default PLF degradation coefficient Cd=0.25

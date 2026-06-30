@@ -147,8 +147,7 @@ gets non-identity defaults when no curves are provided.
 `Heating_Capacity_Function_of_Temperature_Curve_Name` and
 `Heating_EIR_Function_of_Temperature_Curve_Name`. Default curves are in
 EnergyPlus `DataSets/DXCoils/` directory.
-- Cutler, B., et al. (2013). *Improved Control Strategies for Residential
-Heat Pump Systems*. NREL/TP-5500-57501. National Renewable Energy Laboratory.
+- ~~Cutler, B., et al. (2013). *Improved Control Strategies for Residential Heat Pump Systems*. NREL/TP-5500-57501.~~ **Corrected:** Cutler, D., Winkler, J., Kruis, N., Christensen, C., Brandemuehl, M. (2013). *Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations*. NREL/TP-5500-56354. National Renewable Energy Laboratory.
 - AHRI Standard 210/240-2023: H1/H2/H3 test conditions and performance rating. Table 9 specifies H1 condition as 8.3°C DB outdoor / 21.1°C DB indoor — rated capacity is defined at this point, so `cap_ratio ≈ 1.0` at H1 is the primary correctness check for any biquadratic capacity curve.
 - OCHRE `HVAC.py:804-846`: `initialize_biquad_params` loads per-speed curves from CSV
 - OCHRE `ochre/defaults/HVAC Heating/Biquadratic Heat Pump Heater.csv`: source curve data
@@ -215,12 +214,12 @@ The OCHRE-sourced coefficients in HARES defaults are **identical** to those in `
 - **Verdict**: **Confirmed**. H1 at 8.3°C outdoor / 21.1°C indoor is consistent with all AHRI 210/240 versions reviewed. Table 9 is cited as the table number in the 2023 edition, which cannot be verified (document access blocked); the conditions themselves are confirmed correct across versions. The specific claim that H2 is "frost accumulation" and H3 is "low temperature (17°F / −8.3°C)" is consistent with industry documentation.
 - **Minor note**: The ticket's citation says "Table 9" which is the 2023-edition table number. The 2017 edition uses different table numbering. The table number itself is plausible but could not be independently verified against the paywalled 2023 PDF. The temperature values are correct.
 
-**Citation 3: NREL/TP-5500-57501 (Cutler et al. 2013)**
+**Citation 3: NREL/TP-5500-57501 (Cutler et al. 2013)** — **FIXED** by ticket T-0309; References section entry strikethrough-corrected.
 
 - **Ticket claims**: Cutler, B., et al. (2013). *Improved Control Strategies for Residential Heat Pump Systems*. NREL/TP-5500-57501.
 - **Source found**: OSTI.GOV biblio/1219902; docs.nrel.gov/docs/fy13osti/56354.pdf
 - **Quoted passage** (from OSTI): The 2013 NREL paper by Cutler et al. has report number **NREL/TP-5500-56354**, not 57501. Title is *"Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations."* Authors are Cutler, D.; Winkler, J.; Kruis, N.; Christensen, C.; Brandemuehl, M.
-- **Verdict**: **Incorrect on multiple points**. (a) The report number is NREL/TP-5500-**56354**, not 57501. (b) The title is "Improved *Modeling*…" not "Improved *Control Strategies*…". (c) The first author is "Cutler, D." not "Cutler, B." The ticket's citation has three independent errors. No NREL document with number TP-5500-57501 was found in any search. This citation should be corrected to: *Cutler, D., et al. (2013). Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations. NREL/TP-5500-56354.* Note: this citation is informational background; it does not affect the correctness of the bug description or proposed fix.
+- **Verdict**: **Incorrect on multiple points** (now fixed — T-0309). (a) The report number is NREL/TP-5500-**56354**, not 57501. (b) The title is "Improved *Modeling*…" not "Improved *Control Strategies*…". (c) The first author is "Cutler, D." not "Cutler, B." The ticket's citation had three independent errors. No NREL document with number TP-5500-57501 was found in any search. The citation has been corrected to: *Cutler, D., et al. (2013). Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations. NREL/TP-5500-56354.* The References section now has the strikethrough-corrected entry.
 
 **Citation 4: OCHRE `HVAC.py:804-846` `initialize_biquad_params`**
 
@@ -241,7 +240,7 @@ The OCHRE-sourced coefficients in HARES defaults are **identical** to those in `
 
 **Rationale**: All core claims in the ticket are confirmed by direct code inspection and web-verified standards. (1) `DEFAULT_BIQUADRATIC_COEFFS = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]` is demonstrably identity — confirmed at `hvac_core.rs:23`. (2) Equipment initialization unconditionally uses identity regardless of type — confirmed at `hvac_core.rs:294`. (3) The identity coefficients produce `cap_ratio = 1.0` at all temperatures — confirmed analytically. (4) OCHRE-derived default coefficients for ASHP Single_1 and MSHP Variable_1 exist in HARES's own `defaults/` directory but are not auto-loaded — confirmed by Glob. (5) With the OCHRE coefficients, cap_ratio at AHRI H3 is 0.631 (ASHP) and 0.568 (MSHP), both satisfying the `< 0.8` criterion. (6) EnergyPlus independently confirms the biquadratic formula structure and H1 normalization point. (7) Four new failing regression tests were written and confirmed to fail with the present identity defaults, proving the bug is live.
 
-The one inaccurate reference (NREL/TP-5500-57501) is an informational citation that does not affect the bug description, proposed fix, or verification criteria.
+The one previously inaccurate reference (NREL/TP-5500-57501) has been corrected above (ticket T-0309). See References section for the strikethrough-and-correct entry.
 
 ### Proposed Fix Summary
 

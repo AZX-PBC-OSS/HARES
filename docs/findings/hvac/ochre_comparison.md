@@ -80,7 +80,7 @@ For external control (grid signals), OCHRE accepts duty cycles and uses a priori
 ---
 3. Physics Models
 3.1 Biquadratic Capacity/EIR Model (DynamicHVAC, lines 735-969)
-The core physics model uses the biquadratic form from Cutler 2013 (referenced at line 744-746):
+The core physics model uses the biquadratic form from Cutler, D., Winkler, J., Kruis, N., Christensen, C., & Brandemuehl, M. (2013). *Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations*. NREL/TP-5500-56354. (referenced at OCHRE HVAC.py line 744-746):
 param_ratio = (a + b*T_in + c*T_in² + d*T_ext + e*T_ext² + f*T_in*T_ext)
             * (a + b*ff + c*ff²)
             / (a + b*plr + c*plr²)
@@ -90,7 +90,7 @@ Where:
 - ff = flow fraction (always 1 for constant-speed equipment)
 - plr = part load ratio (used for cycling degradation / PLF)
 The numerator is a 6-coefficient biquadratic in temperatures, the denominator is the Part Load Factor (PLF) correction for cycling losses. This is JIT-compiled via @nb.njit (line 24) for performance.
-HARES should adopt: The biquadratic + PLF structure is the EnergyPlus standard (ref: Cutler 2013). It's well-validated and the CSV-based parameterization makes it extensible.
+HARES should adopt: The biquadratic + PLF structure is the EnergyPlus standard (ref: Cutler, D., Winkler, J., Kruis, N., Christensen, C., & Brandemuehl, M. (2013). *Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations*. NREL/TP-5500-56354). It's well-validated and the CSV-based parameterization makes it extensible.
 HARES should avoid: The min/max clamping at lines 43-45 silently clips inputs rather than warning. If conditions are outside the curve's valid range (e.g., extreme cold), the model returns the boundary value with no notification.
 3.2 SHR / Sensible-Latent Split (HVAC.update_shr, lines 458-512)
 The SHR calculation is the most physically detailed part of OCHRE's HVAC:
