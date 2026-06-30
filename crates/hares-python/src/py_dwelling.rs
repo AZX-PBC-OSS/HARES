@@ -276,8 +276,18 @@ fn parse_solar_override_from_dict(
         ));
     }
 
-    let first_surface: Bound<'_, PyDict> = dict.get_item(surface_ids[0])?.unwrap().extract()?;
-    let direct_val = first_surface.get_item("direct")?.unwrap();
+    let first_surface: Bound<'_, PyDict> = dict
+        .get_item(surface_ids[0])?
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "missing required key: surface id {}",
+                surface_ids[0]
+            ))
+        })?
+        .extract()?;
+    let direct_val = first_surface
+        .get_item("direct")?
+        .ok_or_else(|| PyValueError::new_err("missing required key: 'direct'"))?;
     let n_timesteps: usize = get_array_len(&direct_val)?;
 
     let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_timesteps);
@@ -285,16 +295,37 @@ fn parse_solar_override_from_dict(
     for step_idx in 0..n_timesteps {
         let mut surfaces = Vec::with_capacity(surface_ids.len());
         for &sid in &surface_ids {
-            let surface_dict: Bound<'_, PyDict> = dict.get_item(sid)?.unwrap().extract()?;
+            let surface_dict: Bound<'_, PyDict> = dict
+                .get_item(sid)?
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("missing required key: surface id {sid}"))
+                })?
+                .extract()?;
 
-            let direct: f64 =
-                extract_array_element(&surface_dict.get_item("direct")?.unwrap(), step_idx)?;
-            let diffuse: f64 =
-                extract_array_element(&surface_dict.get_item("diffuse")?.unwrap(), step_idx)?;
-            let reflected: f64 =
-                extract_array_element(&surface_dict.get_item("reflected")?.unwrap(), step_idx)?;
-            let aoi: f64 =
-                extract_array_element(&surface_dict.get_item("aoi")?.unwrap(), step_idx)?;
+            let direct: f64 = extract_array_element(
+                &surface_dict
+                    .get_item("direct")?
+                    .ok_or_else(|| PyValueError::new_err("missing required key: 'direct'"))?,
+                step_idx,
+            )?;
+            let diffuse: f64 = extract_array_element(
+                &surface_dict
+                    .get_item("diffuse")?
+                    .ok_or_else(|| PyValueError::new_err("missing required key: 'diffuse'"))?,
+                step_idx,
+            )?;
+            let reflected: f64 = extract_array_element(
+                &surface_dict
+                    .get_item("reflected")?
+                    .ok_or_else(|| PyValueError::new_err("missing required key: 'reflected'"))?,
+                step_idx,
+            )?;
+            let aoi: f64 = extract_array_element(
+                &surface_dict
+                    .get_item("aoi")?
+                    .ok_or_else(|| PyValueError::new_err("missing required key: 'aoi'"))?,
+                step_idx,
+            )?;
 
             surfaces.push(SurfaceIrradiance {
                 surface_id: sid,
@@ -353,12 +384,21 @@ fn parse_solar_override_from_list(
         for surface_item in step_list.iter() {
             let surface_dict: Bound<'_, PyDict> = surface_item.extract()?;
 
-            let surface_id: u32 = surface_dict.get_item("surface_id")?.unwrap().extract()?;
-            let direct_w_m2: f64 = surface_dict.get_item("direct_w_m2")?.unwrap().extract()?;
-            let diffuse_w_m2: f64 = surface_dict.get_item("diffuse_w_m2")?.unwrap().extract()?;
+            let surface_id: u32 = surface_dict
+                .get_item("surface_id")?
+                .ok_or_else(|| PyValueError::new_err("missing required key: 'surface_id'"))?
+                .extract()?;
+            let direct_w_m2: f64 = surface_dict
+                .get_item("direct_w_m2")?
+                .ok_or_else(|| PyValueError::new_err("missing required key: 'direct_w_m2'"))?
+                .extract()?;
+            let diffuse_w_m2: f64 = surface_dict
+                .get_item("diffuse_w_m2")?
+                .ok_or_else(|| PyValueError::new_err("missing required key: 'diffuse_w_m2'"))?
+                .extract()?;
             let reflected_w_m2: f64 = surface_dict
                 .get_item("reflected_w_m2")?
-                .unwrap()
+                .ok_or_else(|| PyValueError::new_err("missing required key: 'reflected_w_m2'"))?
                 .extract()?;
             let angle_of_incidence_rad: f64 = surface_dict
                 .get_item("angle_of_incidence_rad")
@@ -698,11 +738,11 @@ impl PyDwelling {
         out.set_item("hvac_heating_w", step.hvac_heating_w)?;
         out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
         out.set_item("gas_power_w", step.gas_power_w)?;
-        for ((_zone_id, temp_c), key) in step
-            .zone_temperatures_c
-            .iter()
-            .zip(self.zone_keys.as_ref().unwrap().iter())
-        {
+        let zone_keys = self
+            .zone_keys
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("zone keys not initialized"))?;
+        for ((_zone_id, temp_c), key) in step.zone_temperatures_c.iter().zip(zone_keys.iter()) {
             out.set_item(key, *temp_c)?;
         }
         Ok(out.unbind().into())
@@ -2464,9 +2504,15 @@ mod tests {
     use hares_types::{
         EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
     };
+    use pyo3::Bound;
+    use pyo3::PyErr;
+    use pyo3::Python;
+    use pyo3::exceptions::PyValueError;
+    use pyo3::types::{PyDict, PyDictMethods, PyList};
 
     use super::default_start;
     use super::pv_config_from_py;
+    use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
     use crate::utils::parse_datetime_str;
 
@@ -2853,5 +2899,197 @@ mod tests {
         let guard = StepGuard::new();
         let result = guard.step_core_string();
         assert_eq!(result.unwrap(), 42);
+    }
+
+    fn make_valid_solar_dict<'py>(py: Python<'py>) -> Bound<'py, PyDict> {
+        let dict = PyDict::new(py);
+        let surface = PyDict::new(py);
+        surface.set_item("direct", vec![100.0_f64]).unwrap();
+        surface.set_item("diffuse", vec![50.0_f64]).unwrap();
+        surface.set_item("reflected", vec![25.0_f64]).unwrap();
+        surface.set_item("aoi", vec![0.5_f64]).unwrap();
+        dict.set_item(1_u32, surface).unwrap();
+        dict
+    }
+
+    #[test]
+    fn solar_dict_valid_produces_correct_result() {
+        Python::attach(|py| {
+            let dict = make_valid_solar_dict(py);
+            let result = parse_solar_override_from_dict(py, dict.as_any()).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].len(), 1);
+            assert_eq!(result[0][0].surface_id, 1);
+            assert!((result[0][0].direct_w_m2 - 100.0).abs() < 1e-9);
+            assert!((result[0][0].diffuse_w_m2 - 50.0).abs() < 1e-9);
+            assert!((result[0][0].reflected_w_m2 - 25.0).abs() < 1e-9);
+            assert!((result[0][0].angle_of_incidence_rad - 0.5).abs() < 1e-9);
+        });
+    }
+
+    fn to_py_value_string(err: PyErr, py: Python<'_>) -> String {
+        err.value(py).to_string()
+    }
+
+    #[test]
+    fn solar_dict_missing_direct_key_returns_valueerror() {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            let surface = PyDict::new(py);
+            surface.set_item("diffuse", vec![50.0_f64]).unwrap();
+            surface.set_item("reflected", vec![25.0_f64]).unwrap();
+            surface.set_item("aoi", vec![0.5_f64]).unwrap();
+            dict.set_item(1_u32, surface).unwrap();
+
+            let err = parse_solar_override_from_dict(py, dict.as_any()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_dict_missing_diffuse_key_returns_valueerror() {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            let surface = PyDict::new(py);
+            surface.set_item("direct", vec![100.0_f64]).unwrap();
+            surface.set_item("reflected", vec![25.0_f64]).unwrap();
+            surface.set_item("aoi", vec![0.5_f64]).unwrap();
+            dict.set_item(1_u32, surface).unwrap();
+
+            let err = parse_solar_override_from_dict(py, dict.as_any()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_dict_missing_reflected_key_returns_valueerror() {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            let surface = PyDict::new(py);
+            surface.set_item("direct", vec![100.0_f64]).unwrap();
+            surface.set_item("diffuse", vec![50.0_f64]).unwrap();
+            surface.set_item("aoi", vec![0.5_f64]).unwrap();
+            dict.set_item(1_u32, surface).unwrap();
+
+            let err = parse_solar_override_from_dict(py, dict.as_any()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_dict_missing_aoi_key_returns_valueerror() {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            let surface = PyDict::new(py);
+            surface.set_item("direct", vec![100.0_f64]).unwrap();
+            surface.set_item("diffuse", vec![50.0_f64]).unwrap();
+            surface.set_item("reflected", vec![25.0_f64]).unwrap();
+            dict.set_item(1_u32, surface).unwrap();
+
+            let err = parse_solar_override_from_dict(py, dict.as_any()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_list_valid_produces_correct_result() {
+        Python::attach(|py| {
+            let surface_dict = PyDict::new(py);
+            surface_dict.set_item("surface_id", 1_u32).unwrap();
+            surface_dict.set_item("direct_w_m2", 100.0_f64).unwrap();
+            surface_dict.set_item("diffuse_w_m2", 50.0_f64).unwrap();
+            surface_dict.set_item("reflected_w_m2", 25.0_f64).unwrap();
+
+            let step_list = PyList::new(py, [surface_dict.as_any()]).unwrap();
+            let top_list = PyList::new(py, [step_list.as_any()]).unwrap();
+
+            let result = parse_solar_override_from_list(py, &top_list).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].len(), 1);
+            assert_eq!(result[0][0].surface_id, 1);
+            assert!((result[0][0].direct_w_m2 - 100.0).abs() < 1e-9);
+            assert!((result[0][0].diffuse_w_m2 - 50.0).abs() < 1e-9);
+            assert!((result[0][0].reflected_w_m2 - 25.0).abs() < 1e-9);
+        });
+    }
+
+    #[test]
+    fn solar_list_missing_surface_id_returns_valueerror() {
+        Python::attach(|py| {
+            let surface_dict = PyDict::new(py);
+            surface_dict.set_item("direct_w_m2", 100.0_f64).unwrap();
+            surface_dict.set_item("diffuse_w_m2", 50.0_f64).unwrap();
+            surface_dict.set_item("reflected_w_m2", 25.0_f64).unwrap();
+
+            let step_list = PyList::new(py, [surface_dict.as_any()]).unwrap();
+            let top_list = PyList::new(py, [step_list.as_any()]).unwrap();
+
+            let err = parse_solar_override_from_list(py, &top_list).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("surface_id"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_list_missing_direct_w_m2_returns_valueerror() {
+        Python::attach(|py| {
+            let surface_dict = PyDict::new(py);
+            surface_dict.set_item("surface_id", 1_u32).unwrap();
+            surface_dict.set_item("diffuse_w_m2", 50.0_f64).unwrap();
+            surface_dict.set_item("reflected_w_m2", 25.0_f64).unwrap();
+
+            let step_list = PyList::new(py, [surface_dict.as_any()]).unwrap();
+            let top_list = PyList::new(py, [step_list.as_any()]).unwrap();
+
+            let err = parse_solar_override_from_list(py, &top_list).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_list_missing_diffuse_w_m2_returns_valueerror() {
+        Python::attach(|py| {
+            let surface_dict = PyDict::new(py);
+            surface_dict.set_item("surface_id", 1_u32).unwrap();
+            surface_dict.set_item("direct_w_m2", 100.0_f64).unwrap();
+            surface_dict.set_item("reflected_w_m2", 25.0_f64).unwrap();
+
+            let step_list = PyList::new(py, [surface_dict.as_any()]).unwrap();
+            let top_list = PyList::new(py, [step_list.as_any()]).unwrap();
+
+            let err = parse_solar_override_from_list(py, &top_list).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn solar_list_missing_reflected_w_m2_returns_valueerror() {
+        Python::attach(|py| {
+            let surface_dict = PyDict::new(py);
+            surface_dict.set_item("surface_id", 1_u32).unwrap();
+            surface_dict.set_item("direct_w_m2", 100.0_f64).unwrap();
+            surface_dict.set_item("diffuse_w_m2", 50.0_f64).unwrap();
+
+            let step_list = PyList::new(py, [surface_dict.as_any()]).unwrap();
+            let top_list = PyList::new(py, [step_list.as_any()]).unwrap();
+
+            let err = parse_solar_override_from_list(py, &top_list).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = to_py_value_string(err, py);
+            assert!(msg.contains("missing required key"), "got: {msg}");
+        });
     }
 }
