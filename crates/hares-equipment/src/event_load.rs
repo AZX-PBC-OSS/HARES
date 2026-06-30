@@ -2563,11 +2563,12 @@ mod tests {
             event_cursor: 0,
             current_step: 0,
         };
-        let bytes = crate::save_versioned(
+        let bytes = crate::try_save_versioned(
             &bad_state,
             WetAppliance::checkpoint_version(),
             "WetAppliance",
-        );
+        )
+        .expect("serialization should not fail in test");
 
         let err = eq.load_state(&bytes);
         assert!(
@@ -2676,11 +2677,12 @@ mod tests {
             event_cursor: 0,
             current_step: 0,
         };
-        let bytes = crate::save_versioned(
+        let bytes = crate::try_save_versioned(
             &good_state,
             WetAppliance::checkpoint_version(),
             "WetAppliance",
-        );
+        )
+        .expect("serialization should not fail in test");
 
         let result = eq.load_state(&bytes);
         assert!(

@@ -277,6 +277,8 @@ pub trait Equipment: Send + Sync {
 }
 
 /// Re-export postcard CRC32 serialisation helpers from the serial module.
+#[allow(deprecated)]
+// Why: re-exporting deprecated save_versioned for backward compatibility while the deprecation warning guides new code to try_save_versioned
 pub use serial::{
     load_postcard, load_versioned, save_versioned, try_save_postcard, try_save_versioned,
 };

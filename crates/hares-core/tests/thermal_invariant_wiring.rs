@@ -82,7 +82,11 @@ master_seed = 0
 
 /// Builds a synthetic dwelling with RC envelope from the shared TOML fixture.
 fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
-    let tmp = env::temp_dir().join("hares_thermal_invariant_rc_test.toml");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let tmp = env::temp_dir().join(format!("hares_thermal_invariant_rc_test_{nanos}.toml"));
     fs::write(&tmp, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
     let dwelling = Dwelling::from_toml_config(&tmp).expect("create dwelling");
     (tmp, dwelling)

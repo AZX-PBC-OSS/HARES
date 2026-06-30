@@ -54,6 +54,7 @@ const VERSION_PREAMBLE_LEN: usize = std::mem::size_of::<u32>();
 ///
 /// Panics on postcard serialization failure. Prefer `try_save_versioned` in
 /// production code where panicking would crash a long-running simulation.
+#[deprecated(note = "use try_save_versioned instead to avoid panics during checkpointing")]
 pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &str) -> Vec<u8> {
     try_save_versioned(state, version, equipment_type)
         .expect("postcard serialization failed in save_versioned — use try_save_versioned for production paths")
@@ -210,7 +211,7 @@ mod tests {
             b: f64,
         }
         let s = S { a: 3, b: 4.2 };
-        let bytes = save_versioned(&s, 1, "S");
+        let bytes = try_save_versioned(&s, 1, "S").expect("serialization should not fail in test");
         let decoded: S = load_versioned(&bytes, 1, "S", EquipmentId(0)).unwrap();
         assert_eq!(decoded, s);
     }
@@ -222,7 +223,8 @@ mod tests {
             a: u32,
         }
         let s = S { a: 42 };
-        let mut bytes = save_versioned(&s, 1, "S");
+        let mut bytes =
+            try_save_versioned(&s, 1, "S").expect("serialization should not fail in test");
         bytes[0] = 99;
         let result = load_versioned::<S>(&bytes, 1, "S", EquipmentId(7));
         let err_msg = result.unwrap_err().to_string();
@@ -252,7 +254,8 @@ mod tests {
         let version: u32 = 1;
 
         let raw_postcard = try_save_postcard(&p).unwrap();
-        let versioned = save_versioned(&p, version, "P");
+        let versioned =
+            try_save_versioned(&p, version, "P").expect("serialization should not fail in test");
 
         assert_eq!(&versioned[..4], &version.to_le_bytes());
         assert_eq!(&versioned[4..], &raw_postcard);
@@ -268,7 +271,8 @@ mod tests {
             x: u32,
         }
         let p = P { x: 0xCAFE };
-        let mut blob = save_versioned(&p, 1, "P");
+        let mut blob =
+            try_save_versioned(&p, 1, "P").expect("serialization should not fail in test");
         // Corrupt a byte in the postcard payload portion (past version prefix)
         if blob.len() > 6 {
             blob[6] ^= 0x01;

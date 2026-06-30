@@ -66,7 +66,7 @@ impl DwellingCheckpoint {
                     checkpoint_path = %path.display(),
                     "checkpoint saved successfully",
                 ),
-                Err(e) => tracing::warn!(
+                Err(e) => tracing::error!(
                     checkpoint_path = %path.display(),
                     error = %e,
                     "checkpoint save failed",
@@ -323,5 +323,34 @@ mod tests {
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.prior_electrical_summary, summary);
+    }
+
+    #[test]
+    fn save_returns_err_on_non_writable_path() {
+        let cp = DwellingCheckpoint {
+            format_version: CHECKPOINT_VERSION,
+            bldg_id: 1,
+            timestep_index: 0,
+            equipment_states: vec![],
+            rng_state: [0; 32],
+            envelope_state: vec![],
+            humidity_states: vec![(ZoneId(1), 0.005)],
+            fluid_states: vec![],
+            rng_stream: 0,
+            rng_word_pos: 0,
+            thermal_last_u: vec![],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
+            actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
+        };
+
+        let path = std::path::PathBuf::from("/nonexistent-dir-xyz/cp.json");
+        let result = cp.save(&path);
+        assert!(
+            result.is_err(),
+            "save() should return Err for a non-writable path, but returned Ok"
+        );
     }
 }

@@ -4,7 +4,7 @@
 use chrono::Duration;
 use hares_core::Dwelling;
 use hares_core::DwellingCheckpoint;
-use hares_equipment::{load_versioned, save_versioned};
+use hares_equipment::{load_versioned, try_save_versioned};
 use hares_types::EquipmentId;
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
 use rand::SeedableRng;
@@ -152,7 +152,8 @@ pub fn run_per_equipment_version_rejection_regression() -> Result<(), Vec<String
     }
 
     let state = FakeState { val: 42.0 };
-    let mut blob = save_versioned(&state, 1, "FakeEquip");
+    let mut blob =
+        try_save_versioned(&state, 1, "FakeEquip").expect("serialization should not fail in test");
     // Corrupt version byte
     blob[0] = 99;
 
@@ -328,7 +329,8 @@ pub fn run_equipment_crc_corruption_regression() -> Result<(), Vec<String>> {
     }
 
     let state = FakeState { val: 42.0 };
-    let mut blob = save_versioned(&state, 1, "FakeEquip");
+    let mut blob =
+        try_save_versioned(&state, 1, "FakeEquip").expect("serialization should not fail in test");
 
     // Corrupt a byte in the postcard payload portion (past the 4-byte version prefix)
     if blob.len() > 6 {

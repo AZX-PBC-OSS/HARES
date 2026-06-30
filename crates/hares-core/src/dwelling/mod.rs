@@ -3689,15 +3689,30 @@ impl Dwelling {
             .collect();
         let fluid_states = self.fluid_solver.snapshot_payload();
 
+        let mut equipment_states = Vec::with_capacity(self.equipment.len());
+        for eq in &self.equipment {
+            match eq.save_state() {
+                Ok(state) => equipment_states.push(state),
+                Err(e) => {
+                    #[cfg(feature = "observe")]
+                    tracing::error!(
+                        equipment_name = %eq.descriptor().name,
+                        equipment_type = %eq.descriptor().equipment_type,
+                        equipment_id = %eq.descriptor().id,
+                        error = %e,
+                        bldg_id = self.bldg_id,
+                        "checkpoint save_state failed for equipment",
+                    );
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,
             bldg_id: self.bldg_id,
             timestep_index: self.clock.current_step(),
-            equipment_states: self
-                .equipment
-                .iter()
-                .map(|eq| eq.save_state())
-                .collect::<std::result::Result<Vec<_>, _>>()?,
+            equipment_states,
             rng_state: self.rng.get_seed(),
             envelope_state: snap.x,
             humidity_states,
