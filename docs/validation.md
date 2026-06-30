@@ -158,7 +158,7 @@ PsychroLib:
 ### Convection and film coefficients
 
 - **TARP natural convection**: h = 1.31 × ΔT^(1/3) verified at multiple
-  ΔT values (EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm, ASHRAE HOF Ch. 25)
+  ΔT values (EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm; ASHRAE HOF 2021 Ch. 4)
 - **DOE-2 exterior film**: monotonically decreasing exterior film
   resistance with increasing wind speed (EnergyPlus ERM 26.1 — Outside Surface Heat Balance: DOE-2 Exterior Convection)
 
@@ -254,7 +254,7 @@ Different validation layers use different tolerance strategies:
 | ASHRAE 140-2017 | BESTEST reference bands for envelope validation |
 | ASHRAE HOF 2021 Ch. 1 | Psychrometric equations, saturation pressure |
 | ASHRAE HOF 2021 Ch. 16 | Infiltration (AIM-2 wind-stack model) |
-| ASHRAE HOF 2021 Ch. 25 | Natural convection (TARP h formula) |
+| ASHRAE HOF 2021 Ch. 4 | Natural convection (TARP h formula) |
 | ASHRAE 152-2019 | Duct distribution system efficiency |
 | EnergyPlus Engineering Reference | Film coefficients, water mains, performance curves, defrost, latent degradation |
 | OCHRE (NREL) | Primary reference oracle for equipment and whole-building parity testing |

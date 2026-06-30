@@ -263,7 +263,7 @@ fn film_coefficient_increases_with_wind() {
 /// must return the same value.
 ///
 /// Reference: EnergyPlus ERM 26.1 — Inside Surface Heat Balance: TARP Algorithm, Eq. 9.4-1;
-/// ASHRAE HOF 2021 Ch. 25, natural convection correlations.
+/// ASHRAE HOF 2021 Ch. 4, natural convection correlations.
 #[test]
 fn tarp_h_natural_vertical_surface() {
     let delta_ts = [1.0_f64, 5.0, 12.9, 20.0, 30.0];

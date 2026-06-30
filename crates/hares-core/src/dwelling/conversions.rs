@@ -167,7 +167,7 @@ pub fn building_to_boundary_inputs(
 
             // ASHRAE F-factor perimeter method for slab-on-grade boundaries.
             // Replaces area-UA conduction with F2 × P × ΔT per ASHRAE HoF 2021
-            // Ch. 18.31. The F-factor method accounts for 3-D edge heat flow
+            // Ch. 17. The F-factor method accounts for 3-D edge heat flow
             // around the slab perimeter rather than 1-D conduction through the
             // full floor area, which can overstate loss by 2–2.5×.
             // Ref: ANSI/ASHRAE 90.1-2022 Table A6.3.1;
@@ -304,7 +304,7 @@ pub fn building_to_boundary_inputs(
             // Ground is a fixed-temperature node — no convective exterior film
             // applies. The F-factor perimeter conductance G = F2 × P captures
             // the entire slab-to-ground pathway; adding an exterior film would
-            // over-resist it. Per ASHRAE HoF 2021 Ch. 18.31.
+            // over-resist it. Per ASHRAE HoF 2021 Ch. 17.
             let r_film_ext = if bd.boundary_type == BoundaryType::Slab {
                 0.0
             } else {

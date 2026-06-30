@@ -439,7 +439,8 @@ pub(super) fn coil_bypass_factor(
     // 5–20% depending on humidity ratio. The enthalpy form correctly accounts
     // for both sensible and latent heat transfer across the coil surface.
     //
-    // Ref: ASHRAE HOF 2021 Ch.18 Eq.63; EnergyPlus DXCoils.cc;
+    // Ref: ASHRAE HOF 2021 Ch. 17 — coil bypass factor method (enthalpy form);
+    //      CBF = exp(−NTU) per EnergyPlus DXCoils.cc:9627;
     //      vendors/OCHRE/ochre/utils/equipment.py:872-874
     let w_adp = humidity_ratio_from_rel_hum(t_adp, 1.0, p_pa);
     let h_adp = moist_air_enthalpy(t_adp, w_adp);

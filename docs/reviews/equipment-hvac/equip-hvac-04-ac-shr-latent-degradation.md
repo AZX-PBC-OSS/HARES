@@ -84,5 +84,5 @@
 - OCHRE `HVAC.py:199-215` — Ao computation per-speed using per-stage SHR values (the pattern HARES should follow for Finding 1).
 - OCHRE `equipment.py:795-875` — `coil_bypass_factor` reference implementation using EnergyPlus methodology.
 - OCHRE `equipment.py:658-680` — `calculate_mass_flow_rate` uses `GetMoistAirDensity` (moist-air density); HARES intentionally deviates to use dry-air density for ASHRAE HOF Ch.1 consistency (`coil_physics.rs:424-441`).
-- ASHRAE 2017 Handbook of Fundamentals, Ch.18 Eq.63 — enthalpy-based coil bypass factor.
+- ASHRAE 2017 Handbook of Fundamentals, Ch. 18 — enthalpy-based coil bypass factor method. (The specific equation number "Eq.63" could not be verified against the 2017 edition; the standard psychrometric bypass factor BF = exp(−NTU) is used. Replace with a precise equation reference when the 2017 HOF table of contents is available.)
 - AHRI 210/240 — rated cooling test conditions (80°F DB / 67°F WB indoor; 95°F DB outdoor).

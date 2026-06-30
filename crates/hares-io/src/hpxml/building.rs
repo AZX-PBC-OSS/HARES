@@ -752,7 +752,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // F-factor perimeter heat loss method.
     //
     // OCHRE envelope.py:462-485 for insulation details.
-    // ASHRAE HoF 2021 Ch. 18.31 for F-factor perimeter method.
+    // ASHRAE HoF 2021 Ch. 17 for F-factor perimeter method.
     if let Some(slabs_group) = details.path(&["Enclosure", "Slabs"]) {
         for bd in &mut boundaries {
             if bd.boundary_type == BoundaryType::Slab {

@@ -46,7 +46,7 @@ OCHRE uses DOE-2 surface ground temperature (equivalent to HARES `ground_temp_c`
 
 ## Approach
 
-Add `ground_temp_at_depth_c` as a field in `WeatherState` (e.g., `below_grade_ground_temp_c`) populated each step by `EnvironmentManager` at a configurable depth (e.g., 0.5 m default per ASHRAE HoF Ch. 18). Wire this field to the thermal solver's below-grade boundary conditions. The existing `ground_temp_c` (DOE-2 surface) remains for surface-adjacent boundaries.
+Add `ground_temp_at_depth_c` as a field in `WeatherState` (e.g., `below_grade_ground_temp_c`) populated each step by `EnvironmentManager` at a configurable depth (e.g., 0.5 m default per ~~ASHRAE HoF Ch. 18~~ ASHRAE HoF 2021 Ch. 17). Wire this field to the thermal solver's below-grade boundary conditions. The existing `ground_temp_c` (DOE-2 surface) remains for surface-adjacent boundaries.
 
 ## Definition of Done
 
@@ -65,7 +65,7 @@ cargo test -p hares-envelope bestest
 ## References
 
 - EnergyPlus Engineering Reference §3.1 "Ground Heat Transfer" — Kusuda-Achenbach for below-grade, not surface DOE-2
-- ASHRAE Handbook of Fundamentals 2021 Ch. 18 "Nonresidential Cooling and Heating Load Calculations" §18.31 (Below-Grade Heat Transfer)
+- ASHRAE Handbook of Fundamentals 2021 Ch. 17 "Residential Cooling and Heating Load Calculations" (Below-Grade Heat Transfer)
 - Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Transactions 71(1), pp. 61-74
 - OCHRE `models/envelope.py`: uses DOE-2 surface temperature for all ground boundaries (acknowledged simplification)
 

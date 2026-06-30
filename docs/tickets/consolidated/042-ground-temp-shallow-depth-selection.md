@@ -56,7 +56,7 @@ Medium. For slab-on-grade buildings, the 0.5 m selection is approximately correc
 
 - EnergyPlus Engineering Reference §3.17 "Ground Heat Transfer Calculations" — Kusuda-Achenbach model with site-specific depth
 - Kusuda, T. and Achenbach, P.R. (1965) ASHRAE Transactions 71(1):61-74 — original derivation
-- ASHRAE Handbook of Fundamentals 2021 Ch. 18.31 "Below-Grade Heat Transfer" — recommended depths for different foundation types
+- ASHRAE Handbook of Fundamentals 2021 Ch. 17 "Residential Cooling and Heating Load Calculations" — recommended depths for different foundation types
 - `crates/hares-physics/src/ground.rs:63-80` — Kusuda-Achenbach implementation already present
 
 ## Verification Audit
