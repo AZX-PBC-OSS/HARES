@@ -1037,7 +1037,7 @@ mod tests {
         let mut eq = Dehumidifier::new(cfg.clone());
         eq.init(&cfg, &env(0.45)).unwrap();
         eq.apply_control(&ControlSignal::HumiditySetpoint {
-            target_rh: 55.0,
+            target_rh: 0.55,
             min_rh: None,
             max_rh: None,
         })

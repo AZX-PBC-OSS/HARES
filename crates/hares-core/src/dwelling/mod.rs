@@ -7797,6 +7797,37 @@ mod tests {
     }
 
     #[test]
+    fn invalid_signal_rejected_and_simulation_continues() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        dwelling.apply_control(
+            "Ideal HVAC",
+            ControlSignal::IdealCapacity {
+                capacity_w: f64::NAN,
+                degraded: false,
+            },
+        );
+
+        let result = dwelling.run_timestep(false);
+        assert!(
+            result.is_ok(),
+            "timestep should not panic on rejected signal"
+        );
+
+        let warnings = dwelling.take_warnings();
+        let rejection = warnings
+            .iter()
+            .find(|w| w.contains("control apply failed for ") && w.contains("IdealCapacity"));
+        assert!(
+            rejection.is_some(),
+            "expected a control-apply-failed warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn simulate_accumulates_steps_when_write_output_disabled() {
         let toml_path = {
             let mut path = std::env::temp_dir();

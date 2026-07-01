@@ -1023,21 +1023,11 @@ impl Equipment for Ev {
                         "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),
                     ));
                 }
-                if !active_power_kw.is_finite() {
-                    return Err(HaresError::Control(
-                        "EV PowerSetpoint active_power_kw must be finite".to_string(),
-                    ));
-                }
                 self.power_setpoint_kw = Some(*active_power_kw);
                 self.power_setpoint_min_soc = *min_soc;
                 self.power_setpoint_max_soc = *max_soc;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                if !max_power_kw.is_finite() {
-                    return Err(HaresError::Control(
-                        "EV PowerLimit max_power_kw must be finite".to_string(),
-                    ));
-                }
                 self.power_limit_kw = Some((*max_power_kw).max(0.0));
             }
             ControlSignal::SOCTarget {
@@ -1045,25 +1035,6 @@ impl Equipment for Ev {
                 min_soc,
                 max_soc,
             } => {
-                if !target_soc.is_finite() {
-                    return Err(HaresError::Control(
-                        "EV SOCTarget target_soc must be finite".to_string(),
-                    ));
-                }
-                if let Some(min) = min_soc
-                    && (!min.is_finite() || !(0.0..=1.0).contains(min))
-                {
-                    return Err(HaresError::Control(
-                        "EV SOCTarget min_soc must be finite and within [0, 1]".to_string(),
-                    ));
-                }
-                if let Some(max) = max_soc
-                    && (!max.is_finite() || !(0.0..=1.0).contains(max))
-                {
-                    return Err(HaresError::Control(
-                        "EV SOCTarget max_soc must be finite and within [0, 1]".to_string(),
-                    ));
-                }
                 self.soc_target = Some((*target_soc).clamp(0.0, 1.0));
                 self.soc_target_min = *min_soc;
                 self.soc_target_max = *max_soc;
@@ -1097,11 +1068,6 @@ impl Equipment for Ev {
                         "EvDrive rejected: EV must be Disconnected to drive".to_string(),
                     ));
                 }
-                if !kwh.is_finite() || *kwh < 0.0 {
-                    return Err(HaresError::Control(
-                        "EvDrive kwh must be finite and >= 0".to_string(),
-                    ));
-                }
                 let available_kwh = self.battery_capacity_kwh * self.soc;
                 if *kwh > available_kwh {
                     return Err(HaresError::Control(format!(
@@ -1116,23 +1082,12 @@ impl Equipment for Ev {
                         "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
                     ));
                 }
-                if !power_kw.is_finite() || *power_kw < 0.0 {
-                    return Err(HaresError::Control(
-                        "EvAwayCharge power_kw must be finite and >= 0".to_string(),
-                    ));
-                }
                 self.away_charger_power_kw = *power_kw;
             }
             ControlSignal::EvSetReadyBy {
                 departure_hour,
                 target_soc,
             } => {
-                validate_optional_hour("ready_by_hour", Some(*departure_hour))?;
-                if !target_soc.is_finite() || !(0.0..=1.0).contains(target_soc) {
-                    return Err(HaresError::Control(
-                        "EvSetReadyBy target_soc must be finite and within [0, 1]".to_string(),
-                    ));
-                }
                 self.ready_by_hour = Some(*departure_hour);
                 self.ready_by_soc = Some(*target_soc);
             }

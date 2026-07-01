@@ -206,6 +206,302 @@ impl ControlSignal {
         matches!(self, Self::EvPlugIn { .. })
     }
 
+    /// Validate numeric bounds for every `ControlSignal` variant.
+    ///
+    /// Per-variant range checks reject physically impossible or numerically
+    /// dangerous values (NaN, ±∞, out-of-range) that would corrupt simulation
+    /// state. The trait boundary (`Equipment::apply_control`) calls this
+    /// before dispatching to equipment-specific logic.
+    ///
+    /// Variants with no numeric fields (mode/boolean/enum signals) trivially
+    /// return `Ok(())`.
+    pub fn validate_numeric_bounds(&self) -> Result<(), HaresError> {
+        match self {
+            Self::ThermalSetpoint {
+                heating_setpoint_c,
+                cooling_setpoint_c,
+                deadband_c,
+            } => {
+                if let Some(h) = heating_setpoint_c {
+                    if *h < -50.0 || *h > 100.0 || !h.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpoint heating_setpoint_c invalid: {h}, expected [-50, 100] °C"
+                        )));
+                    }
+                }
+                if let Some(c) = cooling_setpoint_c {
+                    if *c < 0.0 || *c > 60.0 || !c.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpoint cooling_setpoint_c invalid: {c}, expected [0, 60] °C"
+                        )));
+                    }
+                }
+                if let Some(db) = deadband_c {
+                    if *db < 0.0 || *db > 5.0 || !db.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpoint deadband_c invalid: {db}, expected [0, 5] °C"
+                        )));
+                    }
+                }
+                if let (Some(h), Some(c), Some(db)) =
+                    (heating_setpoint_c, cooling_setpoint_c, deadband_c)
+                {
+                    if h + db >= *c {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpoint: heating ({h}) + deadband ({db}) = {} not < cooling ({c})",
+                            h + db
+                        )));
+                    }
+                }
+            }
+            Self::HumiditySetpoint {
+                target_rh,
+                min_rh,
+                max_rh,
+            } => {
+                if *target_rh < 0.0 || *target_rh > 1.0 || !target_rh.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "HumiditySetpoint target_rh invalid: {target_rh}, expected [0, 1]"
+                    )));
+                }
+                if let Some(r) = min_rh {
+                    if *r < 0.0 || *r > 1.0 || !r.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "HumiditySetpoint min_rh invalid: {r}, expected [0, 1]"
+                        )));
+                    }
+                    if *r >= *target_rh {
+                        return Err(HaresError::Control(format!(
+                            "HumiditySetpoint min_rh ({r}) must be < target_rh ({target_rh})"
+                        )));
+                    }
+                }
+                if let Some(r) = max_rh {
+                    if *r < 0.0 || *r > 1.0 || !r.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "HumiditySetpoint max_rh invalid: {r}, expected [0, 1]"
+                        )));
+                    }
+                    if *r <= *target_rh {
+                        return Err(HaresError::Control(format!(
+                            "HumiditySetpoint max_rh ({r}) must be > target_rh ({target_rh})"
+                        )));
+                    }
+                }
+            }
+            Self::PowerSetpoint {
+                active_power_kw,
+                reactive_power_kvar,
+                ..
+            } => {
+                if !active_power_kw.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "PowerSetpoint active_power_kw must be finite, got {active_power_kw}"
+                    )));
+                }
+                if let Some(r) = reactive_power_kvar {
+                    if !r.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "PowerSetpoint reactive_power_kvar must be finite, got {r}"
+                        )));
+                    }
+                }
+            }
+            Self::PowerLimit {
+                max_power_kw,
+                ramp_rate_kw_per_s,
+            } => {
+                if !max_power_kw.is_finite() || *max_power_kw < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "PowerLimit max_power_kw must be finite and >= 0, got {max_power_kw}"
+                    )));
+                }
+                if let Some(r) = ramp_rate_kw_per_s {
+                    if !r.is_finite() || *r < 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "PowerLimit ramp_rate_kw_per_s must be finite and >= 0, got {r}"
+                        )));
+                    }
+                }
+            }
+            Self::SOCTarget {
+                target_soc,
+                min_soc,
+                max_soc,
+            } => {
+                if *target_soc < 0.0 || *target_soc > 1.0 || !target_soc.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget target_soc invalid: {target_soc}, expected [0, 1]"
+                    )));
+                }
+                if let Some(m) = min_soc {
+                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "SOCTarget min_soc invalid: {m}, expected [0, 1]"
+                        )));
+                    }
+                }
+                if let Some(m) = max_soc {
+                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "SOCTarget max_soc invalid: {m}, expected [0, 1]"
+                        )));
+                    }
+                }
+                if let (Some(min), Some(max)) = (min_soc, max_soc) {
+                    if *min >= *max {
+                        return Err(HaresError::Control(format!(
+                            "SOCTarget min_soc ({min}) must be < max_soc ({max})"
+                        )));
+                    }
+                    if *target_soc <= *min || *target_soc >= *max {
+                        return Err(HaresError::Control(format!(
+                            "SOCTarget target_soc ({target_soc}) must be in ({min}, {max})"
+                        )));
+                    }
+                }
+            }
+            Self::ModeOverride { .. } => {}
+            Self::DutyCycle {
+                on_fraction,
+                period_s,
+                ..
+            } => {
+                if *on_fraction < 0.0 || *on_fraction > 1.0 || !on_fraction.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "DutyCycle on_fraction invalid: {on_fraction}, expected [0, 1]"
+                    )));
+                }
+                if let Some(p) = period_s {
+                    if !p.is_finite() || *p < 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "DutyCycle period_s must be finite and >= 0, got {p}"
+                        )));
+                    }
+                }
+            }
+            Self::LoadFraction { fraction } => {
+                if *fraction < 0.0 || *fraction > 1.0 || !fraction.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "LoadFraction fraction invalid: {fraction}, expected [0, 1]"
+                    )));
+                }
+            }
+            Self::GridConnect { .. } => {}
+            Self::SelfConsumption { .. } => {}
+            Self::DemandResponse {
+                level: _,
+                duration_s,
+            } => {
+                if let Some(d) = duration_s {
+                    if !d.is_finite() || *d < 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "DemandResponse duration_s must be finite and >= 0, got {d}"
+                        )));
+                    }
+                }
+            }
+            Self::ProtocolNative { .. } => {}
+            Self::CurtailmentPercent { percent } => {
+                if *percent < 0.0 || *percent > 100.0 || !percent.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "CurtailmentPercent percent invalid: {percent}, expected [0, 100]"
+                    )));
+                }
+            }
+            Self::ReactiveSetpoint { kvar } => {
+                if !kvar.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "ReactiveSetpoint kvar must be finite, got {kvar}"
+                    )));
+                }
+            }
+            Self::PowerFactorSetpoint { power_factor } => {
+                if *power_factor < 0.0 || *power_factor > 1.0 || !power_factor.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "PowerFactorSetpoint power_factor invalid: {power_factor}, expected [0, 1]"
+                    )));
+                }
+            }
+            Self::InverterPriorityMode { .. } => {}
+            Self::IdealCapacity {
+                capacity_w,
+                degraded: _,
+            } => {
+                if !capacity_w.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "IdealCapacity capacity_w must be finite, got {capacity_w}"
+                    )));
+                }
+            }
+            Self::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            } => {
+                if let Some(d) = heating_delta_c {
+                    if !d.is_finite() || *d < -20.0 || *d > 20.0 {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpointDelta heating_delta_c invalid: {d}, expected ±20 °C"
+                        )));
+                    }
+                }
+                if let Some(d) = cooling_delta_c {
+                    if !d.is_finite() || *d < -20.0 || *d > 20.0 {
+                        return Err(HaresError::Control(format!(
+                            "ThermalSetpointDelta cooling_delta_c invalid: {d}, expected ±20 °C"
+                        )));
+                    }
+                }
+            }
+            Self::IdealCapacityModeOverride { .. } => {}
+            Self::EvPlugIn { .. } => {}
+            Self::EvDrive { kwh } => {
+                if !kwh.is_finite() || *kwh < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvDrive kwh must be finite and >= 0, got {kwh}"
+                    )));
+                }
+            }
+            Self::EvAwayCharge { power_kw } => {
+                if !power_kw.is_finite() || *power_kw < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvAwayCharge power_kw must be finite and >= 0, got {power_kw}"
+                    )));
+                }
+            }
+            Self::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                if *departure_hour < 0.0 || *departure_hour > 24.0 || !departure_hour.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "EvSetReadyBy departure_hour invalid: {departure_hour}, expected [0, 24]"
+                    )));
+                }
+                if *target_soc < 0.0 || *target_soc > 1.0 || !target_soc.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "EvSetReadyBy target_soc invalid: {target_soc}, expected [0, 1]"
+                    )));
+                }
+            }
+            Self::EventDelay { delay_s } => {
+                if !delay_s.is_finite() || *delay_s < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "EventDelay delay_s must be finite and >= 0, got {delay_s}"
+                    )));
+                }
+            }
+            Self::MaxCapacityFraction { fraction } => {
+                if *fraction < 0.0 || *fraction > 1.0 || !fraction.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "MaxCapacityFraction fraction invalid: {fraction}, expected [0, 1]"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn required_capability(&self) -> ControlCapabilities {
         match self {
             Self::ThermalSetpoint { .. } => ControlCapabilities::THERMAL_SETPOINT,
@@ -447,5 +743,590 @@ mod tests {
         };
         let result = ensure_signal_supported(capabilities, &signal);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_numeric_bounds tests
+    // -----------------------------------------------------------------
+
+    fn assert_ok(signal: &ControlSignal) {
+        assert!(
+            signal.validate_numeric_bounds().is_ok(),
+            "expected Ok for {signal:?}"
+        );
+    }
+
+    fn assert_err(signal: &ControlSignal) {
+        assert!(
+            signal.validate_numeric_bounds().is_err(),
+            "expected Err for {signal:?}"
+        );
+    }
+
+    #[test]
+    fn thermal_setpoint_valid() {
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: Some(1.0),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_all_none_is_valid() {
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_heating_out_of_range() {
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(-51.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(101.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_cooling_out_of_range() {
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(-1.0),
+            deadband_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(61.0),
+            deadband_c: None,
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_deadband_out_of_range() {
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: Some(-0.1),
+        });
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: Some(6.0),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_deadband_collision() {
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(22.0),
+            cooling_setpoint_c: Some(23.0),
+            deadband_c: Some(2.0),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_nan_rejected() {
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(f64::NAN),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(f64::NAN),
+            deadband_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: Some(f64::NAN),
+        });
+    }
+
+    #[test]
+    fn humidity_setpoint_valid() {
+        assert_ok(&ControlSignal::HumiditySetpoint {
+            target_rh: 0.5,
+            min_rh: None,
+            max_rh: None,
+        });
+    }
+
+    #[test]
+    fn humidity_setpoint_target_out_of_range() {
+        assert_err(&ControlSignal::HumiditySetpoint {
+            target_rh: -0.1,
+            min_rh: None,
+            max_rh: None,
+        });
+        assert_err(&ControlSignal::HumiditySetpoint {
+            target_rh: 1.5,
+            min_rh: None,
+            max_rh: None,
+        });
+        assert_err(&ControlSignal::HumiditySetpoint {
+            target_rh: f64::NAN,
+            min_rh: None,
+            max_rh: None,
+        });
+    }
+
+    #[test]
+    fn humidity_setpoint_min_max_ordering() {
+        assert_err(&ControlSignal::HumiditySetpoint {
+            target_rh: 0.5,
+            min_rh: Some(0.6),
+            max_rh: None,
+        });
+        assert_err(&ControlSignal::HumiditySetpoint {
+            target_rh: 0.5,
+            min_rh: None,
+            max_rh: Some(0.4),
+        });
+    }
+
+    #[test]
+    fn power_setpoint_valid() {
+        assert_ok(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: Some(1.0),
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_ok(&ControlSignal::PowerSetpoint {
+            active_power_kw: -3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        });
+    }
+
+    #[test]
+    fn power_setpoint_nan_inf_rejected() {
+        assert_err(&ControlSignal::PowerSetpoint {
+            active_power_kw: f64::NAN,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_err(&ControlSignal::PowerSetpoint {
+            active_power_kw: f64::INFINITY,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_err(&ControlSignal::PowerSetpoint {
+            active_power_kw: 0.0,
+            reactive_power_kvar: Some(f64::NAN),
+            min_soc: None,
+            max_soc: None,
+        });
+    }
+
+    #[test]
+    fn power_limit_valid() {
+        assert_ok(&ControlSignal::PowerLimit {
+            max_power_kw: 5.0,
+            ramp_rate_kw_per_s: Some(0.5),
+        });
+        assert_ok(&ControlSignal::PowerLimit {
+            max_power_kw: 0.0,
+            ramp_rate_kw_per_s: None,
+        });
+    }
+
+    #[test]
+    fn power_limit_negative_rejected() {
+        assert_err(&ControlSignal::PowerLimit {
+            max_power_kw: -1.0,
+            ramp_rate_kw_per_s: None,
+        });
+        assert_err(&ControlSignal::PowerLimit {
+            max_power_kw: 5.0,
+            ramp_rate_kw_per_s: Some(-0.1),
+        });
+    }
+
+    #[test]
+    fn power_limit_nan_inf_rejected() {
+        assert_err(&ControlSignal::PowerLimit {
+            max_power_kw: f64::NAN,
+            ramp_rate_kw_per_s: None,
+        });
+        assert_err(&ControlSignal::PowerLimit {
+            max_power_kw: f64::INFINITY,
+            ramp_rate_kw_per_s: Some(0.5),
+        });
+    }
+
+    #[test]
+    fn soc_target_valid() {
+        assert_ok(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_ok(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: Some(0.2),
+            max_soc: Some(0.8),
+        });
+    }
+
+    #[test]
+    fn soc_target_out_of_range() {
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: -0.1,
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: 1.5,
+            min_soc: None,
+            max_soc: None,
+        });
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: f64::NAN,
+            min_soc: None,
+            max_soc: None,
+        });
+    }
+
+    #[test]
+    fn soc_target_ordering() {
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        });
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: 0.1,
+            min_soc: Some(0.2),
+            max_soc: Some(0.8),
+        });
+        assert_err(&ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: Some(0.2),
+            max_soc: Some(0.8),
+        });
+    }
+
+    #[test]
+    fn load_fraction_valid() {
+        assert_ok(&ControlSignal::LoadFraction { fraction: 0.5 });
+        assert_ok(&ControlSignal::LoadFraction { fraction: 0.01 });
+        assert_ok(&ControlSignal::LoadFraction { fraction: 0.99 });
+    }
+
+    #[test]
+    fn load_fraction_invalid() {
+        assert_err(&ControlSignal::LoadFraction { fraction: -0.1 });
+        assert_err(&ControlSignal::LoadFraction { fraction: 1.1 });
+        assert_err(&ControlSignal::LoadFraction { fraction: 5.0 });
+        assert_err(&ControlSignal::LoadFraction { fraction: f64::NAN });
+    }
+
+    #[test]
+    fn duty_cycle_valid() {
+        assert_ok(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: Some(900.0),
+            component: None,
+        });
+        assert_ok(&ControlSignal::DutyCycle {
+            on_fraction: 0.01,
+            period_s: None,
+            component: None,
+        });
+    }
+
+    #[test]
+    fn duty_cycle_invalid() {
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: -0.1,
+            period_s: None,
+            component: None,
+        });
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: 1.1,
+            period_s: None,
+            component: None,
+        });
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: 2.0,
+            period_s: None,
+            component: None,
+        });
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: f64::NAN,
+            period_s: None,
+            component: None,
+        });
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: Some(-1.0),
+            component: None,
+        });
+        assert_err(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: Some(f64::NAN),
+            component: None,
+        });
+    }
+
+    #[test]
+    fn max_capacity_fraction_valid() {
+        assert_ok(&ControlSignal::MaxCapacityFraction { fraction: 0.5 });
+        assert_ok(&ControlSignal::MaxCapacityFraction { fraction: 0.01 });
+    }
+
+    #[test]
+    fn max_capacity_fraction_invalid() {
+        assert_err(&ControlSignal::MaxCapacityFraction { fraction: -0.1 });
+        assert_err(&ControlSignal::MaxCapacityFraction { fraction: 1.1 });
+        assert_err(&ControlSignal::MaxCapacityFraction { fraction: 5.0 });
+        assert_err(&ControlSignal::MaxCapacityFraction { fraction: f64::NAN });
+    }
+
+    #[test]
+    fn curtailment_percent_valid() {
+        assert_ok(&ControlSignal::CurtailmentPercent { percent: 50.0 });
+        assert_ok(&ControlSignal::CurtailmentPercent { percent: 0.0 });
+        assert_ok(&ControlSignal::CurtailmentPercent { percent: 100.0 });
+    }
+
+    #[test]
+    fn curtailment_percent_invalid() {
+        assert_err(&ControlSignal::CurtailmentPercent { percent: -5.0 });
+        assert_err(&ControlSignal::CurtailmentPercent { percent: 150.0 });
+        assert_err(&ControlSignal::CurtailmentPercent { percent: f64::NAN });
+    }
+
+    #[test]
+    fn power_factor_setpoint_valid() {
+        assert_ok(&ControlSignal::PowerFactorSetpoint { power_factor: 0.95 });
+        assert_ok(&ControlSignal::PowerFactorSetpoint { power_factor: 0.0 });
+        assert_ok(&ControlSignal::PowerFactorSetpoint { power_factor: 1.0 });
+    }
+
+    #[test]
+    fn power_factor_setpoint_invalid() {
+        assert_err(&ControlSignal::PowerFactorSetpoint { power_factor: -0.1 });
+        assert_err(&ControlSignal::PowerFactorSetpoint { power_factor: 1.1 });
+        assert_err(&ControlSignal::PowerFactorSetpoint {
+            power_factor: f64::NAN,
+        });
+    }
+
+    #[test]
+    fn ev_drive_valid() {
+        assert_ok(&ControlSignal::EvDrive { kwh: 5.0 });
+        assert_ok(&ControlSignal::EvDrive { kwh: 0.0 });
+    }
+
+    #[test]
+    fn ev_drive_invalid() {
+        assert_err(&ControlSignal::EvDrive { kwh: -1.0 });
+        assert_err(&ControlSignal::EvDrive { kwh: f64::NAN });
+        assert_err(&ControlSignal::EvDrive { kwh: f64::INFINITY });
+    }
+
+    #[test]
+    fn ev_away_charge_valid() {
+        assert_ok(&ControlSignal::EvAwayCharge { power_kw: 7.2 });
+        assert_ok(&ControlSignal::EvAwayCharge { power_kw: 0.0 });
+    }
+
+    #[test]
+    fn ev_away_charge_invalid() {
+        assert_err(&ControlSignal::EvAwayCharge { power_kw: -1.0 });
+        assert_err(&ControlSignal::EvAwayCharge { power_kw: f64::NAN });
+    }
+
+    #[test]
+    fn ev_set_ready_by_valid() {
+        assert_ok(&ControlSignal::EvSetReadyBy {
+            departure_hour: 7.0,
+            target_soc: 0.8,
+        });
+        assert_ok(&ControlSignal::EvSetReadyBy {
+            departure_hour: 0.0,
+            target_soc: 0.0,
+        });
+        assert_ok(&ControlSignal::EvSetReadyBy {
+            departure_hour: 24.0,
+            target_soc: 1.0,
+        });
+    }
+
+    #[test]
+    fn ev_set_ready_by_invalid() {
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: -1.0,
+            target_soc: 0.8,
+        });
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: 25.0,
+            target_soc: 0.8,
+        });
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: 7.0,
+            target_soc: -0.1,
+        });
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: 7.0,
+            target_soc: 1.5,
+        });
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: f64::NAN,
+            target_soc: 0.8,
+        });
+        assert_err(&ControlSignal::EvSetReadyBy {
+            departure_hour: 7.0,
+            target_soc: f64::NAN,
+        });
+    }
+
+    #[test]
+    fn event_delay_valid() {
+        assert_ok(&ControlSignal::EventDelay { delay_s: 300.0 });
+        assert_ok(&ControlSignal::EventDelay { delay_s: 0.0 });
+    }
+
+    #[test]
+    fn event_delay_invalid() {
+        assert_err(&ControlSignal::EventDelay { delay_s: -1.0 });
+        assert_err(&ControlSignal::EventDelay { delay_s: f64::NAN });
+    }
+
+    #[test]
+    fn ideal_capacity_valid() {
+        assert_ok(&ControlSignal::IdealCapacity {
+            capacity_w: 3500.0,
+            degraded: false,
+        });
+        assert_ok(&ControlSignal::IdealCapacity {
+            capacity_w: 0.0,
+            degraded: true,
+        });
+    }
+
+    #[test]
+    fn ideal_capacity_invalid() {
+        assert_err(&ControlSignal::IdealCapacity {
+            capacity_w: f64::NAN,
+            degraded: false,
+        });
+        assert_err(&ControlSignal::IdealCapacity {
+            capacity_w: f64::INFINITY,
+            degraded: false,
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_delta_valid() {
+        assert_ok(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(2.0),
+            cooling_delta_c: Some(-2.0),
+        });
+        assert_ok(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(-20.0),
+            cooling_delta_c: Some(20.0),
+        });
+        assert_ok(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: None,
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_delta_out_of_range() {
+        assert_err(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(25.0),
+            cooling_delta_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(-25.0),
+            cooling_delta_c: None,
+        });
+        assert_err(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: Some(30.0),
+        });
+        assert_err(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(f64::NAN),
+            cooling_delta_c: None,
+        });
+    }
+
+    #[test]
+    fn reactive_setpoint_nan_rejected() {
+        assert_err(&ControlSignal::ReactiveSetpoint { kvar: f64::NAN });
+        assert_err(&ControlSignal::ReactiveSetpoint {
+            kvar: f64::INFINITY,
+        });
+    }
+
+    #[test]
+    fn reactive_setpoint_valid() {
+        assert_ok(&ControlSignal::ReactiveSetpoint { kvar: 5.0 });
+        assert_ok(&ControlSignal::ReactiveSetpoint { kvar: -3.0 });
+    }
+
+    #[test]
+    fn demand_response_duration_invalid() {
+        assert_err(&ControlSignal::DemandResponse {
+            level: DRLevel::Moderate,
+            duration_s: Some(-1.0),
+        });
+        assert_err(&ControlSignal::DemandResponse {
+            level: DRLevel::Moderate,
+            duration_s: Some(f64::NAN),
+        });
+    }
+
+    #[test]
+    fn demand_response_valid() {
+        assert_ok(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        });
+        assert_ok(&ControlSignal::DemandResponse {
+            level: DRLevel::Normal,
+            duration_s: None,
+        });
+    }
+
+    #[test]
+    fn non_numeric_signals_always_valid() {
+        assert_ok(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        });
+        assert_ok(&ControlSignal::GridConnect { connected: true });
+        assert_ok(&ControlSignal::SelfConsumption {
+            enabled: true,
+            solar_only_charging: false,
+        });
+        assert_ok(&ControlSignal::InverterPriorityMode {
+            priority: InverterPriority::Watt,
+        });
+        assert_ok(&ControlSignal::IdealCapacityModeOverride {
+            mode: IdealCapacityMode::On,
+        });
+        assert_ok(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::HomePluggedIn,
+        });
+        assert_ok(&ControlSignal::ProtocolNative {
+            protocol: ProtocolId(1),
+            payload: vec![1, 2, 3],
+        });
     }
 }

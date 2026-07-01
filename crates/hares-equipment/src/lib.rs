@@ -21,11 +21,36 @@ pub mod water_heater;
 
 use std::time::Duration;
 
+#[cfg(feature = "observe")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
     EquipmentDescriptor, GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration,
     PortSlots, ensure_signal_supported,
 };
+
+#[cfg(feature = "observe")]
+static REJECTED_SIGNAL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "observe")]
+static WARNED_REJECTED_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+/// Returns the total count of control signals rejected for numeric bounds
+/// violations across all equipment types since program start.
+///
+/// Only available when the `observe` feature is enabled; returns `0` otherwise.
+pub fn control_signal_rejected_count() -> u64 {
+    #[cfg(feature = "observe")]
+    {
+        REJECTED_SIGNAL_COUNT.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "observe"))]
+    {
+        0
+    }
+}
+
 /// Configuration seed for auto-registering an actor for this equipment.
 /// Equipment that wants a built-in actor overrides `actor_seed()`.
 #[derive(Clone, Debug)]
@@ -144,8 +169,40 @@ pub trait Equipment: Send + Sync {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<()>;
 
     /// Capability-gated control dispatch boundary.
+    ///
+    /// Validates capability flags and numeric bounds before dispatching to
+    /// equipment-specific `apply_control_unchecked`.  Signals that fail
+    /// numeric bounds are rejected with a typed error — no silent clamping.
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
+        if let Err(ref e) = signal.validate_numeric_bounds() {
+            #[cfg(feature = "observe")]
+            {
+                REJECTED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+                if WARNED_REJECTED_SIGNAL
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    tracing::warn!(
+                        signal = ?signal,
+                        reason = %e,
+                        equipment = %self.descriptor().name,
+                        "control_signal_rejected: numeric bounds validation failed (further rejections will be counted but not logged)"
+                    );
+                }
+            }
+            return Err(e.clone());
+        }
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Belt-and-suspenders: re-verify that numeric bounds pass before
+            // dispatching to equipment-specific logic.  A fire here means
+            // validate_numeric_bounds is non-deterministic (should never happen).
+            debug_assert!(
+                signal.validate_numeric_bounds().is_ok(),
+                "invariant violation: numeric bounds validation failed for {signal:?}"
+            );
+        }
         self.apply_control_unchecked(signal)
     }
 
@@ -986,6 +1043,151 @@ mod tests {
         assert!(
             result.is_err(),
             "save_state on equipment with a failing Serialize impl should return Err, not panic"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Numeric bounds validation tests via the Equipment trait boundary
+    // ---------------------------------------------------------------
+
+    /// Create a MockEquipment that declares all capabilities.
+    fn mock_with_all_caps() -> MockEquipment {
+        MockEquipment::new(ControlCapabilities::all())
+    }
+
+    #[test]
+    fn apply_control_rejects_negative_load_fraction() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::LoadFraction { fraction: -0.5 };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("LoadFraction"),
+            "expected LoadFraction error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_infinite_power_setpoint() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::PowerSetpoint {
+            active_power_kw: f64::INFINITY,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("PowerSetpoint"),
+            "expected PowerSetpoint error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_nan_ideal_capacity() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::IdealCapacity {
+            capacity_w: f64::NAN,
+            degraded: false,
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("IdealCapacity"),
+            "expected IdealCapacity error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_negative_power_limit() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::PowerLimit {
+            max_power_kw: -5.0,
+            ramp_rate_kw_per_s: None,
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("PowerLimit"),
+            "expected PowerLimit error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_out_of_range_soc_target() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::SOCTarget {
+            target_soc: -0.5,
+            min_soc: None,
+            max_soc: None,
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("SOCTarget"),
+            "expected SOCTarget error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_duty_cycle_two_hundred_percent() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::DutyCycle {
+            on_fraction: 2.0,
+            period_s: None,
+            component: None,
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("DutyCycle"),
+            "expected DutyCycle error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_out_of_range_curtailment_percent() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::CurtailmentPercent { percent: 150.0 };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("CurtailmentPercent"),
+            "expected CurtailmentPercent error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_invalid_thermal_setpoint_deadband_collision() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(22.0),
+            cooling_setpoint_c: Some(23.0),
+            deadband_c: Some(2.0),
+        };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("ThermalSetpoint"),
+            "expected ThermalSetpoint error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_control_accepts_valid_thermal_setpoint() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: Some(1.0),
+        };
+        assert!(
+            eq.apply_control(&signal).is_ok(),
+            "expected valid ThermalSetpoint to be accepted"
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_negative_event_delay() {
+        let mut eq = mock_with_all_caps();
+        let signal = ControlSignal::EventDelay { delay_s: -60.0 };
+        let err = eq.apply_control(&signal).unwrap_err();
+        assert!(
+            err.to_string().contains("EventDelay"),
+            "expected EventDelay error, got: {err}"
         );
     }
 }

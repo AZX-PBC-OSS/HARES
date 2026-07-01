@@ -3012,7 +3012,9 @@ mod tests {
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
-        eq.apply_control(&ControlSignal::LoadFraction { fraction: -0.5 })
+        // Negative load fractions are rejected centrally; 0.0 means "off" and
+        // is the correct way to zero the load through the control interface.
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.0 })
             .unwrap();
 
         let mut ports = PortSlots {
@@ -3020,11 +3022,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(
-            ports.electrical.net_active_w(),
-            0.0,
-            "negative load fraction must be clamped to 0, producing zero power"
-        );
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
     }
 
     #[test]

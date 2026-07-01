@@ -245,7 +245,7 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
 pub fn apply_heating_control_unchecked(
     hvac: &mut HvacEquipment,
     signal: &ControlSignal,
-    equipment_name: &str,
+    _equipment_name: &str,
 ) -> crate::Result<()> {
     hvac.apply_control_signal(signal)?;
     if let ControlSignal::ThermalSetpoint {
@@ -253,11 +253,6 @@ pub fn apply_heating_control_unchecked(
         ..
     } = signal
     {
-        if !deadband_c.is_finite() || *deadband_c < 0.0 {
-            return Err(HaresError::Control(format!(
-                "invalid deadband_c for {equipment_name}: {deadband_c}"
-            )));
-        }
         hvac.thermostat_fsm.thermostat.hysteresis_c = *deadband_c;
     }
     Ok(())

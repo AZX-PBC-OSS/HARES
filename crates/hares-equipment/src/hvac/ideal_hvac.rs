@@ -929,7 +929,7 @@ impl Equipment for IdealHvac {
                 self.ideal_capacity_mode = *mode;
             }
             ControlSignal::LoadFraction { fraction } => {
-                self.load_fraction = fraction.clamp(0.0, 1.0);
+                self.load_fraction = *fraction;
                 if *fraction <= 0.0 {
                     if let Some(sim_time) = self.last_sim_time {
                         self.set_mode(ThermostatMode::Deadband, sim_time);

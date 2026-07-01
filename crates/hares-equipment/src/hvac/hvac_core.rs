@@ -752,7 +752,7 @@ impl HvacEquipment {
             return Ok(());
         }
         if let ControlSignal::MaxCapacityFraction { fraction } = signal {
-            self.control.max_capacity_fraction = fraction.clamp(0.0, 1.0);
+            self.control.max_capacity_fraction = *fraction;
         }
         Ok(())
     }

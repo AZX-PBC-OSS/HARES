@@ -1664,7 +1664,7 @@ impl Equipment for Battery {
                 self.soc_target = None;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                self.external_power_limit_kw = Some(max_power_kw.max(0.0));
+                self.external_power_limit_kw = Some(*max_power_kw);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;
@@ -5052,20 +5052,17 @@ mod tests {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
 
-        // min_soc=0.8, target=0.3 → target clamped to 0.8 (min)
-        // but 0.8 == 0.8 violates strict ordering → reject.
+        // min_soc=0.8, target=0.3 → target_soc not in (min, max) → rejected centrally.
         let result = bat.apply_control(&ControlSignal::SOCTarget {
             target_soc: 0.3,
             min_soc: Some(0.8),
             max_soc: Some(0.9),
         });
-        // After clamping target=0.3 to [0.8, 0.9]: target=0.8
-        // 0.8 <= 0.8 → invalid ordering → rejected.
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(
-            msg.contains("ordering invalid"),
-            "expected ordering error, got: {msg}"
+            msg.contains("SOCTarget"),
+            "expected SOCTarget rejection, got: {msg}"
         );
     }
 

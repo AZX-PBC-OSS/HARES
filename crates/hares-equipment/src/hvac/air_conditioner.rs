@@ -1592,27 +1592,17 @@ impl CoolingCore {
             ControlSignal::ThermalSetpoint { deadband_c, .. } => {
                 self.hvac.apply_control_signal(signal)?;
                 if let Some(db) = deadband_c {
-                    if !db.is_finite() || *db < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "invalid deadband_c for {}: {db}",
-                            self.descriptor.equipment_type
-                        )));
-                    }
                     self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
                 }
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
-                self.ctrl_duty_cycle = on_fraction.clamp(0.0, 1.0);
+                self.ctrl_duty_cycle = *on_fraction;
             }
             ControlSignal::LoadFraction { fraction } => {
-                self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
+                self.ctrl_load_fraction = *fraction;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                self.ctrl_power_limit_kw = if *max_power_kw >= 0.0 {
-                    *max_power_kw
-                } else {
-                    f64::INFINITY
-                };
+                self.ctrl_power_limit_kw = *max_power_kw;
             }
             ControlSignal::ModeOverride { mode } => {
                 self.ctrl_mode_override = Some(*mode);
@@ -1626,12 +1616,6 @@ impl CoolingCore {
                 self.ideal_capacity_w = *capacity_w;
             }
             ControlSignal::MaxCapacityFraction { fraction } => {
-                if !fraction.is_finite() || !(0.0..=1.0).contains(fraction) {
-                    return Err(HaresError::Control(format!(
-                        "invalid max capacity fraction for {}: {fraction}",
-                        self.descriptor.equipment_type
-                    )));
-                }
                 self.hvac.control.max_capacity_fraction = *fraction;
             }
             _ => {

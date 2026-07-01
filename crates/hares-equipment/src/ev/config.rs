@@ -149,17 +149,6 @@ pub(super) fn vehicle_number_from_config(config: &EquipmentConfig, capacity_kwh:
     }
 }
 
-pub(super) fn validate_optional_hour(field_name: &str, value: Option<f64>) -> crate::Result<()> {
-    if let Some(v) = value
-        && (!v.is_finite() || !(0.0..24.0).contains(&v))
-    {
-        return Err(HaresError::Equipment(format!(
-            "EV {field_name} must be finite and within [0, 24)"
-        )));
-    }
-    Ok(())
-}
-
 /// Typed configuration for an electric vehicle charger.
 ///
 /// All power values are in kW, energy in kWh, temperatures in °C.
