@@ -435,3 +435,86 @@ class TestStandaloneSizePvSystem:
             usable, target_kw=8.0, inverter_kw_ac=5.0, max_dc_ac_ratio=1.2
         )
         assert with_inv.capacity_kw <= no_inv.capacity_kw
+
+    def test_nec_100a_panel_clamps_to_backfeed_limit(self):
+        """100 A main panel → ~4.8 kW AC backfeed limit → system clamped."""
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        # Without electrical limit, target 10 kW is achievable.
+        no_limit = hares.size_pv_system(usable, target_kw=10.0)
+        # With 100 A panel, backfeed = 100 × 1.2 − 100 = 20 A → 4.8 kW AC.
+        limited = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=100)
+        assert limited.capacity_kw < no_limit.capacity_kw, (
+            f"100 A panel ({limited.capacity_kw:.2f} kW) must be less than "
+            f"unconstrained ({no_limit.capacity_kw:.2f} kW)"
+        )
+        # ~4.8 kW AC → ~5.6 kW DC at 14% losses, 1.0 DC:AC ratio.
+        assert limited.capacity_kw <= 6.0, (
+            f"100 A panel must limit to ≤ 6 kW DC, got {limited.capacity_kw:.2f}"
+        )
+
+    def test_nec_200a_panel_allows_larger_system(self):
+        """200 A main panel → ~9.6 kW AC backfeed → larger capacity than 100 A."""
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        result_100a = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=100)
+        result_200a = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=200)
+        assert result_200a.capacity_kw > result_100a.capacity_kw, (
+            f"200 A panel ({result_200a.capacity_kw:.2f} kW) should allow more "
+            f"than 100 A panel ({result_100a.capacity_kw:.2f} kW)"
+        )
+
+    def test_nec_result_exposes_electrical_constraint_fields(self):
+        """PvSizingResult exposes max_backfeed_amps, max_ac_kw, and
+        electrical_constraint_binding."""
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        result = hares.size_pv_system(
+            usable, target_kw=10.0, main_panel_ampacity=100
+        )
+        assert result.max_backfeed_amps == 20.0
+        assert result.max_ac_kw == 4.8
+        assert result.electrical_constraint_binding is True
+
+    def test_no_ampacity_fields_are_none(self):
+        """Without main_panel_ampacity, electrical fields are None and
+        constraint is not binding."""
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        result = hares.size_pv_system(usable, target_kw=10.0)
+        assert result.max_backfeed_amps is None
+        assert result.max_ac_kw is None
+        assert result.electrical_constraint_binding is False
+
+
+class TestRequiredMainPanelAmpacity:
+    """required_main_panel_ampacity — reverse NEC 120% service sizing."""
+
+    def test_4_8kw_needs_100a(self):
+        assert hares.required_main_panel_ampacity(4.8) == 100
+
+    def test_9_6kw_needs_200a(self):
+        assert hares.required_main_panel_ampacity(9.6) == 200
+
+    def test_5kw_needs_125a(self):
+        assert hares.required_main_panel_ampacity(5.0) == 125
+
+    def test_explicit_breaker(self):
+        assert hares.required_main_panel_ampacity(10.0, main_breaker_amps=150) == 200
+
+    def test_rounds_up_to_nearest_standard(self):
+        # 4.81 kW → 20.04 A backfeed → busbar ≥ 100.2 → 125
+        assert hares.required_main_panel_ampacity(4.81) == 125
+        # 9.61 kW → 40.04 A → busbar ≥ 200.2 → 225
+        assert hares.required_main_panel_ampacity(9.61) == 225
+
+    def test_saturates_at_400(self):
+        assert hares.required_main_panel_ampacity(100.0) == 400

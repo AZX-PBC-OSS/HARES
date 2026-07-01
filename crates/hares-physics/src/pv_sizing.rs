@@ -86,7 +86,12 @@ pub struct PvSizingResult {
     pub system_losses_fraction: f64,
     pub max_roof_capacity_kw: f64,
     pub panel_watts: u32,
+    pub electrical_constraint_binding: bool,
+    pub max_ac_kw: Option<f64>,
+    pub max_backfeed_amps: Option<f64>,
 }
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -192,6 +197,39 @@ const EAST_WEST_GCR: f64 = 0.85;
 ///   PVSC, pp. 815–820. §Simulation setup: 10° tilt used for all parametric
 ///   GCR studies of east-west sawtooth layouts.
 const EAST_WEST_TILT_DEG: f64 = 10.0;
+
+/// NEC 705.12(B)(2)(3)(b): sum of overcurrent device ampere ratings supplying
+/// power to a busbar or conductor shall not exceed 120% of the busbar rating.
+/// For a residential main panel, the backfeed limit is:
+///   max_backfeed_amps = main_panel_ampacity × 1.2 − main_breaker_amps
+/// where the main breaker is typically equal to the panel ampacity.
+/// NFPA 70 (NEC 2023) Article 705.12(B)(2)(3)(b) — Interconnected Electric
+/// Power Production Sources. The 120% factor dates to NEC 2014 §705.12(D)(2)
+/// with the load-side connection formula unchanged through NEC 2023.
+const NEC_BUSBAR_BACKFEED_RATIO: f64 = 1.2;
+
+/// Busbar sizing multiplier for the reverse NEC computation.
+/// When main breaker = panel ampacity: busbar ≥ target_backfeed / 0.2.
+/// Equivalent to: busbar ≥ target_backfeed × 5.0.
+/// Using multiplication avoids the f64 representation error in 1.2 − 1.0
+/// (catastrophic cancellation gives 0.19999999999999996 instead of 0.2,
+/// skewing ceil() upward by one standard panel size).
+const NEC_BUSBAR_REVERSE_MULTIPLIER: f64 = 5.0;
+
+/// Nominal US residential split-phase voltage for NEC backfeed calculations.
+/// NEC 705.12 operates on current (amps), not power; the 240 V conversion
+/// provides the AC-side power constraint. Split-phase 240/120 V is the
+/// nearly-universal US residential service (ANSI C84.1 Range B: 228–252 V).
+/// HARES uses the nominal 240 V per NEC standard assumptions for busbar
+/// backfeed calculations.
+const RESIDENTIAL_SPLIT_PHASE_VOLTAGE: f64 = 240.0;
+
+/// Throttle the "no main_panel_ampacity" warning to once per process.
+/// At fleet scale (thousands of dwellings), `size_pv_system` may be called
+/// once per dwelling. Without throttling, every dwelling without ampacity
+/// data emits an identical warning. This AtomicBool gate follows the
+/// same pattern as `hares-equipment::pv::lut` NN fallback warning.
+static NO_AMPACITY_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Per-shape usable fraction of gross roof area.
 fn usable_fraction(shape: RoofShape) -> f64 {
@@ -892,6 +930,19 @@ pub fn compute_usable_area(
 /// DC:AC ratios are 1.1–1.3 (NREL SAM defaults to 1.2; EnergyPlus PVWatts
 /// IDD V26-1-0 ElectricLoadCenter:Inverter:PVWatts, field N1 (DC to AC Size
 /// Ratio), default = 1.10).
+///
+/// When `main_panel_ampacity` is provided, the NEC 705.12(B)(2)(3)(b) 120%
+/// busbar backfeed rule constrains the AC-side output:
+///
+/// ```text
+///   max_backfeed_amps = main_panel_ampacity × 1.2 − main_breaker_amps
+///   max_ac_kw = max_backfeed_amps × 240 V / 1000
+/// ```
+///
+/// The main breaker defaults to the panel ampacity when `main_breaker_ampacity`
+/// is `None` (overcurrent protection sized to busbar rating in typical
+/// residential installations). Callers may override via `main_breaker_ampacity`
+/// for non-typical configurations (e.g. 200 A panel with 150 A main breaker).
 // Why: the parameter count reflects the complete set of tunable PV sizing
 // inputs; constructing a builder/params type would add indirection for no
 // benefit at this call site.
@@ -906,6 +957,8 @@ pub fn size_pv_system(
     panel_area_m2: Option<f64>,
     inverter_kw_ac: Option<f64>,
     max_dc_ac_ratio: Option<f64>,
+    main_panel_ampacity: Option<u32>,
+    main_breaker_ampacity: Option<u32>,
 ) -> Result<PvSizingResult, PvSizingError> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
@@ -954,6 +1007,85 @@ pub fn size_pv_system(
         clamped_kw = clamped_kw.min(max_dc_from_inverter);
     }
 
+    // NEC 705.12(B)(2)(3)(b) 120% busbar backfeed rule.
+    // max_backfeed_amps = main_panel_ampacity × 1.2 − main_breaker_amps.
+    // The main breaker defaults to the panel ampacity when not provided
+    // (overcurrent protection sized to the busbar rating in typical
+    // residential installations). The AC-side limit is converted to DC kW
+    // via the DC:AC ratio and system loss factor to produce an equivalent
+    // DC-side capacity cap.
+    let (electrical_constraint_binding, result_max_ac_kw, result_max_backfeed_amps) = if let Some(
+        ampacity,
+    ) =
+        main_panel_ampacity
+    {
+        if ampacity == 0 {
+            return Err(PvSizingError::InvalidMainPanelAmpacity { ampacity });
+        }
+        let breaker_amps = main_breaker_ampacity.unwrap_or(ampacity) as f64;
+        let max_backfeed_amps =
+            (ampacity as f64 * NEC_BUSBAR_BACKFEED_RATIO - breaker_amps).max(0.0);
+        let max_ac_kw = max_backfeed_amps * RESIDENTIAL_SPLIT_PHASE_VOLTAGE / 1000.0;
+
+        // DC:AC ratio for the AC→DC conversion. Uses the caller-provided
+        // max_dc_ac_ratio (inverter nameplate) if available, falling back to
+        // 1.0 — no oversizing — which is conservative: it assumes each DC kW
+        // produces 1.0 AC kW and thus the electrical limit is most restrictive.
+        let dc_ac_ratio = max_dc_ac_ratio.unwrap_or(1.0);
+        // Effective DC capacity after losses: DC kW × (1 − losses) = AC kW
+        // divided by DC:AC ratio accounts for inverter oversizing.
+        let est_ac_kw = clamped_kw * (1.0 - system_losses) / dc_ac_ratio;
+        let ac_limited_kw = est_ac_kw.min(max_ac_kw);
+        // Convert limited AC kW back to equivalent DC kW for panelisation.
+        let dc_limited_kw = ac_limited_kw * dc_ac_ratio / (1.0 - system_losses);
+        let is_binding = dc_limited_kw < clamped_kw - 0.001;
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                pv_main_panel_ampacity = ampacity,
+                pv_main_breaker_ampacity = main_breaker_ampacity,
+                pv_max_backfeed_amps = max_backfeed_amps,
+                pv_max_ac_kw = max_ac_kw,
+                pv_dc_ac_ratio_for_nec = dc_ac_ratio,
+                pv_est_ac_kw = est_ac_kw,
+                pv_ac_limited_kw = ac_limited_kw,
+                pv_dc_limited_kw = dc_limited_kw,
+                pv_electrical_constraint_binding = is_binding,
+                "NEC 120% busbar backfeed electrical constraint"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                max_ac_kw >= 0.0,
+                "max_ac_kw must be non-negative, got {max_ac_kw}"
+            );
+            let effective_dc_limit = max_ac_kw * dc_ac_ratio / (1.0 - system_losses);
+            assert!(
+                dc_limited_kw <= effective_dc_limit + 0.01,
+                "dc_limited_kw {dc_limited_kw:.4} exceeds effective DC limit {effective_dc_limit:.4} from max_ac_kw={max_ac_kw}"
+            );
+        }
+
+        clamped_kw = dc_limited_kw;
+        (is_binding, Some(max_ac_kw), Some(max_backfeed_amps))
+    } else {
+        // No main panel ampacity provided — skip the electrical-code check.
+        // Emit a throttled warning (once per process) to avoid log spam at
+        // fleet scale where thousands of dwellings may lack ampacity data.
+        if NO_AMPACITY_WARNED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            tracing::warn!(
+                "PV sizing proceeding without electrical code check — no main_panel_ampacity provided"
+            );
+        }
+        (false, None, None)
+    };
+
     let num_panels =
         ((clamped_kw * 1000.0 / panel_watts as f64).ceil() as u32).min(usable.max_panels);
     let capacity_kw = (num_panels as f64) * (panel_watts as f64) / 1000.0;
@@ -981,6 +1113,9 @@ pub fn size_pv_system(
             pv_inverter_kw_ac = inverter_kw_ac,
             pv_max_dc_ac_ratio = max_dc_ac_ratio,
             pv_effective_dc_ac_ratio = effective_dc_ac_ratio,
+            pv_main_panel_ampacity = main_panel_ampacity,
+            pv_main_breaker_ampacity = main_breaker_ampacity,
+            pv_electrical_constraint_binding = electrical_constraint_binding,
             pv_num_panels = num_panels,
             pv_capacity_kw = capacity_kw,
             pv_collector_area_m2 = collector_area_m2,
@@ -997,7 +1132,53 @@ pub fn size_pv_system(
         system_losses_fraction: system_losses,
         max_roof_capacity_kw: usable.max_capacity_kw,
         panel_watts,
+        electrical_constraint_binding,
+        max_ac_kw: result_max_ac_kw,
+        max_backfeed_amps: result_max_backfeed_amps,
     })
+}
+
+/// Standard US residential main panel ampacity ratings, in ascending order.
+/// IEC 61439-1 / NEC 240.6 standard overcurrent device ratings for
+/// residential services.
+const STANDARD_PANEL_AMPACITIES: &[u32] = &[100, 125, 150, 200, 225, 400];
+
+/// Compute the minimum main panel ampacity required to support a given
+/// PV system AC output under the NEC 120% busbar backfeed rule.
+///
+/// This is the inverse of the electrical constraint applied in
+/// `size_pv_system`: given a desired AC-side PV output, what is the
+/// smallest standard main panel that can legally accommodate it?
+///
+/// NEC 705.12(B)(2)(3)(b) (NFPA 70, NEC 2023) — Interconnected Electric
+/// Power Production Sources: sum of overcurrent device ratings supplying
+/// power to a busbar shall not exceed 120% of the busbar rating.
+/// The backfeed limit is: max_backfeed = busbar × 1.2 − main_breaker.
+///
+/// When `main_breaker_amps` is `None`, the main breaker is assumed to
+/// match the panel ampacity (the standard residential configuration).
+/// In this case the formula simplifies to: busbar ≥ target_backfeed / 0.2.
+///
+/// When `main_breaker_amps` is explicitly provided (non-standard
+/// configuration, e.g. 200 A panel with 150 A main breaker), the full
+/// formula is used: busbar ≥ (target_backfeed + breaker) / 1.2.
+///
+/// Rounds up to the nearest standard residential panel rating. If the
+/// required ampacity exceeds the largest standard size, the largest
+/// standard size is returned (callers should review feasibility).
+pub fn required_main_panel_ampacity(target_ac_kw: f64, main_breaker_amps: Option<u32>) -> u32 {
+    let target_backfeed_amps = target_ac_kw * 1000.0 / RESIDENTIAL_SPLIT_PHASE_VOLTAGE;
+    let min_busbar_amps = if let Some(breaker) = main_breaker_amps {
+        (target_backfeed_amps + breaker as f64) / NEC_BUSBAR_BACKFEED_RATIO
+    } else {
+        target_backfeed_amps * NEC_BUSBAR_REVERSE_MULTIPLIER
+    };
+    let min_busbar_u32 = (min_busbar_amps.ceil() as u32).max(1);
+    STANDARD_PANEL_AMPACITIES
+        .iter()
+        .copied()
+        .find(|&r| r >= min_busbar_u32)
+        .unwrap_or(STANDARD_PANEL_AMPACITIES[STANDARD_PANEL_AMPACITIES.len() - 1])
 }
 
 /// Enumerate all viable PV candidate placements, one per non-north-facing
@@ -1227,6 +1408,8 @@ pub enum PvSizingError {
     AllNorthFacing,
     #[error("roof capacity {available_kw:.1} kW below minimum {min_kw} kW")]
     InsufficientRoof { available_kw: f64, min_kw: f64 },
+    #[error("main panel ampacity must be positive, got {ampacity} A")]
+    InvalidMainPanelAmpacity { ampacity: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,8 +1999,10 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result =
-            size_pv_system(&usable, 10.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+        let result = size_pv_system(
+            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
         assert!(result.capacity_kw <= usable.max_capacity_kw + 0.01);
         assert!(result.num_panels <= usable.max_panels);
     }
@@ -1833,7 +2018,9 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(&usable, 6.0, 2.0, 14.0, None, None, None, None, None);
+        let result = size_pv_system(
+            &usable, 6.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        );
         assert!(result.is_err());
     }
 
@@ -1852,8 +2039,10 @@ mod tests {
         };
 
         // Default 440 W panel: ceil(10000/440)=23 panels → 10.12 kW
-        let result_default =
-            size_pv_system(&usable, 10.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+        let result_default = size_pv_system(
+            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
 
         // 500 W panel: ceil(10000/500)=20 panels → 10.0 kW
         // Fewer panels for the same target because each panel produces more.
@@ -1865,6 +2054,8 @@ mod tests {
             None,
             Some(500),
             Some(2.2),
+            None,
+            None,
             None,
             None,
         )
@@ -1902,8 +2093,10 @@ mod tests {
         };
 
         // Without inverter constraint: target 12 kW → 28 panels × 440W = 12.32 kW
-        let result_no_inverter =
-            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+        let result_no_inverter = size_pv_system(
+            &usable, 12.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
 
         // With inverter: 7.6 kW AC × 1.2 DC:AC ratio → max 9.12 kW DC
         // Target 12 kW should be clamped to 9.12 kW
@@ -1917,6 +2110,8 @@ mod tests {
             None,
             Some(7.6),
             Some(1.2),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1957,18 +2152,297 @@ mod tests {
         };
 
         // Only inverter_kw_ac, no dc_ac_ratio → no inverter clamp applied
-        let result_ac_only =
-            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, Some(7.6), None).unwrap();
+        let result_ac_only = size_pv_system(
+            &usable,
+            12.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            Some(7.6),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Neither provided
-        let result_none =
-            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+        let result_none = size_pv_system(
+            &usable, 12.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
 
         assert_eq!(
             result_ac_only.capacity_kw, result_none.capacity_kw,
             "inverter_kw_ac alone (no ratio) must not clamp capacity"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // NEC 120% busbar backfeed electrical code constraint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nec_zero_ampacity_returns_typed_error() {
+        // main_panel_ampacity = Some(0) is invalid input (not an internal
+        // invariant), must return a typed error — not panic in debug builds.
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let result = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            None,
+        );
+        assert!(result.is_err());
+        match result {
+            Err(PvSizingError::InvalidMainPanelAmpacity { ampacity }) => {
+                assert_eq!(ampacity, 0);
+            }
+            other => panic!("expected InvalidMainPanelAmpacity error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nec_120_pct_100a_panel_clamps_to_backfeed_limit() {
+        // 100 A main panel: max_backfeed = 100 × 1.2 − 100 = 20 A
+        // max_ac_kw = 20 × 240 / 1000 = 4.8 kW
+        // With default 14% losses, DC:AC = 1.0:
+        //   dc_limited = 4.8 × 1.0 / 0.86 ≈ 5.58 kW DC
+        // ceil(5.58 × 1000 / 440) = ceil(12.68) = 13 panels → 5.72 kW
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let result = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+        )
+        .unwrap();
+        // 100 A panel → ~4.8 kW AC → ~5.6 kW DC, should be well below 10 kW target
+        assert!(
+            result.capacity_kw < 7.0,
+            "100 A panel should limit capacity below ~7 kW DC, got {:.2}",
+            result.capacity_kw
+        );
+        assert!(
+            result.capacity_kw <= 6.0,
+            "100 A panel (20 A backfeed, ~4.8 kW AC, ~5.6 kW DC) should produce ≤ 6 kW, got {:.2}",
+            result.capacity_kw
+        );
+    }
+
+    #[test]
+    fn nec_120_pct_200a_panel_allows_larger_system() {
+        // 200 A main panel: max_backfeed = 200 × 1.2 − 200 = 40 A
+        // max_ac_kw = 40 × 240 / 1000 = 9.6 kW
+        // A 10 kW target should be clamped to ~9.6 kW AC → ~11.2 kW DC
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let result_100a = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+        )
+        .unwrap();
+        let result_200a = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(200),
+            None,
+        )
+        .unwrap();
+        assert!(
+            result_200a.capacity_kw > result_100a.capacity_kw,
+            "200 A panel ({:.2} kW) should allow larger system than 100 A panel ({:.2} kW)",
+            result_200a.capacity_kw,
+            result_100a.capacity_kw
+        );
+    }
+
+    #[test]
+    fn nec_no_main_panel_ampacity_no_electrical_limit() {
+        // When main_panel_ampacity is None, no electrical constraint is applied.
+        // A 10 kW target with generous roof capacity should not be limited.
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let result = size_pv_system(
+            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+        // Without electrical limit, target 10 kW should be achievable.
+        // ceil(10 × 1000 / 440) = 23 panels → 10.12 kW
+        assert!(
+            (result.capacity_kw - 10.12).abs() < 0.01,
+            "without electrical limit, capacity should match target, got {:.2}",
+            result.capacity_kw
+        );
+    }
+
+    #[test]
+    fn nec_100a_small_panel_clamps_to_near_zero() {
+        // 60 A main panel: max_backfeed = 60 × 1.2 − 60 = 12 A
+        // max_ac_kw = 12 × 240 / 1000 = 2.88 kW AC → ~3.35 kW DC
+        // A 10 kW target should be heavily clamped.
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let result = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(60),
+            None,
+        )
+        .unwrap();
+        assert!(
+            result.capacity_kw < 4.0,
+            "60 A panel should limit capacity below 4 kW DC, got {:.2}",
+            result.capacity_kw
+        );
+        assert!(
+            result.num_panels > 0,
+            "should still have at least one panel"
+        );
+    }
+
+    #[test]
+    fn nec_result_exposes_electrical_constraint_fields() {
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 100.0,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+        let with_elec = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+        )
+        .unwrap();
+        assert_eq!(with_elec.max_ac_kw, Some(4.8));
+        assert_eq!(with_elec.max_backfeed_amps, Some(20.0));
+        assert!(with_elec.electrical_constraint_binding);
+
+        let without = size_pv_system(
+            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+        assert_eq!(without.max_ac_kw, None);
+        assert_eq!(without.max_backfeed_amps, None);
+        assert!(!without.electrical_constraint_binding);
+    }
+
+    #[test]
+    fn required_main_panel_ampacity_standard_cases() {
+        assert_eq!(required_main_panel_ampacity(4.8, None), 100);
+        assert_eq!(required_main_panel_ampacity(9.6, None), 200);
+        assert_eq!(required_main_panel_ampacity(5.0, None), 125);
+    }
+
+    #[test]
+    fn required_main_panel_ampacity_with_explicit_breaker() {
+        // 200 A panel, 150 A breaker: max_backfeed = 200×1.2−150 = 90 A → 21.6 kW
+        // For 10 kW AC target: breaker=150 → busbar ≥ (10000/240 + 150)/1.2
+        // = (41.67 + 150)/1.2 = 191.67/1.2 = 159.7 → next size = 200
+        assert_eq!(required_main_panel_ampacity(10.0, Some(150)), 200);
+    }
+
+    #[test]
+    fn required_main_panel_ampacity_rounds_up_to_nearest_standard() {
+        // 4.81 kW AC → 20.04 A backfeed → busbar ≥ 20.04 / 0.2 = 100.2 → 125
+        assert_eq!(required_main_panel_ampacity(4.81, None), 125);
+        // 9.61 kW AC → 40.04 A → busbar ≥ 200.2 → 225
+        assert_eq!(required_main_panel_ampacity(9.61, None), 225);
+    }
+
+    #[test]
+    fn required_main_panel_ampacity_saturates_at_largest_standard() {
+        assert_eq!(required_main_panel_ampacity(100.0, None), 400);
+    }
+
+    // -----------------------------------------------------------------------
 
     #[test]
     fn infer_flat_from_apartment() {
@@ -2923,8 +3397,20 @@ mod tests {
 
         // Result from size_pv_system with explicit losses must match explicit
         // vs None (default losses = 0.14).
-        let sizing_default =
-            size_pv_system(&result_440w, 5.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+        let sizing_default = size_pv_system(
+            &result_440w,
+            5.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let sizing_explicit = size_pv_system(
             &result_440w,
             5.0,
@@ -2933,6 +3419,8 @@ mod tests {
             Some(0.14),
             Some(440),
             Some(2.0),
+            None,
+            None,
             None,
             None,
         )

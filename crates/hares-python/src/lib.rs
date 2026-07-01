@@ -174,5 +174,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_pv_sizing::compute_usable_area, m)?)?;
     m.add_function(wrap_pyfunction!(py_pv_sizing::enumerate_pv_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_pv_sizing::size_pv_system, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_pv_sizing::required_main_panel_ampacity,
+        m
+    )?)?;
     Ok(())
 }

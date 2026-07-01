@@ -1505,13 +1505,23 @@ impl PyDwelling {
     ///         ``Some``, must be paired with ``inverter_kw_ac`` to apply
     ///         the inverter DC-capacity clamp. Typical residential values
     ///         are 1.1–1.3 (NREL SAM default = 1.2).
+    ///     main_panel_ampacity: Optional main electrical panel ampacity (amps).
+    ///         When provided, the NEC 120% busbar backfeed rule is applied to
+    ///         constrain the system to electrically-safe backfeed limits.
+    ///         For example, a 100 A panel limits backfeed to ~4.8 kW AC;
+    ///         a 200 A panel allows up to ~9.6 kW AC.
+    ///     main_breaker_ampacity: Optional main breaker ampacity (amps). When
+    ///         ``None`` (default), the main breaker is assumed to equal the
+    ///         main panel ampacity. Override this for non-typical
+    ///         configurations (e.g. 200 A panel with a 150 A main breaker).
     ///     roof_shape: Optional roof shape classification override. When
     ///         ``Some``, the provided shape is used directly and inference
     ///         is skipped. When ``None`` (default), roof shape is inferred
     ///         from building metadata.
     #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
         panel_watts=None, panel_area_m2=None, system_losses=None,
-        inverter_kw_ac=None, max_dc_ac_ratio=None, roof_shape=None))]
+        inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
+        main_breaker_ampacity=None, roof_shape=None))]
     // Why: PyO3 signature mirrors the full Rust API surface;
     // a builder type adds indirection at the binding layer.
     #[allow(clippy::too_many_arguments)]
@@ -1526,6 +1536,8 @@ impl PyDwelling {
         system_losses: Option<f64>,
         inverter_kw_ac: Option<f64>,
         max_dc_ac_ratio: Option<f64>,
+        main_panel_ampacity: Option<u32>,
+        main_breaker_ampacity: Option<u32>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
         let dwelling = self.acquire()?;
@@ -1561,6 +1573,8 @@ impl PyDwelling {
             system_losses,
             inverter_kw_ac,
             max_dc_ac_ratio,
+            main_panel_ampacity,
+            main_breaker_ampacity,
             dwelling.pv_panel_defaults(),
             user_override,
         )

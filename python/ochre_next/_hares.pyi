@@ -1909,6 +1909,12 @@ class PvSizingResult:
     def max_roof_capacity_kw(self) -> float: ...
     @property
     def panel_watts(self) -> int: ...
+    @property
+    def electrical_constraint_binding(self) -> bool: ...
+    @property
+    def max_ac_kw(self) -> float | None: ...
+    @property
+    def max_backfeed_amps(self) -> float | None: ...
 
 def compute_annual_diffuse_fraction(ghi: list[float], dhi: list[float]) -> float: ...
 def default_diffuse_fraction() -> float: ...
@@ -1952,7 +1958,15 @@ def size_pv_system(
     panel_area_m2: float | None = None,
     inverter_kw_ac: float | None = None,
     max_dc_ac_ratio: float | None = None,
+    main_panel_ampacity: int | None = None,
+    main_breaker_ampacity: int | None = None,
 ) -> PvSizingResult: ...
+
+def required_main_panel_ampacity(
+    target_ac_kw: float,
+    *,
+    main_breaker_amps: int | None = None,
+) -> int: ...
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -2402,6 +2416,8 @@ class Dwelling:
         target_kw: float,
         min_kw: float = ...,
         max_kw: float = ...,
+        main_panel_ampacity: int | None = ...,
+        main_breaker_ampacity: int | None = ...,
     ) -> PvSizingResult: ...
     def set_electric_tariff(
         self,

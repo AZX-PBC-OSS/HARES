@@ -127,6 +127,7 @@ from ._hares import (
     compute_usable_area,
     enumerate_pv_candidates,
     size_pv_system,
+    required_main_panel_ampacity,
 )
 
 # Iterator types
@@ -245,6 +246,7 @@ __all__ = [
     "compute_usable_area",
     "enumerate_pv_candidates",
     "size_pv_system",
+    "required_main_panel_ampacity",
     # Iterator types
     "TimestepsIter",
     # Gym / RL
