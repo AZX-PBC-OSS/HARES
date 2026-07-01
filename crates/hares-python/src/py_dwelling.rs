@@ -1498,12 +1498,20 @@ impl PyDwelling {
     ///         falls back to the compile-time default (2.1 m²).
     ///     system_losses: Optional system losses fraction override (0–1).
     ///         When ``None``, falls back to the compile-time default (0.14).
+    ///     inverter_kw_ac: Optional inverter AC power rating (kW). When
+    ///         ``Some``, must be paired with ``max_dc_ac_ratio`` to apply
+    ///         an inverter-side DC capacity clamp (max DC = AC × ratio).
+    ///     max_dc_ac_ratio: Optional maximum DC/AC oversizing ratio. When
+    ///         ``Some``, must be paired with ``inverter_kw_ac`` to apply
+    ///         the inverter DC-capacity clamp. Typical residential values
+    ///         are 1.1–1.3 (NREL SAM default = 1.2).
     ///     roof_shape: Optional roof shape classification override. When
     ///         ``Some``, the provided shape is used directly and inference
     ///         is skipped. When ``None`` (default), roof shape is inferred
     ///         from building metadata.
     #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
-        panel_watts=None, panel_area_m2=None, system_losses=None, roof_shape=None))]
+        panel_watts=None, panel_area_m2=None, system_losses=None,
+        inverter_kw_ac=None, max_dc_ac_ratio=None, roof_shape=None))]
     // Why: PyO3 signature mirrors the full Rust API surface;
     // a builder type adds indirection at the binding layer.
     #[allow(clippy::too_many_arguments)]
@@ -1516,6 +1524,8 @@ impl PyDwelling {
         panel_watts: Option<u32>,
         panel_area_m2: Option<f64>,
         system_losses: Option<f64>,
+        inverter_kw_ac: Option<f64>,
+        max_dc_ac_ratio: Option<f64>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
         let dwelling = self.acquire()?;
@@ -1549,6 +1559,8 @@ impl PyDwelling {
             panel_watts,
             panel_area_m2,
             system_losses,
+            inverter_kw_ac,
+            max_dc_ac_ratio,
             dwelling.pv_panel_defaults(),
             user_override,
         )

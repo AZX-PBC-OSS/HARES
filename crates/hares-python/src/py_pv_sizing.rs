@@ -374,6 +374,8 @@ pub(crate) fn size_pv_from_dwelling(
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
     system_losses: Option<f64>,
+    inverter_kw_ac: Option<f64>,
+    max_dc_ac_ratio: Option<f64>,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
     roof_shape_user_override: bool,
 ) -> Result<PyPvSizingResult, String> {
@@ -398,6 +400,8 @@ pub(crate) fn size_pv_from_dwelling(
         system_losses,
         panel_watts,
         panel_area_m2,
+        inverter_kw_ac,
+        max_dc_ac_ratio,
     )
     .map_err(|e| e.to_string())?;
     Ok(PyPvSizingResult { inner: result })
@@ -437,6 +441,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             &HashMap::new(),
             false,
         )
@@ -455,6 +461,8 @@ mod tests {
             Some(300),
             Some(1.6),
             Some(0.14),
+            None,
+            None,
             &HashMap::new(),
             false,
         )
@@ -562,6 +570,67 @@ mod tests {
         assert!(
             def_candidates[0].inner.max_capacity_kw > candidates[0].inner.max_capacity_kw,
             "440W default should yield higher capacity than 300W store panel"
+        );
+    }
+
+    #[test]
+    fn size_pv_inverter_clamp_through_binding() {
+        let roof = make_roof();
+
+        // No inverter constraint
+        let result_no_inv = size_pv_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            8.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+        )
+        .expect("no inverter");
+
+        // With inverter: 5.0 kW AC × 1.2 ratio → max 6.0 kW DC
+        let result_with_inv = size_pv_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            8.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            Some(5.0),
+            Some(1.2),
+            &HashMap::new(),
+            false,
+        )
+        .expect("with inverter");
+
+        // Inverter-limited capacity must be ≤ unconstrained capacity.
+        assert!(
+            result_with_inv.inner.capacity_kw <= result_no_inv.inner.capacity_kw,
+            "inverter-limited capacity ({:.2}) must be <= unconstrained ({:.2})",
+            result_with_inv.inner.capacity_kw,
+            result_no_inv.inner.capacity_kw
+        );
+        // With 5.0 kW AC × 1.2 = 6.0 kW DC max, target 8 kW must be clamped.
+        let max_dc = 5.0 * 1.2;
+        assert!(
+            result_with_inv.inner.capacity_kw <= max_dc + 0.5,
+            "inverter-limited capacity {:.2} should approximate max DC {:.2}",
+            result_with_inv.inner.capacity_kw,
+            max_dc
         );
     }
 }

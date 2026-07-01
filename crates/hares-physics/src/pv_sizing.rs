@@ -104,7 +104,7 @@ pub struct PvSizingResult {
 const DEFAULT_PANEL_WATTS: u32 = 440;
 const DEFAULT_PANEL_AREA_M2: f64 = 2.1;
 /// Total system derate factor (wiring, soiling, mismatch, inverter, shading).
-/// EnergyPlus PVWatts IDD V26-1-0 Generator:PVWatts, field N6 (system_losses),
+/// EnergyPlus PVWatts IDD V26-1-0 Generator:PVWatts, field N2 (system_losses),
 /// default = 0.14 (14%). Valid range [0, 0.99].
 const DEFAULT_SYSTEM_LOSSES: f64 = 0.14;
 /// Flat-roof tilt fallback when latitude is unavailable.
@@ -880,6 +880,22 @@ pub fn compute_usable_area(
 }
 
 /// Size a PV system to a target capacity, clamped by roof constraints.
+///
+/// When both `inverter_kw_ac` and `max_dc_ac_ratio` are provided, the DC-side
+/// capacity is also clamped by the inverter's maximum DC input:
+///
+/// ```text
+///   max_dc_from_inverter = inverter_kw_ac × max_dc_ac_ratio
+/// ```
+///
+/// This models the inverter's DC oversizing limit. Typical residential
+/// DC:AC ratios are 1.1–1.3 (NREL SAM defaults to 1.2; EnergyPlus PVWatts
+/// IDD V26-1-0 ElectricLoadCenter:Inverter:PVWatts, field N1 (DC to AC Size
+/// Ratio), default = 1.10).
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this call site.
+#[allow(clippy::too_many_arguments)]
 pub fn size_pv_system(
     usable: &UsableRoofArea,
     target_kw: f64,
@@ -888,6 +904,8 @@ pub fn size_pv_system(
     system_losses: Option<f64>,
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
+    inverter_kw_ac: Option<f64>,
+    max_dc_ac_ratio: Option<f64>,
 ) -> Result<PvSizingResult, PvSizingError> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
@@ -924,18 +942,45 @@ pub fn size_pv_system(
     }
 
     let upper_bound = max_kw.min(usable.max_capacity_kw);
-    let clamped_kw = target_kw.clamp(min_kw, upper_bound);
+    let mut clamped_kw = target_kw.clamp(min_kw, upper_bound);
+
+    // Inverter-side AC constraint: max DC input = inverter_kw_ac × DC:AC ratio.
+    // Typical residential inverters allow 1.1–1.3× oversizing on the DC side
+    // (NREL SAM V2023.12 default DC:AC ratio = 1.2; EnergyPlus PVWatts IDD
+    // V26-1-0 ElectricLoadCenter:Inverter:PVWatts, field N1 (DC to AC Size
+    // Ratio), default = 1.10).
+    if let (Some(inv_ac), Some(ratio)) = (inverter_kw_ac, max_dc_ac_ratio) {
+        let max_dc_from_inverter = inv_ac * ratio;
+        clamped_kw = clamped_kw.min(max_dc_from_inverter);
+    }
+
     let num_panels =
         ((clamped_kw * 1000.0 / panel_watts as f64).ceil() as u32).min(usable.max_panels);
     let capacity_kw = (num_panels as f64) * (panel_watts as f64) / 1000.0;
     let collector_area_m2 = (num_panels as f64) * panel_area_m2;
 
+    // Invariant: computed capacity must be finite and non-negative.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            capacity_kw.is_finite() && capacity_kw >= 0.0,
+            "computed capacity kW must be finite and non-negative, got {capacity_kw}"
+        );
+    }
+
     #[cfg(feature = "observe")]
     {
+        let effective_dc_ac_ratio = match (inverter_kw_ac, max_dc_ac_ratio) {
+            (Some(_), Some(ratio)) => Some(ratio),
+            _ => None,
+        };
         tracing::debug!(
             pv_panel_watts = panel_watts,
             pv_panel_area_m2 = panel_area_m2,
             pv_system_losses_fraction = system_losses,
+            pv_inverter_kw_ac = inverter_kw_ac,
+            pv_max_dc_ac_ratio = max_dc_ac_ratio,
+            pv_effective_dc_ac_ratio = effective_dc_ac_ratio,
             pv_num_panels = num_panels,
             pv_capacity_kw = capacity_kw,
             pv_collector_area_m2 = collector_area_m2,
@@ -1709,7 +1754,8 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(&usable, 10.0, 2.0, 14.0, None, None, None).unwrap();
+        let result =
+            size_pv_system(&usable, 10.0, 2.0, 14.0, None, None, None, None, None).unwrap();
         assert!(result.capacity_kw <= usable.max_capacity_kw + 0.01);
         assert!(result.num_panels <= usable.max_panels);
     }
@@ -1725,8 +1771,141 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(&usable, 6.0, 2.0, 14.0, None, None, None);
+        let result = size_pv_system(&usable, 6.0, 2.0, 14.0, None, None, None, None, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn size_pv_explicit_panel_specs_changes_capacity_proportionally() {
+        // 100 m² roof, 37.5 usable → with generous max constraints,
+        // panel count is driven by target / panel_watts.
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 37.5,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+
+        // Default 440 W panel: ceil(10000/440)=23 panels → 10.12 kW
+        let result_default =
+            size_pv_system(&usable, 10.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+
+        // 500 W panel: ceil(10000/500)=20 panels → 10.0 kW
+        // Fewer panels for the same target because each panel produces more.
+        let result_500w = size_pv_system(
+            &usable,
+            10.0,
+            2.0,
+            14.0,
+            None,
+            Some(500),
+            Some(2.2),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            result_default.panel_watts < result_500w.panel_watts,
+            "default 440W panel must have lower wattage than 500W override"
+        );
+        assert!(
+            result_default.num_panels > result_500w.num_panels,
+            "higher-wattage panel needs fewer panels for same target ({} vs {})",
+            result_default.num_panels,
+            result_500w.num_panels,
+        );
+        // Capacity difference is bounded by ~1 panel worth of wattage rounding.
+        let cap_diff = (result_default.capacity_kw - result_500w.capacity_kw).abs();
+        assert!(
+            cap_diff < 0.5,
+            "capacity from different panel specs should be within ~1 panel: got diff {:.3}",
+            cap_diff,
+        );
+    }
+
+    #[test]
+    fn size_pv_inverter_clamps_dc_capacity() {
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 37.5,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+
+        // Without inverter constraint: target 12 kW → 28 panels × 440W = 12.32 kW
+        let result_no_inverter =
+            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+
+        // With inverter: 7.6 kW AC × 1.2 DC:AC ratio → max 9.12 kW DC
+        // Target 12 kW should be clamped to 9.12 kW
+        let result_with_inverter = size_pv_system(
+            &usable,
+            12.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            Some(7.6),
+            Some(1.2),
+        )
+        .unwrap();
+
+        assert!(
+            result_with_inverter.capacity_kw < result_no_inverter.capacity_kw,
+            "inverter-limited capacity ({:.2}) must be below unconstrained ({:.2})",
+            result_with_inverter.capacity_kw,
+            result_no_inverter.capacity_kw
+        );
+        // Max DC from inverter = 7.6 × 1.2 = 9.12 kW.
+        // ceil(9.12*1000/440)=ceil(20.73)=21 panels → 21×440/1000=9.24 kW.
+        // capacity_kw should not exceed 9.24 given the panelisation.
+        let max_dc_from_inverter = 7.6 * 1.2;
+        assert!(
+            result_with_inverter.capacity_kw <= max_dc_from_inverter + 0.5,
+            "inverter-limited capacity {:.2} should approximate max DC {:.2}",
+            result_with_inverter.capacity_kw,
+            max_dc_from_inverter
+        );
+        assert!(
+            result_with_inverter.num_panels <= result_no_inverter.num_panels,
+            "inverter-limited panels ({}) should be ≤ unconstrained ({})",
+            result_with_inverter.num_panels,
+            result_no_inverter.num_panels
+        );
+    }
+
+    #[test]
+    fn size_pv_inverter_params_ignored_when_only_one_provided() {
+        let usable = UsableRoofArea {
+            best_plane_idx: 0,
+            usable_m2: 37.5,
+            max_panels: 100,
+            max_capacity_kw: 44.0,
+            roof_shape: RoofShape::Gable,
+            azimuth_deg: 180.0,
+            tilt_deg: 26.0,
+        };
+
+        // Only inverter_kw_ac, no dc_ac_ratio → no inverter clamp applied
+        let result_ac_only =
+            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, Some(7.6), None).unwrap();
+
+        // Neither provided
+        let result_none =
+            size_pv_system(&usable, 12.0, 2.0, 14.0, None, None, None, None, None).unwrap();
+
+        assert_eq!(
+            result_ac_only.capacity_kw, result_none.capacity_kw,
+            "inverter_kw_ac alone (no ratio) must not clamp capacity"
+        );
     }
 
     #[test]
@@ -2680,7 +2859,7 @@ mod tests {
         // Result from size_pv_system with explicit losses must match explicit
         // vs None (default losses = 0.14).
         let sizing_default =
-            size_pv_system(&result_440w, 5.0, 2.0, 14.0, None, None, None).unwrap();
+            size_pv_system(&result_440w, 5.0, 2.0, 14.0, None, None, None, None, None).unwrap();
         let sizing_explicit = size_pv_system(
             &result_440w,
             5.0,
@@ -2689,6 +2868,8 @@ mod tests {
             Some(0.14),
             Some(440),
             Some(2.0),
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(
