@@ -10,6 +10,7 @@ REPO = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO / "data" / "examples"
 HPXML = str(EXAMPLES / "BEopt_example.xml")
 HPXML_PV = str(REPO / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base-pv.xml")
+HPXML_ALL_NORTH = str(REPO / "tests" / "fixtures" / "hpxml" / "base-all-north.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
 WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 HARES_DEFAULTS = REPO / "defaults"
@@ -40,6 +41,21 @@ def dwelling_winter_24h():
         schedule=SCHEDULE,
         weather=WEATHER,
         start_time="2019-01-15T00:00:00Z",
+        duration_s=86400,
+        time_res_s=900,
+    )
+
+
+@pytest.fixture
+def dwelling_all_north():
+    """Dwelling with both roof planes facing north (azimuth 0°)."""
+    from ochre_next import Dwelling
+
+    return Dwelling.from_hpxml(
+        hpxml=HPXML_ALL_NORTH,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        start_time="2019-07-15T00:00:00Z",
         duration_s=86400,
         time_res_s=900,
     )
@@ -126,6 +142,11 @@ class TestPvCandidates:
         r = repr(candidates[0])
         assert "PvCandidate" in r
         assert "kW" in r
+
+    def test_all_north_facing_raises_valueerror(self, dwelling_all_north):
+        """All-north roofs should raise ValueError instead of returning empty list."""
+        with pytest.raises(ValueError, match="north-facing"):
+            dwelling_all_north.pv_candidates()
 
 
 # ---------------------------------------------------------------------------

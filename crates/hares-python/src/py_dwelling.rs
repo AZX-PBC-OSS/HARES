@@ -1467,7 +1467,7 @@ impl PyDwelling {
                 false,
             ),
         };
-        Ok(crate::py_pv_sizing::pv_candidates_from_dwelling(
+        crate::py_pv_sizing::pv_candidates_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
             &dwelling.wall_azimuths,
@@ -1477,7 +1477,7 @@ impl PyDwelling {
             panel_area_m2,
             dwelling.pv_panel_defaults(),
             user_override,
-        ))
+        )
     }
 
     /// Size a PV system to a target capacity, constrained by roof geometry.

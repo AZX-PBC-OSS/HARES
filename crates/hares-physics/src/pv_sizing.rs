@@ -1004,6 +1004,10 @@ pub fn size_pv_system(
 /// roof plane. Results are sorted by solar score (best first).
 ///
 /// This lets users see all placement options rather than just the single best.
+///
+/// Returns `Err(PvSizingError::AllNorthFacing)` if the roof has planes but
+/// every one was filtered out for facing north; returns `Ok(vec![])` only
+/// when the roof genuinely has zero planes.
 // Why: the parameter count reflects the complete set of tunable PV sizing
 // inputs; constructing a builder/params type would add indirection for no
 // benefit at this call site.
@@ -1017,7 +1021,7 @@ pub fn enumerate_pv_candidates(
     panel_area_m2: Option<f64>,
     diffuse_fraction: Option<f64>,
     roof_shape_user_override: bool,
-) -> Vec<PvCandidate> {
+) -> Result<Vec<PvCandidate>, PvSizingError> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
     let lat = latitude.unwrap_or(35.0);
@@ -1113,7 +1117,7 @@ pub fn enumerate_pv_candidates(
             );
         }
 
-        return candidates;
+        return Ok(candidates);
     }
 
     let mut candidates: Vec<PvCandidate> = roof
@@ -1169,6 +1173,21 @@ pub fn enumerate_pv_candidates(
         })
         .collect();
 
+    if candidates.is_empty() && !roof.planes.is_empty() {
+        return Err(PvSizingError::AllNorthFacing);
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Invariant: after calling enumerate_pv_candidates, an Ok(vec) result
+        // with vec.is_empty() only occurs when there are truly zero roof planes.
+        // If roof planes exist but all were filtered, we returned Err above.
+        debug_assert!(
+            !candidates.is_empty() || roof.planes.is_empty(),
+            "enumerate_pv_candidates returned Ok empty vec but roof planes exist — all-north-facing filter should have returned Err"
+        );
+    }
+
     // Sort by solar score descending (best first).
     candidates.sort_by(|a, b| {
         b.solar_score
@@ -1196,7 +1215,7 @@ pub fn enumerate_pv_candidates(
         }
     }
 
-    candidates
+    Ok(candidates)
 }
 
 /// Errors from PV sizing.
@@ -1526,6 +1545,49 @@ mod tests {
         let result =
             compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None, None, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn enumerate_single_north_facing_returns_err() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 26.0, Some(0.0))],
+            total_roof_area_m2: 100.0,
+        };
+        let result =
+            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        assert!(result.is_err());
+        match result {
+            Err(PvSizingError::AllNorthFacing) => {}
+            other => panic!("expected AllNorthFacing error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enumerate_empty_roof_returns_ok_empty() {
+        let roof = RoofInfo {
+            planes: vec![],
+            total_roof_area_m2: 0.0,
+        };
+        let result =
+            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        assert!(result.is_ok());
+        let candidates = result.unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn enumerate_all_north_multiple_planes_returns_err() {
+        let roof = RoofInfo {
+            planes: vec![plane(50.0, 26.0, Some(0.0)), plane(40.0, 26.0, Some(360.0))],
+            total_roof_area_m2: 90.0,
+        };
+        let result =
+            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        assert!(result.is_err());
+        match result {
+            Err(PvSizingError::AllNorthFacing) => {}
+            other => panic!("expected AllNorthFacing error, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2041,7 +2103,8 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .unwrap();
         // 3 non-north planes.
         assert_eq!(candidates.len(), 3);
         // Best first (south with most area).
@@ -2216,7 +2279,8 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .unwrap();
 
         // The top enumerated candidate should match compute_usable_area's best plane.
         assert!(
@@ -2740,7 +2804,8 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
         for c in &candidates {
             assert!(c.max_panels > 0);
@@ -2992,7 +3057,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 3);
         for c in &candidates {
             assert_eq!(c.roof_shape, RoofShape::Gable);
@@ -3396,7 +3462,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
 
         let azs: Vec<f64> = candidates.iter().map(|c| c.azimuth_deg).collect();
@@ -3429,7 +3496,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .unwrap();
 
         let east = candidates
             .iter()

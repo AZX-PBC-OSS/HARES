@@ -512,10 +512,10 @@ pub fn enumerate_pv_candidates(
     panel_area_m2: Option<f64>,
     diffuse_fraction: Option<f64>,
     roof_shape_user_override: bool,
-) -> Vec<PyPvCandidate> {
+) -> PyResult<Vec<PyPvCandidate>> {
     let roof = roof_info_from_py_planes(&roof_planes);
     let azimuths: Vec<f64> = wall_azimuths.unwrap_or_default();
-    hares_physics::pv_sizing::enumerate_pv_candidates(
+    let result = hares_physics::pv_sizing::enumerate_pv_candidates(
         &roof,
         roof_shape.into(),
         &azimuths,
@@ -525,9 +525,11 @@ pub fn enumerate_pv_candidates(
         diffuse_fraction,
         roof_shape_user_override,
     )
-    .into_iter()
-    .map(|c| PyPvCandidate { inner: c })
-    .collect()
+    .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
+    Ok(result
+        .into_iter()
+        .map(|c| PyPvCandidate { inner: c })
+        .collect())
 }
 
 /// Size a PV system from a usable roof area result.
@@ -648,10 +650,10 @@ pub(crate) fn pv_candidates_from_dwelling(
     panel_area_m2: Option<f64>,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
     roof_shape_user_override: bool,
-) -> Vec<PyPvCandidate> {
+) -> PyResult<Vec<PyPvCandidate>> {
     let (panel_watts, panel_area_m2, _) =
         resolve_panel_defaults(panel_watts, panel_area_m2, None, pv_panel_defaults);
-    pv_sizing::enumerate_pv_candidates(
+    let result = pv_sizing::enumerate_pv_candidates(
         roof_info,
         roof_shape,
         wall_azimuths,
@@ -661,9 +663,11 @@ pub(crate) fn pv_candidates_from_dwelling(
         diffuse_fraction,
         roof_shape_user_override,
     )
-    .into_iter()
-    .map(|c| PyPvCandidate { inner: c })
-    .collect()
+    .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
+    Ok(result
+        .into_iter()
+        .map(|c| PyPvCandidate { inner: c })
+        .collect())
 }
 
 /// Internal helper – mirrors the full Rust API surface for PV sizing
@@ -801,7 +805,8 @@ mod tests {
             None,
             &HashMap::new(),
             false,
-        );
+        )
+        .unwrap();
         let candidates_custom = pv_candidates_from_dwelling(
             &roof,
             RoofShape::Gable,
@@ -812,7 +817,8 @@ mod tests {
             Some(2.0),
             &HashMap::new(),
             false,
-        );
+        )
+        .unwrap();
 
         assert_eq!(candidates_default.len(), candidates_custom.len());
         // max_capacity_kw should differ because panel wattage differs.
@@ -854,7 +860,8 @@ mod tests {
             None,
             &store,
             false,
-        );
+        )
+        .unwrap();
 
         // When all panel params are None, the store should be consulted.
         // A 300W/1.6m² panel produces a different max_capacity_kw than the
@@ -871,7 +878,8 @@ mod tests {
             // Empty store → compile-time defaults (440W / 2.1 m²)
             &HashMap::new(),
             false,
-        );
+        )
+        .unwrap();
         assert_ne!(
             candidates[0].inner.max_capacity_kw, def_candidates[0].inner.max_capacity_kw,
             "store-supplied 300W panel must differ from compile-time 440W default"
@@ -1073,9 +1081,38 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].max_capacity_kw() > 0.0);
+    }
+
+    #[test]
+    fn enumerate_candidates_all_north_facing_raises_error() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(0.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let result = enumerate_pv_candidates(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "all-north-facing planes must raise an error, not return empty list"
+        );
     }
 
     #[test]
