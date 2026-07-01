@@ -2545,13 +2545,13 @@ mod tests {
     use pyo3::PyErr;
     use pyo3::Python;
     use pyo3::exceptions::PyValueError;
-    use pyo3::types::{PyDict, PyDictMethods, PyList};
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 
     use super::default_start;
     use super::pv_config_from_py;
     use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
-    use crate::utils::parse_datetime_str;
+    use crate::utils::{extract_datetime, parse_datetime_str};
 
     #[derive(Debug)]
     struct TestDwelling {
@@ -2706,6 +2706,69 @@ mod tests {
             dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
             "2024-12-31T00:00:00"
         );
+    }
+
+    #[test]
+    fn extract_datetime_handles_naive_datetime_with_microseconds() {
+        Python::attach(|py| {
+            let datetime_cls = py.import("datetime").unwrap().getattr("datetime").unwrap();
+            // datetime.datetime(2024, 1, 15, 14, 30, 0, 123456)
+            let obj = datetime_cls
+                .call1((2024i32, 1i32, 15i32, 14i32, 30i32, 0i32, 123456i32))
+                .unwrap();
+            let result = extract_datetime(&obj);
+            assert!(
+                result.is_ok(),
+                "naive datetime with microseconds should parse: {:?}",
+                result
+            );
+            let dt = result.unwrap();
+            assert_eq!(dt.time().nanosecond(), 123_456_000);
+        });
+    }
+
+    #[test]
+    fn extract_datetime_handles_naive_datetime_zero_microseconds() {
+        Python::attach(|py| {
+            let datetime_cls = py.import("datetime").unwrap().getattr("datetime").unwrap();
+            // datetime.datetime(2024, 1, 15, 14, 30, 0)
+            let obj = datetime_cls
+                .call1((2024i32, 1i32, 15i32, 14i32, 30i32, 0i32))
+                .unwrap();
+            let result = extract_datetime(&obj);
+            assert!(
+                result.is_ok(),
+                "naive datetime without microseconds should still parse: {:?}",
+                result
+            );
+            let dt = result.unwrap();
+            assert_eq!(dt.time().nanosecond(), 0);
+        });
+    }
+
+    #[test]
+    fn extract_datetime_handles_aware_datetime() {
+        Python::attach(|py| {
+            let datetime_mod = py.import("datetime").unwrap();
+            let datetime_cls = datetime_mod.getattr("datetime").unwrap();
+            let utc = datetime_mod
+                .getattr("timezone")
+                .unwrap()
+                .getattr("utc")
+                .unwrap();
+            // datetime.datetime(2024, 1, 15, 14, 30, 0, tzinfo=datetime.timezone.utc)
+            let obj = datetime_cls
+                .call1((2024i32, 1i32, 15i32, 14i32, 30i32, 0i32, 0i32, &utc))
+                .unwrap();
+            let result = extract_datetime(&obj);
+            assert!(
+                result.is_ok(),
+                "aware datetime should parse through RFC3339 path: {:?}",
+                result
+            );
+            let dt = result.unwrap();
+            assert_eq!(dt.time().nanosecond(), 0);
+        });
     }
 
     #[test]
