@@ -26,6 +26,11 @@ _LOG = logging.getLogger(__name__)
 class HELICSFleet:
     """Wrap a ``PySteppableFleet`` as a single HELICS value federate.
 
+    All federates must use the same time period for correct data exchange.
+    HELICS does not enforce period alignment — it grants time at the minimum
+    period across all federates. Mismatched periods cause silent data
+    misalignment: the slower federate publishes data at unintended times.
+
     Args:
         fleet: Initialized ``PySteppableFleet`` instance.
         fed_name: Unique name for this federate in the HELICS federation.
@@ -52,6 +57,13 @@ class HELICSFleet:
         self._time_res_s = float(fleet.time_res_s())
         self._total_steps = int(fleet.total_steps())
         self._n_dwellings = len(fleet)
+        _LOG.info(
+            "HELICS fleet federate %s period %.1fs, total_steps=%d, n_dwellings=%d",
+            fed_name,
+            self._time_res_s,
+            self._total_steps,
+            self._n_dwellings,
+        )
 
         fedinfo = self._create_federate_info()
         self._configure_federate_info(fedinfo)

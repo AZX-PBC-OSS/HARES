@@ -639,3 +639,25 @@ def test_helics_dwelling_federation_termination_sentinel_during_multi_rate_grant
     assert pub.published[1] == 3.0
     assert term_fed.disconnected is True
 
+
+def test_peek_timing_derives_period_from_first_two_timesteps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_peek_timing computes period_s as the difference between the first two timesteps."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    assert orchestrator._period_s == pytest.approx(60.0)
+    assert orchestrator._start_time == datetime(2020, 1, 1, 0, 0, 0)
+
+
+def test_peek_timing_defaults_period_for_single_timestep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_peek_timing defaults period_s to 1.0s when only one timestep is available."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _SingleTimestepDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    assert orchestrator._period_s == pytest.approx(1.0)
+    assert orchestrator._start_time == datetime(2020, 1, 1, 0, 0, 0)
+

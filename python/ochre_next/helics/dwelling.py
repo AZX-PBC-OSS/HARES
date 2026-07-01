@@ -82,6 +82,11 @@ class HELICSSubscriptionConfig:
 class HELICSDwelling:
     """Wrap a single ``PyDwelling`` with HELICS federate lifecycle management.
 
+    All federates must use the same time period for correct data exchange.
+    HELICS does not enforce period alignment — it grants time at the minimum
+    period across all federates. Mismatched periods cause silent data
+    misalignment: the slower federate publishes data at unintended times.
+
     Args:
         dwelling: Initialized ``PyDwelling`` instance.
         fed_name: Unique name for this federate in the HELICS federation.
@@ -108,6 +113,7 @@ class HELICSDwelling:
         self._time_offset_s = time_offset_s
 
         self._start_time, self._period_s = self._peek_timing(dwelling)
+        _LOG.info("HELICS federate %s period %.1fs derived from dwelling timesteps", fed_name, self._period_s)
 
         fedinfo = self._create_federate_info()
         self._configure_federate_info(fedinfo)
@@ -291,6 +297,13 @@ class HELICSDwelling:
         if second_time is not None:
             period_s = (second_time - start_time).total_seconds()
             prefetch.append(second_time)
+            _LOG.warning(
+                "HELICS period %.1fs derived from dwelling timesteps; "
+                "all federates must use consistent time periods — "
+                "HELICS does not enforce alignment and grants at the minimum period across all federates. "
+                "Mismatched periods cause silent data misalignment.",
+                period_s,
+            )
         else:
             _LOG.warning(
                 "Dwelling timesteps() yielded a single timestamp; defaulting HELICS period to 1.0s"

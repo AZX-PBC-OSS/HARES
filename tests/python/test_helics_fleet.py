@@ -669,3 +669,15 @@ def test_helics_fleet_federation_termination_sentinel_during_multi_rate_grant(
     assert pub.published[0] == 6.0  # unchanged state, republished
     assert pub.published[1] == 6.0
     assert term_fed.disconnected is True
+
+
+def test_fleet_constructor_tracks_timing_from_fleet_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HELICSFleet.__init__ derives time_res_s, total_steps, and n_dwellings from the fleet."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    assert orchestrator._time_res_s == pytest.approx(60.0)
+    assert orchestrator._total_steps == 2
+    assert orchestrator._n_dwellings == 3
