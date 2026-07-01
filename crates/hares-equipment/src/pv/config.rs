@@ -194,7 +194,8 @@ mod tests {
     #[test]
     fn pv_config_round_trips_via_equipment_config() {
         let cfg = minimal_pv_config();
-        let ec = EquipmentConfig::from_typed("test_pv".to_string(), "PV".to_string(), cfg.clone());
+        let ec = EquipmentConfig::from_typed("test_pv".to_string(), "PV".to_string(), cfg.clone())
+            .unwrap();
         assert!(ec.is_typed());
         let recovered: PvConfig = ec.typed().unwrap();
         assert_eq!(recovered.capacity_kw, cfg.capacity_kw);
@@ -429,7 +430,8 @@ mod tests {
             ..minimal_pv_config()
         };
         let ec =
-            EquipmentConfig::from_typed("test_multi".to_string(), "PV".to_string(), cfg.clone());
+            EquipmentConfig::from_typed("test_multi".to_string(), "PV".to_string(), cfg.clone())
+                .unwrap();
         assert!(ec.is_typed());
         let recovered: PvConfig = ec.typed().unwrap();
         let arrays = recovered.arrays.unwrap();

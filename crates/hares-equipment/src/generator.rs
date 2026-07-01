@@ -2180,6 +2180,7 @@ mod tests {
             "Gas Generator".to_string(),
             cfg,
         )
+        .unwrap()
     }
 
     fn ports_for(generator: &Generator) -> PortSlots {
@@ -2605,7 +2606,8 @@ mod tests {
                 delta_kw_per_s: Some(100.0),
                 ..minimal_generator_config()
             },
-        );
+        )
+        .unwrap();
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -4265,7 +4267,8 @@ mod tests {
             "test_gen".to_string(),
             "Gas Generator".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: GeneratorConfig = ec.typed().unwrap();
         assert_eq!(recovered.rated_power_kw, cfg.rated_power_kw);
@@ -4293,7 +4296,8 @@ mod tests {
             "test_gen".to_string(),
             "Gas Generator".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         let recovered: GeneratorConfig = ec.typed().unwrap();
         assert_eq!(
             recovered.efficiency_curve_points,
@@ -4429,7 +4433,8 @@ mod tests {
             ..minimal_generator_config()
         };
         let ec =
-            EquipmentConfig::from_typed("typed_gen".to_string(), "Gas Generator".to_string(), cfg);
+            EquipmentConfig::from_typed("typed_gen".to_string(), "Gas Generator".to_string(), cfg)
+                .unwrap();
         let env = base_env();
         let mut r#gen = Generator::new(ec.clone(), GeneratorKind::GasGenerator);
         r#gen.init(&ec, &env).expect("typed init");
@@ -5414,7 +5419,8 @@ mod tests {
         let mut cfg_a: GeneratorConfig = config_a.typed().unwrap();
         cfg_a.efficiency_curve_points = Some(hardcoded_points);
         let config_a =
-            EquipmentConfig::from_typed("GenA".to_string(), "Gas Generator".to_string(), cfg_a);
+            EquipmentConfig::from_typed("GenA".to_string(), "Gas Generator".to_string(), cfg_a)
+                .unwrap();
 
         // Generator B: no explicit curve (uses hardcoded fallback).
         let config_b = gen_config(&[

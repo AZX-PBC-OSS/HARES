@@ -470,17 +470,20 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
-            typed_config: Some(EquipmentConfig::from_typed(
-                "ASHP Heater".to_string(),
-                "ASHP Heater".to_string(),
-                HeatPumpHeaterConfig {
-                    common: HeatPumpCommonConfig {
-                        zone_id: Some(1),
-                        ..HeatPumpCommonConfig::default()
+            typed_config: Some(
+                EquipmentConfig::from_typed(
+                    "ASHP Heater".to_string(),
+                    "ASHP Heater".to_string(),
+                    HeatPumpHeaterConfig {
+                        common: HeatPumpCommonConfig {
+                            zone_id: Some(1),
+                            ..HeatPumpCommonConfig::default()
+                        },
+                        ..HeatPumpHeaterConfig::default()
                     },
-                    ..HeatPumpHeaterConfig::default()
-                },
-            )),
+                )
+                .unwrap(),
+            ),
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
@@ -491,17 +494,20 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
-            typed_config: Some(EquipmentConfig::from_typed(
-                "ASHP Cooler".to_string(),
-                "ASHP Cooler".to_string(),
-                HeatPumpCoolerConfig {
-                    common: HeatPumpCommonConfig {
-                        zone_id: Some(1),
-                        ..HeatPumpCommonConfig::default()
+            typed_config: Some(
+                EquipmentConfig::from_typed(
+                    "ASHP Cooler".to_string(),
+                    "ASHP Cooler".to_string(),
+                    HeatPumpCoolerConfig {
+                        common: HeatPumpCommonConfig {
+                            zone_id: Some(1),
+                            ..HeatPumpCommonConfig::default()
+                        },
+                        ..HeatPumpCoolerConfig::default()
                     },
-                    ..HeatPumpCoolerConfig::default()
-                },
-            )),
+                )
+                .unwrap(),
+            ),
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,

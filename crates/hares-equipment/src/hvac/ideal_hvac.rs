@@ -1147,6 +1147,7 @@ mod tests {
             "Ideal HVAC".to_string(),
             crate::IdealHvacConfig::default(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -1583,7 +1584,8 @@ mod tests {
             },
             ..crate::IdealHvacConfig::default()
         };
-        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+        let cfg =
+            EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap();
 
         let mut eq = IdealHvac::new(cfg.clone());
         let mut env = env(18.0, 60, 0);
@@ -1796,7 +1798,8 @@ mod tests {
             },
             ..crate::IdealHvacConfig::default()
         };
-        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+        let cfg =
+            EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap();
 
         // Zone at 15°C -- well below both setpoints, always triggers Heating.
         // hysteresis=1.0, deadband_offset=0.2 → heat turn-on at setpoint-0.8
@@ -1854,7 +1857,8 @@ mod tests {
             },
             ..crate::IdealHvacConfig::default()
         };
-        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+        let cfg =
+            EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap();
 
         let env_h0 = env(15.0, 60, 0);
         let mut eq = IdealHvac::new(cfg.clone());
@@ -1895,7 +1899,8 @@ mod tests {
             },
             ..crate::IdealHvacConfig::default()
         };
-        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+        let cfg =
+            EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap();
 
         // Midpoint = 22.0 at hour 0
         let env_h0 = env(22.0, 60, 0);
@@ -2115,7 +2120,7 @@ mod tests {
     }
 
     fn typed_config(typed: crate::IdealHvacConfig) -> EquipmentConfig {
-        EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed)
+        EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap()
     }
 
     #[test]

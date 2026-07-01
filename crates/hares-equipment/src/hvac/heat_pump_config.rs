@@ -678,6 +678,7 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
+        .unwrap()
     }
 
     #[test]
@@ -821,7 +822,8 @@ mod tests {
             min_oat_cooling_c: 10.0,
         };
         let ec =
-            EquipmentConfig::from_typed("test".to_string(), "ASHP Cooler".to_string(), cfg.clone());
+            EquipmentConfig::from_typed("test".to_string(), "ASHP Cooler".to_string(), cfg.clone())
+                .unwrap();
         let recovered: HeatPumpCoolerConfig = ec.typed().unwrap();
         assert!(
             (recovered.common.cooling_eir.unwrap() - cfg.common.cooling_eir.unwrap()).abs() < 1e-12

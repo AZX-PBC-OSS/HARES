@@ -407,6 +407,7 @@ mod tests {
                 ..ElectricBaseboardConfig::default()
             },
         )
+        .unwrap()
     }
 
     #[test]

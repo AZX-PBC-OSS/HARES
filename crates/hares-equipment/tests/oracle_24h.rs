@@ -133,7 +133,8 @@ fn oracle_gas_furnace_24h_constant_heating() {
                 ..Default::default()
             },
         },
-    );
+    )
+    .unwrap();
 
     let mut eq = GasFurnace::new(cfg.clone());
     let env = base_env();
@@ -192,7 +193,8 @@ fn oracle_electric_baseboard_24h_cop1() {
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let mut eq = ElectricBaseboard::new(cfg.clone());
     let env = base_env();
@@ -274,7 +276,8 @@ fn oracle_ideal_hvac_24h_50pct_load() {
             capacity_biquadratic_coeffs: None,
             eir_biquadratic_coeffs: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut eq = IdealHvac::new(cfg.clone());
     let env = base_env();
@@ -333,7 +336,8 @@ fn oracle_pv_24h_constant_irradiance() {
             sam_lut_path: None,
             arrays: None,
         },
-    );
+    )
+    .unwrap();
 
     let surface_id = hares_equipment::pv::surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
 
@@ -498,7 +502,8 @@ fn oracle_pv_24h_lut_parity() {
             sam_lut_path: Some(lut_path.to_string_lossy().into_owned()),
             arrays: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut eq = PV::new(cfg.clone());
     eq.init(&cfg, &env).unwrap();
@@ -565,7 +570,8 @@ fn oracle_battery_self_discharge_24h() {
             grid_export_rule: None,
             min_dwell_steps: 0,
         },
-    );
+    )
+    .unwrap();
 
     let mut bat = Battery::new(cfg.clone());
     let env = base_env();
@@ -636,7 +642,8 @@ fn oracle_generator_24h_constant_load() {
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut generator = Generator::new(cfg.clone(), GeneratorKind::GasGenerator);
     let env = base_env();
@@ -722,7 +729,8 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = GasWH::new(cfg.clone());
     let mut env = base_env();
@@ -791,7 +799,8 @@ fn oracle_tankless_wh_24h_constant_draw() {
             avg_water_draw_l_per_day: None,
             zone_type: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = TanklessWH::new(cfg.clone());
     let env = base_env();

@@ -807,7 +807,8 @@ mod tests {
             "gas".to_string(),
             "Gas Water Heater".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: GasWaterHeaterConfig = ec.typed().expect("typed decode");
         assert_eq!(recovered, cfg);
@@ -863,7 +864,8 @@ mod tests {
             "resistance".to_string(),
             "Electric Resistance Water Heater".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: ElectricResistanceWaterHeaterConfig = ec.typed().expect("typed decode");
         assert_eq!(recovered, cfg);
@@ -907,7 +909,8 @@ mod tests {
             "tankless".to_string(),
             "Tankless Water Heater".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: TanklessWaterHeaterConfig = ec.typed().expect("typed decode");
         assert_eq!(recovered, cfg);
@@ -972,7 +975,8 @@ mod tests {
             "hpwh".to_string(),
             "Heat Pump Water Heater".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: HeatPumpWaterHeaterConfig = ec.typed().expect("typed decode");
         assert_eq!(recovered, cfg);
@@ -1023,7 +1027,8 @@ mod tests {
             "indirect".to_string(),
             "Indirect Tank".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: IndirectTankConfig = ec.typed().expect("typed decode");
         assert_eq!(recovered, cfg);

@@ -902,6 +902,7 @@ mod tests {
                 plf_min: None,
             },
         )
+        .unwrap()
     }
 
     fn ports() -> PortSlots {
@@ -1494,6 +1495,7 @@ mod tests {
                     plf_min: None,
                 },
             )
+            .unwrap()
         }
 
         // ── Test 1: Full load (default curve, PLR=1.0) ──────────────────
@@ -1595,7 +1597,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
             },
-        );
+        )
+        .unwrap();
         dehu.init(&cfg_without_zone, &env(50.0))
             .expect("init must succeed");
         assert!(

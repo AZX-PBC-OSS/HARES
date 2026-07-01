@@ -107,7 +107,8 @@ fn generator_fluid_solver_invariant_passes() {
         "Test CHP Gen".to_string(),
         "Gas Generator".to_string(),
         gen_cfg,
-    );
+    )
+    .unwrap();
 
     let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
     generator.init(&config, &env()).unwrap();

@@ -109,6 +109,7 @@ fn resistance_config(
             hot_draw_temp_c: None,
         },
     )
+    .unwrap()
 }
 
 fn gas_config(
@@ -154,6 +155,7 @@ fn gas_config(
             pilot_fraction_to_tank: None,
         },
     )
+    .unwrap()
 }
 
 fn tankless_config(
@@ -186,6 +188,7 @@ fn tankless_config(
             zone_type: None,
         },
     )
+    .unwrap()
 }
 
 /// Step the WH, resetting port accumulators each call so readings are per-step.
@@ -389,7 +392,8 @@ fn resistance_wh_uses_schedule_draw_source() {
         "RWH".to_string(),
         "Resistance Water Heater".to_string(),
         typed,
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -420,7 +424,8 @@ fn gas_wh_uses_schedule_draw_source() {
         col_idx: 1,
         boundary: BoundaryPolicy::Clamp,
     });
-    let cfg = EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed);
+    let cfg = EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed)
+        .unwrap();
 
     let mut wh = GasWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -548,7 +553,8 @@ fn energy_conservation_over_draw_cycle() {
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -707,7 +713,8 @@ fn max_tank_temp_safety_limit() {
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -930,6 +937,7 @@ fn resistance_config_with_ramp(
             hot_draw_temp_c: None,
         },
     )
+    .unwrap()
 }
 
 #[test]
@@ -1190,7 +1198,8 @@ fn tmv_reduces_draw_volume_for_hot_tank() {
             fixture_delivery_temp_c: Some(fixture_temp_c),
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -1254,7 +1263,8 @@ fn tmv_unmet_load_when_tank_cold() {
             fixture_delivery_temp_c: Some(fixture_temp_c),
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();

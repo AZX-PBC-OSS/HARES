@@ -159,7 +159,7 @@ impl BatterySpec {
     /// Splits `round_trip_efficiency` symmetrically: charge and discharge
     /// efficiency are each `sqrt(rte)`. This is valid for AC-coupled systems
     /// where inverter losses dominate and are symmetric.
-    pub fn to_config(&self) -> EquipmentConfig {
+    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
         #[cfg(debug_assertions)]
         {
             // Typical manufacturer-specified AC round-trip efficiency ranges
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn to_config_splits_rte() {
         let spec = BatteryProductId::TeslaPw3.spec();
-        let cfg = spec.to_config();
+        let cfg = spec.to_config().unwrap();
         let eta = 0.90_f64.sqrt();
         let typed: BatteryConfig = cfg.typed().unwrap();
         let charge_eff = typed.charge_efficiency.unwrap();
@@ -755,7 +755,8 @@ mod tests {
         // n_series derived: round(50.4 / 3.2) = round(15.75) = 16
         // Verify through init: create battery, init, check n_series
         let ec =
-            crate::EquipmentConfig::from_typed("test_lv".to_string(), "Battery".to_string(), cfg);
+            crate::EquipmentConfig::from_typed("test_lv".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
         let mut batt = crate::battery::Battery::new(ec.clone());
         let env = hares_types::EnvironmentState {
             zones: vec![],
@@ -818,7 +819,7 @@ mod tests {
     #[test]
     fn to_config_wires_topology() {
         for spec in CATALOG {
-            let cfg = spec.to_config();
+            let cfg = spec.to_config().unwrap();
             let typed: BatteryConfig = cfg.typed().unwrap();
             assert_eq!(
                 typed.n_series,
@@ -930,7 +931,7 @@ mod tests {
     #[test]
     fn to_config_splits_rte_correctly_for_all_products() {
         for spec in CATALOG {
-            let cfg = spec.to_config();
+            let cfg = spec.to_config().unwrap();
             let expected_eta = spec.round_trip_efficiency.sqrt();
             let typed: BatteryConfig = cfg.typed().unwrap();
             let charge = typed.charge_efficiency.unwrap();
@@ -1216,7 +1217,7 @@ mod tests {
         use crate::battery::Battery;
 
         let spec = BatteryProductId::TeslaPw2.spec();
-        let config = spec.to_config();
+        let config = spec.to_config().unwrap();
 
         let env = EnvironmentState {
             zones: vec![],
@@ -1415,6 +1416,7 @@ mod tests {
                     min_dwell_steps: 0,
                 },
             )
+            .unwrap()
         }
 
         // --- small battery: Enphase IQ 5P ---

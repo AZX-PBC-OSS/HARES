@@ -1047,6 +1047,7 @@ mod tests {
                 ..ElectricBoilerConfig::default()
             },
         )
+        .unwrap()
     }
 
     fn gb_config(capacity_w: f64, afue: f64) -> EquipmentConfig {
@@ -1061,6 +1062,7 @@ mod tests {
                 ..GasBoilerConfig::default()
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -1573,7 +1575,8 @@ mod tests {
                 fluid_type: FluidType::Water,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         let glycol_cfg = EquipmentConfig::from_typed(
             "EB-glycol".to_string(),
             "Electric Boiler".to_string(),
@@ -1586,7 +1589,8 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let env = env(18.0);
         let mut water_eq = ElectricBoiler::new(water_cfg.clone());
@@ -1661,7 +1665,8 @@ mod tests {
                 fluid_type: FluidType::Water,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         let env = env(18.0);
         let mut eq = ElectricBoiler::new(water_cfg.clone());
         eq.init(&water_cfg, &env).unwrap();
@@ -1695,7 +1700,8 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         eq.init(&glycol_cfg, &env).unwrap();
         let mut ports = PortSlots {
             thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
@@ -1726,7 +1732,8 @@ mod tests {
                 fluid_type: FluidType::Refrigerant,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         eq.init(&refrig_cfg, &env).unwrap();
         let mut ports = PortSlots {
             thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],

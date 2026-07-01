@@ -1804,11 +1804,14 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
-            typed_config: Some(hares_equipment::EquipmentConfig::from_typed(
-                name.to_string(),
-                ochre_class.to_string(),
-                config,
-            )),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    name.to_string(),
+                    ochre_class.to_string(),
+                    config,
+                )
+                .unwrap(),
+            ),
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
@@ -2050,7 +2053,8 @@ mod tests {
                 },
             ),
             other => panic!("unsupported water heater type for schedule test: {other}"),
-        };
+        }
+        .unwrap();
         EquipmentSpec {
             instance_name: None,
             name: name.to_string(),
@@ -2090,7 +2094,8 @@ mod tests {
                 avg_water_draw_l_per_day,
                 zone_type: None,
             },
-        );
+        )
+        .unwrap();
         EquipmentSpec {
             instance_name: None,
             name: "Tankless Water Heater".to_string(),
@@ -2296,7 +2301,8 @@ mod tests {
             "electric".to_string(),
             "Electric Resistance Water Heater".to_string(),
             config,
-        );
+        )
+        .unwrap();
         let spec = EquipmentSpec {
             instance_name: None,
             name: "Electric Resistance Water Heater".to_string(),

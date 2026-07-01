@@ -119,7 +119,7 @@ impl PyGasFurnace {
     }
 }
 
-pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> EquipmentSpec {
+pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if gf.autosize {
@@ -150,14 +150,19 @@ pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> EquipmentSpec {
             setpoint: setpoint_config(gf.heating_setpoint_c, gf.cooling_setpoint_c),
             ..GasFurnaceConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            gf.name.clone(),
-            "Gas Furnace".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(gf.name.clone(), "Gas Furnace".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec("Gas Furnace", &gf.name, FuelType::Gas, params, typed_config)
+    Ok(make_spec(
+        "Gas Furnace",
+        &gf.name,
+        FuelType::Gas,
+        params,
+        typed_config,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +268,7 @@ fn resolve_eir(eir: Option<f64>, seer: Option<f64>, default_seer: f64) -> f64 {
     })
 }
 
-pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
+pub fn ac_spec_from_py(ac: &PyAirConditioner) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let eir = resolve_eir(ac.eir, ac.seer, 14.0);
 
@@ -321,20 +326,19 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> EquipmentSpec {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         };
-        Some(EquipmentConfig::from_typed(
-            ac.name.clone(),
-            "Air Conditioner".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(ac.name.clone(), "Air Conditioner".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Air Conditioner",
         &ac.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +457,7 @@ fn parse_fuel_type(s: Option<&str>) -> PyResult<Option<FuelType>> {
     }
 }
 
-pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> EquipmentSpec {
+pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let hspf = hp.hspf.unwrap_or(8.2);
     let heating_eir = BTU_PER_HR_PER_W / hspf.max(1e-6);
@@ -499,20 +503,19 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> EquipmentSpec {
             common,
             ..HeatPumpHeaterConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            hp.name.clone(),
-            "ASHP Heater".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(hp.name.clone(), "ASHP Heater".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "ASHP Heater",
         &hp.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -605,7 +608,7 @@ impl PyASHPCooler {
     }
 }
 
-pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> EquipmentSpec {
+pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let seer = hp.seer.unwrap_or(14.0);
     let cooling_eir = BTU_PER_HR_PER_W / seer.max(1e-6);
@@ -647,20 +650,19 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> EquipmentSpec {
             common,
             ..HeatPumpCoolerConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            hp.name.clone(),
-            "ASHP Cooler".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(hp.name.clone(), "ASHP Cooler".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "ASHP Cooler",
         &hp.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +746,7 @@ impl PyElectricBaseboard {
     }
 }
 
-pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> EquipmentSpec {
+pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let eir = bb.eir.unwrap_or(1.0);
 
@@ -773,20 +775,19 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> EquipmentSpec {
             setpoint: setpoint_config(bb.heating_setpoint_c, bb.cooling_setpoint_c),
             ..ElectricBaseboardConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            bb.name.clone(),
-            "Electric Baseboard".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(bb.name.clone(), "Electric Baseboard".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Electric Baseboard",
         &bb.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -857,7 +858,7 @@ impl PyIdealHVAC {
     }
 }
 
-pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> EquipmentSpec {
+pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if ih.autosize {
@@ -888,20 +889,19 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> EquipmentSpec {
             setpoint: setpoint_config(ih.heating_setpoint_c, ih.cooling_setpoint_c),
             ..IdealHvacConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            ih.name.clone(),
-            "Ideal HVAC".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(ih.name.clone(), "Ideal HVAC".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Ideal HVAC",
         &ih.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -985,7 +985,7 @@ impl PyGasBoiler {
     }
 }
 
-pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> EquipmentSpec {
+pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if gb.autosize {
@@ -1012,14 +1012,19 @@ pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> EquipmentSpec {
             setpoint: setpoint_config(gb.heating_setpoint_c, gb.cooling_setpoint_c),
             ..GasBoilerConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            gb.name.clone(),
-            "Gas Boiler".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(gb.name.clone(), "Gas Boiler".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec("Gas Boiler", &gb.name, FuelType::Gas, params, typed_config)
+    Ok(make_spec(
+        "Gas Boiler",
+        &gb.name,
+        FuelType::Gas,
+        params,
+        typed_config,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1108,7 @@ impl PyElectricBoiler {
     }
 }
 
-pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> EquipmentSpec {
+pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let eir = eb.eir.unwrap_or(1.0);
 
@@ -1132,20 +1137,19 @@ pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> EquipmentSpec {
             setpoint: setpoint_config(eb.heating_setpoint_c, eb.cooling_setpoint_c),
             ..ElectricBoilerConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            eb.name.clone(),
-            "Electric Boiler".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(eb.name.clone(), "Electric Boiler".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Electric Boiler",
         &eb.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,7 +1236,7 @@ impl PyElectricFurnace {
     }
 }
 
-pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> EquipmentSpec {
+pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
     let eir = ef.eir.unwrap_or(1.0);
 
@@ -1263,18 +1267,17 @@ pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> EquipmentSpec {
             setpoint: setpoint_config(ef.heating_setpoint_c, ef.cooling_setpoint_c),
             ..ElectricFurnaceConfig::default()
         };
-        Some(EquipmentConfig::from_typed(
-            ef.name.clone(),
-            "Electric Furnace".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(ef.name.clone(), "Electric Furnace".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Electric Furnace",
         &ef.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }

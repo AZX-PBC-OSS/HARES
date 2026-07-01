@@ -343,7 +343,8 @@ mod tests {
             "Gas Tankless Water Heater".to_string(),
             TanklessWaterHeaterConfig::equipment_type_name().to_string(),
             cfg,
-        );
+        )
+        .unwrap();
         let registry = EquipmentRegistry::new();
         let mut eq = registry
             .create("Gas Tankless Water Heater", ec.clone())

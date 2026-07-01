@@ -58,10 +58,10 @@ pub fn resolve_equipment(
     resolve_ev(details, defaults, &mut specs)?;
     resolve_generators(details, defaults, &mut specs)?;
     resolve_scheduled_loads(building, defaults, &mut specs)?;
-    resolve_ventilation(details, defaults, &mut specs);
+    resolve_ventilation(details, defaults, &mut specs)?;
 
     apply_overrides(&mut specs, overrides);
-    resolve_loop_wiring(&mut specs);
+    resolve_loop_wiring(&mut specs)?;
     assign_instance_names(&mut specs);
     Ok(specs)
 }
@@ -145,7 +145,7 @@ pub fn build_typed_spec<T>(
     fuel_type: FuelType,
     config: T,
     defaults: &DefaultsStore,
-) -> EquipmentSpec
+) -> Result<EquipmentSpec, HpxmlError>
 where
     T: EquipmentTypedConfig,
 {
@@ -159,8 +159,8 @@ where
             );
             serde_json::Map::new()
         });
-    let typed_config = EquipmentConfig::from_typed(name.clone(), name.clone(), config);
-    EquipmentSpec {
+    let typed_config = EquipmentConfig::from_typed(name.clone(), name.clone(), config)?;
+    Ok(EquipmentSpec {
         name: name.clone(),
         instance_name: None,
         fuel_type,
@@ -170,7 +170,7 @@ where
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
-    }
+    })
 }
 
 fn fuel_type_label(fuel_type: FuelType) -> String {
@@ -193,7 +193,7 @@ fn fuel_type_label(fuel_type: FuelType) -> String {
 ///
 /// Without this pass, both boiler and indirect tank default to `LoopId(1)`
 /// independently — the cross-reference is parsed but never applied.
-fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) {
+fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) -> Result<(), HpxmlError> {
     let mut next_loop_id: u16 = 1;
 
     // Build a lookup: HPXML SystemIdentifier/id → index for boiler specs.
@@ -230,23 +230,28 @@ fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) {
 
     // Apply wiring jobs.
     for (tank_idx, boiler_idx, loop_id) in wiring_jobs {
-        set_boiler_loop_id(specs, boiler_idx, loop_id);
-        set_indirect_tank_boiler_loop_id(specs, tank_idx, loop_id);
+        set_boiler_loop_id(specs, boiler_idx, loop_id)?;
+        set_indirect_tank_boiler_loop_id(specs, tank_idx, loop_id)?;
     }
+    Ok(())
 }
 
-fn set_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
+fn set_boiler_loop_id(
+    specs: &mut [EquipmentSpec],
+    idx: usize,
+    loop_id: u16,
+) -> Result<(), HpxmlError> {
     use hares_equipment::{ElectricBoilerConfig, GasBoilerConfig};
 
     let Some(ref mut cfg) = specs[idx].typed_config else {
-        return;
+        return Ok(());
     };
     match specs[idx].name.as_str() {
         "Gas Boiler" => {
             if let Ok(mut typed) = cfg.typed::<GasBoilerConfig>() {
                 typed.loop_id = Some(loop_id);
                 *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
             } else {
                 tracing::warn!(
                     name = %specs[idx].name,
@@ -259,7 +264,7 @@ fn set_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
             if let Ok(mut typed) = cfg.typed::<ElectricBoilerConfig>() {
                 typed.loop_id = Some(loop_id);
                 *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
             } else {
                 tracing::warn!(
                     name = %specs[idx].name,
@@ -270,15 +275,20 @@ fn set_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn set_indirect_tank_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
+fn set_indirect_tank_boiler_loop_id(
+    specs: &mut [EquipmentSpec],
+    idx: usize,
+    loop_id: u16,
+) -> Result<(), HpxmlError> {
     use hares_equipment::IndirectTankConfig;
 
     if let Some(ref mut cfg) = specs[idx].typed_config {
         if let Ok(mut typed) = cfg.typed::<IndirectTankConfig>() {
             typed.boiler_loop_id = Some(loop_id);
-            *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+            *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
         } else {
             tracing::warn!(
                 name = %specs[idx].name,
@@ -287,6 +297,7 @@ fn set_indirect_tank_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loo
             );
         }
     }
+    Ok(())
 }
 
 pub fn canonical_instance_namer(name: &str, count: usize) -> String {

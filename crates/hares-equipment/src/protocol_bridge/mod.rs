@@ -437,6 +437,7 @@ mod tests {
                 handlers: vec![config::HandlerConfig::Json { protocol_id: 17 }],
             },
         )
+        .unwrap()
     }
 
     fn empty_env() -> EnvironmentState {
@@ -583,7 +584,8 @@ mod tests {
                 registered_protocols: vec![],
                 handlers: vec![config::HandlerConfig::Json { protocol_id: 99 }],
             },
-        );
+        )
+        .unwrap();
         let mut bridge = ProtocolBridge::new(config.clone());
         let env = empty_env();
         bridge.init(&config, &env).unwrap();
@@ -708,7 +710,8 @@ mod tests {
                 registered_protocols: vec![17],
                 handlers: vec![config::HandlerConfig::Json { protocol_id: 99 }],
             },
-        );
+        )
+        .unwrap();
         let mut bridge = ProtocolBridge::new(config.clone());
         let env = empty_env();
         bridge.init(&config, &env).unwrap();
@@ -761,7 +764,8 @@ mod tests {
                 registered_protocols: vec![17],
                 handlers: vec![config::HandlerConfig::Json { protocol_id: 17 }],
             },
-        );
+        )
+        .unwrap();
         let mut bridge = ProtocolBridge::new(config.clone());
         let env = empty_env();
         bridge.init(&config, &env).unwrap();

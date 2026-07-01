@@ -655,7 +655,7 @@ fn smoke_case<T>(registry: &EquipmentRegistry, name: &str, cfg: T, env: &Environ
 where
     T: EquipmentTypedConfig,
 {
-    let ec = EquipmentConfig::from_typed(name.to_string(), name.to_string(), cfg);
+    let ec = EquipmentConfig::from_typed(name.to_string(), name.to_string(), cfg).unwrap();
     let mut equipment = registry.create(name, ec.clone()).unwrap();
     equipment.init(&ec, env).unwrap();
 }

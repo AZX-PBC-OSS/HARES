@@ -1753,7 +1753,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // (resolve_loop_wiring, inside resolve_equipment) and before
     // equipment construction so every instance receives a unique
     // loop ID above the wired range.
-    loop_allocator::allocate_loop_ids(&mut equipment_specs);
+    loop_allocator::allocate_loop_ids(&mut equipment_specs)?;
 
     // Register PV surfaces with the environment so Perez irradiance is
     // computed for PV orientations (which may not match any envelope surface).

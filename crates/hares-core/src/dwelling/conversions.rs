@@ -1169,11 +1169,14 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
-            typed_config: Some(hares_equipment::EquipmentConfig::from_typed(
-                "Gas Furnace".to_string(),
-                "Gas Furnace".to_string(),
-                typed_cfg,
-            )),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Gas Furnace".to_string(),
+                    "Gas Furnace".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
@@ -1244,7 +1247,8 @@ mod tests {
             "Gas Furnace".to_string(),
             "Gas Furnace".to_string(),
             typed_cfg,
-        );
+        )
+        .unwrap();
         eq_cfg.setpoints_reconciled = Some(reconciliations);
         hares_io::EquipmentSpec {
             instance_name: None,

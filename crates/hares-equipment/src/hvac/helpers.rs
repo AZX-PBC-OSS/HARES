@@ -599,7 +599,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(equipment_id_from_config(&gas_furnace).unwrap(), 42);
         assert_eq!(
             zone_id_from_config(&gas_furnace),
@@ -617,7 +618,8 @@ mod tests {
                 eir: 1.0,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             loop_id_from_config(&boiler, &["loop_id", "hydronic_loop_id"]),
             Some(hares_types::LoopId(9))
@@ -635,7 +637,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             zone_id_from_config(&config),
             None,
@@ -654,7 +657,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             zone_id_from_config(&config),
             Some(hares_types::ZoneId(1)),
@@ -673,7 +677,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             parse_zone_id_key(&config, "zone_id"),
             None,
@@ -693,7 +698,8 @@ mod tests {
                 eir: 1.0,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]),
             Some(hares_types::LoopId(0)),
@@ -712,7 +718,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             zone_id_from_config(&config),
             None,
@@ -731,7 +738,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
         assert_eq!(
             zone_id,
@@ -755,7 +763,8 @@ mod tests {
                 afue: 0.96,
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
         assert_eq!(
             zone_id,

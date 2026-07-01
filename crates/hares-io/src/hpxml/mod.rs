@@ -152,6 +152,9 @@ pub enum HpxmlError {
         /// The measurement context (e.g. "area", "volume", "length").
         context: String,
     },
+    /// Equipment configuration error propagated from hares-equipment.
+    #[error(transparent)]
+    Equipment(#[from] hares_types::HaresError),
 }
 
 pub type Result<T> = std::result::Result<T, HpxmlError>;

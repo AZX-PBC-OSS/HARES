@@ -1103,6 +1103,7 @@ mod tests {
                 pilot_fraction_to_tank: None,
             },
         )
+        .unwrap()
     }
 
     fn config_with_extras(
@@ -1171,6 +1172,7 @@ mod tests {
             }
         }
         EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed)
+            .unwrap()
     }
 
     fn ports() -> PortSlots {
@@ -1665,7 +1667,8 @@ mod tests {
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
         assert!(
@@ -1720,7 +1723,8 @@ mod tests {
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
 

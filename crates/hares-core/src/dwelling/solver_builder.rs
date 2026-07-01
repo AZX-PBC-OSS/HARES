@@ -2114,7 +2114,8 @@ mod tests {
             "Ventilation Fan".to_string(),
             "Ventilation Fan".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         let recovered: VentilationConfig = ec.typed().unwrap();
 
         let ventilation = MechanicalVentilationParams {
@@ -2999,7 +3000,8 @@ mod tests {
                 afue: 0.90,
                 ..GasBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
         let electric_boiler = EquipmentConfig::from_typed(
             "Electric Boiler".to_string(),
             "Electric Boiler".to_string(),
@@ -3010,7 +3012,8 @@ mod tests {
                 eir: 1.0,
                 ..ElectricBoilerConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let specs = [
             hares_io::EquipmentSpec {

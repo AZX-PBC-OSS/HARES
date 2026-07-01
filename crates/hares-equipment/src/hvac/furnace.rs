@@ -1144,6 +1144,7 @@ mod tests {
                 ..ElectricFurnaceConfig::default()
             },
         )
+        .unwrap()
     }
 
     fn gf_config(capacity_w: f64, afue: f64) -> EquipmentConfig {
@@ -1158,6 +1159,7 @@ mod tests {
                 ..GasFurnaceConfig::default()
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -1204,7 +1206,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
@@ -1234,7 +1237,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).expect("gas furnace init");
@@ -1257,7 +1261,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).expect("gas furnace init");
@@ -1283,7 +1288,8 @@ mod tests {
                 },
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
@@ -1353,7 +1359,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1391,7 +1398,8 @@ mod tests {
                 },
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = GasFurnace::new(cfg_dse.clone());
         let env = env(18.0);
@@ -1424,7 +1432,8 @@ mod tests {
                 },
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
 
         let mut eq_perfect = GasFurnace::new(cfg_perfect.clone());
         eq_perfect.init(&cfg_perfect, &env).unwrap();
@@ -1517,7 +1526,8 @@ mod tests {
                 zone_id: Some(1),
                 ..ElectricFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let eq = registry.create("Electric Furnace", cfg).unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
     }
@@ -1578,7 +1588,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut gas_eq = GasFurnace::new(gas_cfg.clone());
         gas_eq.init(&gas_cfg, &env(18.0)).unwrap();
         assert_eq!(
@@ -1596,7 +1607,8 @@ mod tests {
                 zone_id: Some(1),
                 ..ElectricFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut elec_eq = ElectricFurnace::new(elec_cfg.clone());
         elec_eq.init(&elec_cfg, &env(18.0)).unwrap();
         assert_eq!(
@@ -1624,7 +1636,8 @@ mod tests {
                 stage_heating_eirs: Some(vec![low_eir, high_eir]),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).unwrap();
 
@@ -1671,7 +1684,8 @@ mod tests {
                 stage_heating_eirs: Some(vec![1.25]),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasFurnace::new(cfg.clone());
         let err = eq
             .init(&cfg, &env(18.0))
@@ -1734,7 +1748,8 @@ mod tests {
                 },
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1771,7 +1786,8 @@ mod tests {
                 zone_id: Some(1),
                 ..GasFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1831,7 +1847,8 @@ mod tests {
                 zone_id: Some(1),
                 ..ElectricFurnaceConfig::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = ElectricFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();

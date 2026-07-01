@@ -123,7 +123,7 @@ pub struct VehicleSpec {
 }
 
 impl VehicleSpec {
-    pub fn to_config(&self) -> EquipmentConfig {
+    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
         let fuel_economy = self.fuel_economy_kwh_per_mi;
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn to_config_sets_fuel_economy() {
         let spec = VehicleId::TeslaModelYLr.spec();
-        let cfg = spec.to_config();
+        let cfg = spec.to_config().unwrap();
         let typed: EvConfig = cfg.typed().unwrap();
         let fuel_econ = typed.fuel_economy_kwh_per_mi.unwrap();
         // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi)
@@ -1119,7 +1119,7 @@ mod tests {
     fn fuel_economy_stored_for_all_vehicles() {
         for &id in VehicleId::ALL {
             let spec = id.spec();
-            let cfg = spec.to_config();
+            let cfg = spec.to_config().unwrap();
             let typed: EvConfig = cfg.typed().unwrap();
             let actual = typed.fuel_economy_kwh_per_mi.unwrap();
             let expected = spec.fuel_economy_kwh_per_mi;

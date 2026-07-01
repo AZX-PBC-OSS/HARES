@@ -179,7 +179,7 @@ pub(super) fn resolve_water_heaters(
                     hot_draw_temp_c: None,
                     pilot_fraction_to_tank: None,
                 };
-                typed_spec(name.clone(), fuel, cfg, defaults)
+                typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Electric Resistance Water Heater" => {
                 let cfg = ElectricResistanceWaterHeaterConfig {
@@ -212,7 +212,7 @@ pub(super) fn resolve_water_heaters(
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
                 };
-                typed_spec(name.clone(), fuel, cfg, defaults)
+                typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Tankless Water Heater" | "Gas Tankless Water Heater" => {
                 // UEF-only inputs (no EF) use 0.94 default per RESNET 301;
@@ -238,7 +238,7 @@ pub(super) fn resolve_water_heaters(
                     avg_water_draw_l_per_day,
                     zone_type: zone_name.clone(),
                 };
-                typed_spec(name.clone(), fuel, cfg, defaults)
+                typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Heat Pump Water Heater" => {
                 // UEF→EF conversion coefficients for HPWH.
@@ -312,7 +312,7 @@ pub(super) fn resolve_water_heaters(
                     jacket_r_value_m2_k_w,
                     fixture_delivery_temp_c: None,
                 };
-                typed_spec(name.clone(), fuel, cfg, defaults)
+                typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Indirect Tank" => {
                 let cfg = IndirectTankConfig {
@@ -340,7 +340,7 @@ pub(super) fn resolve_water_heaters(
                     hot_draw_temp_c: None,
                     boiler_loop_flow_rate_kg_s: None,
                 };
-                typed_spec(name.clone(), fuel, cfg, defaults)
+                typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             // Unreachable: canonical_water_heater_name (called at the top of
             // this loop) generates exactly the six names matched above and
@@ -519,7 +519,7 @@ fn typed_spec<T>(
     fuel_type: FuelType,
     cfg: T,
     defaults: &DefaultsStore,
-) -> EquipmentSpec
+) -> Result<EquipmentSpec, super::HpxmlError>
 where
     T: hares_equipment::EquipmentTypedConfig + Serialize,
 {
@@ -528,8 +528,8 @@ where
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     let typed_config =
-        EquipmentConfig::from_typed(name.clone(), T::equipment_type_name().to_string(), cfg);
-    EquipmentSpec {
+        EquipmentConfig::from_typed(name.clone(), T::equipment_type_name().to_string(), cfg)?;
+    Ok(EquipmentSpec {
         name: name.clone(),
         instance_name: None,
         fuel_type,
@@ -539,7 +539,7 @@ where
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
-    }
+    })
 }
 
 /// Parse a FuelType string value from HPXML into a [`FuelType`].
@@ -800,11 +800,7 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
         pilot_fraction_to_tank: param_f64(params, "pilot_fraction_to_tank"),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Gas Water Heater".to_string(),
-        cfg,
-    ))
+    EquipmentConfig::from_typed(name.to_string(), "Gas Water Heater".to_string(), cfg).ok()
 }
 
 fn try_build_elec_res_wh_config(
@@ -842,11 +838,12 @@ fn try_build_elec_res_wh_config(
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
     };
-    Some(EquipmentConfig::from_typed(
+    EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Resistance Water Heater".to_string(),
         cfg,
-    ))
+    )
+    .ok()
 }
 
 fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
@@ -890,11 +887,7 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
         jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Heat Pump Water Heater".to_string(),
-        cfg,
-    ))
+    EquipmentConfig::from_typed(name.to_string(), "Heat Pump Water Heater".to_string(), cfg).ok()
 }
 
 fn try_build_tankless_wh_config(
@@ -919,11 +912,7 @@ fn try_build_tankless_wh_config(
         avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
         zone_type: param_str(params, "zone_type"),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Tankless Water Heater".to_string(),
-        cfg,
-    ))
+    EquipmentConfig::from_typed(name.to_string(), "Tankless Water Heater".to_string(), cfg).ok()
 }
 
 fn try_build_indirect_tank_config(
@@ -955,11 +944,7 @@ fn try_build_indirect_tank_config(
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
         boiler_loop_flow_rate_kg_s: param_f64(params, "boiler_loop_flow_rate_kg_s"),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Indirect Tank".to_string(),
-        cfg,
-    ))
+    EquipmentConfig::from_typed(name.to_string(), "Indirect Tank".to_string(), cfg).ok()
 }
 
 /// Rebuild a water heater equipment typed config using updated parameters.
@@ -1097,7 +1082,8 @@ mod tests {
             FuelType::Propane,
             cfg,
             &DefaultsStore::empty(),
-        );
+        )
+        .unwrap();
         assert!(
             spec.typed_config
                 .as_ref()
@@ -1153,7 +1139,8 @@ mod tests {
             FuelType::Electric,
             cfg,
             &DefaultsStore::empty(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             spec.parameters.get("draw_flow_rate_source"),
             Some(&Value::Null)

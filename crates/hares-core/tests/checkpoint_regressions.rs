@@ -371,7 +371,8 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
             power_limit_kw: None,
             initial_connection_state: None,
         },
-    );
+    )
+    .unwrap();
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &env).expect("init EV");
     dwelling.add_equipment(Box::new(ev));

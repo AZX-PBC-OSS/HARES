@@ -109,7 +109,8 @@ fn tankless_schedule_sources_round_trip_and_init() {
         "twh".to_string(),
         "Gas Tankless Water Heater".to_string(),
         round_trip,
-    );
+    )
+    .unwrap();
     let env = sample_env(21.0, 10.0);
     let mut eq = registry
         .create("Gas Tankless Water Heater", ec.clone())
@@ -185,7 +186,8 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
 
     let registry = EquipmentRegistry::new();
     let ec =
-        EquipmentConfig::from_typed("ac".to_string(), "Air Conditioner".to_string(), round_trip);
+        EquipmentConfig::from_typed("ac".to_string(), "Air Conditioner".to_string(), round_trip)
+            .unwrap();
     let env = sample_env(27.0, 35.0);
     let mut eq = registry
         .create("Air Conditioner", ec.clone())

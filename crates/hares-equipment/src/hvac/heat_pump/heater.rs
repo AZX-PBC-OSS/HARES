@@ -2642,7 +2642,8 @@ mod tests {
             "mshp_stages".to_string(),
             "MSHP Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2677,7 +2678,8 @@ mod tests {
 
         let typed = mshp_typed_config(RATED_W);
         let cfg =
-            EquipmentConfig::from_typed("mshp_eir".to_string(), "MSHP Heater".to_string(), typed);
+            EquipmentConfig::from_typed("mshp_eir".to_string(), "MSHP Heater".to_string(), typed)
+                .unwrap();
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2707,7 +2709,8 @@ mod tests {
         let mut typed = mshp_typed_config(RATED_W);
         typed.common.min_compressor_fraction = 0.30;
         let cfg =
-            EquipmentConfig::from_typed("mshp_min30".to_string(), "MSHP Heater".to_string(), typed);
+            EquipmentConfig::from_typed("mshp_min30".to_string(), "MSHP Heater".to_string(), typed)
+                .unwrap();
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2757,7 +2760,8 @@ mod tests {
             "mshp_eir_benefit".to_string(),
             "MSHP Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2804,7 +2808,8 @@ mod tests {
             "mshp_explicit_eirs".to_string(),
             "MSHP Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2874,7 +2879,8 @@ mod tests {
         let mut typed = heater_typed_config();
         mutator(&mut typed);
         let mut cfg =
-            EquipmentConfig::from_typed("HP Heater".to_string(), "ASHP Heater".to_string(), typed);
+            EquipmentConfig::from_typed("HP Heater".to_string(), "ASHP Heater".to_string(), typed)
+                .unwrap();
         add_identity_biquadratic_curves(&mut cfg);
         cfg
     }
@@ -4728,7 +4734,8 @@ mod tests {
             "MSHP Heater".to_string(),
             HeatPumpHeaterConfig::equipment_type_name().to_string(),
             cfg,
-        );
+        )
+        .unwrap();
         let ec = crate::config::EquipmentConfig::with_payload(
             "MSHP Heater".to_string(),
             "MSHP Heater".to_string(),
@@ -4773,6 +4780,7 @@ mod tests {
                 HeatPumpHeaterConfig::equipment_type_name().to_string(),
                 typed,
             )
+            .unwrap()
             .payload
             .clone(),
         );
@@ -6298,6 +6306,7 @@ mod tests {
                 defrost: DefrostConfig::default(),
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -6347,7 +6356,8 @@ mod tests {
             "gshp_heater".to_string(),
             "GSHP Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
         let mut eq = GshpHeater::new(cfg.clone());
         let e = env(18.0, -5.0, 0.002);
         eq.init(&cfg, &e).unwrap();
@@ -6363,7 +6373,8 @@ mod tests {
     fn gshp_not_locked_out_at_cold_ambient() {
         let typed = gshp_typed_config();
         let cfg =
-            EquipmentConfig::from_typed("gshp_cold".to_string(), "GSHP Heater".to_string(), typed);
+            EquipmentConfig::from_typed("gshp_cold".to_string(), "GSHP Heater".to_string(), typed)
+                .unwrap();
         let mut eq = GshpHeater::new(cfg.clone());
         let e = env(18.0, -30.0, 0.001);
         eq.init(&cfg, &e).unwrap();
@@ -6377,7 +6388,8 @@ mod tests {
             "gshp_defrost".to_string(),
             "GSHP Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
         let mut eq = GshpHeater::new(cfg.clone());
         let e = env(18.0, -5.0, 0.006);
         eq.init(&cfg, &e).unwrap();
@@ -6417,7 +6429,8 @@ mod tests {
             "gshp_default".to_string(),
             "GSHP Heater".to_string(),
             typed_default,
-        );
+        )
+        .unwrap();
         let mut eq_default = GshpHeater::new(cfg_default.clone());
         eq_default.init(&cfg_default, &e).unwrap();
 
@@ -6428,7 +6441,8 @@ mod tests {
             "gshp_deep".to_string(),
             "GSHP Heater".to_string(),
             typed_deep,
-        );
+        )
+        .unwrap();
         let mut eq_deep = GshpHeater::new(cfg_deep.clone());
         eq_deep.init(&cfg_deep, &e).unwrap();
 
@@ -6623,7 +6637,8 @@ mod ideal_capacity_tests {
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
@@ -6830,7 +6845,8 @@ mod ideal_capacity_tests {
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
-        );
+        )
+        .unwrap();
         // Identity curves: cap_ratio = 1.0, eir_ratio = 1.0
         cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
@@ -6994,7 +7010,8 @@ mod ideal_capacity_tests {
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
@@ -7099,7 +7116,8 @@ mod ideal_capacity_tests {
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),

@@ -1362,6 +1362,7 @@ mod tests {
             HeatPumpWaterHeaterConfig::equipment_type_name().to_string(),
             typed,
         )
+        .unwrap()
     }
 
     pub(super) fn config() -> EquipmentConfig {

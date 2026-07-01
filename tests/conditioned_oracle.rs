@@ -195,6 +195,7 @@ mod tests {
                 ..IdealHvacConfig::default()
             },
         )
+        .unwrap()
     }
 
     struct Check {

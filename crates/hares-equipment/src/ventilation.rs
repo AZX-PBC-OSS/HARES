@@ -947,6 +947,7 @@ mod tests {
                 hours_in_operation: None,
             },
         )
+        .unwrap()
     }
 
     fn erv_config() -> EquipmentConfig {
@@ -971,6 +972,7 @@ mod tests {
                 hours_in_operation: None,
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -1249,7 +1251,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let mut fan = Ventilation::new(cfg.clone());
         let e = env(-10.0, 20.0);
         fan.init(&cfg, &e).expect("init");
@@ -1294,7 +1297,8 @@ mod tests {
             ..minimal_ventilation_config()
         };
         let cfg_half =
-            EquipmentConfig::from_typed("HRV-half".to_string(), "HRV".to_string(), half_config);
+            EquipmentConfig::from_typed("HRV-half".to_string(), "HRV".to_string(), half_config)
+                .unwrap();
         let mut hrv = Ventilation::new(cfg_half.clone());
         hrv.init(&cfg_half, &e).expect("init");
 
@@ -1386,7 +1390,8 @@ mod tests {
             "test_vent".to_string(),
             "Ventilation Fan".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: VentilationConfig = ec.typed().unwrap();
         assert_eq!(recovered.flow_rate_m3_s, cfg.flow_rate_m3_s);
@@ -1449,7 +1454,8 @@ mod tests {
             "typed_vent".to_string(),
             "Ventilation Fan".to_string(),
             cfg,
-        );
+        )
+        .unwrap();
         let env = env(0.0, 20.0);
         let mut fan = Ventilation::new(ec.clone());
         fan.init(&ec, &env).expect("typed init");
@@ -1487,7 +1493,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let mut fan = Ventilation::new(cfg.clone());
         // 21°C is within the default bypass range [18, 24]°C
         let e = env(21.0, 22.0);
@@ -1628,7 +1635,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let e = env(5.0, 20.0);
         let mut hrv = Ventilation::new(cfg.clone());
         hrv.init(&cfg, &e).expect("init");
@@ -1717,7 +1725,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let e = env(5.0, 20.0);
         let mut fan = Ventilation::new(cfg.clone());
         fan.init(&cfg, &e).expect("init");
@@ -1767,7 +1776,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let e_bypass = env(21.0, 22.0); // within bypass comfort range
         let e_normal = env(10.0, 20.0); // outside bypass range
 
@@ -1832,7 +1842,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
         let cfg_split = EquipmentConfig::from_typed(
             "HRV-split".to_string(),
             "HRV".to_string(),
@@ -1853,7 +1864,8 @@ mod tests {
                 balanced: None,
                 hours_in_operation: None,
             },
-        );
+        )
+        .unwrap();
 
         let e = env(10.0, 20.0); // normal operation, no bypass/defrost
         let mut combined = Ventilation::new(cfg_combined.clone());

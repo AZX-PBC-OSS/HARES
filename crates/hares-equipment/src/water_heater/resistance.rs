@@ -1022,6 +1022,7 @@ mod tests {
 
     fn config_from_typed(cfg: ElectricResistanceWaterHeaterConfig) -> EquipmentConfig {
         EquipmentConfig::from_typed("WH".to_string(), "Resistance Water Heater".to_string(), cfg)
+            .unwrap()
     }
 
     fn typed_config() -> ElectricResistanceWaterHeaterConfig {
@@ -1804,6 +1805,7 @@ mod element_priority_tests {
                 hot_draw_temp_c: None,
             },
         )
+        .unwrap()
     }
 
     fn ports() -> PortSlots {
@@ -2103,7 +2105,8 @@ mod element_priority_tests {
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             cfg,
-        );
+        )
+        .unwrap();
 
         let mut wh = ResistanceWH::new(config.clone());
         wh.init(&config, &env_state()).unwrap();
@@ -2178,7 +2181,8 @@ mod element_priority_tests {
                 "WH".to_string(),
                 "Resistance Water Heater".to_string(),
                 cfg,
-            );
+            )
+            .unwrap();
 
             let mut wh = ResistanceWH::new(config.clone());
             wh.init(&config, &env_state()).unwrap();
@@ -2244,7 +2248,8 @@ mod element_priority_tests {
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             cfg,
-        );
+        )
+        .unwrap();
 
         let mut wh = ResistanceWH::new(config.clone());
         wh.init(&config, &env_state()).unwrap();

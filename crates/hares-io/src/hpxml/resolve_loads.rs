@@ -534,7 +534,7 @@ pub(super) fn resolve_scheduled_loads(
                         "Dehumidifier".to_string(),
                         "Dehumidifier".to_string(),
                         cfg,
-                    ));
+                    )?);
                 }
                 specs.push(spec);
             }
@@ -707,7 +707,7 @@ pub(super) fn resolve_scheduled_loads(
                             FuelType::Electric,
                             cfg,
                             defaults,
-                        ));
+                        )?);
                     }
                     continue;
                 }
@@ -768,10 +768,10 @@ pub(super) fn resolve_ventilation(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), super::HpxmlError> {
     let Some(vent_fans) = details.path(&["Systems", "MechanicalVentilation", "VentilationFans"])
     else {
-        return;
+        return Ok(());
     };
 
     for fan in vent_fans.children_named("VentilationFan") {
@@ -849,8 +849,9 @@ pub(super) fn resolve_ventilation(
             FuelType::Electric,
             cfg,
             defaults,
-        ));
+        )?);
     }
+    Ok(())
 }
 
 /// Returns `true` when an HPXML `Location` string represents a conditioned space

@@ -520,6 +520,7 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
+        .unwrap()
     }
 
     #[test]

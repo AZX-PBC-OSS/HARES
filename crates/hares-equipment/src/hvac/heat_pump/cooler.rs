@@ -195,11 +195,7 @@ impl HpCooler {
             min_oat_compressor_cooling_c: Some(hp_cfg.min_oat_cooling_c),
         };
 
-        Ok(EquipmentConfig::from_typed(
-            source.name.clone(),
-            "Air Conditioner".to_string(),
-            mapped,
-        ))
+        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
     }
 }
 
@@ -440,11 +436,7 @@ impl GshpCooler {
             min_oat_compressor_cooling_c: None,
         };
 
-        Ok(EquipmentConfig::from_typed(
-            source.name.clone(),
-            "Air Conditioner".to_string(),
-            mapped,
-        ))
+        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
     }
 
     /// Return the cooling coil's runtime fraction from the most recent step.
@@ -783,11 +775,7 @@ impl WshpCooler {
             min_oat_compressor_cooling_c: None,
         };
 
-        Ok(EquipmentConfig::from_typed(
-            source.name.clone(),
-            "Air Conditioner".to_string(),
-            mapped,
-        ))
+        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
     }
 
     pub fn last_cooling_rtf(&self) -> f64 {
@@ -1024,6 +1012,7 @@ mod tests {
                 min_oat_cooling_c: 10.0,
             },
         )
+        .unwrap()
     }
 
     fn typed_config(data: serde_json::Value, ochre_class: &str) -> EquipmentConfig {
@@ -1367,7 +1356,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GshpCooler::new(cfg.clone());
         let env = cooling_env(21.0, 10.0);
         eq.init(&cfg, &env).unwrap();
@@ -1404,7 +1394,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GshpCooler::new(cfg.clone());
         // Zone in deadband (21 °C, between default heating=20 °C / cooling=24 °C),
         // outdoor at 5 °C — below central-AC crankcase threshold of 12.8 °C.
@@ -1450,7 +1441,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq_default = GshpCooler::new(cfg_default.clone());
         eq_default.init(&cfg_default, &env).unwrap();
 
@@ -1468,7 +1460,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq_deep = GshpCooler::new(cfg_deep.clone());
         eq_deep.init(&cfg_deep, &env).unwrap();
 
@@ -1558,7 +1551,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut eq = GshpCooler::new(cfg.clone());
         let env = cooling_env(28.0, 35.0);
         eq.init(&cfg, &env).unwrap();
@@ -1616,7 +1610,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut cooler = HpCooler::ashp_cooler(typed_hp.clone());
         // Init with a warm env so the cooler's internals are fully set up.
         cooler.init(&typed_hp, &cooling_env(28.0, 35.0)).unwrap();
@@ -1652,7 +1647,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut cooler = HpCooler::ashp_cooler(typed_hp.clone());
         // Init with a warm env.
         cooler.init(&typed_hp, &cooling_env(28.0, 35.0)).unwrap();
@@ -1706,7 +1702,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut cooler = HpCooler::ashp_cooler(typed_hp.clone());
         cooler.init(&typed_hp, &cooling_env(28.0, 35.0)).unwrap();
 

@@ -154,7 +154,8 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        ),
+        )
+        .unwrap(),
         "ASHP Heater" => EquipmentConfig::from_typed(
             name.to_string(),
             class.to_string(),
@@ -211,7 +212,8 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
-        ),
+        )
+        .unwrap(),
         "Ideal HVAC" => EquipmentConfig::from_typed(
             name.to_string(),
             class.to_string(),
@@ -238,7 +240,8 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 capacity_biquadratic_coeffs: None,
                 eir_biquadratic_coeffs: None,
             },
-        ),
+        )
+        .unwrap(),
         _ => panic!("unsupported class in hvac_parity cfg helper: {class}"),
     }
 }
@@ -307,6 +310,7 @@ fn hp_cooler_cfg(
             min_oat_cooling_c: 10.0,
         },
     )
+    .unwrap()
 }
 // 1. Gas furnace: energy balance verification
 //
@@ -341,7 +345,8 @@ fn gas_furnace_energy_balance() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
     let env = make_env(19.0, -5.0, 13.0);
@@ -421,7 +426,8 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
                 stage_heating_eirs: None,
                 setpoint: HvacSetpointConfig::default(),
             },
-        );
+        )
+        .unwrap();
         let registry = EquipmentRegistry::new();
         let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
         let env = make_env(18.0, -5.0, 12.0);
@@ -475,7 +481,8 @@ fn electric_baseboard_cop_is_unity() {
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", c.clone()).unwrap();
     let env = make_env(18.0, -5.0, 12.0);
@@ -969,7 +976,8 @@ fn furnace_thermostat_off_above_setpoint() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
 
     // 1. Zone well below setpoint → heating
@@ -1090,6 +1098,7 @@ fn two_speed_ac_config() -> EquipmentConfig {
             min_oat_compressor_cooling_c: None,
         },
     )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,7 +1518,8 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
     let env = make_env(18.0, -5.0, 12.0);
@@ -1580,7 +1590,8 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
     let env = make_env(18.0, -5.0, 12.0);
@@ -1639,7 +1650,8 @@ fn gas_furnace_zone_2_routes_heat_to_zone_2_not_zone_1() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
@@ -1706,7 +1718,8 @@ fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let mut furnace = registry.create("Gas Furnace", furnace_cfg.clone()).unwrap();
     furnace
         .init(&furnace_cfg, &make_env_at_minute(19.0, 0.0, 13.0, 0))
@@ -1970,7 +1983,8 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let mut mild = registry.create("ASHP Heater", cfg.clone()).unwrap();
     mild.init(&cfg, &make_env_at_minute(17.0, 12.0, 11.0, 0))

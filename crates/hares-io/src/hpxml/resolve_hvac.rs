@@ -820,7 +820,7 @@ fn try_build_gas_furnace_config(
         },
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), "Gas Furnace".to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), "Gas Furnace".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -872,7 +872,7 @@ fn try_build_electric_furnace_config(
         },
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), "Electric Furnace".to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), "Electric Furnace".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -964,7 +964,7 @@ fn try_build_gas_boiler_config(
         cfg.return_temp_c = 65.0;
     }
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), "Gas Boiler".to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), "Gas Boiler".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -1037,7 +1037,7 @@ fn try_build_electric_boiler_config(
         },
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), "Electric Boiler".to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), "Electric Boiler".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -1073,7 +1073,7 @@ fn try_build_electric_baseboard_config(
         },
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), "Electric Baseboard".to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), "Electric Baseboard".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -1120,6 +1120,7 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Ideal HVAC".to_string(), cfg)
+            .ok()?
             .with_setpoints_reconciled(setpoints),
     )
 }
@@ -1213,6 +1214,7 @@ fn try_build_central_ac_config(
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)
+            .ok()?
             .with_setpoints_reconciled(setpoints),
     )
 }
@@ -1270,6 +1272,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Room AC".to_string(), cfg)
+            .ok()?
             .with_setpoints_reconciled(setpoints),
     )
 }
@@ -1297,6 +1300,7 @@ fn try_build_dehumidifier_config(
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Dehumidifier".to_string(), cfg)
+            .ok()?
             .with_setpoints_reconciled(setpoints),
     )
 }
@@ -1505,7 +1509,7 @@ fn try_build_heat_pump_heater_config(
         },
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }
@@ -1694,7 +1698,7 @@ fn try_build_heat_pump_cooler_config(
             .unwrap_or(10.0),
     };
     Ok(Some(
-        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
+        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
     ))
 }

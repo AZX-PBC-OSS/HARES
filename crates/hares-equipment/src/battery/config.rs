@@ -207,7 +207,8 @@ mod tests {
             "test_battery".to_string(),
             "Battery".to_string(),
             cfg.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: BatteryConfig = ec.typed().unwrap();
         assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);

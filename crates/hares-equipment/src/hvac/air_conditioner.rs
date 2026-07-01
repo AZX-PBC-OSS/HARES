@@ -1764,6 +1764,7 @@ fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
             min_oat_compressor_cooling_c: None,
         },
     )
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -1868,12 +1869,13 @@ mod tests {
                 min_oat_compressor_cooling_c: None,
             },
         )
+        .unwrap()
     }
 
     fn ac_config_with(mutator: impl FnOnce(&mut CentralAirConditionerConfig)) -> EquipmentConfig {
         let mut typed = ac_config().typed::<CentralAirConditionerConfig>().unwrap();
         mutator(&mut typed);
-        EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed)
+        EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed).unwrap()
     }
 
     #[test]
@@ -1933,7 +1935,8 @@ mod tests {
                 startup_cd: Some(explicit_cd),
                 ..room_ac_defaults()
             },
-        );
+        )
+        .unwrap();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
         assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - explicit_cd).abs() < 1e-9);
@@ -1961,7 +1964,8 @@ mod tests {
                 startup_cd: None,
                 ..room_ac_defaults()
             },
-        );
+        )
+        .unwrap();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
         assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-9);
@@ -1989,7 +1993,8 @@ mod tests {
                 startup_cd: None,
                 ..room_ac_defaults()
             },
-        );
+        )
+        .unwrap();
         let mut eq = RoomAC::new(cfg.clone());
         assert!(
             eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).is_err(),
@@ -2347,7 +2352,8 @@ mod tests {
         typed.stage_capacities_w = Some(vec![typed.capacity_w]);
 
         let cfg =
-            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed)
+                .unwrap();
         let mut eq = AirConditioner::new(cfg.clone());
         let environment = env(27.0, 0.010, 19.0, 35.0);
         eq.init(&cfg, &environment).unwrap();
@@ -2709,7 +2715,8 @@ mod tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let environment = env(26.0, 0.010, 18.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
@@ -3005,7 +3012,8 @@ mod tests {
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
@@ -3258,6 +3266,7 @@ mod tests {
                 min_oat_compressor_cooling_c: None,
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -3371,7 +3380,8 @@ mod tests {
                 plf_max: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let mut rac = RoomAC::new(cfg.clone());
         // Zone in deadband (21 °C, between heating=18 °C and cooling=24 °C).
@@ -3609,7 +3619,8 @@ mod tests {
             min_oat_compressor_cooling_c: Some(min_oat_cooling_c),
         };
         let cfg =
-            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), inner_cfg);
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), inner_cfg)
+                .unwrap();
         let mut ac = AirConditioner::new(cfg.clone());
         let init_env = oat_lockout_env(30.0);
         ac.init(&cfg, &init_env).expect("init must succeed");
@@ -3863,7 +3874,8 @@ mod dr_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -4259,7 +4271,8 @@ mod crankcase_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -4351,7 +4364,8 @@ mod crankcase_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -4367,7 +4381,8 @@ mod crankcase_tests {
             .unwrap();
         mutator(&mut typed);
         let mut cfg =
-            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed)
+                .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -4813,7 +4828,8 @@ mod ideal_capacity_tests {
                 plf_max: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = RoomAC::new(cfg.clone());
         // Zone above cooling turn-on threshold: 26°C > setpoint+hysteresis = 25°C.
@@ -4880,7 +4896,8 @@ mod ideal_capacity_tests {
                 plf_max: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let mut eq = RoomAC::new(cfg.clone());
         // Fine timestep (60 s < 300 s threshold) → use_ideal = false.
@@ -4942,7 +4959,8 @@ mod ideal_capacity_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let rac_cfg = EquipmentConfig::from_typed(
             "rac_par".to_string(),
@@ -4975,7 +4993,8 @@ mod ideal_capacity_tests {
                 plf_max: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let env = make_env(26.0, 900);
 
@@ -5107,7 +5126,8 @@ mod defaults_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -5181,7 +5201,8 @@ mod defaults_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let env = make_env(28.0);
         let mut eq = AirConditioner::new(cfg.clone());
@@ -5258,7 +5279,8 @@ mod defaults_tests {
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let env = make_env(28.0);
         let mut eq = RoomAC::new(cfg.clone());
@@ -5374,7 +5396,8 @@ mod speed_selection_parity_tests {
             min_oat_compressor_cooling_c: None,
         };
         let mut cfg =
-            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed)
+                .unwrap();
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -5508,7 +5531,8 @@ mod speed_selection_parity_tests {
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let env = minimal_env();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
@@ -5554,7 +5578,8 @@ mod speed_selection_parity_tests {
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let env = minimal_env();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
@@ -5603,7 +5628,8 @@ mod speed_selection_parity_tests {
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let central_cfg = EquipmentConfig::from_typed(
             "CAC".to_string(),
             "Air Conditioner".to_string(),
@@ -5645,7 +5671,8 @@ mod speed_selection_parity_tests {
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
             },
-        );
+        )
+        .unwrap();
         let env_state = minimal_env();
         let mut room_eq = RoomAC::new(room_cfg.clone());
         room_eq.init(&room_cfg, &env_state).unwrap();

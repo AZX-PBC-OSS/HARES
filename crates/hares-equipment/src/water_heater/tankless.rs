@@ -713,6 +713,7 @@ mod tests {
             "Tankless Water Heater".to_string(),
             cfg,
         )
+        .unwrap()
     }
 
     fn typed_config() -> TanklessWaterHeaterConfig {

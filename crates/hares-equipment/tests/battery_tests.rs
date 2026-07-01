@@ -106,6 +106,7 @@ fn battery_config() -> EquipmentConfig {
         "Battery".to_string(),
         base_battery_config(),
     )
+    .unwrap()
 }
 
 /// Initialize a battery with default test config and return it ready to step.
@@ -209,7 +210,8 @@ fn soc_clamped_at_min_max() {
                 min_dwell_steps: 0,
                 ..base_battery_config()
             },
-        );
+        )
+        .unwrap();
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -243,7 +245,8 @@ fn soc_clamped_at_min_max() {
                 min_dwell_steps: 0,
                 ..base_battery_config()
             },
-        );
+        )
+        .unwrap();
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {

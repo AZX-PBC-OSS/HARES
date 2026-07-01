@@ -151,6 +151,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             initial_connection_state: get_str(&[KEY_INITIAL_CONNECTION_STATE]),
         },
     )
+    .unwrap()
 }
 
 fn base_raw() -> HashMap<String, crate::config::ConfigValue> {
@@ -2780,7 +2781,8 @@ fn minimal_ev_config() -> EvConfig {
 fn ev_config_round_trips_via_equipment_config() {
     let cfg = minimal_ev_config();
     let ec =
-        crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg.clone());
+        crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg.clone())
+            .unwrap();
     assert!(ec.is_typed());
     let recovered: EvConfig = ec.typed().unwrap();
     assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);
@@ -2845,7 +2847,8 @@ fn ev_init_typed_sets_fields_from_ev_config() {
         initial_soc: Some(0.5),
         ..minimal_ev_config()
     };
-    let ec = crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let ec =
+        crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg).unwrap();
     let mut ev = Ev::new(ec.clone());
     let env = sample_env();
     ev.init(&ec, &env).unwrap();
@@ -2973,7 +2976,7 @@ fn raw_and_typed_config_cold_derate_equivalence() {
         initial_soc: Some(0.3),
         ..minimal_ev_config()
     };
-    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg).unwrap();
     let mut typed_ev = Ev::new(typed.clone());
     let env = sample_env();
     typed_ev.init(&typed, &env).unwrap();
@@ -3020,7 +3023,7 @@ fn raw_and_typed_default_battery_temp_c_are_consistent() {
         battery_temp_c: None,
         ..minimal_ev_config()
     };
-    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg).unwrap();
     let mut typed_ev = Ev::new(typed.clone());
     typed_ev.init(&typed, &env).unwrap();
 
@@ -3051,7 +3054,7 @@ fn raw_and_typed_explicit_battery_temp_c_is_honoured() {
         battery_temp_c: Some(35.0),
         ..minimal_ev_config()
     };
-    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg).unwrap();
     let mut typed_ev = Ev::new(typed.clone());
     typed_ev.init(&typed, &env).unwrap();
 

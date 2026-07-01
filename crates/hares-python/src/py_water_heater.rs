@@ -91,7 +91,7 @@ impl PyGasWaterHeater {
     }
 }
 
-pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> EquipmentSpec {
+pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     params.insert("fuel_type".into(), json!("natural gas"));
@@ -156,20 +156,19 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> EquipmentSpec {
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,
         };
-        Some(EquipmentConfig::from_typed(
-            wh.name.clone(),
-            "Gas Water Heater".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(wh.name.clone(), "Gas Water Heater".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Gas Water Heater",
         &wh.name,
         FuelType::Gas,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +249,7 @@ impl PyElectricResistanceWH {
     }
 }
 
-pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> EquipmentSpec {
+pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if wh.autosize {
@@ -311,20 +310,23 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> EquipmentSpec {
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         };
-        Some(EquipmentConfig::from_typed(
-            wh.name.clone(),
-            "Electric Resistance Water Heater".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(
+                wh.name.clone(),
+                "Electric Resistance Water Heater".to_string(),
+                cfg,
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Electric Resistance Water Heater",
         &wh.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +416,7 @@ impl PyHeatPumpWH {
     }
 }
 
-pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> EquipmentSpec {
+pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if wh.autosize {
@@ -482,20 +484,19 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> EquipmentSpec {
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
         };
-        Some(EquipmentConfig::from_typed(
-            wh.name.clone(),
-            "Heat Pump Water Heater".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(wh.name.clone(), "Heat Pump Water Heater".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Heat Pump Water Heater",
         &wh.name,
         FuelType::Electric,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +573,7 @@ impl PyTanklessWaterHeater {
     }
 }
 
-pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> EquipmentSpec {
+pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     params.insert("fuel_type".into(), json!("natural gas"));
@@ -619,20 +620,19 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> EquipmentSpec {
             mains_temp_c_source: None,
             zone_type: None,
         };
-        Some(EquipmentConfig::from_typed(
-            wh.name.clone(),
-            "Tankless Water Heater".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(wh.name.clone(), "Tankless Water Heater".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Tankless Water Heater",
         &wh.name,
         FuelType::Gas,
         params,
         typed_config,
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -713,7 +713,7 @@ impl PyIndirectTank {
     }
 }
 
-pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> EquipmentSpec {
+pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> PyResult<EquipmentSpec> {
     let mut params = Map::new();
 
     if it.autosize {
@@ -763,18 +763,17 @@ pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> EquipmentSpec {
             hot_draw_temp_c: None,
             boiler_loop_flow_rate_kg_s: None,
         };
-        Some(EquipmentConfig::from_typed(
-            it.name.clone(),
-            "Indirect Tank".to_string(),
-            cfg,
-        ))
+        Some(
+            EquipmentConfig::from_typed(it.name.clone(), "Indirect Tank".to_string(), cfg)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )
     };
 
-    make_spec(
+    Ok(make_spec(
         "Indirect Tank",
         &it.name,
         FuelType::Gas,
         params,
         typed_config,
-    )
+    ))
 }

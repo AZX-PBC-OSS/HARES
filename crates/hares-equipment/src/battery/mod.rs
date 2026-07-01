@@ -1934,7 +1934,7 @@ mod tests {
                 _ => panic!("unsupported battery test override key: {k}"),
             }
         }
-        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
     }
 
     fn typed_battery_config(chemistry: Option<&str>, bms_mode: Option<BmsMode>) -> EquipmentConfig {
@@ -1974,7 +1974,7 @@ mod tests {
             grid_export_rule: None,
             min_dwell_steps: 0,
         };
-        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
     }
 
     fn default_ports() -> PortSlots {
@@ -2543,7 +2543,8 @@ mod tests {
                     .typed::<BatteryConfig>()
                     .expect("typed battery config")
             },
-        );
+        )
+        .unwrap();
         let mut bat = Battery::new(config.clone());
         let env = base_env();
         bat.init(&config, &env).unwrap();
@@ -2828,6 +2829,7 @@ mod tests {
                         .expect("typed battery config")
                 },
             )
+            .unwrap()
         };
 
         let charge_steps = 10;
@@ -2927,6 +2929,7 @@ mod tests {
                         .expect("typed battery config")
                 },
             )
+            .unwrap()
         };
 
         let env = warm_env();
@@ -3134,7 +3137,8 @@ mod tests {
                     .typed::<BatteryConfig>()
                     .expect("typed battery config")
             },
-        );
+        )
+        .unwrap();
         let mut bat = Battery::new(config.clone());
         let env = base_env();
         bat.init(&config, &env).unwrap();

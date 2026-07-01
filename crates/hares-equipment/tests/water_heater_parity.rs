@@ -121,6 +121,7 @@ fn resistance_cfg(
             hot_draw_temp_c: None,
         },
     )
+    .unwrap()
 }
 
 fn step_wh(wh: &mut dyn hares_equipment::Equipment, env: &EnvironmentState, ports: &mut PortSlots) {
@@ -204,6 +205,7 @@ fn hpwh_cfg_with(
             fixture_delivery_temp_c: None,
         },
     )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +328,8 @@ fn element_cycling_deadband_matches_ochre_default() {
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -423,7 +426,8 @@ fn gas_wh_fuel_not_electricity() {
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = GasWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -542,7 +546,8 @@ fn standby_loss_ua_magnitude() {
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -639,7 +644,8 @@ fn hpwh_cop_at_multiple_ambient_temps() {
                 jacket_r_value_m2_k_w: None,
                 fixture_delivery_temp_c: None,
             },
-        );
+        )
+        .unwrap();
 
         let mut wh = HeatPumpWH::new(cfg.clone());
         wh.init(&cfg, &env).unwrap();
@@ -730,7 +736,8 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     hot_draw_temp_c: None,
                     pilot_fraction_to_tank: None,
                 },
-            ),
+            )
+            .unwrap(),
             FuelType::Gas,
         ),
     ];
@@ -795,6 +802,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     pilot_fraction_to_tank: None,
                 },
             )
+            .unwrap()
         };
 
         let on_below_floor = if fuel_type == FuelType::Electric {
@@ -1021,7 +1029,8 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
             wall_heat_fraction: Some(0.0),
             ..base.clone()
         },
-    );
+    )
+    .unwrap();
     let cfg50 = EquipmentConfig::from_typed(
         "HPWH50".to_string(),
         "Heat Pump Water Heater".to_string(),
@@ -1029,7 +1038,8 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
             wall_heat_fraction: Some(0.5),
             ..base
         },
-    );
+    )
+    .unwrap();
 
     let mut wh0 = HeatPumpWH::new(cfg0.clone());
     wh0.init(&cfg0, &env).unwrap();
@@ -1137,7 +1147,8 @@ fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut wh = HeatPumpWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();

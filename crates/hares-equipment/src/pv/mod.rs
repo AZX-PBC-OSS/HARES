@@ -1441,12 +1441,13 @@ mod tests {
             "PV".to_string(),
             base_pv_typed_config(),
         )
+        .unwrap()
     }
 
     fn config_single_with_losses(system_losses_fraction: f64) -> EquipmentConfig {
         let mut cfg = base_pv_typed_config();
         cfg.system_losses_fraction = Some(system_losses_fraction);
-        EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg)
+        EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg).unwrap()
     }
 
     fn approx_eq(a: f64, b: f64) {
@@ -1662,7 +1663,8 @@ mod tests {
                 ]),
                 ..base_pv_typed_config()
             },
-        );
+        )
+        .unwrap();
 
         let sid0 = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let sid1 = surface_id_for_orientation(20.0, 90.0, 5.0).unwrap();
@@ -1724,7 +1726,8 @@ mod tests {
                 }]),
                 ..base_pv_typed_config()
             },
-        );
+        )
+        .unwrap();
         let sid = surface_id_for_orientation(30.0, 0.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1811,7 +1814,8 @@ mod tests {
                 sam_lut_path: None,
                 arrays: None,
             },
-        );
+        )
+        .unwrap();
         let sid = surface_id_for_orientation(27.0, 200.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1891,7 +1895,8 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
-        let cfg = EquipmentConfig::from_typed("PV Wind".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV Wind".to_string(), "PV".to_string(), cfg).unwrap();
 
         // Calm day (0.5 m/s)
         let env_calm = env_with_surfaces_full(
@@ -1951,7 +1956,8 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
         cfg.inverter_capacity_kw = Some(3.0);
-        let cfg = EquipmentConfig::from_typed("PV Clip".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV Clip".to_string(), "PV".to_string(), cfg).unwrap();
 
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1992,7 +1998,7 @@ mod tests {
         cfg.equipment_id = Some(2);
         cfg.inverter_efficiency = Some(1.0);
         cfg.power_factor = Some(0.9);
-        let cfg = EquipmentConfig::from_typed("PV Q".to_string(), "PV".to_string(), cfg);
+        let cfg = EquipmentConfig::from_typed("PV Q".to_string(), "PV".to_string(), cfg).unwrap();
 
         // At 25°C cell temp, 1000 W/m² → DC = 5 kW, AC = 5 kW (eff=1.0, T_derate at T_ref).
         let env = env_with_surfaces(
@@ -2038,7 +2044,7 @@ mod tests {
             cfg.inverter_efficiency = Some(1.0);
             cfg.system_losses_fraction = Some(0.0);
             cfg.module_type = Some(module_type.to_string());
-            EquipmentConfig::from_typed(format!("PV {module_type}"), "PV".to_string(), cfg)
+            EquipmentConfig::from_typed(format!("PV {module_type}"), "PV".to_string(), cfg).unwrap()
         };
 
         // T_amb = 33.75°C → T_cell = 33.75 + 1000*(45-20)/800 = 65°C (40°C above T_ref).
@@ -2129,7 +2135,7 @@ mod tests {
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(1.0);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).expect("init pv csv lut");
         let mut ports = PortSlots::default();
@@ -2160,7 +2166,7 @@ mod tests {
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(1.0);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).expect("init pv parquet lut");
         let mut ports = PortSlots::default();
@@ -2211,7 +2217,7 @@ mod tests {
         let mut typed = base_pv_typed_config();
         typed.equipment_id = Some(41);
         typed.system_losses_fraction = Some(0.10);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -2233,7 +2239,7 @@ mod tests {
         let mut typed = base_pv_typed_config();
         typed.equipment_id = Some(42);
         typed.system_losses_fraction = Some(1.0);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -2413,7 +2419,7 @@ mod tests {
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(1.0);
         typed.system_losses_fraction = Some(0.0);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -2453,7 +2459,7 @@ mod tests {
         typed.system_losses_fraction = Some(0.0);
         typed.inverter_capacity_kw = Some(inv_cap_kw);
         typed.power_factor = Some(1.0);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -2785,7 +2791,8 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.inverter_efficiency = Some(1.0);
         cfg.system_losses_fraction = Some(0.0);
-        let cfg = EquipmentConfig::from_typed("PV Setpoint".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV Setpoint".to_string(), "PV".to_string(), cfg).unwrap();
 
         // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(45-20)/800 = 56.25°C.
         // Temperature derating is slight but the unconstrained AC output is well above 2 kW.
@@ -2893,7 +2900,8 @@ mod tests {
                 surface_resolution_deg: Some(5.0),
                 ..base_pv_typed_config()
             },
-        );
+        )
+        .unwrap();
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
@@ -2933,7 +2941,8 @@ mod tests {
         cfg.system_losses_fraction = Some(0.0);
         cfg.inverter_capacity_kw = Some(4.0);
         let cfg =
-            EquipmentConfig::from_typed("PV 5kW/4kW inverter".to_string(), "PV".to_string(), cfg);
+            EquipmentConfig::from_typed("PV 5kW/4kW inverter".to_string(), "PV".to_string(), cfg)
+                .unwrap();
 
         // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive
         // temp derating so DC > nameplate 5 kW and definitely above the 4 kW cap.
@@ -2990,7 +2999,8 @@ mod tests {
         cfg.system_losses_fraction = Some(0.0);
         // inverter_capacity_kw stays None — tests the default 1:1 resolving.
         let cfg =
-            EquipmentConfig::from_typed("PV default ratio".to_string(), "PV".to_string(), cfg);
+            EquipmentConfig::from_typed("PV default ratio".to_string(), "PV".to_string(), cfg)
+                .unwrap();
 
         // Cold ambient (-10 °C, wind 2 m/s) pushes cell temp to ~14 °C,
         // giving positive temperature derating so DC (~5.25 kW) exceeds
@@ -3040,7 +3050,8 @@ mod tests {
         cfg.inverter_efficiency = Some(1.0);
         cfg.system_losses_fraction = Some(0.0);
         cfg.inverter_capacity_kw = Some(3.0);
-        let cfg = EquipmentConfig::from_typed("PV 5kW/3kW".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV 5kW/3kW".to_string(), "PV".to_string(), cfg).unwrap();
 
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -3189,7 +3200,7 @@ mod tests {
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(0.96);
         typed.system_losses_fraction = Some(0.14);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
 
         let mut env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -3236,7 +3247,7 @@ mod tests {
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(0.90);
         typed.system_losses_fraction = Some(0.10);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
 
         let mut env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -3281,7 +3292,7 @@ mod tests {
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
         typed.inverter_efficiency = Some(0.96);
-        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
 
         let mut env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -3434,7 +3445,8 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.noct_c = None;
         cfg.array_type = Some("roof_mounted".to_string());
-        let cfg = EquipmentConfig::from_typed("PV Roof".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV Roof".to_string(), "PV".to_string(), cfg).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3459,7 +3471,8 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.noct_c = Some(42.0);
         cfg.array_type = Some("roof_mounted".to_string());
-        let cfg = EquipmentConfig::from_typed("PV Explicit".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV Explicit".to_string(), "PV".to_string(), cfg).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3490,7 +3503,8 @@ mod tests {
         cfg.noct_c = None;
         cfg.array_type = Some("OpenRack".to_string());
         cfg.equipment_id = Some(1);
-        let cfg = EquipmentConfig::from_typed("PV OpenRack".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV OpenRack".to_string(), "PV".to_string(), cfg).unwrap();
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3544,7 +3558,8 @@ mod tests {
         cfg.array_type = Some("OpenRack".to_string());
         cfg.sam_lut_path = Some(path.to_string_lossy().into_owned());
         cfg.inverter_efficiency = Some(1.0);
-        let cfg = EquipmentConfig::from_typed("PV LUT AT".to_string(), "PV".to_string(), cfg);
+        let cfg =
+            EquipmentConfig::from_typed("PV LUT AT".to_string(), "PV".to_string(), cfg).unwrap();
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env)
             .expect("init pv lut with array_type metadata");
@@ -3680,7 +3695,8 @@ mod tests {
                 surface_resolution_deg: Some(5.0),
                 ..base_pv_typed_config()
             },
-        );
+        )
+        .unwrap();
         let mut pv_no_lut = PV::new(cfg_no_lut.clone());
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
@@ -3708,7 +3724,8 @@ mod tests {
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
-        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+        let cfg_lut =
+            EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut).unwrap();
 
         // Weather must match LUT entry coordinates: zenith=30 (altitude=60),
         // azimuth=180, GHI=DNI=DHI=0 (LUT has a single entry at these coords).
@@ -3784,7 +3801,8 @@ mod tests {
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
-        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+        let cfg_lut =
+            EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut).unwrap();
 
         let mut env_lut = env_with_surfaces_full(
             vec![SurfaceIrradiance {
@@ -3869,7 +3887,8 @@ mod tests {
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
-        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+        let cfg_lut =
+            EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut).unwrap();
 
         let mut env_lut = env_with_surfaces_full(
             vec![SurfaceIrradiance {

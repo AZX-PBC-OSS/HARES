@@ -341,14 +341,14 @@ impl EquipmentConfig {
         name: String,
         ochre_class: String,
         config: T,
-    ) -> Self {
-        let data = serde_json::to_value(config).unwrap_or_else(|e| {
-            panic!(
+    ) -> crate::Result<Self> {
+        let data = serde_json::to_value(config).map_err(|e| {
+            hares_types::HaresError::Equipment(format!(
                 "typed config serialization failed for {}: {e}",
                 T::equipment_type_name()
-            )
-        });
-        Self {
+            ))
+        })?;
+        Ok(Self {
             name,
             ochre_class,
             payload: ConfigPayload::Typed {
@@ -361,7 +361,7 @@ impl EquipmentConfig {
             rng_seed: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
-        }
+        })
     }
 
     /// Constructor for Python adapter layer custom equipment.
@@ -419,7 +419,8 @@ mod tests {
             "test_name".to_string(),
             "TestClass".to_string(),
             config.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: TestConfig = ec.typed().unwrap();
         assert_eq!(recovered, config);
@@ -466,7 +467,8 @@ mod tests {
             name: "test".to_string(),
         };
         let ec =
-            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config);
+            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config)
+                .unwrap();
         let result: Result<OtherConfig, _> = ec.typed();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -521,12 +523,76 @@ mod tests {
             value: 42.5,
             name: "test".to_string(),
         };
-        let ec = EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config);
+        let ec =
+            EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config).unwrap();
 
         assert!(ec.is_typed());
         assert_eq!(ec.get_f64("any"), None);
         assert_eq!(ec.get_str("any"), None);
         assert_eq!(ec.get_bool("any"), None);
         assert_eq!(ec.get_f64_array("any"), None);
+    }
+
+    /// Type with a custom Serialize impl that always returns an error,
+    /// used to verify that `from_typed()` returns `Err` rather than panicking.
+    #[derive(Clone, Debug, Deserialize, PartialEq)]
+    struct FailSerialize;
+
+    impl Serialize for FailSerialize {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            _serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
+
+    impl EquipmentTypedConfig for FailSerialize {
+        fn equipment_type_name() -> &'static str {
+            "FailEquipment"
+        }
+    }
+
+    #[test]
+    fn from_typed_valid_config_returns_ok() {
+        let config = TestConfig {
+            value: 1.0,
+            name: "valid".to_string(),
+        };
+        let result =
+            EquipmentConfig::from_typed("test_valid".to_string(), "TestClass".to_string(), config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn from_typed_serialization_failure_returns_err() {
+        let config = FailSerialize;
+        let result =
+            EquipmentConfig::from_typed("test_fail".to_string(), "FailClass".to_string(), config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("typed config serialization failed"));
+        assert!(err.contains("FailEquipment"));
+    }
+
+    #[test]
+    fn from_typed_produces_correct_config_values() {
+        let config = TestConfig {
+            value: 73.3,
+            name: "sensor_a".to_string(),
+        };
+        let ec = EquipmentConfig::from_typed(
+            "sensor".to_string(),
+            "SensorClass".to_string(),
+            config.clone(),
+        )
+        .unwrap();
+        let recovered: TestConfig = ec.typed().unwrap();
+        assert_eq!(recovered.value, 73.3);
+        assert_eq!(recovered.name, "sensor_a");
+        assert_eq!(ec.name, "sensor");
+        assert_eq!(ec.ochre_class, "SensorClass");
     }
 }

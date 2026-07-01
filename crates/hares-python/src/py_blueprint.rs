@@ -116,46 +116,46 @@ impl PyDwellingBlueprint {
 
 fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<EquipmentSpec> {
     if let Ok(f) = obj.extract::<PyRef<'_, PyGasFurnace>>() {
-        return Ok(gas_furnace_spec_from_py(&f));
+        return gas_furnace_spec_from_py(&f);
     }
     if let Ok(ac) = obj.extract::<PyRef<'_, PyAirConditioner>>() {
-        return Ok(ac_spec_from_py(&ac));
+        return ac_spec_from_py(&ac);
     }
     if let Ok(hp) = obj.extract::<PyRef<'_, PyASHPHeater>>() {
-        return Ok(ashp_heater_spec_from_py(&hp));
+        return ashp_heater_spec_from_py(&hp);
     }
     if let Ok(hp) = obj.extract::<PyRef<'_, PyASHPCooler>>() {
-        return Ok(ashp_cooler_spec_from_py(&hp));
+        return ashp_cooler_spec_from_py(&hp);
     }
     if let Ok(hvac) = obj.extract::<PyRef<'_, PyIdealHVAC>>() {
-        return Ok(ideal_hvac_spec_from_py(&hvac));
+        return ideal_hvac_spec_from_py(&hvac);
     }
     if let Ok(bb) = obj.extract::<PyRef<'_, PyElectricBaseboard>>() {
-        return Ok(baseboard_spec_from_py(&bb));
+        return baseboard_spec_from_py(&bb);
     }
     if let Ok(wh) = obj.extract::<PyRef<'_, PyGasWaterHeater>>() {
-        return Ok(gas_wh_spec_from_py(&wh));
+        return gas_wh_spec_from_py(&wh);
     }
     if let Ok(wh) = obj.extract::<PyRef<'_, PyElectricResistanceWH>>() {
-        return Ok(elec_res_wh_spec_from_py(&wh));
+        return elec_res_wh_spec_from_py(&wh);
     }
     if let Ok(wh) = obj.extract::<PyRef<'_, PyHeatPumpWH>>() {
-        return Ok(hpwh_spec_from_py(&wh));
+        return hpwh_spec_from_py(&wh);
     }
     if let Ok(gb) = obj.extract::<PyRef<'_, PyGasBoiler>>() {
-        return Ok(gas_boiler_spec_from_py(&gb));
+        return gas_boiler_spec_from_py(&gb);
     }
     if let Ok(eb) = obj.extract::<PyRef<'_, PyElectricBoiler>>() {
-        return Ok(electric_boiler_spec_from_py(&eb));
+        return electric_boiler_spec_from_py(&eb);
     }
     if let Ok(ef) = obj.extract::<PyRef<'_, PyElectricFurnace>>() {
-        return Ok(electric_furnace_spec_from_py(&ef));
+        return electric_furnace_spec_from_py(&ef);
     }
     if let Ok(wh) = obj.extract::<PyRef<'_, PyTanklessWaterHeater>>() {
-        return Ok(tankless_wh_spec_from_py(&wh));
+        return tankless_wh_spec_from_py(&wh);
     }
     if let Ok(it) = obj.extract::<PyRef<'_, PyIndirectTank>>() {
-        return Ok(indirect_tank_spec_from_py(&it));
+        return indirect_tank_spec_from_py(&it);
     }
     Err(PyValueError::new_err(
         "equipment must be a typed HVAC or water heater config object",

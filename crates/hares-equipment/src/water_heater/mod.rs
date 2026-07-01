@@ -529,6 +529,7 @@ mod tests {
                 hot_draw_temp_c: None,
             },
         )
+        .unwrap()
     }
 
     fn env_with_payloads(schedule_payload: Option<Vec<f64>>) -> EnvironmentState {
@@ -863,6 +864,7 @@ mod dhw_integration_tests {
                 hot_draw_temp_c: None,
             },
         )
+        .unwrap()
     }
 
     /// Merge port declarations from multiple equipment into shared PortSlots,
@@ -1091,7 +1093,8 @@ mod dhw_integration_tests {
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             typed,
-        );
+        )
+        .unwrap();
 
         let mut wh = ResistanceWH::new(wh_cfg.clone());
         wh.init(&wh_cfg, &env).unwrap();

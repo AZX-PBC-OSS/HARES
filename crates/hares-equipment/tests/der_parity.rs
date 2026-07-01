@@ -128,6 +128,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             min_dwell_steps: 0,
         },
     )
+    .unwrap()
 }
 
 fn make_battery(cfg: &EquipmentConfig) -> Battery {
@@ -391,7 +392,8 @@ fn pv_cell_temperature_noct_model() {
             sam_lut_path: None,
             arrays: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut env = base_env();
     // Irradiance = 800 W/m², ambient = 30°C, wind = 2 m/s
@@ -503,7 +505,8 @@ fn pv_peak_generation_in_good_conditions() {
             sam_lut_path: None,
             arrays: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut env = base_env();
     // Hot, sunny summer noon — the exact conditions of the reported scenario.
@@ -603,7 +606,8 @@ fn pv_power_temperature_derating() {
                 sam_lut_path: None,
                 arrays: None,
             },
-        );
+        )
+        .unwrap();
         let mut env = base_env();
         env.weather.outdoor_temp_c = outdoor_temp_c;
         env.weather.wind_speed_m_s = 0.5; // low wind → high cell temp
@@ -707,7 +711,8 @@ fn generator_fuel_efficiency_at_half_load() {
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();
@@ -807,7 +812,8 @@ fn generator_ramp_rate_is_kw_per_second() {
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();
@@ -889,7 +895,8 @@ fn generator_capacity_min_enforced() {
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();

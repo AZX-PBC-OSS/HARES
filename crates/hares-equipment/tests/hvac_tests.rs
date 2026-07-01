@@ -110,6 +110,7 @@ fn ideal_hvac_config(name: &str, mode: IdealCapacityModeConfig) -> EquipmentConf
             ..IdealHvacConfig::default()
         },
     )
+    .unwrap()
 }
 
 fn gas_furnace_config(name: &str) -> EquipmentConfig {
@@ -129,6 +130,7 @@ fn gas_furnace_config(name: &str) -> EquipmentConfig {
             ducts: DuctConfig::default(),
         },
     )
+    .unwrap()
 }
 
 fn electric_furnace_config(name: &str) -> EquipmentConfig {
@@ -146,6 +148,7 @@ fn electric_furnace_config(name: &str) -> EquipmentConfig {
             ducts: DuctConfig::default(),
         },
     )
+    .unwrap()
 }
 
 fn electric_boiler_config(name: &str) -> EquipmentConfig {
@@ -166,6 +169,7 @@ fn electric_boiler_config(name: &str) -> EquipmentConfig {
             setpoint: HvacSetpointConfig::default(),
         },
     )
+    .unwrap()
 }
 
 fn ports_for_zone1() -> PortSlots {
@@ -230,7 +234,8 @@ fn zone_id_0_equipment_produces_nonzero_thermal_output() {
             capacity_w: 10_000.0,
             ..GasFurnaceConfig::default()
         },
-    );
+    )
+    .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
     let env = env_with_zone_temp(18.0);
@@ -311,7 +316,8 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -388,7 +394,8 @@ fn gas_furnace_consumes_gas_fuel() {
             setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -516,7 +523,8 @@ fn ashp_heating_cop_above_unity() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -620,7 +628,8 @@ fn hvac_port_contributions_are_correct_sign() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
     let mut cooler = registry
         .create("Air Conditioner", cool_cfg.clone())
         .unwrap();
@@ -662,7 +671,8 @@ fn baseboard_electric_resistance_cop_unity() {
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
@@ -864,7 +874,8 @@ fn electric_resistance_heaters_use_eir_as_input_ratio() {
             setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let boiler_cfg = EquipmentConfig::from_typed(
         "eb".to_string(),
         "Electric Boiler".to_string(),
@@ -881,7 +892,8 @@ fn electric_resistance_heaters_use_eir_as_input_ratio() {
             number_of_speeds: 1,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let env = env_with_zone_temp(18.0);
@@ -1037,7 +1049,8 @@ fn simple_heaters_ideal_capacity_scales_output() {
                     eir: 1.0,
                     setpoint: HvacSetpointConfig::default(),
                 },
-            ),
+            )
+            .unwrap(),
         )
         .unwrap();
     let baseboard_cfg = EquipmentConfig::from_typed(
@@ -1050,7 +1063,8 @@ fn simple_heaters_ideal_capacity_scales_output() {
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
     baseboard.init(&baseboard_cfg, &env).unwrap();
     baseboard
         .apply_control(&ControlSignal::IdealCapacity {
@@ -1134,7 +1148,8 @@ fn ashp_sub_consumption_telemetry() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -1285,7 +1300,8 @@ fn ashp_defaults_match_reference() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -1379,7 +1395,8 @@ fn ashp_defaults_match_reference() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let mut eq2 = registry
         .create("ASHP Heater", cfg_with_backup.clone())
@@ -1478,7 +1495,8 @@ fn mshp_defaults_match_reference() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("MSHP Heater", cfg.clone()).unwrap();
@@ -1605,7 +1623,8 @@ fn bang_bang_single_speed_cycles_within_deadband() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
 
@@ -1922,7 +1941,8 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
             setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let env_cold = env_with_zone_temp(18.0);
     let mut eq_hpx = registry.create("Gas Furnace", cfg_hpx.clone()).unwrap();
     eq_hpx.init(&cfg_hpx, &env_cold).unwrap();
@@ -2032,7 +2052,8 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2134,7 +2155,8 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2234,7 +2256,8 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2330,7 +2353,8 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2443,7 +2467,8 @@ fn heating_latent_always_zero_during_normal_heating() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2533,7 +2558,8 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2625,7 +2651,8 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2701,7 +2728,8 @@ fn heating_latent_telemetry_key_present() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2778,7 +2806,8 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2884,7 +2913,8 @@ fn defrost_accumulating_applies_continuous_multiplier() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -3014,7 +3044,8 @@ fn mshp_load_above_stage1_runs_continuously() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("MSHP Heater", cfg.clone()).unwrap();
@@ -3203,7 +3234,8 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 resistive_defrost_capacity_w: 0.0,
             },
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -3367,7 +3399,8 @@ fn update_mode_heating_to_deadband_transition() {
             setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         },
-    );
+    )
+    .unwrap();
     let env_cold = env_with_zone_temp(18.0);
     let env_warm = env_with_zone_temp(26.0);
 
@@ -3435,7 +3468,8 @@ fn update_mode_cooling_transition() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     // Default cooling setpoint is 24.0°C; hysteresis=1.0, deadband_offset=0.2.
     // Turn-on  = setpoint + hysteresis*(1-offset) = 24.0 + 0.8 = 24.8°C
@@ -3553,7 +3587,8 @@ fn ac_core_output_carries_cop() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
@@ -3672,7 +3707,8 @@ fn speed_staging_keys_present_in_telemetry() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
@@ -3759,7 +3795,8 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
@@ -3838,7 +3875,8 @@ fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
@@ -4082,7 +4120,8 @@ fn furnace_thermal_port_equals_rated_capacity_at_sf1() {
             setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let env = env_with_zone_temp(18.0);
@@ -4131,7 +4170,8 @@ fn baseboard_thermal_port_equals_rated_capacity_at_sf1() {
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let env = env_with_zone_temp(18.0);
@@ -4225,7 +4265,8 @@ fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let env = env_with_zone_temp_hot(30.0);
@@ -4293,6 +4334,7 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
                 min_oat_compressor_cooling_c: None,
             },
         )
+        .unwrap()
     };
 
     let registry = EquipmentRegistry::new();
@@ -4442,7 +4484,8 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("MSHP Heater", cfg.clone()).unwrap();

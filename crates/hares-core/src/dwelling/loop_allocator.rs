@@ -15,6 +15,7 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_io::EquipmentSpec;
+use hares_types::HaresError;
 
 /// Iterate over all allocated loop IDs across equipment typed configs.
 ///
@@ -60,19 +61,20 @@ fn replace_typed<T: EquipmentTypedConfig>(
     next_id: &mut u16,
     setter: impl FnOnce(&mut T, u16),
     assign: impl FnOnce(&T) -> bool,
-) {
+) -> Result<(), HaresError> {
     let Some(eq_cfg) = cfg else {
-        return;
+        return Ok(());
     };
     let Ok(mut typed) = eq_cfg.typed::<T>() else {
-        return;
+        return Ok(());
     };
     if !assign(&typed) {
-        return;
+        return Ok(());
     }
     setter(&mut typed, *next_id);
     *next_id = next_id.saturating_add(1);
-    *eq_cfg = EquipmentConfig::from_typed(eq_cfg.name.clone(), eq_cfg.ochre_class.clone(), typed);
+    *eq_cfg = EquipmentConfig::from_typed(eq_cfg.name.clone(), eq_cfg.ochre_class.clone(), typed)?;
+    Ok(())
 }
 
 /// Collect every loop ID currently assigned across all equipment typed configs.
@@ -95,7 +97,7 @@ pub(crate) fn collect_allocated_loop_ids(
 ///
 /// Standalone equipment that shares a fluid loop domain will receive
 /// distinct IDs, eliminating collision with wired combi-pair IDs.
-pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
+pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) -> Result<(), HaresError> {
     let max_wired = max_wired_loop_id(specs);
     // When max_wired == u16::MAX (extremely unlikely), saturating_add
     // keeps it at u16::MAX to avoid wrap; every further saturating_add
@@ -111,7 +113,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Electric Boiler" => {
                 replace_typed::<ElectricBoilerConfig>(
@@ -119,7 +121,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Gas Water Heater" => {
                 replace_typed::<GasWaterHeaterConfig>(
@@ -127,7 +129,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Electric Resistance Water Heater" => {
                 replace_typed::<ElectricResistanceWaterHeaterConfig>(
@@ -135,7 +137,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Tankless Water Heater" => {
                 replace_typed::<TanklessWaterHeaterConfig>(
@@ -143,7 +145,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Heat Pump Water Heater" => {
                 replace_typed::<HeatPumpWaterHeaterConfig>(
@@ -151,7 +153,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             "Indirect Tank" => {
                 replace_typed::<IndirectTankConfig>(
@@ -159,7 +161,7 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.boiler_loop_id = Some(id),
                     |c| c.boiler_loop_id.is_none(),
-                );
+                )?;
             }
             "Gas Generator" | "Gas Fuel Cell" => {
                 replace_typed::<GeneratorConfig>(
@@ -167,11 +169,12 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) {
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
                     |c| c.loop_id.is_none(),
-                );
+                )?;
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -191,11 +194,9 @@ mod tests {
             fuel_type: FuelType::None,
             parameters: Default::default(),
             zip_params: None,
-            typed_config: Some(EquipmentConfig::from_typed(
-                name.to_string(),
-                name.to_string(),
-                config,
-            )),
+            typed_config: Some(
+                EquipmentConfig::from_typed(name.to_string(), name.to_string(), config).unwrap(),
+            ),
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
@@ -267,7 +268,7 @@ mod tests {
             ),
         ];
 
-        allocate_loop_ids(&mut specs);
+        allocate_loop_ids(&mut specs).unwrap();
 
         let gb_cfg = specs[0]
             .typed_config
@@ -384,7 +385,7 @@ mod tests {
             ),
         ];
 
-        allocate_loop_ids(&mut specs);
+        allocate_loop_ids(&mut specs).unwrap();
 
         // Wired IDs preserved
         assert_eq!(
@@ -486,7 +487,7 @@ mod tests {
             ),
         ];
 
-        allocate_loop_ids(&mut specs);
+        allocate_loop_ids(&mut specs).unwrap();
 
         // Standalone gets ID 2 (above wired ID 1)
         assert_eq!(
@@ -568,7 +569,7 @@ mod tests {
             primary_role: None,
         }];
 
-        allocate_loop_ids(&mut specs);
+        allocate_loop_ids(&mut specs).unwrap();
         // No panic, no modification (no typed config to patch)
         assert!(specs[0].typed_config.is_none());
     }
@@ -710,7 +711,7 @@ mod tests {
             ),
         ];
 
-        allocate_loop_ids(&mut specs);
+        allocate_loop_ids(&mut specs).unwrap();
 
         let ids: Vec<u16> = vec![
             specs[0]

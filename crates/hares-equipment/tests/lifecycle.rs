@@ -411,7 +411,8 @@ fn lifecycle_gas_furnace() {
             stage_heating_eirs: None,
             setpoint: HvacSetpointConfig::default(),
         },
-    );
+    )
+    .unwrap();
 
     let mut eq = registry
         .create("Gas Furnace", cfg.clone())
@@ -552,7 +553,8 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
 
 fn typed_alias_config<T: EquipmentTypedConfig>(name: &str, cfg: T) -> EquipmentConfig {
     let mut out =
-        EquipmentConfig::from_typed(name.to_string(), T::equipment_type_name().to_string(), cfg);
+        EquipmentConfig::from_typed(name.to_string(), T::equipment_type_name().to_string(), cfg)
+            .unwrap();
     out.ochre_class = name.to_string();
     out
 }
@@ -1571,7 +1573,8 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
         "Test GSHP Heater".to_string(),
         "GSHP Heater".to_string(),
         typed,
-    );
+    )
+    .unwrap();
     cfg.ochre_class = "GSHP Heater".to_string();
 
     let mut eq = registry
@@ -1642,7 +1645,8 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         "Test GSHP Cooler".to_string(),
         "GSHP Cooler".to_string(),
         typed,
-    );
+    )
+    .unwrap();
     cfg.ochre_class = "GSHP Cooler".to_string();
 
     let mut eq = registry

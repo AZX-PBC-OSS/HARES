@@ -422,7 +422,7 @@ fn parse_solar_override_from_list(
     Ok(result)
 }
 
-fn battery_config_from_py(battery: &PyBattery) -> EquipmentConfig {
+fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresError> {
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
@@ -464,7 +464,7 @@ fn battery_config_from_py(battery: &PyBattery) -> EquipmentConfig {
     EquipmentConfig::from_typed(battery.name.clone(), "Battery".to_string(), cfg)
 }
 
-fn pv_config_from_py(pv: &PyPv) -> EquipmentConfig {
+fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
     let cfg = PvConfig {
         equipment_id: None,
         zone_id: None,
@@ -485,7 +485,7 @@ fn pv_config_from_py(pv: &PyPv) -> EquipmentConfig {
     EquipmentConfig::from_typed(pv.name.clone(), "PV".to_string(), cfg)
 }
 
-fn ev_config_from_py(ev: &PyEv) -> EquipmentConfig {
+fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
     let capacity_kwh = ev.capacity_kwh.unwrap_or(75.0);
     let max_charging_power_kw =
         ev.max_charging_kw
@@ -526,7 +526,9 @@ fn ev_config_from_py(ev: &PyEv) -> EquipmentConfig {
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }
 
-fn protocol_bridge_config_from_py(bridge: &PyProtocolBridge) -> EquipmentConfig {
+fn protocol_bridge_config_from_py(
+    bridge: &PyProtocolBridge,
+) -> Result<EquipmentConfig, HaresError> {
     let handlers: Vec<_> = bridge
         .json_handlers
         .iter()
@@ -919,7 +921,8 @@ impl PyDwelling {
     }
 
     pub fn add_battery(&mut self, battery: &PyBattery) -> PyResult<()> {
-        let config = battery_config_from_py(battery);
+        let config = battery_config_from_py(battery)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let mut eq = self
             .equipment_registry
@@ -946,7 +949,8 @@ impl PyDwelling {
     }
 
     pub fn add_pv(&mut self, pv: &PyPv) -> PyResult<()> {
-        let config = pv_config_from_py(pv);
+        let config = pv_config_from_py(pv)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let mut eq = self
             .equipment_registry
@@ -991,7 +995,8 @@ impl PyDwelling {
     }
 
     pub fn add_ev(&mut self, ev: &PyEv) -> PyResult<()> {
-        let config = ev_config_from_py(ev);
+        let config = ev_config_from_py(ev)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let mut eq = self
             .equipment_registry
@@ -1067,7 +1072,8 @@ impl PyDwelling {
                 power_limit_kw: None,
                 initial_connection_state: None,
             },
-        );
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let mut eq = self
             .equipment_registry
@@ -1110,7 +1116,8 @@ impl PyDwelling {
     }
 
     pub fn add_protocol_bridge(&mut self, bridge: &PyProtocolBridge) -> PyResult<()> {
-        let config = protocol_bridge_config_from_py(bridge);
+        let config = protocol_bridge_config_from_py(bridge)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut eq = self
             .equipment_registry
             .create("Protocol Bridge", config.clone())
@@ -1790,7 +1797,8 @@ impl PyDwelling {
         obj: &Bound<'_, PyAny>,
     ) -> PyResult<Box<dyn hares_equipment::Equipment>> {
         if let Ok(battery) = obj.extract::<PyRef<'_, PyBattery>>() {
-            let config = battery_config_from_py(&battery);
+            let config = battery_config_from_py(&battery)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             let mut eq = self
                 .equipment_registry
                 .create("Battery", config)
@@ -1802,14 +1810,16 @@ impl PyDwelling {
             return Ok(eq);
         }
         if let Ok(pv) = obj.extract::<PyRef<'_, PyPv>>() {
-            let config = pv_config_from_py(&pv);
+            let config = pv_config_from_py(&pv)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return self
                 .equipment_registry
                 .create("PV", config)
                 .map_err(to_py_err);
         }
         if let Ok(ev) = obj.extract::<PyRef<'_, PyEv>>() {
-            let config = ev_config_from_py(&ev);
+            let config = ev_config_from_py(&ev)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             let mut eq = self
                 .equipment_registry
                 .create("EV", config)
@@ -1821,7 +1831,8 @@ impl PyDwelling {
             return Ok(eq);
         }
         if let Ok(bridge) = obj.extract::<PyRef<'_, PyProtocolBridge>>() {
-            let config = protocol_bridge_config_from_py(&bridge);
+            let config = protocol_bridge_config_from_py(&bridge)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return self
                 .equipment_registry
                 .create("Protocol Bridge", config)
@@ -2673,7 +2684,7 @@ mod tests {
             sam_lut_path: Some("/tmp/example.parquet".to_string()),
             soiling: None,
         };
-        let config = pv_config_from_py(&pv);
+        let config = pv_config_from_py(&pv).expect("PV config");
         let typed: PvConfig = config.typed().expect("typed PvConfig");
         assert_eq!(typed.sam_lut_path.as_deref(), Some("/tmp/example.parquet"));
     }
@@ -2688,7 +2699,7 @@ mod tests {
             sam_lut_path: None,
             soiling: None,
         };
-        let config = pv_config_from_py(&pv);
+        let config = pv_config_from_py(&pv).expect("PV config");
         let env = pv_env(30.0, 180.0);
         let registry = EquipmentRegistry::new();
         let mut eq = registry
@@ -2711,7 +2722,7 @@ mod tests {
             sam_lut_path: Some(bad_lut_path.to_string()),
             soiling: None,
         };
-        let config = pv_config_from_py(&pv);
+        let config = pv_config_from_py(&pv).expect("PV config");
         let env = pv_env(30.0, 180.0);
         let registry = EquipmentRegistry::new();
         let mut eq = registry
