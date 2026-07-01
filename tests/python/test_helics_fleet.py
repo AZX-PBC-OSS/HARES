@@ -57,6 +57,7 @@ class _FakeFederate:
         log: list[tuple[Any, ...]],
         *,
         raise_on_enter: bool = False,
+        raise_on_max_time: bool = False,
     ) -> None:
         self.fed_name = fed_name
         self.fedinfo = fedinfo
@@ -66,6 +67,7 @@ class _FakeFederate:
         self.requested_times: list[float] = []
         self.disconnected = False
         self._raise_on_enter = raise_on_enter
+        self._raise_on_max_time = raise_on_max_time
         self._log = log
 
     def set_flag_option(self, flag: int, enabled: bool) -> None:
@@ -90,6 +92,8 @@ class _FakeFederate:
         self._log.append(("enter_executing_mode",))
 
     def request_time(self, requested: float) -> float:
+        if self._raise_on_max_time and requested == _FakeHelicsModule.HELICS_TIME_MAXTIME:
+            raise RuntimeError("synthetic max-time failure")
         self.requested_times.append(requested)
         self._log.append(("request_time", requested))
         return requested
@@ -104,6 +108,7 @@ class _FakeHelicsModule:
     HELICS_FLAG_TERMINATE_ON_ERROR = 72
     HELICS_PROPERTY_TIME_PERIOD = 141
     HELICS_PROPERTY_TIME_OFFSET = 142
+    HELICS_TIME_MAXTIME = 9223372036.854774
 
     class HelicsFederateInfo:
         def __init__(self) -> None:
@@ -118,6 +123,7 @@ class _FakeHelicsModule:
         self.last_fedinfo: _FakeHelicsModule.HelicsFederateInfo | None = None
         self.last_fed: _FakeFederate | None = None
         self.raise_on_enter = False
+        self.raise_on_max_time = False
 
     def helicsCreateValueFederate(self, fed_name: str, fedinfo: Any) -> _FakeFederate:
         self.last_fedinfo = fedinfo
@@ -126,6 +132,7 @@ class _FakeHelicsModule:
             fedinfo,
             self.log,
             raise_on_enter=self.raise_on_enter,
+            raise_on_max_time=self.raise_on_max_time,
         )
         self.last_fed = fed
         self.log.append(("create_value_federate", fed_name))
@@ -345,7 +352,7 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
 
     fed = fake_helics.last_fed
     assert fed is not None
-    assert fed.requested_times == [60.0, 120.0]
+    assert fed.requested_times == [60.0, 120.0, fake_helics.HELICS_TIME_MAXTIME]
 
     first_request_idx = fake_helics.log.index(("request_time", 60.0))
     first_step_idx = fake_helics.log.index(("step", 1))
@@ -413,6 +420,7 @@ def test_helics_fleet_finalize_on_step_exception(monkeypatch: pytest.MonkeyPatch
     assert fed is not None
     assert fed.disconnected is True
     assert fake_helics.log.count(("disconnect",)) == 1
+    assert fake_helics.HELICS_TIME_MAXTIME not in fed.requested_times
 
 
 def test_helics_fleet_finalize_on_enter_exception(monkeypatch: pytest.MonkeyPatch):
@@ -430,6 +438,7 @@ def test_helics_fleet_finalize_on_enter_exception(monkeypatch: pytest.MonkeyPatc
     assert fed is not None
     assert fed.disconnected is True
     assert fake_helics.log.count(("disconnect",)) == 1
+    assert fake_helics.HELICS_TIME_MAXTIME not in fed.requested_times
 
 
 def test_helics_fleet_broadcast_control_applies_to_all_dwellings(
@@ -559,7 +568,7 @@ def test_helics_fleet_multi_rate_grants_only_steps_at_requested_time(
     orchestrator.run()
 
     assert fleet._step_count == 2
-    assert multi_fed.requested_times == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 120.0]
+    assert multi_fed.requested_times == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 120.0, fake_helics.HELICS_TIME_MAXTIME]
 
     fed = fake_helics.last_fed
     assert fed is not None
@@ -572,3 +581,23 @@ def test_helics_fleet_multi_rate_grants_only_steps_at_requested_time(
     assert pub.published[6] == 7.5  # step 2: 1.5+2.5+3.5
 
     assert multi_fed.disconnected is True
+
+
+def test_helics_fleet_run_does_not_propagate_completion_signal_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fake_helics.raise_on_max_time = True
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    orchestrator.run()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    assert fed.disconnected is True
+    assert fake_helics.HELICS_TIME_MAXTIME not in fed.requested_times
+    assert fake_helics.log.count(("disconnect",)) == 1

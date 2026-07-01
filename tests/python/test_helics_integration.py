@@ -194,7 +194,7 @@ def _start_thread(target: Callable[[], None], name: str) -> tuple[threading.Thre
 
 
 def _new_federate_info(
-    port: int, core_type: str = "zmq", time_res_s: float = _TIME_RES_S, core_name: str = "aggregator"
+    port: int, core_type: str = "zmq", time_res_s: float = _TIME_RES_S, core_name: str = "aggregator",
 ):
     if hasattr(helics, "HelicsFederateInfo"):
         try:
@@ -235,6 +235,7 @@ def _new_federate_info(
             helics.HELICS_PROPERTY_TIME_PERIOD,
             time_res_s,
         )
+
     return fedinfo
 
 
@@ -468,8 +469,10 @@ def test_helics_time_domain_is_simulation_relative() -> None:
         # already at time 0 after enter_executing_mode(), so the first
         # request must be for one period ahead, not for time 0 itself.
         expected = [(step + 1) * _TIME_RES_S for step in range(_TOTAL_STEPS)]
+        # The final request is HELICS_TIME_MAXTIME to signal completion.
+        expected.append(helics.HELICS_TIME_MAXTIME)
         assert probe.requested_times == expected
-        assert all(requested <= (_TOTAL_STEPS * _TIME_RES_S) for requested in probe.requested_times)
+        assert all(requested <= (_TOTAL_STEPS * _TIME_RES_S) for requested in probe.requested_times[:-1])
     finally:
         _disconnect_broker(broker)
 
@@ -648,5 +651,148 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
             f"Expected {AGG_STEPS} publications, got {len(power_trace)}"
         )
         assert any(abs(p) > 1e-6 for p in power_trace), "published dwelling power should be non-zero"
+    finally:
+        _disconnect_broker(broker)
+
+
+def test_single_dwelling_completion_signal_unblocks_aggregator() -> None:
+    """After dwelling signals completion, the co-simulation completes cleanly.
+
+    A ``_FederateProbe`` records the dwelling's ``request_time`` calls during
+    a 2-federate co-simulation with a real aggregator.  The test asserts that
+    ``request_time(HELICS_TIME_MAXTIME)`` is the final call — a regression
+    that proves the completion signal is sent in the presence of an active
+    peer federate.
+
+    The aggregator disconnects before joining the dwelling thread so that the
+    dwelling's blocked ``request_time(HELICS_TIME_MAXTIME)`` is granted after
+    the last remaining peer leaves the federation.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling()
+        federate_ready = threading.Event()
+        probe_times: list[float] = []
+
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling,
+                fed_name="house_1",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+
+            probe = _FederateProbe(helics_dwelling._fed)
+            helics_dwelling._fed = probe
+
+            federate_ready.set()
+            helics_dwelling.run()
+
+            probe_times.extend(probe.requested_times)
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-federate")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port)
+        aggregator = helics.helicsCreateValueFederate("aggregator_1", fedinfo)
+        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        aggregator.enter_executing_mode()
+        for step_idx in range(_TOTAL_STEPS):
+            pub_voltage.publish(1.0)
+            aggregator.request_time(step_idx * _TIME_RES_S)
+            if sub_power.is_updated():
+                _ = float(sub_power.double)
+
+        # Disconnect aggregator FIRST so the dwelling's blocked
+        # request_time(HELICS_TIME_MAXTIME) is granted after the last
+        # remaining peer leaves the federation.
+        aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert len(probe_times) > 0, "dwelling made no request_time calls"
+        assert probe_times[-1] == helics.HELICS_TIME_MAXTIME, (
+            f"Expected final request_time to be HELICS_TIME_MAXTIME; got {probe_times[-1]}"
+        )
+    finally:
+        _disconnect_broker(broker)
+
+
+def test_fleet_completion_signal_unblocks_aggregator() -> None:
+    """After fleet signals completion, the co-simulation completes cleanly.
+
+    Mirrors ``test_single_dwelling_completion_signal_unblocks_aggregator``
+    for the fleet federate — uses a ``_FederateProbe`` to verify
+    ``request_time(HELICS_TIME_MAXTIME)`` is the final call in a 2-federate
+    co-simulation.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        fleet = _new_fleet(n_dwellings=3)
+        federate_ready = threading.Event()
+        probe_times: list[float] = []
+
+        def _run_federate() -> None:
+            helics_fleet = HELICSFleet(
+                fleet=fleet,
+                fed_name="fleet_1",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_fleet.register_publications()
+            helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
+
+            probe = _FederateProbe(helics_fleet._fed)
+            helics_fleet._fed = probe
+
+            federate_ready.set()
+            helics_fleet.run()
+
+            probe_times.extend(probe.requested_times)
+
+        thread, thread_result = _start_thread(_run_federate, name="fleet-federate")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port)
+        aggregator = helics.helicsCreateValueFederate("aggregator_1", fedinfo)
+        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
+        _ = [
+            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
+            for idx in range(3)
+        ]
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        aggregator.enter_executing_mode()
+        for step_idx in range(_TOTAL_STEPS):
+            pub_voltage.publish(0.98)
+            aggregator.request_time(step_idx * _TIME_RES_S)
+            if sub_aggregate.is_updated():
+                _ = float(sub_aggregate.double)
+
+        # Disconnect aggregator FIRST so the fleet's blocked
+        # request_time(HELICS_TIME_MAXTIME) is granted after the last
+        # remaining peer leaves the federation.
+        aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "fleet federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert len(probe_times) > 0, "fleet made no request_time calls"
+        assert probe_times[-1] == helics.HELICS_TIME_MAXTIME, (
+            f"Expected final request_time to be HELICS_TIME_MAXTIME; got {probe_times[-1]}"
+        )
     finally:
         _disconnect_broker(broker)

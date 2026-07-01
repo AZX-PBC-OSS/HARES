@@ -187,6 +187,23 @@ class HELICSDwelling:
                 self._read_subscriptions()
                 self._dwelling.step()
                 self._publish_results()
+            # Signal completion to the HELICS federation. A federate that has
+            # no further time steps must inform the broker so it can coordinate
+            # clean shutdown. Without this handshake other federates may stall
+            # at their next request_time() call until the broker detects the
+            # disconnect after the default federate timeout (30-120s).
+            try:
+                _LOG.info(
+                    "HELICS federate %s signalling completion via request_time(HELICS_TIME_MAXTIME)",
+                    self._fed_name,
+                )
+                self._fed.request_time(helics.HELICS_TIME_MAXTIME)
+            except Exception:
+                _LOG.warning(
+                    "HELICS federate %s request_time(HELICS_TIME_MAXTIME) failed during completion signalling",
+                    self._fed_name,
+                    exc_info=True,
+                )
         finally:
             self.finalize()
 
