@@ -135,20 +135,23 @@ class VecDwellingGymEnv:
         if arr.shape != expected:
             raise ValueError(f"expected actions shape {expected}, got {arr.shape}")
 
-        for idx, dwelling in enumerate(self._dwellings):
-            self._apply_controls(dwelling, arr[idx])
-
         if rust_batch_step is not None:
-            # Controls are already applied via _apply_controls above.
-            # Pass empty action lists -- Rust-side action mapping is not yet implemented.
-            empty_actions: list[list[float]] = [[] for _ in self._dwellings]
-            raw = rust_batch_step(self._dwellings, empty_actions, self._observation_fields)
+            actions_list = arr.tolist()
+            raw = rust_batch_step(
+                self._dwellings,
+                actions_list,
+                self._observation_fields,
+                self._action_layout,
+                self._signal_type_by_equipment,
+            )
             obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
             rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
             dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)
             truncs = np.asarray([bool(row["truncated"]) for row in raw], dtype=np.bool_)
             infos = [dict(row.get("info", {})) for row in raw]
         else:
+            for idx, dwelling in enumerate(self._dwellings):
+                self._apply_controls(dwelling, arr[idx])
             obs_rows = []
             rewards = []
             dones = []

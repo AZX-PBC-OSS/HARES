@@ -58,15 +58,6 @@ def _make_dwelling(seed: int = 0) -> PyDwelling:
     )
 
 
-# reset() calls load_state() which is not yet implemented (see TestCheckpoint xfail
-# in test_py_dwelling_integration.py).
-_LOAD_STATE_NOT_IMPLEMENTED = pytest.mark.xfail(
-    reason="load_state not yet implemented; tracked in TestCheckpoint xfail",
-    strict=True,
-)
-
-
-@_LOAD_STATE_NOT_IMPLEMENTED
 def test_dwelling_gym_reset_seed_reproducible():
     env = _make_env()
 
@@ -141,7 +132,6 @@ def test_vec_gym_step_batch_shape():
     assert len(infos) == 4
 
 
-@_LOAD_STATE_NOT_IMPLEMENTED
 def test_vec_gym_reset_seed_batch_shape():
     dwellings = [_make_dwelling(seed=i) for i in range(4)]
     env = VecDwellingGymEnv(
@@ -169,4 +159,56 @@ def test_vec_gym_rejects_fork_start_method(monkeypatch: pytest.MonkeyPatch):
             action_space_config=_ACTION_CONFIG,
             reward_fn=lambda _: 0.0,
             episode_length=timedelta(minutes=1),
+        )
+
+
+def test_vec_gym_random_policy_100_steps():
+    """100-step random-policy integration test exercises Rust batch_step with >=2 signal types."""
+    from ochre_next import Battery
+    from ochre_next._hares import Dwelling as PyDwelling
+
+    n_dwel = 2
+    obs_fields = ["total_power_kw", "outdoor_temp"]
+    dwellings = [
+        PyDwelling.from_hpxml(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            start_time="2019-01-01T00:00:00",
+            duration_s=6000,
+            time_res_s=60,
+            master_seed=i,
+        )
+        for i in range(n_dwel)
+    ]
+    for dw in dwellings:
+        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+
+    action_config = {
+        "Gas Furnace": ["heat_c"],
+        "Batt": ["active_power_kw"],
+    }
+
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=obs_fields,
+        action_space_config=action_config,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(seconds=6000),
+    )
+
+    rng = np.random.default_rng(42)
+    obs_fields = ["total_power_kw", "outdoor_temp"]
+    for step_idx in range(100):
+        actions = rng.uniform(-1.0, 1.0, size=(n_dwel, 2)).astype(np.float64)
+        step_obs, rewards, dones, truncs, infos = env.step(actions)
+        assert step_obs.shape == (n_dwel, len(obs_fields)), (
+            f"obs shape mismatch at step {step_idx}"
+        )
+        assert np.all(np.isfinite(step_obs)), (
+            f"Non-finite observation at step {step_idx}: {step_obs}"
+        )
+        assert np.all(np.isfinite(rewards)), (
+            f"Non-finite reward at step {step_idx}: {rewards}"
         )
