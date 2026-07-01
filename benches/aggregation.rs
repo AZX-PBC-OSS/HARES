@@ -12,8 +12,8 @@ use hares_core::{SimStatus as CoreSimStatus, SimulationResults};
 use hares_fleet::aggregation::aggregate;
 use hares_fleet::{AggregationResolution, DwellingOutcome, SimStatus};
 use hares_io::output::metrics::{
-    GridInteractionMetrics, PeakPowerKw, RollingPeakKw, SimulationCoverage, SimulationMetrics,
-    TotalEnergyKwh,
+    GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
+    SimulationMetrics, TotalEnergyKwh,
 };
 use std::sync::Arc;
 
@@ -44,6 +44,8 @@ fn empty_metrics() -> SimulationMetrics {
         rows_with_partial_setpoint_data_fraction: None,
         simulation_duration_hours: 0.0,
         coverage: SimulationCoverage::PartialYear,
+        nan_step_count: 0,
+        metrics_reliability: Reliability::Reliable,
     }
 }
 

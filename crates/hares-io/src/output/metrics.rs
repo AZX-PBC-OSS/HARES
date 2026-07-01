@@ -148,6 +148,25 @@ pub enum SimulationCoverage {
     MultiYear,
 }
 
+/// Whether the simulation metrics are fully reliable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reliability {
+    /// All power timesteps were finite — no accumulators were poisoned.
+    Reliable,
+    /// One or more power timesteps contained non-finite values that were
+    /// skipped; downstream consumers should check `nan_step_count` before
+    /// trusting aggregate totals.
+    Degraded,
+}
+
+impl Reliability {
+    /// Returns `true` if the reliability status is `Reliable`.
+    #[must_use]
+    pub fn is_reliable(&self) -> bool {
+        matches!(self, Reliability::Reliable)
+    }
+}
+
 /// Final simulation metrics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationMetrics {
@@ -169,6 +188,10 @@ pub struct SimulationMetrics {
     pub simulation_duration_hours: f64,
     /// Whether the simulation period is a full calendar year.
     pub coverage: SimulationCoverage,
+    /// Number of power-value timesteps skipped due to non-finite (NaN/Inf) values.
+    pub nan_step_count: u64,
+    /// Reliability status: `Degraded` if any power timesteps were skipped.
+    pub metrics_reliability: Reliability,
 }
 
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
@@ -364,10 +387,11 @@ pub struct MetricsCalculator {
     // Stored config for duration validation and leap-year normalization in finish()
     config: SimulationConfig,
 
+    // Non-finite power value tracking
+    nan_step_count: u64,
+
     #[cfg(feature = "observe")]
     end_use_equipment_counts: BTreeMap<String, usize>,
-    #[cfg(feature = "observe")]
-    nan_skip_count: u64,
 }
 
 #[derive(Debug)]
@@ -535,10 +559,9 @@ impl MetricsCalculator {
             total_row_count: 0,
             setpoint_missing_row_count: 0,
             config: config.clone(),
+            nan_step_count: 0,
             #[cfg(feature = "observe")]
             end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
-            #[cfg(feature = "observe")]
-            nan_skip_count: 0,
         })
     }
 
@@ -546,6 +569,22 @@ impl MetricsCalculator {
     #[cfg(feature = "observe")]
     pub fn set_end_use_equipment_counts(&mut self, counts: BTreeMap<String, usize>) {
         self.end_use_equipment_counts = counts;
+    }
+
+    /// Read a power value from an Arrow array, returning `Some` for finite values
+    /// and `None` for null or non-finite (NaN/Inf) values, incrementing
+    /// [`nan_step_count`](Self::nan_step_count) on each skip.
+    fn guarded_power_value(&mut self, arr: &Float64Array, row: usize) -> Option<f64> {
+        if arr.is_null(row) {
+            return None;
+        }
+        let v = arr.value(row);
+        if v.is_finite() {
+            Some(v)
+        } else {
+            self.nan_step_count += 1;
+            None
+        }
     }
 
     /// Update metrics from a single flushed batch.
@@ -595,7 +634,7 @@ impl MetricsCalculator {
             .collect::<Vec<_>>();
 
         for row in 0..batch.num_rows() {
-            if let Some(total_kw) = value_at(total_arr, row) {
+            if let Some(total_kw) = self.guarded_power_value(total_arr, row) {
                 self.total_electric_energy_kwh += total_kw * self.timestep_h;
                 if total_kw > 0.0 {
                     self.total_consumption_kwh += total_kw * self.timestep_h;
@@ -633,6 +672,8 @@ impl MetricsCalculator {
                     {
                         *peak_kw = value_kw;
                     }
+                } else if !array.is_null(row) {
+                    self.nan_step_count += 1;
                 }
             }
 
@@ -785,19 +826,20 @@ impl MetricsCalculator {
 
         #[cfg(feature = "observe")]
         {
-            let nan_in = |arr: &Float64Array| {
-                (0..batch.num_rows())
-                    .filter(|&i| !arr.is_null(i) && arr.value(i).is_nan())
-                    .count() as u64
-            };
-            let batch_nan = nan_in(total_arr);
-            self.nan_skip_count += batch_nan;
-            if batch_nan > 0 {
-                tracing::debug!(
-                    batch_nan,
-                    total_skipped = self.nan_skip_count,
-                    "NaN values detected and skipped in total electric power column"
-                );
+            if self.nan_step_count > 0 {
+                let nan_in = |arr: &Float64Array| {
+                    (0..batch.num_rows())
+                        .filter(|&i| !arr.is_null(i) && !arr.value(i).is_finite())
+                        .count() as u64
+                };
+                let batch_nan = nan_in(total_arr);
+                if batch_nan > 0 {
+                    tracing::debug!(
+                        batch_nan,
+                        total_skipped = self.nan_step_count,
+                        "non-finite values detected and skipped in total electric power column"
+                    );
+                }
             }
         }
 
@@ -925,6 +967,46 @@ impl MetricsCalculator {
             SimulationCoverage::FullYear | SimulationCoverage::LeapYear => {}
         }
 
+        // Invariant: no accumulator should contain NaN or Inf at finish time.
+        // Catching NaN/Inf propagation early prevents downstream corruption
+        // of visualisation and RL environment observation pipelines.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                !self.total_electric_energy_kwh.is_nan()
+                    && self.total_electric_energy_kwh.is_finite(),
+                "total_electric_energy_kwh is non-finite — a NaN/Inf power value contaminated the accumulator"
+            );
+            assert!(
+                !self.total_consumption_kwh.is_nan() && self.total_consumption_kwh.is_finite(),
+                "total_consumption_kwh is non-finite"
+            );
+            assert!(
+                !self.total_gas_energy_therms.is_nan() && self.total_gas_energy_therms.is_finite(),
+                "total_gas_energy_therms is non-finite"
+            );
+            assert!(
+                !self.peak_import_kw.is_nan() && self.peak_import_kw.is_finite(),
+                "peak_import_kw is non-finite"
+            );
+            assert!(
+                !self.peak_export_kw.is_nan() && self.peak_export_kw.is_finite(),
+                "peak_export_kw is non-finite"
+            );
+            if self.has_envelope_columns {
+                assert!(
+                    !self.envelope_hvac_heating_wh.is_nan()
+                        && self.envelope_hvac_heating_wh.is_finite(),
+                    "envelope_hvac_heating_wh is non-finite"
+                );
+                assert!(
+                    !self.envelope_hvac_cooling_wh.is_nan()
+                        && self.envelope_hvac_cooling_wh.is_finite(),
+                    "envelope_hvac_cooling_wh is non-finite"
+                );
+            }
+        }
+
         // Normalize leap-year totals to standard 8760 h year
         // (ASHRAE HoF 2021 Ch.15). Applies to both electric and gas
         // energy so that the combined total is on a consistent time base.
@@ -947,6 +1029,22 @@ impl MetricsCalculator {
                 total_kwh_equivalent: energy_therms_to_kwh(therms),
             }
         });
+
+        let nan_step_count = self.nan_step_count;
+        let metrics_reliability = if nan_step_count > 0 {
+            Reliability::Degraded
+        } else {
+            Reliability::Reliable
+        };
+
+        #[cfg(feature = "observe")]
+        if nan_step_count > 0 {
+            tracing::warn!(
+                nan_step_count,
+                "non-finite power values were detected and skipped during metric accumulation; \
+                 check source simulation output for NaN/Inf telemetry"
+            );
+        }
 
         FullSimulationMetrics {
             metrics: SimulationMetrics {
@@ -1011,6 +1109,8 @@ impl MetricsCalculator {
                 rows_with_partial_setpoint_data_fraction,
                 simulation_duration_hours: actual_duration_h,
                 coverage,
+                nan_step_count,
+                metrics_reliability,
             },
             gas_energy,
         }
@@ -1245,7 +1345,7 @@ fn value_at(arr: &Float64Array, row: usize) -> Option<f64> {
         return None;
     }
     let v = arr.value(row);
-    if v.is_nan() {
+    if !v.is_finite() {
         return None;
     }
     Some(v)
@@ -2007,12 +2107,14 @@ mod tests {
         );
     }
 
-    // ── NaN propagation tests ──────────────────────────────────────────
+    // ── Non-finite value tests ─────────────────────────────────────
 
     #[test]
-    fn value_at_returns_none_for_nan() {
-        let arr = Float64Array::from(vec![f64::NAN]);
+    fn value_at_returns_none_for_non_finite() {
+        let arr = Float64Array::from(vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
         assert_eq!(value_at(&arr, 0), None);
+        assert_eq!(value_at(&arr, 1), None);
+        assert_eq!(value_at(&arr, 2), None);
     }
 
     #[test]
@@ -2042,6 +2144,16 @@ mod tests {
             (metrics.total_energy_kwh.total - 4.0).abs() < 1e-9,
             "total should be 4.0 kWh, got {}",
             metrics.total_energy_kwh.total
+        );
+        assert_eq!(
+            metrics.nan_step_count, 1,
+            "nan_step_count should be 1, got {}",
+            metrics.nan_step_count
+        );
+        assert_eq!(
+            metrics.metrics_reliability,
+            Reliability::Degraded,
+            "metrics_reliability should be Degraded when NaN was detected"
         );
     }
 
@@ -2085,6 +2197,153 @@ mod tests {
             "hvac cooling should be -6.0 kWh, got {}",
             loads.hvac_cooling_kwh
         );
+    }
+
+    #[test]
+    fn nan_power_increments_counter_and_keeps_accumulators_finite() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+            "Battery End Use Electric Power (kW)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Row 0: NaN in total, valid elsewhere
+        // Row 1: all valid
+        // Row 2: NaN in battery, valid elsewhere
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 2.0, 2.0]),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![1.0, 1.0, 1.0],
+            ),
+            (
+                "Battery End Use Electric Power (kW)",
+                vec![1.0, 1.0, f64::NAN],
+            ),
+        ]));
+        let metrics = calc.finish();
+
+        // Total: row 0 skipped, rows 1+2 valid = 4 kWh
+        assert!(
+            metrics.total_energy_kwh.total.is_finite(),
+            "total_energy must be finite"
+        );
+        assert!(
+            (metrics.total_energy_kwh.total - 4.0).abs() < 1e-9,
+            "total should be 4.0 kWh, got {}",
+            metrics.total_energy_kwh.total
+        );
+
+        // End-use: hvac_heating: all 3 rows valid = 3 kWh
+        let hvac = metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        assert!((hvac - 3.0).abs() < 1e-9, "hvac_heating should be 3.0 kWh");
+
+        // Battery: row 2 NaN → skipped, rows 0+1 valid = 2 kWh
+        let battery = metrics.total_energy_kwh.per_end_use["battery"];
+        assert!((battery - 2.0).abs() < 1e-9, "battery should be 2.0 kWh");
+
+        // counter: 1 NaN in total + 1 NaN in battery = 2
+        assert_eq!(metrics.nan_step_count, 2);
+    }
+
+    #[test]
+    fn inf_values_are_skipped_and_counted() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Cooling End Use Electric Power (kW)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Three rows: +Inf, valid, -Inf
+        calc.accumulate(&build_batch(vec![
+            (
+                TOTAL_ELECTRIC_POWER_KW,
+                vec![f64::INFINITY, 5.0, f64::NEG_INFINITY],
+            ),
+            (
+                "HVAC Cooling End Use Electric Power (kW)",
+                vec![2.0, 2.0, 2.0],
+            ),
+        ]));
+        let metrics = calc.finish();
+
+        // Total: only row 1 accumulated = 5 kWh
+        assert!(
+            metrics.total_energy_kwh.total.is_finite(),
+            "total_energy must be finite"
+        );
+        assert!(
+            (metrics.total_energy_kwh.total - 5.0).abs() < 1e-9,
+            "total should be 5.0 kWh, got {}",
+            metrics.total_energy_kwh.total
+        );
+
+        // HVAC cooling: all 3 rows valid = 6 kWh
+        let cooling = metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        assert!((cooling - 6.0).abs() < 1e-9);
+
+        // 2 Inf values in total column
+        assert_eq!(metrics.nan_step_count, 2);
+    }
+
+    #[test]
+    fn mixed_finite_and_non_finite_sets_reliability_degraded() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Mixed: some finite, some NaN, some Inf
+        calc.accumulate(&build_batch(vec![
+            (
+                TOTAL_ELECTRIC_POWER_KW,
+                vec![10.0, f64::NAN, 20.0, f64::INFINITY, 30.0],
+            ),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![5.0, 5.0, f64::NAN, 5.0, 5.0],
+            ),
+        ]));
+        let metrics = calc.finish();
+
+        // Total: 10 + 20 + 30 = 60 kWh (NaN and Inf skipped)
+        assert!((metrics.total_energy_kwh.total - 60.0).abs() < 1e-9);
+
+        // End use: rows 0,1,3,4 valid (row 2 skipped) = 20 kWh
+        let hvac = metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        assert!((hvac - 20.0).abs() < 1e-9);
+
+        // nan_step_count: 1 NaN + 1 Inf in total + 1 NaN in hvac = 3
+        assert_eq!(
+            metrics.nan_step_count, 3,
+            "expected 3 non-finite skips, got {}",
+            metrics.nan_step_count
+        );
+
+        // Reliability must be Degraded
+        assert_eq!(
+            metrics.metrics_reliability,
+            Reliability::Degraded,
+            "metrics_reliability should be Degraded when non-finite values were skipped"
+        );
+        assert!(!metrics.metrics_reliability.is_reliable());
+    }
+
+    #[test]
+    fn all_finite_values_produces_reliable_metrics() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        calc.accumulate(&build_batch(vec![(
+            TOTAL_ELECTRIC_POWER_KW,
+            vec![1.0, 2.0, 3.0],
+        )]));
+        let metrics = calc.finish();
+
+        assert_eq!(metrics.nan_step_count, 0);
+        assert_eq!(metrics.metrics_reliability, Reliability::Reliable);
+        assert!(metrics.metrics_reliability.is_reliable());
     }
 
     // ── Nullable-setpoint regression tests ──────────────────────────────

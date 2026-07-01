@@ -413,8 +413,8 @@ mod tests {
     use arrow::datatypes::Schema;
     use hares_core::SimulationResults;
     use hares_io::output::metrics::{
-        GridInteractionMetrics, PeakPowerKw, RollingPeakKw, SimulationCoverage, SimulationMetrics,
-        TotalEnergyKwh,
+        GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
+        SimulationMetrics, TotalEnergyKwh,
     };
 
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
@@ -444,6 +444,8 @@ mod tests {
             rows_with_partial_setpoint_data_fraction: None,
             simulation_duration_hours: 0.0,
             coverage: SimulationCoverage::PartialYear,
+            nan_step_count: 0,
+            metrics_reliability: Reliability::Reliable,
         }
     }
 

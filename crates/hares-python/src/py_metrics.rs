@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use hares_io::output::metrics::{
-    EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics, SimulationCoverage,
+    EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics, Reliability,
+    SimulationCoverage,
 };
 use pyo3::prelude::*;
 
@@ -326,6 +327,19 @@ impl PySimulationMetrics {
             SimulationCoverage::LeapYear => "LeapYear".to_string(),
             SimulationCoverage::PartialYear => "PartialYear".to_string(),
             SimulationCoverage::MultiYear => "MultiYear".to_string(),
+        }
+    }
+
+    #[getter]
+    fn nan_step_count(&self) -> u64 {
+        self.inner.metrics.nan_step_count
+    }
+
+    #[getter]
+    fn metrics_reliability(&self) -> String {
+        match self.inner.metrics.metrics_reliability {
+            Reliability::Reliable => "Reliable".to_string(),
+            Reliability::Degraded => "Degraded".to_string(),
         }
     }
 
