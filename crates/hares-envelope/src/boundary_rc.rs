@@ -580,13 +580,13 @@ pub fn assemble_building_rc(
             ExteriorTarget::Outdoor => outdoor_node,
             ExteriorTarget::Ground => {
                 let key = (bd.foundation_depth_m * 1000.0).round() as u64;
-                *depth_to_node.get(&key).unwrap_or_else(|| {
-                    panic!(
+                depth_to_node.get(&key).copied().ok_or_else(|| {
+                    format!(
                         "boundary {bd_idx}: foundation_depth_m={} has no ground node; \
-                         available depths: {unique_depths:?}",
+                             available depths: {unique_depths:?}",
                         bd.foundation_depth_m
                     )
-                })
+                })?
             }
         };
 
@@ -1128,23 +1128,21 @@ pub fn assemble_building_rc(
     // Build (depth_m, col_index) pairs in ascending depth order.
     // unique_depths is sorted, and NodeIds are GROUND_NODE_BASE + depth_index,
     // so column positions match depth order.
-    let ground_cols: Vec<(f64, usize)> = depth_to_node
-        .iter()
-        .map(|(&key, &node)| {
-            let depth_m = key as f64 / 1000.0;
-            let col = rc
-                .external_nodes
-                .iter()
-                .position(|&n| n == node)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "ground node {:?} (depth={depth_m}) missing from external nodes",
-                        node
-                    )
-                });
-            (depth_m, col)
-        })
-        .collect();
+    let mut ground_cols = Vec::with_capacity(depth_to_node.len());
+    for (&key, &node) in &depth_to_node {
+        let depth_m = key as f64 / 1000.0;
+        let col = rc
+            .external_nodes
+            .iter()
+            .position(|&n| n == node)
+            .ok_or_else(|| {
+                format!(
+                    "ground node {:?} (depth={depth_m}) missing from external nodes",
+                    node
+                )
+            })?;
+        ground_cols.push((depth_m, col));
+    }
 
     let (a_c, b_ext, internal_node_order) = rc
         .build_matrices()
@@ -1227,17 +1225,17 @@ pub fn assemble_building_rc(
     }
 
     // Zone air node → state-vector row.
-    let zone_state_rows: Vec<usize> = (0..n_zones)
-        .map(|zone_idx| {
-            let node = NodeId((zone_idx + 1) as u32);
-            *node_index.get(&node).unwrap_or_else(|| {
-                panic!(
-                    "zone air node {:?} missing from RC network internal nodes",
-                    node
-                )
-            })
-        })
-        .collect();
+    let mut zone_state_rows = Vec::with_capacity(n_zones);
+    for zone_idx in 0..n_zones {
+        let node = NodeId((zone_idx + 1) as u32);
+        let row = node_index.get(&node).copied().ok_or_else(|| {
+            format!(
+                "zone air node {:?} missing from RC network internal nodes",
+                node
+            )
+        })?;
+        zone_state_rows.push(row);
+    }
 
     let n_ext = b_ext.ncols();
 
