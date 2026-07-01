@@ -3,7 +3,11 @@
 use std::collections::HashMap;
 
 use hares_io::PvPanelDefaults;
-use hares_physics::pv_sizing::{self, PvCandidate, PvSizingResult, RoofInfo, RoofPlane, RoofShape};
+use hares_physics::pv_sizing::{
+    self, PvCandidate, PvSizingError, PvSizingResult, RoofInfo, RoofPlane, RoofShape,
+    UsableRoofArea,
+};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Roof shape classification — determines usable-area fraction.
@@ -38,8 +42,8 @@ impl From<PyRoofShape> for RoofShape {
     }
 }
 
-/// A single roof plane from the parsed HPXML building.
-#[pyclass(frozen, name = "RoofPlane", skip_from_py_object)]
+/// A single roof plane — constructable directly from Python.
+#[pyclass(frozen, name = "RoofPlane", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyRoofPlane {
     inner: RoofPlane,
@@ -48,6 +52,29 @@ pub struct PyRoofPlane {
 
 #[pymethods]
 impl PyRoofPlane {
+    /// Construct a roof plane with area, tilt, and optional azimuth.
+    #[new]
+    #[pyo3(signature = (area_m2, tilt_deg=0.0, azimuth_deg=None, material=None, boundary_index=None, index=0))]
+    fn new(
+        area_m2: f64,
+        tilt_deg: f64,
+        azimuth_deg: Option<f64>,
+        material: Option<String>,
+        boundary_index: Option<u32>,
+        index: usize,
+    ) -> Self {
+        Self {
+            inner: RoofPlane {
+                area_m2,
+                tilt_deg,
+                azimuth_deg,
+                material,
+                boundary_index,
+            },
+            idx: index,
+        }
+    }
+
     #[getter]
     fn index(&self) -> usize {
         self.idx
@@ -229,6 +256,69 @@ impl PyPvSizingResult {
     }
 }
 
+/// Result of usable roof area computation from `compute_usable_area`.
+#[pyclass(frozen, name = "UsableRoofArea", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyUsableRoofArea {
+    inner: UsableRoofArea,
+}
+
+#[pymethods]
+impl PyUsableRoofArea {
+    /// Index of the best roof plane in the supplied plane list.
+    #[getter]
+    fn best_plane_idx(&self) -> usize {
+        self.inner.best_plane_idx
+    }
+
+    /// Usable area in square meters.
+    #[getter]
+    fn usable_m2(&self) -> f64 {
+        self.inner.usable_m2
+    }
+
+    /// Maximum number of panels that fit.
+    #[getter]
+    fn max_panels(&self) -> u32 {
+        self.inner.max_panels
+    }
+
+    /// Maximum DC capacity in kW.
+    #[getter]
+    fn max_capacity_kw(&self) -> f64 {
+        self.inner.max_capacity_kw
+    }
+
+    /// Roof shape classification used.
+    #[getter]
+    fn roof_shape(&self) -> PyRoofShape {
+        self.inner.roof_shape.into()
+    }
+
+    /// Array azimuth in degrees (0 = north, 180 = south).
+    #[getter]
+    fn azimuth_deg(&self) -> f64 {
+        self.inner.azimuth_deg
+    }
+
+    /// Array tilt in degrees.
+    #[getter]
+    fn tilt_deg(&self) -> f64 {
+        self.inner.tilt_deg
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "UsableRoofArea(usable_m2={:.1}, max={:.1} kW, panels={}, azimuth={:.0}°, tilt={:.1}°)",
+            self.inner.usable_m2,
+            self.inner.max_capacity_kw,
+            self.inner.max_panels,
+            self.inner.azimuth_deg,
+            self.inner.tilt_deg,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Standalone pyfunctions — callable directly from Python
 // ---------------------------------------------------------------------------
@@ -275,6 +365,225 @@ pub fn default_diffuse_fraction() -> f64 {
 #[pyfunction]
 pub fn is_north_facing(azimuth_deg: f64) -> bool {
     hares_physics::pv_sizing::is_north_facing(azimuth_deg)
+}
+
+// ---------------------------------------------------------------------------
+// Standalone pyfunctions for roof analysis — callable without a Dwelling
+// ---------------------------------------------------------------------------
+
+fn roof_info_from_py_planes(planes: &[PyRoofPlane]) -> RoofInfo {
+    let total = planes.iter().map(|p| p.inner.area_m2).sum();
+    RoofInfo {
+        planes: planes.iter().map(|p| p.inner.clone()).collect(),
+        total_roof_area_m2: total,
+    }
+}
+
+/// Infer roof shape from building metadata without requiring a Dwelling.
+///
+/// Args:
+///     roof_planes: List of ``RoofPlane`` objects describing the roof.
+///     facility_type: Optional HPXML ResidentialFacilityType string
+///         (e.g. ``"single-family detached"``, ``"apartment"``).
+///         ``"apartment"`` or ``"5+"`` keywords force ``Flat``.
+///     latitude: Optional decimal degrees for latitude-dependent classification.
+///     wall_azimuths: Optional fallback orientations when roof planes lack
+///         explicit azimuth.
+///
+/// Returns:
+///     ``RoofShape`` — one of ``Gable``, ``Hip``, or ``Flat``
+///     (``FlatEastWest`` is never inferred; it is only available via user override).
+#[pyfunction]
+#[pyo3(signature = (roof_planes, facility_type=None, latitude=None, wall_azimuths=None))]
+pub fn infer_roof_shape(
+    roof_planes: Vec<PyRoofPlane>,
+    facility_type: Option<String>,
+    latitude: Option<f64>,
+    wall_azimuths: Option<Vec<f64>>,
+) -> PyRoofShape {
+    let roof = roof_info_from_py_planes(&roof_planes);
+    let azimuths: Vec<f64> = wall_azimuths.unwrap_or_default();
+    let result = hares_physics::pv_sizing::infer_roof_shape(
+        &roof,
+        facility_type.as_deref(),
+        latitude,
+        &azimuths,
+    );
+    #[cfg(feature = "observe")]
+    tracing::info!(
+        target: "hares.observe.pv_sizing.infer_roof_shape",
+        latitude = ?latitude,
+        facility_type = ?facility_type,
+        roof_plane_count = roof_planes.len(),
+        roof_shape = ?result,
+        "infer_roof_shape called"
+    );
+    result.into()
+}
+
+/// Compute usable roof area from roof planes and shape classification.
+///
+/// Identifies the single best roof plane (by solar production score) and
+/// returns the usable area, maximum panel count, and capacity. This is the
+/// first stage of PV sizing — pipe the result into ``size_pv_system()`` to
+/// get the final sized array.
+///
+/// Args:
+///     roof_planes: List of ``RoofPlane`` objects.
+///     roof_shape: Roof shape classification (``RoofShape``). Use
+///         ``infer_roof_shape()`` to infer from building metadata, or
+///         pass a user override.
+///     wall_azimuths: Optional fallback orientations.
+///     latitude: Optional decimal degrees for scoring and tilt selection.
+///     panel_watts: Optional panel wattage override (W). Default: 440.
+///     panel_area_m2: Optional panel area override (m²). Default: 2.1.
+///     diffuse_fraction: Optional annual-average DHI/GHI ratio. ``None``
+///         falls back to the NREL PVWatts empirical model.
+///     roof_shape_user_override: Whether ``roof_shape`` was user-specified
+///         (affects aspect ratio selection for east-west placement).
+///
+/// Returns:
+///     ``UsableRoofArea`` on success, or ``ValueError`` if no viable planes exist.
+#[pyfunction]
+#[pyo3(signature = (roof_planes, roof_shape, *, wall_azimuths=None, latitude=None,
+    panel_watts=None, panel_area_m2=None, diffuse_fraction=None, roof_shape_user_override=false))]
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this binding layer.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_usable_area(
+    roof_planes: Vec<PyRoofPlane>,
+    roof_shape: PyRoofShape,
+    wall_azimuths: Option<Vec<f64>>,
+    latitude: Option<f64>,
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    diffuse_fraction: Option<f64>,
+    roof_shape_user_override: bool,
+) -> PyResult<PyUsableRoofArea> {
+    let roof = roof_info_from_py_planes(&roof_planes);
+    let azimuths: Vec<f64> = wall_azimuths.unwrap_or_default();
+    let result = hares_physics::pv_sizing::compute_usable_area(
+        &roof,
+        roof_shape.into(),
+        &azimuths,
+        latitude,
+        panel_watts,
+        panel_area_m2,
+        diffuse_fraction,
+        roof_shape_user_override,
+    )
+    .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
+    Ok(PyUsableRoofArea { inner: result })
+}
+
+/// Enumerate all viable PV placement candidates from roof planes.
+///
+/// Returns one candidate per non-north-facing roof plane, sorted by solar
+/// production score (best first). Use to inspect all placement options
+/// before selecting one for ``size_pv_system()``.
+///
+/// Args:
+///     roof_planes: List of ``RoofPlane`` objects.
+///     roof_shape: Roof shape classification.
+///     wall_azimuths: Optional fallback orientations.
+///     latitude: Optional decimal degrees.
+///     panel_watts: Optional panel wattage override (default 440 W).
+///     panel_area_m2: Optional panel area override (default 2.1 m²).
+///     diffuse_fraction: Optional annual-average DHI/GHI ratio.
+///     roof_shape_user_override: Whether roof_shape was user-specified.
+///
+/// Returns:
+///     List of ``PvCandidate`` objects, sorted by ``solar_score`` (best first).
+///     Empty list if no viable candidates exist.
+#[pyfunction]
+#[pyo3(signature = (roof_planes, roof_shape, *, wall_azimuths=None, latitude=None,
+    panel_watts=None, panel_area_m2=None, diffuse_fraction=None, roof_shape_user_override=false))]
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this binding layer.
+#[allow(clippy::too_many_arguments)]
+pub fn enumerate_pv_candidates(
+    roof_planes: Vec<PyRoofPlane>,
+    roof_shape: PyRoofShape,
+    wall_azimuths: Option<Vec<f64>>,
+    latitude: Option<f64>,
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    diffuse_fraction: Option<f64>,
+    roof_shape_user_override: bool,
+) -> Vec<PyPvCandidate> {
+    let roof = roof_info_from_py_planes(&roof_planes);
+    let azimuths: Vec<f64> = wall_azimuths.unwrap_or_default();
+    hares_physics::pv_sizing::enumerate_pv_candidates(
+        &roof,
+        roof_shape.into(),
+        &azimuths,
+        latitude,
+        panel_watts,
+        panel_area_m2,
+        diffuse_fraction,
+        roof_shape_user_override,
+    )
+    .into_iter()
+    .map(|c| PyPvCandidate { inner: c })
+    .collect()
+}
+
+/// Size a PV system from a usable roof area result.
+///
+/// Takes the output of ``compute_usable_area()`` and sizes a PV array to
+/// the target capacity, respecting roof geometry limits and optional
+/// inverter-side DC capacity clamp.
+///
+/// Args:
+///     usable: ``UsableRoofArea`` from ``compute_usable_area()``.
+///     target_kw: Desired PV capacity in kW.
+///     min_kw: Minimum acceptable capacity (default 2.0).
+///     max_kw: Maximum capacity limit (default 14.0).
+///     system_losses: Optional system losses fraction (0–1, default 0.14).
+///     panel_watts: Optional panel wattage override (default 440 W).
+///     panel_area_m2: Optional panel area override (default 2.1 m²).
+///     inverter_kw_ac: Optional inverter AC power rating for DC-side clamp.
+///         Must pair with ``max_dc_ac_ratio`` to activate.
+///     max_dc_ac_ratio: Optional maximum DC:AC oversizing ratio.
+///         Typical residential values: 1.1–1.3 (NREL SAM default = 1.2).
+///
+/// Returns:
+///     ``PvSizingResult`` on success, or ``ValueError`` if roof capacity
+///     is below the minimum.
+#[pyfunction]
+#[pyo3(signature = (usable, target_kw, *, min_kw=2.0, max_kw=14.0,
+    system_losses=None, panel_watts=None, panel_area_m2=None,
+    inverter_kw_ac=None, max_dc_ac_ratio=None))]
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this binding layer.
+#[allow(clippy::too_many_arguments)]
+pub fn size_pv_system(
+    usable: &PyUsableRoofArea,
+    target_kw: f64,
+    min_kw: f64,
+    max_kw: f64,
+    system_losses: Option<f64>,
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    inverter_kw_ac: Option<f64>,
+    max_dc_ac_ratio: Option<f64>,
+) -> PyResult<PyPvSizingResult> {
+    let result = hares_physics::pv_sizing::size_pv_system(
+        &usable.inner,
+        target_kw,
+        min_kw,
+        max_kw,
+        system_losses,
+        panel_watts,
+        panel_area_m2,
+        inverter_kw_ac,
+        max_dc_ac_ratio,
+    )
+    .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
+    Ok(PyPvSizingResult { inner: result })
 }
 
 // ---------------------------------------------------------------------------
@@ -632,5 +941,196 @@ mod tests {
             result_with_inv.inner.capacity_kw,
             max_dc
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Standalone pyfunction tests — callable without a Dwelling
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn infer_roof_shape_from_gable_planes() {
+        // Two opposing planes at latitude 40°N, 26° tilt → Gable.
+        let planes = vec![
+            PyRoofPlane {
+                inner: RoofPlane {
+                    area_m2: 100.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(180.0),
+                    material: None,
+                    boundary_index: None,
+                },
+                idx: 0,
+            },
+            PyRoofPlane {
+                inner: RoofPlane {
+                    area_m2: 100.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(0.0),
+                    material: None,
+                    boundary_index: None,
+                },
+                idx: 1,
+            },
+        ];
+        let result = infer_roof_shape(planes, None, Some(40.0), None);
+        assert_eq!(result, PyRoofShape::Gable);
+    }
+
+    #[test]
+    fn infer_roof_shape_apartment_returns_flat() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let result = infer_roof_shape(planes, Some("apartment".to_string()), None, None);
+        assert_eq!(result, PyRoofShape::Flat);
+    }
+
+    #[test]
+    fn infer_roof_shape_all_flat_tilt_returns_flat() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 50.0,
+                tilt_deg: 0.5,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let result = infer_roof_shape(planes, None, Some(40.0), None);
+        assert_eq!(result, PyRoofShape::Flat);
+    }
+
+    #[test]
+    fn compute_usable_area_pyfunction_works_without_dwelling() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let result = compute_usable_area(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("compute_usable_area should succeed for valid roof plane");
+        assert!(result.usable_m2() > 0.0);
+        assert!(result.max_capacity_kw() > 0.0);
+        assert!(result.max_panels() > 0);
+        assert_eq!(result.best_plane_idx(), 0);
+    }
+
+    #[test]
+    fn compute_usable_area_empty_planes_returns_error() {
+        let result = compute_usable_area(
+            vec![],
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn enumerate_candidates_pyfunction_works_without_dwelling() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let candidates = enumerate_pv_candidates(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].max_capacity_kw() > 0.0);
+    }
+
+    #[test]
+    fn size_pv_system_chains_with_compute_usable_area() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let usable = compute_usable_area(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("compute should succeed");
+        let result = size_pv_system(&usable, 6.0, 2.0, 14.0, None, None, None, None, None)
+            .expect("size_pv_system should succeed");
+        assert!(result.capacity_kw() > 0.0);
+        assert!(result.num_panels() > 0);
+    }
+
+    #[test]
+    fn size_pv_system_errors_on_insufficient_roof() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 5.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let usable = compute_usable_area(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("compute should succeed");
+        let result = size_pv_system(&usable, 10.0, 10.0, 14.0, None, None, None, None, None);
+        assert!(result.is_err());
     }
 }

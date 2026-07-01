@@ -42,7 +42,7 @@ use py_metrics::{
     PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
     PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
 };
-use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape};
+use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape, PyUsableRoofArea};
 use py_tariff::{PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder};
 use py_telemetry::{PyBillingPeriodSummary, PyTariffTelemetry, PyTelemetry};
 use py_weather::PyWeatherTimeSeries;
@@ -127,6 +127,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWeatherTimeSeries>()?;
     m.add_class::<PyRoofPlane>()?;
     m.add_class::<PyRoofShape>()?;
+    m.add_class::<PyUsableRoofArea>()?;
     m.add_class::<PyPvCandidate>()?;
     m.add_class::<PyPvSizingResult>()?;
     m.add_class::<PyElectricTariff>()?;
@@ -169,5 +170,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_pv_sizing::default_diffuse_fraction, m)?)?;
     m.add_function(wrap_pyfunction!(py_pv_sizing::is_north_facing, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pv_sizing::infer_roof_shape, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pv_sizing::compute_usable_area, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pv_sizing::enumerate_pv_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pv_sizing::size_pv_system, m)?)?;
     Ok(())
 }

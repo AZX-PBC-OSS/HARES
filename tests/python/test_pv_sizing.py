@@ -3,6 +3,7 @@
 import datetime as dt
 from pathlib import Path
 
+import ochre_next as hares
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -287,3 +288,129 @@ class TestPvPowerProduction:
         assert min_power >= -0.01, (
             f"Expected non-negative net power without PV, got {min_power:.4f} kW"
         )
+
+
+# ---------------------------------------------------------------------------
+# Standalone PV sizing functions — callable without a Dwelling object
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneInferRoofShape:
+    """infer_roof_shape should work with RoofPlane objects directly."""
+
+    def test_single_south_plane_gable(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        shape = hares.infer_roof_shape([plane], latitude=40.0)
+        assert shape in (hares.RoofShape.Gable, hares.RoofShape.Hip)
+
+    def test_apartment_returns_flat(self):
+        plane = hares.RoofPlane(area_m2=80.0, tilt_deg=26.0, azimuth_deg=180.0)
+        shape = hares.infer_roof_shape(
+            [plane], facility_type="apartment", latitude=40.0
+        )
+        assert shape == hares.RoofShape.Flat
+
+    def test_flat_tilt_returns_flat(self):
+        plane = hares.RoofPlane(area_m2=60.0, tilt_deg=0.5, azimuth_deg=180.0)
+        shape = hares.infer_roof_shape([plane], latitude=40.0)
+        assert shape == hares.RoofShape.Flat
+
+    def test_two_opposing_planes_gable(self):
+        """Two opposing planes at 40°N latitude, 26° tilt → Gable."""
+        north = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=0.0)
+        south = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        shape = hares.infer_roof_shape([north, south], latitude=40.0)
+        assert shape == hares.RoofShape.Gable
+
+
+class TestStandaloneComputeUsableArea:
+    """compute_usable_area should work with RoofPlane objects directly."""
+
+    def test_returns_usable_area(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        result = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        assert result.usable_m2 > 0
+        assert result.max_capacity_kw > 0
+        assert result.max_panels > 0
+        assert result.best_plane_idx == 0
+
+    def test_empty_planes_raises_valueerror(self):
+        with pytest.raises(ValueError):
+            hares.compute_usable_area(
+                [], roof_shape=hares.RoofShape.Gable, latitude=40.0
+            )
+
+    def test_custom_panel_changes_capacity(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        default = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        custom = hares.compute_usable_area(
+            [plane],
+            roof_shape=hares.RoofShape.Gable,
+            latitude=40.0,
+            panel_watts=300,
+            panel_area_m2=1.6,
+        )
+        assert default.max_capacity_kw != custom.max_capacity_kw
+
+
+class TestStandaloneEnumeratePvCandidates:
+    """enumerate_pv_candidates should work with RoofPlane objects directly."""
+
+    def test_returns_candidates(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        candidates = hares.enumerate_pv_candidates(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        assert len(candidates) == 1
+        assert candidates[0].max_capacity_kw > 0
+        assert candidates[0].roof_shape in (
+            hares.RoofShape.Gable,
+            hares.RoofShape.Hip,
+        )
+
+    def test_excludes_north_facing(self):
+        north = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=0.0)
+        south = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        candidates = hares.enumerate_pv_candidates(
+            [north, south], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        # North-facing plane should be excluded.
+        assert len(candidates) == 1
+        assert abs(candidates[0].azimuth_deg - 180.0) < 1.0
+
+
+class TestStandaloneSizePvSystem:
+    """size_pv_system should chain with compute_usable_area."""
+
+    def test_chains_with_usable_area(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        result = hares.size_pv_system(usable, target_kw=6.0)
+        assert result.capacity_kw > 0
+        assert result.num_panels > 0
+        assert result.collector_area_m2 > 0
+
+    def test_insufficient_roof_raises_valueerror(self):
+        plane = hares.RoofPlane(area_m2=5.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        with pytest.raises(ValueError):
+            hares.size_pv_system(usable, target_kw=10.0, min_kw=10.0)
+
+    def test_inverter_clamps_capacity(self):
+        plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
+        usable = hares.compute_usable_area(
+            [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
+        )
+        no_inv = hares.size_pv_system(usable, target_kw=8.0)
+        with_inv = hares.size_pv_system(
+            usable, target_kw=8.0, inverter_kw_ac=5.0, max_dc_ac_ratio=1.2
+        )
+        assert with_inv.capacity_kw <= no_inv.capacity_kw

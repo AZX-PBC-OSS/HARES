@@ -104,6 +104,7 @@ from ._hares import TariffTelemetry
 
 # PV sizing types
 from ._hares import RoofPlane
+from ._hares import UsableRoofArea
 from ._hares import PvCandidate
 from ._hares import PvSizingResult
 
@@ -115,6 +116,17 @@ from ._hares import (
     parse_tmy3,
     parse_resstock_csv,
     WeatherTimeSeries,
+)
+
+# Standalone PV sizing functions
+from ._hares import (
+    compute_annual_diffuse_fraction,
+    default_diffuse_fraction,
+    is_north_facing,
+    infer_roof_shape,
+    compute_usable_area,
+    enumerate_pv_candidates,
+    size_pv_system,
 )
 
 # Iterator types
@@ -215,6 +227,7 @@ __all__ = [
     "TariffTelemetry",
     # PV sizing
     "RoofPlane",
+    "UsableRoofArea",
     "PvCandidate",
     "PvSizingResult",
     # Weather
@@ -224,6 +237,14 @@ __all__ = [
     "parse_tmy3",
     "parse_resstock_csv",
     "WeatherTimeSeries",
+    # Standalone PV functions
+    "compute_annual_diffuse_fraction",
+    "default_diffuse_fraction",
+    "is_north_facing",
+    "infer_roof_shape",
+    "compute_usable_area",
+    "enumerate_pv_candidates",
+    "size_pv_system",
     # Iterator types
     "TimestepsIter",
     # Gym / RL

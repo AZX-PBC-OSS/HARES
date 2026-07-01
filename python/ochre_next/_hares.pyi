@@ -1830,10 +1830,19 @@ class TariffTelemetry:
     def __repr__(self) -> str: ...
 
 # ---------------------------------------------------------------------------
-# PV sizing (frozen, not constructable from Python)
+# PV sizing
 # ---------------------------------------------------------------------------
 
 class RoofPlane:
+    def __init__(
+        self,
+        area_m2: float,
+        tilt_deg: float = 0.0,
+        azimuth_deg: float | None = None,
+        material: str | None = None,
+        boundary_index: int | None = None,
+        index: int = 0,
+    ) -> None: ...
     @property
     def index(self) -> int: ...
     @property
@@ -1846,6 +1855,22 @@ class RoofPlane:
     def material(self) -> str | None: ...
     @property
     def boundary_index(self) -> int | None: ...
+
+class UsableRoofArea:
+    @property
+    def best_plane_idx(self) -> int: ...
+    @property
+    def usable_m2(self) -> float: ...
+    @property
+    def max_panels(self) -> int: ...
+    @property
+    def max_capacity_kw(self) -> float: ...
+    @property
+    def roof_shape(self) -> RoofShape: ...
+    @property
+    def azimuth_deg(self) -> float: ...
+    @property
+    def tilt_deg(self) -> float: ...
 
 class PvCandidate:
     @property
@@ -1862,6 +1887,8 @@ class PvCandidate:
     def max_capacity_kw(self) -> float: ...
     @property
     def solar_score(self) -> float: ...
+    @property
+    def roof_shape(self) -> RoofShape: ...
     @property
     def boundary_index(self) -> int | None: ...
 
@@ -1882,6 +1909,50 @@ class PvSizingResult:
     def max_roof_capacity_kw(self) -> float: ...
     @property
     def panel_watts(self) -> int: ...
+
+def compute_annual_diffuse_fraction(ghi: list[float], dhi: list[float]) -> float: ...
+def default_diffuse_fraction() -> float: ...
+def is_north_facing(azimuth_deg: float) -> bool: ...
+def infer_roof_shape(
+    roof_planes: list[RoofPlane],
+    facility_type: str | None = None,
+    latitude: float | None = None,
+    wall_azimuths: list[float] | None = None,
+) -> RoofShape: ...
+def compute_usable_area(
+    roof_planes: list[RoofPlane],
+    roof_shape: RoofShape,
+    *,
+    wall_azimuths: list[float] | None = None,
+    latitude: float | None = None,
+    panel_watts: int | None = None,
+    panel_area_m2: float | None = None,
+    diffuse_fraction: float | None = None,
+    roof_shape_user_override: bool = False,
+) -> UsableRoofArea: ...
+def enumerate_pv_candidates(
+    roof_planes: list[RoofPlane],
+    roof_shape: RoofShape,
+    *,
+    wall_azimuths: list[float] | None = None,
+    latitude: float | None = None,
+    panel_watts: int | None = None,
+    panel_area_m2: float | None = None,
+    diffuse_fraction: float | None = None,
+    roof_shape_user_override: bool = False,
+) -> list[PvCandidate]: ...
+def size_pv_system(
+    usable: UsableRoofArea,
+    target_kw: float,
+    *,
+    min_kw: float = 2.0,
+    max_kw: float = 14.0,
+    system_losses: float | None = None,
+    panel_watts: int | None = None,
+    panel_area_m2: float | None = None,
+    inverter_kw_ac: float | None = None,
+    max_dc_ac_ratio: float | None = None,
+) -> PvSizingResult: ...
 
 # ---------------------------------------------------------------------------
 # Configuration
