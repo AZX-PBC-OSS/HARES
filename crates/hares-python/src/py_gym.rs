@@ -10,6 +10,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
+#[cfg(feature = "observe")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use crate::py_control::PyControlSignal;
 use crate::py_dwelling::{FATAL_DWELLING_PREFIX, PyDwelling};
 
@@ -196,6 +199,14 @@ fn build_control_signal(
     Ok(signal)
 }
 
+/// Cumulative count of action values that exceeded declared bounds and were clipped.
+#[cfg(feature = "observe")]
+static ACTIONS_CLIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Throttle gate so the clipping warning is emitted once per process lifetime.
+#[cfg(feature = "observe")]
+static ACTIONS_CLIPPED_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Map a flat action vector to per-equipment [`ControlSignal`]s.
 ///
 /// Each action dimension maps to an (equipment, field) pair from `action_layout`.
@@ -215,6 +226,8 @@ fn map_action_to_signals(
     }
 
     let mut field_values: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    #[cfg(feature = "observe")]
+    let mut clipped_count: u64 = 0;
     for (idx, (equipment, field)) in action_layout.iter().enumerate() {
         let raw_value = action[idx];
         if !raw_value.is_finite() {
@@ -224,6 +237,12 @@ fn map_action_to_signals(
         }
         let (low, high) = field_bounds(field);
         let clipped = raw_value.clamp(low, high);
+        if clipped != raw_value {
+            #[cfg(feature = "observe")]
+            {
+                clipped_count += 1;
+            }
+        }
 
         #[cfg(feature = "observe")]
         {
@@ -246,6 +265,23 @@ fn map_action_to_signals(
             .entry(equipment.clone())
             .or_default()
             .insert(field.clone(), clipped);
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        if clipped_count > 0 {
+            ACTIONS_CLIPPED.fetch_add(clipped_count, Ordering::Relaxed);
+            if ACTIONS_CLIPPED_WARNED
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                tracing::warn!(
+                    actions_clipped_this_call = clipped_count,
+                    total_actions_clipped = ACTIONS_CLIPPED.load(Ordering::Relaxed),
+                    "Action values exceeded declared bounds and were clipped; the RL agent is exploring outside the declared action space. Subsequent clipping events will be suppressed."
+                );
+            }
+        }
     }
 
     let consumed: usize = field_values.values().map(|m| m.len()).sum();

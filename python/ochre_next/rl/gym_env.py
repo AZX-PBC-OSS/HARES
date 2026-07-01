@@ -388,6 +388,9 @@ class DwellingGymEnv(_GYM_BASE):
         return np.ascontiguousarray(obs, dtype=np.float64)
 
     def _apply_action(self, action: np.ndarray) -> None:
+        low = self.action_space.low
+        high = self.action_space.high
+        action = np.clip(action, low, high)
         action_values: dict[str, dict[str, float]] = {}
         for idx, (equipment, field) in enumerate(self._action_layout):
             action_values.setdefault(equipment, {})[field] = float(action[idx])

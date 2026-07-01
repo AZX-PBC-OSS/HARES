@@ -97,6 +97,9 @@ class VecDwellingGymEnv:
         self._max_steps = max(1, int(np.ceil(episode_length.total_seconds() / 60.0)))
 
     def _apply_controls(self, dwelling: PyDwelling, action_row: np.ndarray) -> None:
+        low = self.action_space.low if hasattr(self.action_space, "low") else self.action_space["low"]
+        high = self.action_space.high if hasattr(self.action_space, "high") else self.action_space["high"]
+        action_row = np.clip(action_row, low, high)
         action_values: dict[str, dict[str, float]] = {}
         for idx, (equipment, field) in enumerate(self._action_layout):
             action_values.setdefault(equipment, {})[field] = float(action_row[idx])

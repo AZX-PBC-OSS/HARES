@@ -212,3 +212,138 @@ def test_vec_gym_random_policy_100_steps():
         assert np.all(np.isfinite(rewards)), (
             f"Non-finite reward at step {step_idx}: {rewards}"
         )
+
+
+def test_apply_action_clips_at_bounds():
+    """_apply_action clips action values to action_space.low/high
+    before passing them to _build_control_signal."""
+    env = _make_env()
+    env.reset(seed=42)
+    low = env.action_space.low[0]
+    high = env.action_space.high[0]
+
+    from ochre_next.rl import gym_env
+    original = gym_env._build_control_signal
+    captured = []
+
+    def _spy(signal_type, values):
+        captured.append(dict(values))
+        return original(signal_type, values)
+
+    gym_env._build_control_signal = _spy
+    try:
+        # Above upper bound is clipped to high.
+        env._apply_action(np.array([high + 100.0], dtype=np.float64))
+        assert captured
+        val = captured[0]["heat_c"]
+        assert low <= val <= high, f"heat_c {val} should be in [{low}, {high}]"
+
+        # Below lower bound is clipped to low.
+        captured.clear()
+        env._apply_action(np.array([low - 100.0], dtype=np.float64))
+        val = captured[0]["heat_c"]
+        assert low <= val <= high, f"heat_c {val} should be in [{low}, {high}]"
+
+        # At bounds are passed through unchanged.
+        for bound in (float(low), float(high)):
+            captured.clear()
+            env._apply_action(np.array([bound], dtype=np.float64))
+            val = captured[0]["heat_c"]
+            assert low <= val <= high, f"heat_c {val} should be in [{low}, {high}]"
+    finally:
+        gym_env._build_control_signal = original
+
+
+def test_vec_gym_out_of_bounds_actions_no_nan():
+    """100-step random-policy test with actions 10x the declared range.
+
+    Forces the Python fallback path (rust_batch_step = None) so that
+    _apply_controls — the method this ticket patches — is actually exercised.
+    Also spies on _build_control_signal to verify _apply_controls clips
+    action values to the declared action space bounds before forwarding them.
+    """
+    import ochre_next.rl.vec_env as ve
+
+    n_dwel = 2
+    obs_fields = ["total_power_kw", "outdoor_temp"]
+    dwellings = [
+        PyDwelling.from_hpxml(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            start_time="2019-01-01T00:00:00",
+            duration_s=6000,
+            time_res_s=60,
+            master_seed=i,
+        )
+        for i in range(n_dwel)
+    ]
+    from ochre_next import Battery
+    for dw in dwellings:
+        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+
+    action_config = {
+        "Gas Furnace": ["heat_c"],
+        "Batt": ["active_power_kw"],
+    }
+
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=obs_fields,
+        action_space_config=action_config,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(seconds=6000),
+    )
+
+    low = env.action_space.low
+    high = env.action_space.high
+    scale = 10.0
+    rng = np.random.default_rng(42)
+
+    # Resolve action layout indices once — _sorted_action_layout sorts
+    # equipment names and fields alphabetically, so for the config above
+    # the layout is [("Batt", "active_power_kw"), ("Gas Furnace", "heat_c")].
+    heat_idx = next(i for i, (_, f) in enumerate(env._action_layout) if f == "heat_c")
+    power_idx = next(i for i, (_, f) in enumerate(env._action_layout) if f == "active_power_kw")
+
+    captured_signals = []
+    original_build = ve._build_control_signal
+
+    def _spy(signal_type, values):
+        captured_signals.append((signal_type, dict(values)))
+        return original_build(signal_type, values)
+
+    ve._build_control_signal = _spy
+    old_batch_step = ve.rust_batch_step
+    ve.rust_batch_step = None
+    try:
+        for step_idx in range(100):
+            actions = rng.uniform(low * scale, high * scale, size=(n_dwel, len(env._action_layout))).astype(np.float64)
+            step_obs, rewards, _dones, _truncs, _infos = env.step(actions)
+            assert step_obs.shape == (n_dwel, len(obs_fields)), (
+                f"obs shape mismatch at step {step_idx}"
+            )
+            assert np.all(np.isfinite(step_obs)), (
+                f"Non-finite observation at step {step_idx}: {step_obs}"
+            )
+            assert np.all(np.isfinite(rewards)), (
+                f"Non-finite reward at step {step_idx}: {rewards}"
+            )
+    finally:
+        ve.rust_batch_step = old_batch_step
+        ve._build_control_signal = original_build
+
+    # Verify all captured action values are within action space bounds.
+    assert captured_signals, "spy should have captured at least one signal"
+    for _signal_type, values in captured_signals:
+        if "heat_c" in values:
+            val = float(values["heat_c"])
+            assert low[heat_idx] <= val <= high[heat_idx], (
+                f"heat_c {val} should be in [{low[heat_idx]}, {high[heat_idx]}]"
+            )
+        if "active_power_kw" in values:
+            val = float(values["active_power_kw"])
+            assert low[power_idx] <= val <= high[power_idx], (
+                f"active_power_kw {val} should be in [{low[power_idx]}, {high[power_idx]}]"
+            )
