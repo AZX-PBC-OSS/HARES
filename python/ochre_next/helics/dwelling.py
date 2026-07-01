@@ -21,8 +21,38 @@ from ochre_next import ControlSignal
 from ochre_next._hares import Dwelling as PyDwelling
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
+from .broker import allocate_ephemeral_port
 
 _LOG = logging.getLogger(__name__)
+
+
+def _handle_time_grant(requested: float, granted: float) -> bool:
+    """Return ``True`` when the dwelling should advance model state on this grant.
+
+    HELICS guarantees ``granted <= requested``.  In multi-rate co-simulations
+    ``granted < requested`` indicates an intermediate grant from a faster
+    federate — the caller should publish current results without stepping and
+    re-request the same ``requested`` time.
+
+    ``granted > requested`` is a HELICS invariant violation that the HELICS
+    runtime should prevent — if it occurs, step anyway and log a warning.
+    """
+    if granted > requested:
+        _LOG.warning(
+            "HELICS invariant violation: granted %.3f > requested %.3f",
+            granted,
+            requested,
+        )
+        return True
+    if granted < requested:
+        _LOG.info(
+            "Multi-rate grant: requested=%.1fs granted=%.1fs delta=%.1fs",
+            requested,
+            granted,
+            requested - granted,
+        )
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +101,6 @@ class HELICSDwelling:
         self._configure_federate_info(fedinfo)
         self._fed = helics.helicsCreateValueFederate(fed_name, fedinfo)
 
-        self._set_flag(helics.HELICS_FLAG_UNINTERRUPTIBLE, True)
         self._set_flag(helics.HELICS_FLAG_TERMINATE_ON_ERROR, True)
 
         self._pub_power: HelicsPublicationLike | None = None
@@ -85,18 +114,25 @@ class HELICSDwelling:
         self._finalized = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
-        """Register typed double publications and return config metadata."""
-        base = f"{prefix}{self._fed_name}/"
+        """Register typed double publications and return config metadata.
 
-        power_key = f"{base}total_power_kw"
-        reactive_key = f"{base}reactive_power_kvar"
+        HELICS prepends the federate name to every local publication name, so
+        the name passed to ``register_publication`` must omit ``fed_name`` --
+        passing the fully-qualified key here would register
+        ``fed_name/fed_name/...`` instead of ``fed_name/...``.
 
-        self._pub_power = self._fed.register_publication(power_key, "double")
-        self._pub_reactive = self._fed.register_publication(reactive_key, "double")
+        The ``prefix`` is a namespace prepended to the *config* key returned
+        to callers (e.g. ``"grid/"``), not to the local publication name.
+        """
+        power_name = "total_power_kw"
+        reactive_name = "reactive_power_kvar"
+
+        self._pub_power = self._fed.register_publication(power_name, "double")
+        self._pub_reactive = self._fed.register_publication(reactive_name, "double")
 
         self._publication_configs = [
-            HELICSPublicationConfig(key=power_key),
-            HELICSPublicationConfig(key=reactive_key),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"),
         ]
         return list(self._publication_configs)
 
@@ -125,15 +161,29 @@ class HELICSDwelling:
         return list(self._subscription_configs)
 
     def run(self) -> None:
-        """Run HELICS-coupled stepping loop until dwelling timesteps are exhausted."""
+        """Run HELICS-coupled stepping loop until dwelling timesteps are exhausted.
+
+        Each dwelling timestep at ``start_time + n * period`` represents the
+        state *before* ``step()`` advances it to ``start_time + (n+1) * period``.
+        The HELICS time to request for that step is therefore the *exit* time
+        of the interval (``(n+1) * period``), not the timestep's own entry
+        time -- a federate is already at simulation time 0 immediately after
+        ``enter_executing_mode()``, and HELICS never re-grants a time at or
+        before the federate's current time, so requesting entry time 0 for
+        the first step would be granted the *next* period boundary instead,
+        silently shifting every subsequent request one period late.
+        """
         try:
             if self._pub_power is None or self._pub_reactive is None:
                 raise RuntimeError("Publications are not registered; call register_publications() first")
 
             self._fed.enter_executing_mode()
             for timestamp in self._timesteps:
-                sim_time_s = (timestamp - self._start_time).total_seconds()
-                self._fed.request_time(sim_time_s)
+                exit_time_s = (timestamp - self._start_time).total_seconds() + self._period_s
+                granted = float(self._fed.request_time(exit_time_s))
+                while not _handle_time_grant(exit_time_s, granted):
+                    self._publish_results()
+                    granted = float(self._fed.request_time(exit_time_s))
                 self._read_subscriptions()
                 self._dwelling.step()
                 self._publish_results()
@@ -234,8 +284,18 @@ class HELICSDwelling:
             helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, self._core_type)
         else:
             fedinfo.core_type = self._core_type
+
+        if hasattr(helics, "helicsFederateInfoSetCoreName"):
+            helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{self._fed_name}")
+
         broker_address = self._normalize_broker_address(self._broker_address)
-        core_init_value = f"--broker_address={broker_address}"
+        # Each federate's core needs its own local ZMQ listen port. Without an
+        # explicit --port, multiple auto-named cores in the same process can
+        # collide on the auto-assigned local port and silently deadlock at
+        # enterExecutingMode instead of raising a bind error (reproduced on
+        # macOS/arm64 with HELICS 3.6.1).
+        local_port = allocate_ephemeral_port()
+        core_init_value = f"--broker_address={broker_address} --port={local_port}"
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:
@@ -244,10 +304,16 @@ class HELICSDwelling:
             if hasattr(fedinfo, "core_init_string"):
                 fedinfo.core_init_string = core_init_value
 
+        # Set time period to 0 (no minimum step constraint) so HELICS can grant
+        # at any time — including intermediate grants from faster federates in
+        # multi-rate co-simulations. The dwelling's actual step cadence is
+        # controlled by the for-loop over self._timesteps, not by this property.
+        # A non-zero period would prevent grants at non-period-aligned times,
+        # foreclosing the while-loop's intermediate-grant branch.
         self._set_time_property(
             fedinfo,
             helics.HELICS_PROPERTY_TIME_PERIOD,
-            self._period_s,
+            0.0,
         )
 
         if self._time_offset_s != 0.0:

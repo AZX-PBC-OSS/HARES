@@ -110,6 +110,7 @@ class _FakeHelicsModule:
             self.core_type = ""
             self.core_init = ""
             self.core_init_string = ""
+            self.core_name = ""
             self.property: dict[int, float] = {}
 
     def __init__(self) -> None:
@@ -129,6 +130,14 @@ class _FakeHelicsModule:
         self.last_fed = fed
         self.log.append(("create_value_federate", fed_name))
         return fed
+
+    def helicsFederateInfoSetCoreName(
+        self,
+        fedinfo: _FakeHelicsModule.HelicsFederateInfo,
+        core_name: str,
+    ) -> None:
+        fedinfo.core_name = core_name
+        self.log.append(("set_core_name", core_name))
 
     def helicsFederateInfoSetTimeProperty(
         self,
@@ -249,9 +258,14 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
     fedinfo = fake_helics.last_fedinfo
     assert fedinfo is not None
     assert fedinfo.core_type == "tcp"
-    assert fedinfo.core_init == "--broker_address=tcp://10.0.0.7:23404"
-    assert fedinfo.core_init_string == "--broker_address=tcp://10.0.0.7:23404"
-    assert fedinfo.property[fake_helics.HELICS_PROPERTY_TIME_PERIOD] == pytest.approx(60.0)
+    # Each federate's core needs a unique name and local port: without them,
+    # multiple auto-named/ported cores in the same process can silently
+    # deadlock at enterExecutingMode instead of raising a bind error.
+    assert fedinfo.core_name == "core_fleet_1"
+    assert fedinfo.core_init.startswith("--broker_address=tcp://10.0.0.7:23404")
+    assert fedinfo.core_init_string.startswith("--broker_address=tcp://10.0.0.7:23404")
+    assert "--port=" in fedinfo.core_init
+    assert fedinfo.property[fake_helics.HELICS_PROPERTY_TIME_PERIOD] == pytest.approx(0.0)
 
     pubs = orchestrator.register_publications(prefix="grid/")
     assert [p.key for p in pubs] == [
@@ -331,11 +345,11 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
 
     fed = fake_helics.last_fed
     assert fed is not None
-    assert fed.requested_times == [0.0, 60.0]
+    assert fed.requested_times == [60.0, 120.0]
 
-    first_request_idx = fake_helics.log.index(("request_time", 0.0))
+    first_request_idx = fake_helics.log.index(("request_time", 60.0))
     first_step_idx = fake_helics.log.index(("step", 1))
-    first_publish_idx = fake_helics.log.index(("publish", "fleet_1/aggregate_power_kw", 6.0))
+    first_publish_idx = fake_helics.log.index(("publish", "aggregate_power_kw", 6.0))
     assert first_request_idx < first_step_idx < first_publish_idx
 
     assert fleet.grid_voltage_all_values == [0.98, 0.97]
@@ -344,20 +358,20 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
         (1, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 2.0}}),
     ]
 
-    assert fed.publications["fleet_1/aggregate_power_kw"].published == [6.0, 7.5]
-    assert fed.publications["fleet_1/aggregate_reactive_kvar"].published == pytest.approx(
+    assert fed.publications["aggregate_power_kw"].published == [6.0, 7.5]
+    assert fed.publications["aggregate_reactive_kvar"].published == pytest.approx(
         [0.6, 0.75]
     )
-    assert fed.publications["fleet_1/dwelling_0/total_power_kw"].published == [1.0, 1.5]
-    assert fed.publications["fleet_1/dwelling_0/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_0/total_power_kw"].published == [1.0, 1.5]
+    assert fed.publications["dwelling_0/reactive_power_kvar"].published == pytest.approx(
         [0.1, 0.15]
     )
-    assert fed.publications["fleet_1/dwelling_1/total_power_kw"].published == [2.0, 2.5]
-    assert fed.publications["fleet_1/dwelling_1/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_1/total_power_kw"].published == [2.0, 2.5]
+    assert fed.publications["dwelling_1/reactive_power_kvar"].published == pytest.approx(
         [0.2, 0.25]
     )
-    assert fed.publications["fleet_1/dwelling_2/total_power_kw"].published == [3.0, 3.5]
-    assert fed.publications["fleet_1/dwelling_2/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_2/total_power_kw"].published == [3.0, 3.5]
+    assert fed.publications["dwelling_2/reactive_power_kvar"].published == pytest.approx(
         [0.3, 0.35]
     )
 
@@ -500,3 +514,61 @@ def test_helics_fleet_per_dwelling_voltage_topics_length_validated(
         orchestrator.register_subscriptions(
             per_dwelling_voltage_topics=["topic_0", "topic_1"],
         )
+
+
+class _MultiGrantFederate(_FakeFederate):
+    """Fake federate that returns a predefined sequence of granted times."""
+
+    def __init__(self, fed_name: str, fedinfo: Any, log: list[tuple[Any, ...]], *, grant_sequence: list[float] | None = None) -> None:
+        super().__init__(fed_name, fedinfo, log)
+        self._grant_sequence = list(grant_sequence or [])
+        self._grant_idx = 0
+
+    def request_time(self, requested: float) -> float:
+        self.requested_times.append(requested)
+        if self._grant_idx < len(self._grant_sequence):
+            granted = self._grant_sequence[self._grant_idx]
+            self._grant_idx += 1
+        else:
+            granted = requested
+        self._log.append(("request_time", requested, granted))
+        return granted
+
+
+def test_helics_fleet_multi_rate_grants_only_steps_at_requested_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Exit-time semantics: step 1 requests exit_time=60s. Five intermediate
+    # grants (10-50s) are republished without stepping, then 60s is granted
+    # and the fleet steps. Step 2 requests exit_time=120s and is granted.
+    multi_fed = _MultiGrantFederate(
+        fed_name="fleet_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0],
+    )
+    orchestrator._fed = multi_fed
+
+    orchestrator.run()
+
+    assert fleet._step_count == 2
+    assert multi_fed.requested_times == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 120.0]
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    pub = fed.publications["aggregate_power_kw"]
+    # 5 intermediate publishes (before step 1) + 1 step-1 publish + 1 step-2 publish
+    assert len(pub.published) == 7
+    # All intermediate publishes carry state from before step 1
+    for i in range(5):
+        assert pub.published[i] == 6.0  # intermediate, unchanged
+    assert pub.published[6] == 7.5  # step 2: 1.5+2.5+3.5
+
+    assert multi_fed.disconnected is True

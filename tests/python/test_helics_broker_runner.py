@@ -134,7 +134,7 @@ def test_create_broker_wait_and_shutdown(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_create_broker_ephemeral_port_path(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module, _, fake_helics = _import_broker_runner_modules(monkeypatch)
-    monkeypatch.setattr(broker_module, "_allocate_ephemeral_port", lambda: 26001)
+    monkeypatch.setattr(broker_module, "allocate_ephemeral_port", lambda: 26001)
 
     broker = broker_module.create_broker(n_federates=2, core_type="zmq", port=None)
     created = fake_helics.created_brokers[0]
@@ -289,6 +289,24 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--weather=/data/weather.epw" in fed.exec_command
     assert "--schedule=/data/schedule.csv" in fed.exec_command
     assert "--broker=localhost:24007" in fed.exec_command
+
+
+def test_make_dwelling_federate_config_accepts_underscored_and_hyphenated_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
+
+    fed = runner_module.make_dwelling_federate_config(
+        name="house_1",
+        hpxml_path=Path("/data/house.xml"),
+        weather_path=Path("/data/weather.epw"),
+        schedule_path=Path("/data/schedule.csv"),
+        broker_address="localhost:24007",
+        **{"core-type": "zmq"},
+    )
+
+    assert "--broker_address=localhost:24007" in fed.exec_command
+    assert "--core-type=zmq" in fed.exec_command
 
 
 def test_make_dwelling_federate_config_quotes_paths_and_values(

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import importlib
 import importlib.util
 import json
-from pathlib import Path
 import sys
 import threading
 from typing import Any
@@ -19,6 +18,7 @@ from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
 
 from ochre_next import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
 from ochre_next.helics import HELICSDwelling, HELICSFleet, create_broker, get_broker_port
+from ochre_next.helics.broker import allocate_ephemeral_port
 
 helics_available = importlib.util.find_spec("helics") is not None
 pytestmark = pytest.mark.skipif(not helics_available, reason="helics not installed")
@@ -174,6 +174,11 @@ def _disconnect_broker(broker: Any) -> None:
 
 
 def _start_thread(target: Callable[[], None], name: str) -> tuple[threading.Thread, _ThreadResult]:
+    # HELICS federate handles have thread affinity: a handle created via
+    # helicsCreateValueFederate must be driven (enterExecutingMode, requestTime)
+    # on the same OS thread. Creating in one thread and driving in another
+    # causes a ZMQ-level deadlock at the exec-mode barrier. Always construct
+    # and run HELICSDwelling/HELICSFleet within the same thread target.
     result = _ThreadResult()
 
     def _runner() -> None:
@@ -188,7 +193,9 @@ def _start_thread(target: Callable[[], None], name: str) -> tuple[threading.Thre
     return thread, result
 
 
-def _new_federate_info(port: int, core_type: str = "zmq", time_res_s: float = _TIME_RES_S):
+def _new_federate_info(
+    port: int, core_type: str = "zmq", time_res_s: float = _TIME_RES_S, core_name: str = "aggregator"
+):
     if hasattr(helics, "HelicsFederateInfo"):
         try:
             fedinfo = helics.HelicsFederateInfo()
@@ -201,7 +208,17 @@ def _new_federate_info(port: int, core_type: str = "zmq", time_res_s: float = _T
         helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, core_type)
     else:
         fedinfo.core_type = core_type
-    core_init = f"--broker_address=tcp://127.0.0.1:{port}"
+
+    if hasattr(helics, "helicsFederateInfoSetCoreName"):
+        helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{core_name}")
+
+    # Each federate's core needs its own local ZMQ listen port -- without an
+    # explicit --port, multiple auto-named cores in the same process can
+    # collide on the auto-assigned local port and silently deadlock at
+    # enterExecutingMode instead of raising a bind error (reproduced on
+    # macOS/arm64 with HELICS 3.6.1).
+    local_port = allocate_ephemeral_port()
+    core_init = f"--broker_address=tcp://127.0.0.1:{port} --port={local_port}"
     if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
         helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init)
     else:
@@ -227,20 +244,26 @@ def _run_single_dwelling_exchange(voltage_pu: float) -> list[float]:
 
     try:
         dwelling = _new_dwelling()
-        helics_dwelling = HELICSDwelling(
-            dwelling=dwelling,
-            fed_name="house_1",
-            broker_address=f"localhost:{broker_port}",
-        )
-        helics_dwelling.register_publications()
-        helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+        federate_ready = threading.Event()
 
-        thread, thread_result = _start_thread(helics_dwelling.run, name="dwelling-federate")
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling,
+                fed_name="house_1",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-federate")
+        federate_ready.wait()
 
         fedinfo = _new_federate_info(broker_port)
         aggregator = helics.helicsCreateValueFederate("aggregator_1", fedinfo)
         sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
-        pub_voltage = aggregator.register_publication("grid/voltage", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         power_trace: list[float] = []
         try:
@@ -297,15 +320,21 @@ def test_fleet_cosim_with_mock_aggregator() -> None:
 
     try:
         fleet = _new_fleet(n_dwellings=3)
-        helics_fleet = HELICSFleet(
-            fleet=fleet,
-            fed_name="fleet_1",
-            broker_address=f"localhost:{broker_port}",
-        )
-        helics_fleet.register_publications()
-        helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
+        federate_ready = threading.Event()
 
-        thread, thread_result = _start_thread(helics_fleet.run, name="fleet-federate")
+        def _run_federate() -> None:
+            helics_fleet = HELICSFleet(
+                fleet=fleet,
+                fed_name="fleet_1",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_fleet.register_publications()
+            helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            helics_fleet.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="fleet-federate")
+        federate_ready.wait()
 
         fedinfo = _new_federate_info(broker_port)
         aggregator = helics.helicsCreateValueFederate("aggregator_1", fedinfo)
@@ -314,7 +343,7 @@ def test_fleet_cosim_with_mock_aggregator() -> None:
             aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
             for idx in range(3)
         ]
-        pub_voltage = aggregator.register_publication("grid/voltage", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         aggregate_samples: list[tuple[float, float]] = []
         try:
@@ -361,32 +390,44 @@ def test_control_signal_via_helics() -> None:
         baseline._dwelling.add_battery(
             Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.4)
         )
-        baseline_orchestrator = HELICSDwelling(
-            dwelling=baseline,
-            fed_name="house_base",
-            broker_address=f"localhost:{broker_port}",
-        )
-        baseline_orchestrator.register_publications()
-        baseline_orchestrator.register_subscriptions(control_topic="grid/control")
+        baseline_ready = threading.Event()
+
+        def _run_federate() -> None:
+            baseline_orchestrator = HELICSDwelling(
+                dwelling=baseline,
+                fed_name="house_base",
+                broker_address=f"localhost:{broker_port}",
+            )
+            baseline_orchestrator.register_publications()
+            baseline_orchestrator.register_subscriptions(control_topic="grid/control")
+            baseline_ready.set()
+            baseline_orchestrator.run()
 
         baseline_thread, baseline_result = _start_thread(
-            baseline_orchestrator.run,
+            _run_federate,
             name="dwelling-baseline",
         )
+        baseline_ready.wait()
 
         fedinfo = _new_federate_info(broker_port)
         aggregator = helics.helicsCreateValueFederate("aggregator_base", fedinfo)
-        pub_control = aggregator.register_publication("grid/control", "string")
+        pub_control = aggregator.register_global_publication("grid/control", "string")
         try:
             aggregator.enter_executing_mode()
             for step_idx in range(_TOTAL_STEPS):
                 aggregator.request_time(step_idx * _TIME_RES_S)
                 if step_idx == 1:
+                    # A discharge setpoint (negative active_power_kw), not a charge
+                    # setpoint: the dwelling's default scenario starts at January
+                    # midnight outdoor temperature, below the battery's
+                    # min_charge_temp_c safety lockout, so a charge request would be
+                    # correctly blocked and only the ~5W standby draw would show up
+                    # regardless of whether the control signal was ever delivered.
                     pub_control.publish(
                         json.dumps(
                             {
                                 "equipment": "Battery",
-                                "signal": {"type": "PowerSetpoint", "active_power_kw": 3.0},
+                                "signal": {"type": "PowerSetpoint", "active_power_kw": -3.0},
                             }
                         )
                     )
@@ -423,7 +464,10 @@ def test_helics_time_domain_is_simulation_relative() -> None:
         helics_dwelling._fed = probe
         helics_dwelling.run()
 
-        expected = [step * _TIME_RES_S for step in range(_TOTAL_STEPS)]
+        # Each step requests the *exit* time of its interval: a federate is
+        # already at time 0 after enter_executing_mode(), so the first
+        # request must be for one period ahead, not for time 0 itself.
+        expected = [(step + 1) * _TIME_RES_S for step in range(_TOTAL_STEPS)]
         assert probe.requested_times == expected
         assert all(requested <= (_TOTAL_STEPS * _TIME_RES_S) for requested in probe.requested_times)
     finally:
@@ -462,20 +506,26 @@ def test_malformed_control_payload_does_not_crash_federate(
 
     try:
         dwelling = _new_dwelling()
-        helics_dwelling = HELICSDwelling(
-            dwelling=dwelling,
-            fed_name="house_1",
-            broker_address=f"localhost:{broker_port}",
-        )
-        helics_dwelling.register_publications()
-        helics_dwelling.register_subscriptions(control_topic="grid/control")
+        federate_ready = threading.Event()
 
-        thread, thread_result = _start_thread(helics_dwelling.run, name="dwelling-malformed-control")
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling,
+                fed_name="house_1",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(control_topic="grid/control")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-malformed-control")
+        federate_ready.wait()
 
         fedinfo = _new_federate_info(broker_port)
         aggregator = helics.helicsCreateValueFederate("aggregator_1", fedinfo)
         sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
-        pub_control = aggregator.register_publication("grid/control", "string")
+        pub_control = aggregator.register_global_publication("grid/control", "string")
 
         with caplog.at_level("WARNING"):
             try:
@@ -524,3 +574,79 @@ def test_helics_import_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ImportError, match="HELICS not installed"):
         from ochre_next.helics import HELICSDwelling  # noqa: F401
+
+
+def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
+    """Dwelling at 60s timestep, aggregator at 10s. Verify dwelling only steps at 60s boundaries."""
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    DWELL_TIME_RES_S = 60
+    AGG_TIME_RES_S = 10
+    DWELL_STEPS = 3
+    DWELL_DURATION_S = DWELL_STEPS * DWELL_TIME_RES_S  # 180
+    AGG_STEPS = DWELL_DURATION_S // AGG_TIME_RES_S  # 18
+
+    try:
+        dwelling_raw = Dwelling.from_hpxml(
+            HPXML, SCHEDULE, WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=DWELL_DURATION_S,
+            time_res_s=DWELL_TIME_RES_S,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=99,
+            master_seed=0,
+            output_verbosity=0,
+        )
+        dwelling_raw.initialize()
+        recording = _RecordingDwelling(dwelling_raw)
+        federate_ready = threading.Event()
+
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=recording,
+                fed_name="house_mr",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-mr")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port, time_res_s=float(AGG_TIME_RES_S))
+        aggregator = helics.helicsCreateValueFederate("agg_mr", fedinfo)
+        sub_power = aggregator.register_subscription("house_mr/total_power_kw", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        power_trace: list[float] = []
+        try:
+            aggregator.enter_executing_mode()
+            # request_time(t) asks to be granted time t; since the federate
+            # is already at time 0 after enter_executing_mode(), the first
+            # request must target the exit time of the first interval
+            # (AGG_TIME_RES_S), not entry time 0.
+            for step_idx in range(1, AGG_STEPS + 1):
+                pub_voltage.publish(1.0)
+                aggregator.request_time(step_idx * AGG_TIME_RES_S)
+                if sub_power.is_updated():
+                    power_trace.append(float(sub_power.double))
+        finally:
+            aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        # Dwelling publishes its current state at every HELICS grant (every 10s),
+        # but its model state only advances at 60s boundaries.
+        assert len(power_trace) == AGG_STEPS, (
+            f"Expected {AGG_STEPS} publications, got {len(power_trace)}"
+        )
+        assert any(abs(p) > 1e-6 for p in power_trace), "published dwelling power should be non-zero"
+    finally:
+        _disconnect_broker(broker)

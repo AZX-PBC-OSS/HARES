@@ -66,7 +66,7 @@ def create_broker(
 
     last_error: Exception | None = None
     for _ in range(16):
-        selected_port = _allocate_ephemeral_port()
+        selected_port = allocate_ephemeral_port()
         try:
             broker = _create_broker_for_port(
                 n_federates=n_federates,
@@ -195,7 +195,7 @@ def _set_cached_broker_port(broker: Any, port: int) -> None:
         return
 
 
-def _allocate_ephemeral_port() -> int:
+def allocate_ephemeral_port() -> int:
     # TOCTOU: the socket is closed before the port is returned, so another
     # process can claim it before create_broker() binds.  The 16-retry loop
     # in create_broker() mitigates this race; switching to SO_REUSEPORT or

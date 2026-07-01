@@ -143,7 +143,7 @@ def make_dwelling_federate_config(
     """
 
     for key in kwargs:
-        if not key.replace("-", "_").isalnum():
+        if not key or not all(c.isalnum() or c in "-_" for c in key):
             raise ValueError(f"Invalid CLI argument key: {key!r}")
 
     extra_args = [

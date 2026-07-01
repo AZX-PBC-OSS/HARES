@@ -17,7 +17,8 @@ from ochre_next import ControlSignal
 from ochre_next._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig
+from .broker import allocate_ephemeral_port
+from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant
 
 _LOG = logging.getLogger(__name__)
 
@@ -56,7 +57,6 @@ class HELICSFleet:
         self._configure_federate_info(fedinfo)
         self._fed = helics.helicsCreateValueFederate(fed_name, fedinfo)
 
-        self._set_flag(helics.HELICS_FLAG_UNINTERRUPTIBLE, True)
         self._set_flag(helics.HELICS_FLAG_TERMINATE_ON_ERROR, True)
 
         self._pub_aggregate_power: HelicsPublicationLike | None = None
@@ -73,28 +73,35 @@ class HELICSFleet:
         self._finalized = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
-        """Register aggregate and per-dwelling typed double publications."""
-        base = f"{prefix}{self._fed_name}/"
+        """Register aggregate and per-dwelling typed double publications.
 
-        aggregate_power_key = f"{base}aggregate_power_kw"
-        aggregate_reactive_key = f"{base}aggregate_reactive_kvar"
-        self._pub_aggregate_power = self._fed.register_publication(aggregate_power_key, "double")
-        self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_key, "double")
+        HELICS prepends the federate name to every local publication name, so
+        the name passed to ``register_publication`` must omit ``fed_name`` --
+        passing the fully-qualified key here would register
+        ``fed_name/fed_name/...`` instead of ``fed_name/...``.
+
+        The ``prefix`` is a namespace prepended to the *config* key returned
+        to callers (e.g. ``"grid/"``), not to the local publication name.
+        """
+        aggregate_power_name = "aggregate_power_kw"
+        aggregate_reactive_name = "aggregate_reactive_kvar"
+        self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
+        self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
         configs = [
-            HELICSPublicationConfig(key=aggregate_power_key),
-            HELICSPublicationConfig(key=aggregate_reactive_key),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_power_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_reactive_name}"),
         ]
 
         for dwelling_index in range(self._n_dwellings):
-            power_key = f"{base}dwelling_{dwelling_index}/total_power_kw"
-            reactive_key = f"{base}dwelling_{dwelling_index}/reactive_power_kvar"
-            self._pub_dwelling_power.append(self._fed.register_publication(power_key, "double"))
-            self._pub_dwelling_reactive.append(self._fed.register_publication(reactive_key, "double"))
-            configs.append(HELICSPublicationConfig(key=power_key))
-            configs.append(HELICSPublicationConfig(key=reactive_key))
+            power_name = f"dwelling_{dwelling_index}/total_power_kw"
+            reactive_name = f"dwelling_{dwelling_index}/reactive_power_kvar"
+            self._pub_dwelling_power.append(self._fed.register_publication(power_name, "double"))
+            self._pub_dwelling_reactive.append(self._fed.register_publication(reactive_name, "double"))
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
 
         self._publication_configs = configs
         return list(self._publication_configs)
@@ -144,7 +151,17 @@ class HELICSFleet:
         return list(self._subscription_configs)
 
     def run(self) -> None:
-        """Run HELICS-coupled stepping loop until fleet timesteps are exhausted."""
+        """Run HELICS-coupled stepping loop until fleet timesteps are exhausted.
+
+        Each fleet step advances state from ``sim_time_s`` to
+        ``sim_time_s + time_res_s``, so the HELICS time to request is the
+        *exit* time of the interval, not its entry time -- a federate is
+        already at simulation time 0 immediately after
+        ``enter_executing_mode()``, and HELICS never re-grants a time at or
+        before the federate's current time, so requesting entry time 0 for
+        the first step would be granted the *next* period boundary instead,
+        silently shifting every subsequent request one period late.
+        """
         try:
             if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
                 raise RuntimeError("Publications are not registered; call register_publications() first")
@@ -160,15 +177,18 @@ class HELICSFleet:
                     )
                     break
 
-                granted = float(self._fed.request_time(sim_time_s))
-                assert granted >= sim_time_s, "granted time must be monotonically increasing"
+                exit_time_s = sim_time_s + self._time_res_s
+                granted = float(self._fed.request_time(exit_time_s))
+                while not _handle_time_grant(exit_time_s, granted):
+                    self._publish_results()
+                    granted = float(self._fed.request_time(exit_time_s))
 
                 self._read_subscriptions()
                 self._fleet.step()
                 self._publish_results()
 
                 step_count += 1
-                sim_time_s += self._time_res_s
+                sim_time_s = exit_time_s
         finally:
             self.finalize()
 
@@ -260,8 +280,17 @@ class HELICSFleet:
         else:
             fedinfo.core_type = self._core_type
 
+        if hasattr(helics, "helicsFederateInfoSetCoreName"):
+            helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{self._fed_name}")
+
         broker_address = self._normalize_broker_address(self._broker_address)
-        core_init_value = f"--broker_address={broker_address}"
+        # Each federate's core needs its own local ZMQ listen port. Without an
+        # explicit --port, multiple auto-named cores in the same process can
+        # collide on the auto-assigned local port and silently deadlock at
+        # enterExecutingMode instead of raising a bind error (reproduced on
+        # macOS/arm64 with HELICS 3.6.1).
+        local_port = allocate_ephemeral_port()
+        core_init_value = f"--broker_address={broker_address} --port={local_port}"
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:
@@ -270,10 +299,14 @@ class HELICSFleet:
             if hasattr(fedinfo, "core_init_string"):
                 fedinfo.core_init_string = core_init_value
 
+        # Set time period to 0 (no minimum step constraint) so HELICS can grant
+        # at any time — including intermediate grants from faster federates in
+        # multi-rate co-simulations. The fleet's actual step cadence is
+        # controlled by the while-loop over self._time_res_s, not by this property.
         self._set_time_property(
             fedinfo,
             helics.HELICS_PROPERTY_TIME_PERIOD,
-            self._time_res_s,
+            0.0,
         )
 
         if self._time_offset_s != 0.0:
