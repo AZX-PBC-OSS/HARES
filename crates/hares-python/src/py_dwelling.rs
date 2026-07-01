@@ -2535,7 +2535,7 @@ mod tests {
     use std::thread;
     use std::time::Duration as StdDuration;
 
-    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone, Timelike};
     use hares_equipment::pv::surface_id_for_orientation;
     use hares_equipment::{EquipmentRegistry, PvConfig};
     use hares_types::{
@@ -2645,6 +2645,67 @@ mod tests {
     fn test_parse_datetime_str_rejects_invalid_month() {
         let result = parse_datetime_str("2019-13-01T00:00:00");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_datetime_str_naive_fractional_seconds() {
+        let result = parse_datetime_str("2024-01-15T14:30:00.123456");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+            "2024-01-15T14:30:00.123456"
+        );
+        assert_eq!(dt.time().nanosecond(), 123_456_000);
+    }
+
+    #[test]
+    fn test_parse_datetime_str_naive_single_digit_fractional() {
+        let result = parse_datetime_str("2024-01-15T14:30:00.5");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.time().nanosecond(), 500_000_000);
+    }
+
+    #[test]
+    fn test_parse_datetime_str_naive_zero_fractional() {
+        let result = parse_datetime_str("2024-01-15T14:30:00.0");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.time().nanosecond(), 0);
+    }
+
+    #[test]
+    fn test_parse_datetime_str_date_only_midnight_utc() {
+        let result = parse_datetime_str("2024-01-15");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2024-01-15T00:00:00"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_date_only_leap_day() {
+        let result = parse_datetime_str("2024-02-29");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2024-02-29T00:00:00"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_date_only_year_end() {
+        let result = parse_datetime_str("2024-12-31");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2024-12-31T00:00:00"
+        );
     }
 
     #[test]

@@ -68,25 +68,30 @@ pub fn parse_datetime_str(value: &str) -> PyResult<DateTime<FixedOffset>> {
     }
 
     // Try NaiveDateTime with T separator and assume UTC
-    if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-        let utc_offset =
-            FixedOffset::east_opt(0).ok_or_else(|| PyValueError::new_err("invalid UTC offset"))?;
-        return Ok(utc_offset.from_utc_datetime(&naive));
+    if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Ok(assume_utc(naive));
     }
 
     // Try date-only format (assume midnight UTC)
     if let Ok(naive) =
-        NaiveDateTime::parse_from_str(&format!("{}T00:00:00", value), "%Y-%m-%dT%H:%M:%S")
+        NaiveDateTime::parse_from_str(&format!("{}T00:00:00", value), "%Y-%m-%dT%H:%M:%S%.f")
     {
-        let utc_offset =
-            FixedOffset::east_opt(0).ok_or_else(|| PyValueError::new_err("invalid UTC offset"))?;
-        return Ok(utc_offset.from_utc_datetime(&naive));
+        return Ok(assume_utc(naive));
     }
 
     Err(PyValueError::new_err(format!(
         "invalid start_time format: '{}'. Expected ISO 8601 format (e.g., '2019-01-01T00:00:00Z')",
         value
     )))
+}
+
+/// Assign UTC offset (east 0) to a [`NaiveDateTime`].
+///
+/// FixedOffset::east_opt(0) always returns Some; offset zero is a valid fixed offset.
+fn assume_utc(naive: NaiveDateTime) -> DateTime<FixedOffset> {
+    FixedOffset::east_opt(0)
+        .expect("zero east offset always valid")
+        .from_utc_datetime(&naive)
 }
 
 /// Parse a datetime from a Python object (string or has isoformat method).
