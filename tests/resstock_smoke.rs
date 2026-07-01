@@ -199,12 +199,12 @@ mod tests {
 
         eprintln!(
             "[{version}] {bldg_name} OK — status={:?}, elapsed={:?}, energy={:.4} kWh",
-            result.status, result.elapsed, result.metrics.total_energy_kwh.total
+            result.status, result.elapsed, result.metrics.total_energy_kwh.net_energy_kwh
         );
 
-        if result.metrics.total_energy_kwh.total.is_finite() {
+        if result.metrics.total_energy_kwh.net_energy_kwh.is_finite() {
             assert!(
-                result.metrics.total_energy_kwh.total >= 0.0,
+                result.metrics.total_energy_kwh.net_energy_kwh >= 0.0,
                 "[{version}] {bldg_name} total energy is negative"
             );
         }

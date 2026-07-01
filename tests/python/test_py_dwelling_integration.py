@@ -355,9 +355,9 @@ class TestMetrics:
         dw.simulate()
         m = dw.metrics()
         assert m.total_energy_kwh is not None
-        assert isinstance(m.total_energy_kwh.total, float)
-        assert m.total_energy_kwh.total > 0, (
-            "January Denver simulation must have positive total energy"
+        assert isinstance(m.total_energy_kwh.net_energy_kwh, float)
+        assert m.total_energy_kwh.net_energy_kwh > 0, (
+            "January Denver simulation must have positive net energy"
         )
         # Check that at least one equipment has nonzero energy
         per_use = m.total_energy_kwh.per_end_use

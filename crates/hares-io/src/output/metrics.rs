@@ -41,8 +41,12 @@ pub enum MetricsError {
 /// Total accumulated electric energy over the simulation period.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TotalEnergyKwh {
-    /// Total electric energy accumulated (kWh).
-    pub total: f64,
+    /// Net electric energy accumulated — consumption minus generation (kWh).
+    pub net_energy_kwh: f64,
+    /// Gross electric consumption — only positive (import) power values (kWh).
+    pub gross_consumption_kwh: f64,
+    /// Gross PV generation — abs of negative PV power values (kWh).
+    pub gross_pv_generation_kwh: f64,
     /// Energy by end-use key.
     pub per_end_use: BTreeMap<String, f64>,
     /// Actual simulation duration in hours.
@@ -222,7 +226,7 @@ impl FullSimulationMetrics {
     /// Combined total energy: electric kWh + gas kWh equivalent.
     #[must_use]
     pub fn combined_total_energy_kwh(&self) -> f64 {
-        self.metrics.total_energy_kwh.total
+        self.metrics.total_energy_kwh.net_energy_kwh
             + self
                 .gas_energy
                 .as_ref()
@@ -1016,6 +1020,8 @@ impl MetricsCalculator {
             1.0
         };
         let total_electric_energy_kwh = self.total_electric_energy_kwh * leap_factor;
+        let total_consumption_kwh = self.total_consumption_kwh * leap_factor;
+        let total_pv_generation_kwh = self.total_pv_generation_kwh_abs * leap_factor;
         let energy_by_end_use = self
             .energy_by_end_use
             .into_iter()
@@ -1049,7 +1055,9 @@ impl MetricsCalculator {
         FullSimulationMetrics {
             metrics: SimulationMetrics {
                 total_energy_kwh: TotalEnergyKwh {
-                    total: total_electric_energy_kwh,
+                    net_energy_kwh: total_electric_energy_kwh,
+                    gross_consumption_kwh: total_consumption_kwh,
+                    gross_pv_generation_kwh: total_pv_generation_kwh,
                     per_end_use: energy_by_end_use,
                     duration_hours: actual_duration_h,
                 },
@@ -1454,7 +1462,7 @@ mod tests {
         calc.accumulate(&batch);
         let metrics = calc.finish();
 
-        assert!((metrics.total_energy_kwh.total - 8_760.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.net_energy_kwh - 8_760.0).abs() < 1e-9);
         assert!((metrics.total_energy_kwh.duration_hours - 8_760.0).abs() < 1e-9);
         assert_eq!(metrics.coverage, SimulationCoverage::FullYear);
         assert!((metrics.simulation_duration_hours - 8_760.0).abs() < 1e-9);
@@ -1609,7 +1617,7 @@ mod tests {
             .as_ref()
             .expect("gas energy should be present");
         assert!((gas.total_therms - 5.0).abs() < 1e-9);
-        assert!((metrics.total_energy_kwh.total - 2.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.net_energy_kwh - 2.0).abs() < 1e-9);
         let expected_combined = 2.0 + energy_therms_to_kwh(5.0);
         assert!((metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-6);
     }
@@ -1672,7 +1680,7 @@ mod tests {
         let metrics = calc.finish();
 
         assert!(
-            metrics.total_energy_kwh.total > 0.0,
+            metrics.total_energy_kwh.net_energy_kwh > 0.0,
             "annual electric energy must be > 0"
         );
         assert!(
@@ -2136,14 +2144,14 @@ mod tests {
         let metrics = calc.finish();
 
         assert!(
-            !metrics.total_energy_kwh.total.is_nan(),
+            !metrics.total_energy_kwh.net_energy_kwh.is_nan(),
             "accumulated total must not be NaN"
         );
         // timestep_h = 1.0, so total = 1.0 + 3.0 = 4.0
         assert!(
-            (metrics.total_energy_kwh.total - 4.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.net_energy_kwh - 4.0).abs() < 1e-9,
             "total should be 4.0 kWh, got {}",
-            metrics.total_energy_kwh.total
+            metrics.total_energy_kwh.net_energy_kwh
         );
         assert_eq!(
             metrics.nan_step_count, 1,
@@ -2226,13 +2234,13 @@ mod tests {
 
         // Total: row 0 skipped, rows 1+2 valid = 4 kWh
         assert!(
-            metrics.total_energy_kwh.total.is_finite(),
+            metrics.total_energy_kwh.net_energy_kwh.is_finite(),
             "total_energy must be finite"
         );
         assert!(
-            (metrics.total_energy_kwh.total - 4.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.net_energy_kwh - 4.0).abs() < 1e-9,
             "total should be 4.0 kWh, got {}",
-            metrics.total_energy_kwh.total
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // End-use: hvac_heating: all 3 rows valid = 3 kWh
@@ -2270,13 +2278,13 @@ mod tests {
 
         // Total: only row 1 accumulated = 5 kWh
         assert!(
-            metrics.total_energy_kwh.total.is_finite(),
+            metrics.total_energy_kwh.net_energy_kwh.is_finite(),
             "total_energy must be finite"
         );
         assert!(
-            (metrics.total_energy_kwh.total - 5.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.net_energy_kwh - 5.0).abs() < 1e-9,
             "total should be 5.0 kWh, got {}",
-            metrics.total_energy_kwh.total
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // HVAC cooling: all 3 rows valid = 6 kWh
@@ -2309,7 +2317,7 @@ mod tests {
         let metrics = calc.finish();
 
         // Total: 10 + 20 + 30 = 60 kWh (NaN and Inf skipped)
-        assert!((metrics.total_energy_kwh.total - 60.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.net_energy_kwh - 60.0).abs() < 1e-9);
 
         // End use: rows 0,1,3,4 valid (row 2 skipped) = 20 kWh
         let hvac = metrics.total_energy_kwh.per_end_use["hvac_heating"];
@@ -2629,9 +2637,9 @@ mod tests {
 
         // Normalized total should be 8760 kWh (not 8784).
         assert!(
-            (metrics.total_energy_kwh.total - 8_760.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.net_energy_kwh - 8_760.0).abs() < 1e-9,
             "leap-year total should be normalized to 8760 kWh, got {}",
-            metrics.total_energy_kwh.total
+            metrics.total_energy_kwh.net_energy_kwh
         );
         assert!(
             (metrics.total_energy_kwh.duration_hours - 8_784.0).abs() < 1e-9,
@@ -2660,7 +2668,7 @@ mod tests {
         let metrics = calc.finish();
 
         assert_eq!(metrics.coverage, SimulationCoverage::PartialYear);
-        assert!((metrics.total_energy_kwh.total - 4_380.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.net_energy_kwh - 4_380.0).abs() < 1e-9);
         assert!((metrics.simulation_duration_hours - 4_380.0).abs() < 1e-9);
     }
 
@@ -2678,7 +2686,7 @@ mod tests {
 
         assert_eq!(metrics.coverage, SimulationCoverage::MultiYear);
         // Multi-year data is not normalized.
-        assert!((metrics.total_energy_kwh.total - 17_520.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.net_energy_kwh - 17_520.0).abs() < 1e-9);
         assert!((metrics.simulation_duration_hours - 17_520.0).abs() < 1e-9);
     }
 
@@ -2723,6 +2731,126 @@ mod tests {
         assert!(
             (metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-3,
             "combined_total_energy_kwh should sum normalized electric and gas"
+        );
+    }
+
+    // ── Net vs gross energy tests ────────────────────────────────────────
+
+    #[test]
+    fn finish_separates_net_consumption_and_pv_generation() {
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Mixed-sign power: 3 kW import, 2 kW import, -1 kW export (PV generation)
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 2.0, -1.0]),
+            ("PV End Use Electric Power (kW)", vec![0.0, 0.0, -1.0]),
+        ]));
+        let metrics = calc.finish();
+
+        // net = 3 + 2 + (-1) = 4 kWh
+        assert!(
+            (metrics.total_energy_kwh.net_energy_kwh - 4.0).abs() < 1e-9,
+            "net_energy_kwh should be 4 kWh, got {}",
+            metrics.total_energy_kwh.net_energy_kwh
+        );
+        // gross_consumption = 3 + 2 = 5 kWh (only positive rows)
+        assert!(
+            (metrics.total_energy_kwh.gross_consumption_kwh - 5.0).abs() < 1e-9,
+            "gross_consumption_kwh should be 5 kWh, got {}",
+            metrics.total_energy_kwh.gross_consumption_kwh
+        );
+        // gross_pv = |-1| = 1 kWh (abs of negative PV rows)
+        assert!(
+            (metrics.total_energy_kwh.gross_pv_generation_kwh - 1.0).abs() < 1e-9,
+            "gross_pv_generation_kwh should be 1 kWh, got {}",
+            metrics.total_energy_kwh.gross_pv_generation_kwh
+        );
+    }
+
+    #[test]
+    fn zero_net_with_high_gross_consumption_and_pv_is_correct() {
+        // Regression: a PV dwelling with balanced import/export
+        // must report gross_consumption > 0, gross_pv > 0, net ≈ 0
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // 5 kWh imported, 5 kWh exported via PV → net ≈ 0
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![5.0, -5.0]),
+            ("PV End Use Electric Power (kW)", vec![0.0, -5.0]),
+        ]));
+        let metrics = calc.finish();
+
+        // net ≈ 0 (balanced)
+        assert!(
+            metrics.total_energy_kwh.net_energy_kwh.abs() < 1e-9,
+            "net_energy_kwh should be ~0 for balanced PV dwelling, got {}",
+            metrics.total_energy_kwh.net_energy_kwh
+        );
+        // gross_consumption = 5 kWh
+        assert!(
+            (metrics.total_energy_kwh.gross_consumption_kwh - 5.0).abs() < 1e-9,
+            "gross_consumption_kwh should be 5 kWh even when net ≈ 0, got {}",
+            metrics.total_energy_kwh.gross_consumption_kwh
+        );
+        // gross_pv = 5 kWh
+        assert!(
+            (metrics.total_energy_kwh.gross_pv_generation_kwh - 5.0).abs() < 1e-9,
+            "gross_pv_generation_kwh should be 5 kWh even when net ≈ 0, got {}",
+            metrics.total_energy_kwh.gross_pv_generation_kwh
+        );
+    }
+
+    #[test]
+    fn all_negative_power_gives_negative_net_positive_gross_pv() {
+        // All PV generation, no import → net is negative, gross_consumption = 0
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![-1.0, -2.0]),
+            ("PV End Use Electric Power (kW)", vec![-1.0, -2.0]),
+        ]));
+        let metrics = calc.finish();
+
+        assert!(
+            metrics.total_energy_kwh.net_energy_kwh < 0.0,
+            "net_energy_kwh should be negative for pure generation"
+        );
+        // gross_consumption = 0 (no positive rows)
+        assert!(
+            metrics.total_energy_kwh.gross_consumption_kwh == 0.0,
+            "gross_consumption_kwh should be 0 for pure generation, got {}",
+            metrics.total_energy_kwh.gross_consumption_kwh
+        );
+        // gross_pv = |-1| + |-2| = 3 kWh
+        assert!(
+            (metrics.total_energy_kwh.gross_pv_generation_kwh - 3.0).abs() < 1e-9,
+            "gross_pv_generation_kwh should be 3 kWh, got {}",
+            metrics.total_energy_kwh.gross_pv_generation_kwh
+        );
+    }
+
+    #[test]
+    fn combined_total_energy_kwh_includes_gas_when_present() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, TOTAL_GAS_POWER_THERMS]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![10.0]),
+            (TOTAL_GAS_POWER_THERMS, vec![5.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let expected = 10.0 + energy_therms_to_kwh(5.0);
+        assert!(
+            (metrics.combined_total_energy_kwh() - expected).abs() < 1e-6,
+            "combined should be {expected}, got {}",
+            metrics.combined_total_energy_kwh()
         );
     }
 }

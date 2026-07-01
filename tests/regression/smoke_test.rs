@@ -365,7 +365,7 @@ mod tests {
         }
         eprintln!(
             "  total kWh (from metrics): {:.4}",
-            result.metrics.total_energy_kwh.total
+            result.metrics.total_energy_kwh.net_energy_kwh
         );
 
         // Parse output CSV for per-equipment breakdown
@@ -393,9 +393,9 @@ mod tests {
             // (base loads + HVAC cycling or schedule-driven equipment). Zero
             // total energy indicates engine dispatch regression.
             assert!(
-                result.metrics.total_energy_kwh.total > 0.0,
+                result.metrics.total_energy_kwh.net_energy_kwh > 0.0,
                 "total energy should be > 0 for a 1h BEopt run, got {}",
-                result.metrics.total_energy_kwh.total
+                result.metrics.total_energy_kwh.net_energy_kwh
             );
 
             // Debug: dump heater stats from CSV
@@ -436,7 +436,7 @@ mod tests {
             // --- Physics-validated sanity checks ---
             assert_physics_bounds(
                 &csv_path,
-                result.metrics.total_energy_kwh.total,
+                result.metrics.total_energy_kwh.net_energy_kwh,
                 &result.metrics.total_energy_kwh.per_end_use,
                 1.0,
             );
@@ -507,7 +507,10 @@ mod tests {
             "[smoke_resstock_1h] status={:?} elapsed={:?}",
             result.status, result.elapsed
         );
-        eprintln!("  total kWh: {:.4}", result.metrics.total_energy_kwh.total);
+        eprintln!(
+            "  total kWh: {:.4}",
+            result.metrics.total_energy_kwh.net_energy_kwh
+        );
 
         // --- 2. Output CSV is produced and non-empty. ---
         assert!(
@@ -572,7 +575,7 @@ mod tests {
         //        draw 0.3–5 kWh over a noon hour with base loads only. The band
         //        [0.1, 10] kWh/h covers every plausible occupancy level without
         //        masking real breakage. ---
-        let total_kwh = result.metrics.total_energy_kwh.total;
+        let total_kwh = result.metrics.total_energy_kwh.net_energy_kwh;
         assert!(
             total_kwh.is_finite(),
             "total electric energy is non-finite: {total_kwh}"

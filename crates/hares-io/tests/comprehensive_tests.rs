@@ -346,7 +346,7 @@ fn total_energy_includes_both_electric_and_gas() {
     ]));
     let metrics = calc.finish();
 
-    let electric_kwh = metrics.total_energy_kwh.total;
+    let electric_kwh = metrics.total_energy_kwh.net_energy_kwh;
     let gas = metrics.gas_energy.as_ref().unwrap();
     let gas_therms = gas.total_therms;
     let combined = electric_kwh + gas.total_kwh_equivalent;

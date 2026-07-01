@@ -16,8 +16,18 @@ pub struct PyTotalEnergyKwh {
 #[pymethods]
 impl PyTotalEnergyKwh {
     #[getter]
-    fn total(&self) -> f64 {
-        self.inner.total
+    fn net_energy_kwh(&self) -> f64 {
+        self.inner.net_energy_kwh
+    }
+
+    #[getter]
+    fn gross_consumption_kwh(&self) -> f64 {
+        self.inner.gross_consumption_kwh
+    }
+
+    #[getter]
+    fn gross_pv_generation_kwh(&self) -> f64 {
+        self.inner.gross_pv_generation_kwh
     }
 
     #[getter]
@@ -32,8 +42,11 @@ impl PyTotalEnergyKwh {
 
     fn __repr__(&self) -> String {
         format!(
-            "TotalEnergyKwh(total={:.2} kWh, duration={:.1} h)",
-            self.inner.total, self.inner.duration_hours
+            "TotalEnergyKwh(net={:.2} kWh, gross_consumption={:.2} kWh, gross_pv={:.2} kWh, duration={:.1} h)",
+            self.inner.net_energy_kwh,
+            self.inner.gross_consumption_kwh,
+            self.inner.gross_pv_generation_kwh,
+            self.inner.duration_hours
         )
     }
 }
@@ -351,18 +364,25 @@ impl PySimulationMetrics {
             .map(|g| PyGasEnergyMetrics { inner: g.clone() })
     }
 
+    #[getter]
+    fn combined_total_energy_kwh(&self) -> f64 {
+        self.inner.combined_total_energy_kwh()
+    }
+
     fn __repr__(&self) -> String {
         let total = &self.inner.metrics.total_energy_kwh;
         let gas = self.inner.gas_energy.as_ref();
         if let Some(g) = gas {
             format!(
                 "SimulationMetrics(electric={:.0} kWh, gas={:.0} therms, peak={:.1} kW)",
-                total.total, g.total_therms, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                total.net_energy_kwh,
+                g.total_therms,
+                self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
             )
         } else {
             format!(
                 "SimulationMetrics(electric={:.0} kWh, peak={:.1} kW)",
-                total.total, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                total.net_energy_kwh, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
             )
         }
     }

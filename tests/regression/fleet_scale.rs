@@ -46,10 +46,14 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
             Ok(dwelling_outcome) => {
                 ok_count += 1;
                 if inspected < 5 {
-                    let total = dwelling_outcome.result.metrics.total_energy_kwh.total;
+                    let total = dwelling_outcome
+                        .result
+                        .metrics
+                        .total_energy_kwh
+                        .net_energy_kwh;
                     if total <= 0.0 || !total.is_finite() {
                         failures.push(format!(
-                            "dwelling[{idx}] Ok but total_energy_kwh.total={total} (expected > 0.0)"
+                            "dwelling[{idx}] Ok but net_energy_kwh={total} (expected > 0.0)"
                         ));
                     }
                     inspected += 1;

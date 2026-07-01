@@ -32,7 +32,9 @@ use super::helpers;
 fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
     SimulationMetrics {
         total_energy_kwh: TotalEnergyKwh {
-            total: energy,
+            net_energy_kwh: energy,
+            gross_consumption_kwh: energy,
+            gross_pv_generation_kwh: 0.0,
             per_end_use: BTreeMap::new(),
             duration_hours: 0.0,
         },

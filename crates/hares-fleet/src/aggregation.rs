@@ -132,7 +132,7 @@ pub fn aggregate(results: &[DwellingOutcome], resolution: AggregationResolution)
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
-            total_energy_kwh: outcome.result.metrics.total_energy_kwh.total,
+            total_energy_kwh: outcome.result.metrics.total_energy_kwh.net_energy_kwh,
             peak_power_kw: outcome
                 .result
                 .metrics
@@ -420,7 +420,9 @@ mod tests {
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
         SimulationMetrics {
             total_energy_kwh: TotalEnergyKwh {
-                total: energy,
+                net_energy_kwh: energy,
+                gross_consumption_kwh: energy,
+                gross_pv_generation_kwh: 0.0,
                 per_end_use: BTreeMap::new(),
                 duration_hours: 0.0,
             },
