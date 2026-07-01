@@ -521,7 +521,7 @@ class _MultiGrantFederate(_FakeFederate):
 def test_helics_dwelling_handle_time_grant_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module, _ = _import_dwelling_module(monkeypatch)
+    module, fake_helics = _import_dwelling_module(monkeypatch)
     fn = module._handle_time_grant
 
     assert fn(60.0, 60.0) is True
@@ -529,6 +529,7 @@ def test_helics_dwelling_handle_time_grant_helper(
     assert fn(60.0, 0.0) is False
     assert fn(60.0, 30.0) is False
     assert fn(60.0, 90.0) is True
+    assert fn(60.0, fake_helics.HELICS_TIME_MAXTIME) is True
 
 
 def test_helics_dwelling_multi_rate_grants_only_steps_at_requested_time(
@@ -569,3 +570,72 @@ def test_helics_dwelling_multi_rate_grants_only_steps_at_requested_time(
     assert pub.published[6] == 4.0  # step 2 publish
 
     assert multi_fed.disconnected is True
+
+
+def test_helics_dwelling_federation_termination_sentinel_exits_without_stepping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Simulate federation termination: first request_time returns
+    # HELICS_TIME_MAXTIME. After grant_sequence is exhausted the fallback
+    # returns the requested value (handling the completion-signal call).
+    term_fed = _MultiGrantFederate(
+        fed_name="house_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    # Dwelling must NOT have stepped after receiving the sentinel
+    assert dwelling._step_count == 0
+    # No publish must have occurred for the terminated step
+    fed = fake_helics.last_fed
+    assert fed is not None
+    pub = fed.publications["total_power_kw"]
+    assert len(pub.published) == 0
+    assert term_fed.disconnected is True
+
+
+def test_helics_dwelling_federation_termination_sentinel_during_multi_rate_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Simulate: step 1 gets intermediate grants, then termination sentinel
+    # before the full grant. The dwelling must NOT step.
+    term_fed = _MultiGrantFederate(
+        fed_name="house_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[10.0, 20.0, fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    assert dwelling._step_count == 0
+    fed = fake_helics.last_fed
+    assert fed is not None
+    pub = fed.publications["total_power_kw"]
+    # Only intermediate publishes (before the termination sentinel)
+    assert len(pub.published) == 2
+    assert pub.published[0] == 3.0  # unchanged state, republished
+    assert pub.published[1] == 3.0
+    assert term_fed.disconnected is True
+

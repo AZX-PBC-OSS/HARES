@@ -34,9 +34,21 @@ def _handle_time_grant(requested: float, granted: float) -> bool:
     federate — the caller should publish current results without stepping and
     re-request the same ``requested`` time.
 
-    ``granted > requested`` is a HELICS invariant violation that the HELICS
-    runtime should prevent — if it occurs, step anyway and log a warning.
+    ``HELICS_TIME_MAXTIME`` is the documented HELICS sentinel for federation
+    termination (``helicsFederateRequestTime`` returns it when the federation
+    has been terminated). It is recognised as an expected, handled condition —
+    not an invariant violation.
+
+    ``granted > requested`` with a non-sentinel value is a HELICS invariant
+    violation that the HELICS runtime should prevent — if it occurs, step
+    anyway and log a warning.
     """
+    if granted >= helics.HELICS_TIME_MAXTIME:
+        _LOG.warning(
+            "HELICS federation terminated prematurely; requested=%.1f, granted=HELICS_TIME_MAXTIME",
+            requested,
+        )
+        return True
     if granted > requested:
         _LOG.warning(
             "HELICS invariant violation: granted %.3f > requested %.3f",
@@ -112,6 +124,7 @@ class HELICSDwelling:
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
+        self._federation_terminated = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register typed double publications and return config metadata.
@@ -184,6 +197,9 @@ class HELICSDwelling:
                 while not _handle_time_grant(exit_time_s, granted):
                     self._publish_results()
                     granted = float(self._fed.request_time(exit_time_s))
+                if granted >= helics.HELICS_TIME_MAXTIME:
+                    self._federation_terminated = True
+                    break
                 self._read_subscriptions()
                 self._dwelling.step()
                 self._publish_results()

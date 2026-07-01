@@ -71,6 +71,7 @@ class HELICSFleet:
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
+        self._federation_terminated = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register aggregate and per-dwelling typed double publications.
@@ -182,6 +183,10 @@ class HELICSFleet:
                 while not _handle_time_grant(exit_time_s, granted):
                     self._publish_results()
                     granted = float(self._fed.request_time(exit_time_s))
+
+                if granted >= helics.HELICS_TIME_MAXTIME:
+                    self._federation_terminated = True
+                    break
 
                 self._read_subscriptions()
                 self._fleet.step()

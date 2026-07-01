@@ -601,3 +601,71 @@ def test_helics_fleet_run_does_not_propagate_completion_signal_exception(
     assert fed.disconnected is True
     assert fake_helics.HELICS_TIME_MAXTIME not in fed.requested_times
     assert fake_helics.log.count(("disconnect",)) == 1
+
+
+def test_helics_fleet_federation_termination_sentinel_exits_without_stepping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Simulate federation termination: first request_time returns
+    # HELICS_TIME_MAXTIME. After grant_sequence is exhausted the fallback
+    # returns the requested value (handling the completion-signal call).
+    term_fed = _MultiGrantFederate(
+        fed_name="fleet_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    # Fleet must NOT have stepped after receiving the sentinel
+    assert fleet._step_count == 0
+    # No publishes must have occurred for the terminated step
+    fed = fake_helics.last_fed
+    assert fed is not None
+    pub = fed.publications["aggregate_power_kw"]
+    assert len(pub.published) == 0
+    assert term_fed.disconnected is True
+
+
+def test_helics_fleet_federation_termination_sentinel_during_multi_rate_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Simulate: step 1 gets intermediate grants, then termination sentinel
+    # before the full grant. The fleet must NOT step.
+    term_fed = _MultiGrantFederate(
+        fed_name="fleet_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[10.0, 20.0, fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    assert fleet._step_count == 0
+    fed = fake_helics.last_fed
+    assert fed is not None
+    pub = fed.publications["aggregate_power_kw"]
+    # Only intermediate publishes (before the termination sentinel)
+    assert len(pub.published) == 2
+    assert pub.published[0] == 6.0  # unchanged state, republished
+    assert pub.published[1] == 6.0
+    assert term_fed.disconnected is True
