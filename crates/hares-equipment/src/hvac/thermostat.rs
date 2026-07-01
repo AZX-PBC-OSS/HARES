@@ -236,11 +236,10 @@ pub struct ThermostatFsm {
     /// Minimum time [s] compressor must remain Off before an On transition is
     /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
     pub min_off_time_s: f64,
-    /// Count of setpoint overrides rejected by deadband validation.
-    /// Gated on `observe` feature for diagnostic CSV output.
-    #[cfg(feature = "observe")]
-    #[allow(dead_code)]
-    pub setpoint_inversion_rejected_count: u64,
+    /// Count of setpoint overrides that violated the deadband constraint
+    /// and were auto-corrected. Gated on `observe` feature for
+    /// diagnostic CSV output.
+    pub setpoint_violation_count: u64,
     /// Count of deadband collisions where `heat_turn_on >= cool_turn_on`
     /// in `update_mode()`. Gated on `observe` for diagnostic CSV output.
     #[cfg(feature = "observe")]
@@ -261,8 +260,7 @@ impl ThermostatFsm {
             cooling_setpoint_source: None,
             min_on_time_s: 0.0,
             min_off_time_s: 0.0,
-            #[cfg(feature = "observe")]
-            setpoint_inversion_rejected_count: 0,
+            setpoint_violation_count: 0,
             #[cfg(feature = "observe")]
             deadband_collision_count: 0,
         }
@@ -523,14 +521,18 @@ impl ThermostatFsm {
     /// Apply `ThermalSetpoint` and `ThermalSetpointDelta` control signals.
     ///
     /// Returns `Ok(true)` if the signal was handled, `Ok(false)` if it was an
-    /// unrelated signal type, or `Err(HaresError::Control)` if the resulting
-    /// setpoints violate the deadband invariant (`cooling_c - heating_c >=
-    /// 2 * hysteresis_c`).
+    /// unrelated signal type, or `Err` on a fatal structural error (e.g.
+    /// impossible setpoint values).
     ///
-    /// Validation uses [`ThermalSetpoints::validate_for_deadband`] against the
-    /// merged effective setpoints (static → schedule → candidate override), so
-    /// partial overrides (heating-only or cooling-only) are checked for
-    /// consistency with the existing setpoint on the other side.
+    /// Violations of the deadband invariant (`cooling_c <= heating_c +
+    /// deadband_c`) are auto-corrected rather than rejected: the cooling
+    /// setpoint is raised to `heating_c + deadband_c + 1.0°C` and a warning is
+    /// logged on first occurrence. The corrected values are what get stored,
+    /// not the raw input.
+    ///
+    /// The deadband is taken from the `deadband_c` field of
+    /// `ThermalSetpoint` when present, otherwise defaults to `2 ×
+    /// hysteresis_c` (the thermostat's mechanical deadband).
     pub fn apply_thermal_setpoint_signal(
         &mut self,
         signal: &hares_types::ControlSignal,
@@ -542,7 +544,7 @@ impl ThermostatFsm {
             .with_schedule_override(self.schedule_setpoints);
         let prior = self.runtime_setpoints.unwrap_or_default();
 
-        let candidate = match signal {
+        let mut candidate = match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
                 cooling_setpoint_c,
@@ -565,32 +567,77 @@ impl ThermostatFsm {
             _ => return Ok(false),
         };
 
+        // Effective setpoints after merging with the base (schedule + static).
         let effective = base.with_control_override(Some(candidate));
-        if let Err(e) = effective.validate_for_deadband(hysteresis) {
-            #[cfg(feature = "observe")]
-            {
-                self.setpoint_inversion_rejected_count =
-                    self.setpoint_inversion_rejected_count.saturating_add(1);
+
+        // Deadband constraint: cooling must exceed heating by at least the
+        // deadband. For ThermalSetpoint signals, honour the per-signal
+        // deadband_c; for ThermalSetpointDelta, use the thermostat default
+        // (2 × hysteresis_c).
+        let deadband_c = match signal {
+            ControlSignal::ThermalSetpoint {
+                deadband_c: Some(d),
+                ..
+            } => *d,
+            _ => 2.0 * hysteresis,
+        };
+
+        if effective.cooling_c <= effective.heating_c + deadband_c {
+            let raw_heating = effective.heating_c;
+            let raw_cooling = effective.cooling_c;
+            let corrected_cooling = raw_heating + deadband_c + 1.0;
+            let corrected = ThermalSetpoints {
+                heating_c: raw_heating,
+                cooling_c: corrected_cooling,
+            };
+
+            // Store the corrected values by updating the candidate so the
+            // RuntimeSetpointOverride reflects the auto-correction.
+            candidate.cooling_c = Some(corrected_cooling);
+
+            self.setpoint_violation_count = self.setpoint_violation_count.saturating_add(1);
+            if self.setpoint_violation_count == 1 {
+                tracing::warn!(
+                    raw_heating_c = raw_heating,
+                    raw_cooling_c = raw_cooling,
+                    deadband_c = deadband_c,
+                    corrected_heating_c = corrected.heating_c,
+                    corrected_cooling_c = corrected.cooling_c,
+                    "auto-corrected setpoint override: cooling-heating gap violated deadband; \
+                     cooling raised to heating + deadband + 1.0°C",
+                );
             }
-            tracing::warn!(
-                heating_c = effective.heating_c,
-                cooling_c = effective.cooling_c,
-                hysteresis_c = hysteresis,
-                error = %e,
-                "rejected setpoint override: violates deadband invariant",
+
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            debug_assert!(
+                corrected.cooling_c > corrected.heating_c + deadband_c,
+                "auto-corrected setpoints must satisfy cooling > heating + deadband"
             );
-            return Err(HaresError::Control(format!(
-                "setpoint override rejected: cooling-heating gap {} C < required {} C (2 × hysteresis)",
-                effective.cooling_c - effective.heating_c,
-                2.0 * hysteresis,
-            )));
         }
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            effective.validate_for_deadband(hysteresis).is_ok(),
-            "deadband invariant violated after validation guard"
-        );
+        {
+            let final_effective = base.with_control_override(Some(candidate));
+            // Deadband to check against: for explicit-deadband signals this
+            // may differ from 2 × hysteresis. The auto-correction guarantees
+            // cooling > heating + deadband, so we assert that here.
+            let check_deadband = match signal {
+                ControlSignal::ThermalSetpoint {
+                    deadband_c: Some(d),
+                    ..
+                } => *d,
+                _ => 2.0 * hysteresis,
+            };
+            debug_assert!(
+                final_effective.cooling_c > final_effective.heating_c + check_deadband,
+                "deadband invariant violated after auto-correction guard: \
+                 heating={}, cooling={}, gap={}, required_deadband={}",
+                final_effective.heating_c,
+                final_effective.cooling_c,
+                final_effective.cooling_c - final_effective.heating_c,
+                check_deadband,
+            );
+        }
 
         self.runtime_setpoints = Some(candidate);
         Ok(true)
@@ -683,51 +730,50 @@ mod tests {
     }
 
     #[test]
-    fn apply_thermal_setpoint_signal_rejects_deadband_violation() {
+    fn apply_thermal_setpoint_signal_autocorrects_deadband_violation() {
         let mut fsm = ThermostatFsm::new(ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 24.0,
         });
-        // Default hysteresis_c = 1.0, so gap must be >= 2.0.
-        // heating=23.0, cooling=24.0 => gap=1.0 → violation.
+        // Default hysteresis_c = 1.0 → deadband = 2.0.
+        // heating=23.0, cooling=24.0 → gap=1.0 < 2.0 → auto-corrected.
         let result =
             fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(23.0),
                 cooling_setpoint_c: Some(24.0),
                 deadband_c: None,
             });
-        assert!(result.is_err());
-        // runtime_setpoints must not have been stored on error.
-        assert!(fsm.runtime_setpoints.is_none());
-
-        // Verify the error message names the constraint.
-        let err = result.unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("cooling-heating"),
-            "error message should mention gap constraint, got: {msg}"
-        );
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        // Cooling auto-corrected to heating + deadband + 1.0 = 23 + 2 + 1 = 26.0
+        let stored = fsm.runtime_setpoints.unwrap();
+        assert_eq!(stored.heating_c, Some(23.0));
+        assert_eq!(stored.cooling_c, Some(26.0));
     }
 
     #[test]
-    fn apply_thermal_setpoint_signal_rejects_inverted_heating_cooling() {
+    fn apply_thermal_setpoint_signal_autocorrects_inverted_heating_cooling() {
         let mut fsm = ThermostatFsm::new(ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 24.0,
         });
         // heating=30.0, cooling=25.0 → physically impossible inversion.
+        // deadband = 2.0 → auto-corrected cooling = 30 + 2 + 1 = 33.0
         let result =
             fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(30.0),
                 cooling_setpoint_c: Some(25.0),
                 deadband_c: None,
             });
-        assert!(result.is_err());
-        assert!(fsm.runtime_setpoints.is_none());
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        let stored = fsm.runtime_setpoints.unwrap();
+        assert_eq!(stored.heating_c, Some(30.0));
+        assert_eq!(stored.cooling_c, Some(33.0));
     }
 
     #[test]
-    fn apply_thermal_setpoint_delta_rejects_resulting_deadband_violation() {
+    fn apply_thermal_setpoint_delta_autocorrects_resulting_deadband_violation() {
         let mut fsm = ThermostatFsm::new(ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 24.0,
@@ -739,13 +785,86 @@ mod tests {
             ..ScheduleSetpoints::default()
         });
         // Delta pushes heating up by 1.0 → effective: heating=23, cooling=23 → gap=0 < 2.0
+        // deadband = 2.0 → auto-corrected cooling = 23 + 2 + 1 = 26.0
         let result =
             fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpointDelta {
                 heating_delta_c: Some(1.0),
                 cooling_delta_c: None,
             });
-        assert!(result.is_err());
-        assert!(fsm.runtime_setpoints.is_none());
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        let stored = fsm.runtime_setpoints.unwrap();
+        // heating_delta + base = 1.0 + 22.0 = 23.0 (from effective)
+        // But candidate heating is: delta + base = 1.0 + 22.0 = 23.0
+        // cooling is auto-corrected: 23 + 2 + 1 = 26.0
+        assert_eq!(stored.heating_c, Some(23.0));
+        assert_eq!(stored.cooling_c, Some(26.0));
+    }
+
+    #[test]
+    fn apply_thermal_setpoint_signal_uses_explicit_deadband() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        // Explicit deadband_c=4.0 overrides hysteresis default.
+        // heating=23.0, cooling=26.0 → gap=3.0 < 4.0 → auto-corrected.
+        // corrected cooling = 23 + 4 + 1 = 28.0
+        let result =
+            fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(23.0),
+                cooling_setpoint_c: Some(26.0),
+                deadband_c: Some(4.0),
+            });
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        let stored = fsm.runtime_setpoints.unwrap();
+        assert_eq!(stored.heating_c, Some(23.0));
+        assert_eq!(stored.cooling_c, Some(28.0));
+    }
+
+    #[test]
+    fn apply_thermal_setpoint_signal_autocorrects_with_zero_deadband() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        // deadband_c=0 → enforce strict cooling > heating.
+        // heating=25.0, cooling=25.0 → 25 <= 25 + 0 → violation.
+        // corrected cooling = 25 + 0 + 1 = 26.0
+        let result =
+            fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(25.0),
+                cooling_setpoint_c: Some(25.0),
+                deadband_c: Some(0.0),
+            });
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        let stored = fsm.runtime_setpoints.unwrap();
+        assert_eq!(stored.heating_c, Some(25.0));
+        assert_eq!(stored.cooling_c, Some(26.0));
+    }
+
+    #[test]
+    fn apply_thermal_setpoint_signal_autocorrects_cooling_only_override() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        // Only cooling is set to 21.0 → effective: heating=20.0, cooling=21.0.
+        // gap = 1.0 < 2.0 (default deadband) → auto-corrected.
+        // corrected cooling = 20 + 2 + 1 = 23.0
+        let result =
+            fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: Some(21.0),
+                deadband_c: None,
+            });
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        let stored = fsm.runtime_setpoints.unwrap();
+        assert_eq!(stored.heating_c, None);
+        assert_eq!(stored.cooling_c, Some(23.0));
     }
 
     #[test]

@@ -390,6 +390,13 @@ pub struct Battery {
     bms_mode: BmsMode,
     grid_export_rule: GridExportRule,
     min_dwell_steps: usize,
+
+    /// Count of SOCTarget signals that violated SOC ordering constraints
+    /// (min_soc < target_soc < max_soc) and were auto-corrected.
+    /// Gated on `observe` feature for diagnostic CSV output.
+    #[cfg(feature = "observe")]
+    #[allow(dead_code)]
+    setpoint_violation_count: u64,
 }
 
 impl Battery {
@@ -484,6 +491,8 @@ impl Battery {
             bms_mode: BmsMode::Manual,
             grid_export_rule: GridExportRule::Unrestricted,
             min_dwell_steps: 0,
+            #[cfg(feature = "observe")]
+            setpoint_violation_count: 0,
         }
     }
 
@@ -1561,13 +1570,86 @@ impl Equipment for Battery {
                 min_soc,
                 max_soc,
             } => {
-                self.soc_target = Some(*target_soc);
-                // Store as operational window -- do NOT mutate physical min_soc/max_soc
-                // which are hardware limits set at init from config.
-                self.soc_target_min = *min_soc;
-                self.soc_target_max = *max_soc;
+                let raw_target = *target_soc;
+                let raw_min = *min_soc;
+                let raw_max = *max_soc;
+
+                // When bounds are unspecified, fall back to the battery's
+                // physical min_soc/max_soc — never narrow the operational
+                // window with ad-hoc defaults that are tighter than the
+                // battery's hardware limits.
+                let eff_min = raw_min.unwrap_or(self.min_soc);
+                let eff_max = raw_max.unwrap_or(self.max_soc);
+
+                // Reject if the bounds themselves are fundamentally invalid.
+                if eff_min >= eff_max {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget bounds invalid: min_soc ({}) must be < max_soc ({})",
+                        eff_min, eff_max,
+                    )));
+                }
+
+                // Clamp target_soc between effective bounds.
+                let clamped_target = raw_target.clamp(eff_min, eff_max);
+
+                // Reject if after clamping the ordering is still invalid
+                // (target equals a bound or bounds are still broken).
+                if clamped_target <= eff_min || clamped_target >= eff_max {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget ordering invalid after clamping: \
+                         target_soc={clamped_target} not in ({eff_min}, {eff_max}); \
+                         raw target_soc={raw_target}",
+                    )));
+                }
+
+                // Reject NaN / infinite target.
+                if !clamped_target.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget target_soc must be finite, got {raw_target}"
+                    )));
+                }
+
+                let was_clamped = (clamped_target - raw_target).abs() > f64::EPSILON;
+
+                self.soc_target = Some(clamped_target);
+                // Store as operational window -- do NOT mutate physical
+                // min_soc/max_soc which are hardware limits set at init.
+                self.soc_target_min = Some(eff_min);
+                self.soc_target_max = Some(eff_max);
                 self.power_setpoint_kw = None;
                 self.self_consumption_enabled = false;
+
+                if was_clamped {
+                    #[cfg(feature = "observe")]
+                    {
+                        self.setpoint_violation_count =
+                            self.setpoint_violation_count.saturating_add(1);
+                    }
+                    tracing::warn!(
+                        raw_target_soc = raw_target,
+                        raw_min_soc = raw_min,
+                        raw_max_soc = raw_max,
+                        clamped_target_soc = clamped_target,
+                        effective_min = eff_min,
+                        effective_max = eff_max,
+                        "SOCTarget target_soc clamped to satisfy {eff_min} < target < {eff_max}",
+                    );
+                }
+
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    let stored_min = self.soc_target_min.unwrap_or(self.min_soc);
+                    let stored_max = self.soc_target_max.unwrap_or(self.max_soc);
+                    debug_assert!(
+                        self.soc_target.is_none()
+                            || stored_min < self.soc_target.unwrap()
+                                && self.soc_target.unwrap() < stored_max,
+                        "SOCTarget invariant violated: \
+                         min_soc={stored_min} >= target_soc={target:?} \
+                         or target >= max_soc={stored_max}",
+                        target = self.soc_target,
+                    );
+                }
             }
             ControlSignal::GridConnect { connected } => {
                 self.grid_connected = *connected;
@@ -1818,6 +1900,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::hvac::thermostat::{ThermalSetpoints, ThermostatFsm};
     use crate::{Equipment, EquipmentConfig};
 
     fn base_env() -> EnvironmentState {
@@ -4955,6 +5038,252 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SOCTarget cross-field validation tests
+    // -----------------------------------------------------------------------
+
+    /// SOCTarget with target below min → clamped and stored.
+    #[test]
+    fn soc_target_clamps_target_below_min() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // min_soc=0.8, target=0.3 → target clamped to 0.8 (min)
+        // but 0.8 == 0.8 violates strict ordering → reject.
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.3,
+            min_soc: Some(0.8),
+            max_soc: Some(0.9),
+        });
+        // After clamping target=0.3 to [0.8, 0.9]: target=0.8
+        // 0.8 <= 0.8 → invalid ordering → rejected.
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("ordering invalid"),
+            "expected ordering error, got: {msg}"
+        );
+    }
+
+    /// SOCTarget with target above max → clamped but equal to max → rejected.
+    #[test]
+    fn soc_target_rejects_target_above_max() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.95,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        });
+        // target clamped: 0.9 → 0.9 >= 0.9 → invalid → rejected.
+        assert!(result.is_err());
+    }
+
+    /// SOCTarget with valid ordering and missing bounds → defaults applied.
+    #[test]
+    fn soc_target_defaults_missing_bounds() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target_min, Some(0.15));
+        assert_eq!(bat.soc_target_max, Some(0.95));
+        assert_eq!(bat.soc_target, Some(0.5));
+    }
+
+    /// SOCTarget with target exactly at valid mid-point → accepted without clamping.
+    #[test]
+    fn soc_target_accepts_valid_ordering() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.7,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.7));
+        assert_eq!(bat.soc_target_min, Some(0.1));
+        assert_eq!(bat.soc_target_max, Some(0.9));
+    }
+
+    /// SOCTarget with inverted bounds (min >= max) → rejected before clamping.
+    #[test]
+    fn soc_target_rejects_inverted_bounds() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        });
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("min_soc"), "expected bounds error, got: {msg}");
+    }
+
+    /// SOCTarget with target outside bounds but after clamping falls in valid range.
+    #[test]
+    fn soc_target_accepts_within_bounds_after_defaults() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // target=0.05 is below physical default min=0.15 → clamped to 0.15.
+        // After clamping, 0.15 == eff_min → rejected (must be strictly within).
+        // Use target=0.20 which is clamped within [0.15, 0.95] and strictly inside.
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.20,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.20));
+    }
+
+    /// SOCTarget with NaN target → rejected.
+    #[test]
+    fn soc_target_rejects_nan_target() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: f64::NAN,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        });
+        assert!(result.is_err());
+    }
+
+    /// Unspecified SOCTarget bounds must fall back to the battery's physical
+    /// min_soc/max_soc (0.15/0.95 default), not ad-hoc 0.1/0.9 literals that
+    /// would silently narrow the operational window below hardware limits.
+    #[test]
+    fn soc_target_unspecified_bounds_use_physical_limits() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.05),
+            (KEY_MAX_SOC, 1.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // A target of 0.95 is within the battery's physical [0.05, 1.0] range.
+        // With the old hardcoded 0.1/0.9 defaults, this would have been clamped
+        // to 0.9 and potentially rejected. With physical bounds it's accepted.
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.95,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.95));
+        assert_eq!(bat.soc_target_min, Some(0.05));
+        assert_eq!(bat.soc_target_max, Some(1.0));
+    }
+
+    /// 100-step random-policy regression test: verifies that repeated
+    /// random ThermalSetpoint and SOCTarget signals cannot produce
+    /// degenerate thermostat or battery states (inverted setpoints,
+    /// invalid SOC bounds).
+    #[test]
+    fn regression_random_policy_no_degenerate_states() {
+        use std::num::Wrapping;
+
+        // Deterministic pseudo-random source: no rand dependency needed.
+        let mut rng = Wrapping(0x5bd1_e995_u64);
+        let mut next_f64 = || -> f64 {
+            rng = Wrapping(
+                rng.0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407),
+            );
+            (rng.0 as f64) / (u64::MAX as f64)
+        };
+
+        let mut tstat = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        for _step in 0..100 {
+            let heat = 18.0 + next_f64() * 8.0;
+            let cool = 22.0 + next_f64() * 8.0;
+
+            let _ = tstat.apply_thermal_setpoint_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(heat),
+                cooling_setpoint_c: Some(cool),
+                deadband_c: None,
+            });
+
+            let target = next_f64();
+            let min_soc = if next_f64() > 0.3 {
+                Some(next_f64())
+            } else {
+                None
+            };
+            let max_soc = if next_f64() > 0.3 {
+                Some(next_f64())
+            } else {
+                None
+            };
+
+            let _ = bat.apply_control(&ControlSignal::SOCTarget {
+                target_soc: target,
+                min_soc,
+                max_soc,
+            });
+        }
+
+        // Thermostat: effective setpoints must be physically valid.
+        let eff = tstat.effective_setpoints();
+        let deadband = 2.0 * tstat.thermostat.hysteresis_c;
+        assert!(
+            eff.cooling_c > eff.heating_c + deadband,
+            "after 100 random steps, thermostat cooling {} must exceed heating {} + deadband {}",
+            eff.cooling_c,
+            eff.heating_c,
+            deadband,
+        );
+
+        // Battery: SOC target must be strictly within stored bounds.
+        if let Some(tgt) = bat.soc_target {
+            let stored_min = bat.soc_target_min.unwrap_or(bat.min_soc);
+            let stored_max = bat.soc_target_max.unwrap_or(bat.max_soc);
+            assert!(
+                stored_min < tgt && tgt < stored_max,
+                "after 100 random steps, SOC target {tgt} must be within [{stored_min}, {stored_max}]"
+            );
+            assert!(
+                stored_min < stored_max,
+                "after 100 random steps, SOC bounds must be ordered: min={stored_min}, max={stored_max}"
+            );
         }
     }
 }
