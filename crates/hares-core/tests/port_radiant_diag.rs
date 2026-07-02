@@ -122,7 +122,7 @@ master_seed = 0
 
 // ---------------------------------------------------------------------------
 // Integration test: verifies the diagnostic CSV ({stem}_diagnostics.csv) is
-// written end-to-end when output_verbosity >= 4, and that all six scalar
+// written end-to-end when output_verbosity >= 4, and that all seven scalar
 // EnvelopeDiag columns are emitted with finite values.
 // ---------------------------------------------------------------------------
 
@@ -220,6 +220,7 @@ master_seed = 0
         "opaque_solar_lwr_w",
         "interior_lwr_w",
         "internal_gain_w",
+        "ghi_w_m2",
     ];
     for &col in &env_cols {
         assert!(
@@ -266,6 +267,6 @@ master_seed = 0
     }
     assert!(
         found_finite,
-        "at least one data row must have finite values for all six EnvelopeDiag columns"
+        "at least one data row must have finite values for all seven EnvelopeDiag columns"
     );
 }

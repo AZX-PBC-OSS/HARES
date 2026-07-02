@@ -3136,7 +3136,7 @@ id = "south-window-1"
 area_m2 = 6.0
 azimuth_deg = 180.0
 u_factor_w_m2_k = 3.0
-shgc = 0.789
+shgc = 0.769
 attached_to_wall_id = "south-wall"
 
 [[windows]]
@@ -3144,7 +3144,7 @@ id = "south-window-2"
 area_m2 = 6.0
 azimuth_deg = 180.0
 u_factor_w_m2_k = 3.0
-shgc = 0.789
+shgc = 0.769
 attached_to_wall_id = "south-wall"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
@@ -4481,5 +4481,58 @@ shgc = 0.7
             err.contains("u_factor_w_m2_k"),
             "error message must reference u_factor field, got: {err}"
         );
+    }
+
+    /// Verifies that all BESTEST Case 600-series TOML fixture windows use the
+    /// SHGC = 0.769 from ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1.
+    ///
+    /// The addendum's WINDOW 7 program output for the updated BESTEST Case 600
+    /// window (double-pane, clear glass 3.048 mm, 12 mm air gap, tauSol=0.834,
+    /// rhoSol=0.075 per pane) reports SHGCc = 0.769 at normal incidence (0°).
+    /// Glazing layer properties are cross-verified against the LBNL Modelica
+    /// Buildings library reference implementation (Win600 and Glass600 records).
+    ///
+    /// Fixtures covered: 600, 600ff, 640, 900, 900ff (all share the same window).
+    #[test]
+    fn bestest_fixture_shgc_matches_ashrae_140_authoritative_value() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let fixture_dir = workspace_root.join("tests/fixtures/bestest");
+
+        let cases_with_south_windows = ["600", "600ff", "640", "900", "900ff"];
+        for case_id in &cases_with_south_windows {
+            let path = fixture_dir.join(format!("{case_id}.toml"));
+            assert!(
+                path.exists(),
+                "BESTEST fixture must exist: {}",
+                path.display()
+            );
+            let toml_str = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            let config: SyntheticTomlConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+
+            let windows = config
+                .windows
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} must have [[windows]]", path.display()));
+            assert!(
+                !windows.is_empty(),
+                "{} must have at least one window",
+                path.display()
+            );
+            for win in windows {
+                assert!(
+                    (win.shgc - 0.769).abs() < 1e-10,
+                    "{} window {} shgc = {}; expected 0.769 per ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1 WINDOW 7 output",
+                    path.display(),
+                    win.id,
+                    win.shgc
+                );
+            }
+        }
     }
 }

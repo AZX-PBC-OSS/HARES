@@ -27,7 +27,7 @@ The 600FF peak overshoot is driven primarily by root causes #1 and #2 during pea
 
 | Source | Annual estimate | Notes |
 |--------|----------------|-------|
-| Window transmitted solar | ~4500–5500 kWh | 12 m² south-facing, SHGC=0.789, Denver TMY3 |
+| Window transmitted solar | ~4500–5500 kWh | 12 m² south-facing, SHGC=0.769, Denver TMY3 |
 | Opaque surface solar absorption | ~1200–1800 kWh | Walls + roof, α=0.6 |
 | Internal gains (convective) | 1752 kWh | 200W × 8760h × 1.0 sensible |
 | Window absorbed-inward solar | ~400–800 kWh | (SHGC-T) × N_i × POA × A |
@@ -52,7 +52,7 @@ For heating to be 23% below the band, the building must be retaining or gaining 
 
 ### Problem
 
-The BESTEST specification per ASHRAE 140-2017 §5.2.4.3 and the EnergyPlus BESTEST IDF defines internal gains as 200W with **Fraction Radiant = 0.3** (30% radiant, 70% convective, 0% latent, 0% lost). HARES routes 100% of the sensible gain convectively to zone air.
+The EnergyPlus BESTEST IDF defines internal gains as 200W continuous with **Fraction Radiant = 0.3** (30% radiant, 70% convective, 0% latent, 0% lost). HARES routes 100% of the sensible gain convectively to zone air. Note: ASHRAE 140-2017 Addendum a (2020) §5.2.1.7 specifies a **60% radiant / 40% convective** split — a discrepancy from the EnergyPlus IDF value used by HARES's fixtures, tracked separately (see Fix A, below).
 
 The BESTEST TOML fixtures specify `internal_gains_radiant_fraction = 0.3`, but the current port system does not carry a radiant component for internal gains. The `PortContribution::Thermal` struct lacks a `radiant_gain_w` field, so all 200W goes to `sensible_gain_w` and is injected directly at the zone air node.
 
@@ -134,11 +134,11 @@ Q_zone = T × A × POA + (SHGC - T) × N_i × A × POA
        = A × POA × (T + (SHGC - T) × N_i)
 ```
 
-For BESTEST windows (U=3.0, SHGC=0.789, T≈0.729):
-- N_i ≈ 0.39 (from `calculate_window_parameters` using E+ Step 5 formula)
-- Q_zone / (A × POA) = 0.729 + (0.060 × 0.39) = 0.729 + 0.023 = 0.752
+For BESTEST windows (U=3.0, SHGC=0.769, T≈0.707):
+- N_i ≈ 0.38 (from `calculate_window_parameters` using E+ Step 5 formula)
+- Q_zone / (A × POA) = 0.707 + (0.062 × 0.38) = 0.707 + 0.024 = 0.731
 
-This is correct — it matches the E+ SHGC decomposition. The total zone gain from the window at normal incidence is SHGC × IAM × A × POA = 0.789 × 1.0 × A × POA = 0.789 × A × POA, of which the zone receives 0.752 × A × POA (the remainder 0.037 × A × POA is absorbed by the glass and lost to the exterior).
+This is correct — it matches the E+ SHGC decomposition. The total zone gain from the window at normal incidence is SHGC × IAM × A × POA = 0.769 × 1.0 × A × POA = 0.769 × A × POA, of which the zone receives 0.731 × A × POA (the remainder 0.038 × A × POA is absorbed by the glass and lost to the exterior).
 
 **However**, there is a subtle but significant issue: the `absorbed_zone_w` is added to the **zone air node** directly (via `u[air_idx] += absorbed_zone_w`), while the E+ model distributes the absorbed-inward solar to the interior surface nodes via the window's interior surface temperature. In E+, the inward-flowing absorbed solar heats the interior glass surface, which then convects and radiates to the zone. In HARES, it goes directly to zone air, bypassing the surface thermal mass. This is equivalent to treating the absorbed-inward fraction as 100% convective rather than partially radiant.
 
@@ -150,9 +150,9 @@ However, the **InteriorSurfaceInfo.radiation_frac** for window surfaces IS the f
 
 ### Physics impact
 
-The absorbed-inward solar is small relative to transmitted solar: for BESTEST windows, it's only (0.789 - 0.729) × 0.39 = 0.023 × POA × A, vs transmitted 0.729 × POA × A. The absorbed-inward is 3.2% of the total zone solar gain. Even if this is entirely misrouted to zone air instead of surfaces, the impact on annual HVAC is modest:
+The absorbed-inward solar is small relative to transmitted solar: for BESTEST windows, it's only (0.769 - 0.707) × 0.38 = 0.024 × POA × A, vs transmitted 0.707 × POA × A. The absorbed-inward is 3.2% of the total zone solar gain. Even if this is entirely misrouted to zone air instead of surfaces, the impact on annual HVAC is modest:
 
-- Peak hour excess: 0.023 × 12 × 800 ≈ 220 W (if the 3.2% should have gone to surfaces instead of air)
+- Peak hour excess: 0.024 × 12 × 800 ≈ 230 W (if the 3.2% should have gone to surfaces instead of air)
 - Annual impact: ~50–100 kWh
 
 This root cause contributes **modestly** to the 600FF peak overshoot and the under-heating pattern, but is not the dominant factor.
@@ -353,7 +353,7 @@ OCHRE uses the same lumped-resistance approach as HARES: `create_rc_data` at `en
 
 ## Appendix: BESTEST Fixture Verification
 
-### Case 600 construction (verified against ASHRAE 140-2017 Table 5-2)
+### Case 600 construction (verified against ASHRAE 140-2017 Addendum a (2020) Table 5-2)
 
 | Component | Fixture | ASHRAE 140 | Match? |
 |-----------|---------|------------|--------|
@@ -364,12 +364,12 @@ OCHRE uses the same lumped-resistance approach as HARES: `create_rc_data` at `en
 | Floor area | 48 m² | 48 m² | ✅ |
 | Window area | 12 m² (2×6) | 12 m² | ✅ |
 | Window U-factor | 3.0 W/(m²·K) | 3.0 W/(m²·K) | ✅ |
-| Window SHGC | 0.789 | 0.789 | ✅ |
+| Window SHGC | 0.769 | 0.769 | ✅ Source: ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1, WINDOW 7 program output for the updated BESTEST Case 600 double-pane window (3.048 mm panes, 12 mm air gap, tauSol=0.834, rhoSol=0.075 per pane). Reports SHGCc = 0.769 at normal incidence (0°). Glazing layer properties cross-verified against LBNL Modelica Buildings library (Win600 and Glass600 records). |
 | Solar absorptance (ext) | 0.6 | 0.6 | ✅ |
 | Emittance (ext) | 0.9 | 0.9 | ✅ |
 | Infiltration | 0.5 ACH | 0.5 ACH | ✅ |
 | Internal gains | 200W | 200W | ✅ |
-| Radiant fraction | 0.3 (specified but not wired) | 0.3 | ⚠️ Specified but not applied |
+| Radiant fraction | 0.3 (EnergyPlus IDF; specified but not wired) | 0.6 (Addendum a §5.2.1.7) | ⚠️ Discrepancy — see Fix A |
 | Heating setpoint | 20°C | 20°C | ✅ |
 | Cooling setpoint | 27°C | 27°C | ✅ |
 | Initialization | 86400s (1 day) | E+ runs until convergence | ⚠️ May be insufficient |

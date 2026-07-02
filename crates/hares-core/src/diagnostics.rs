@@ -66,6 +66,10 @@ pub struct EnvelopeDiag {
     pub port_radiant_w: f64,
     /// Outdoor moist-air density used for infiltration mass-flow conversion [kg/m³].
     pub air_density_kg_m3: f64,
+    /// Global horizontal irradiance [W/m²] at this timestep.
+    /// Enables validation of window transmitted solar against expected
+    /// GHI × window_area × SHGC at any reference timestep.
+    pub ghi_w_m2: f64,
 }
 
 #[derive(Debug)]
@@ -100,6 +104,7 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
     cols.push("interior_lwr_w".to_string());
     cols.push("internal_gain_w".to_string());
     cols.push("air_density_kg_m3".to_string());
+    cols.push("ghi_w_m2".to_string());
     let _ = writeln!(w, "{}", cols.join(","));
 }
 
@@ -241,6 +246,18 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .map(|e| {
                 if e.air_density_kg_m3.is_finite() {
                     format!("{:.5}", e.air_density_kg_m3)
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| {
+                if e.ghi_w_m2.is_finite() {
+                    format!("{:.1}", e.ghi_w_m2)
                 } else {
                     String::new()
                 }
@@ -1002,6 +1019,7 @@ mod tests {
             "interior_lwr_w",
             "internal_gain_w",
             "air_density_kg_m3",
+            "ghi_w_m2",
         ];
         for &col in &expected_cols {
             assert!(

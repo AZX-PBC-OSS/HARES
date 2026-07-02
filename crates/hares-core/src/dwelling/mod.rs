@@ -5044,6 +5044,7 @@ impl Dwelling {
                 port_convective_w: gains.port_convective_w,
                 port_radiant_w: gains.port_radiant_w,
                 air_density_kg_m3: gains.air_density_kg_m3,
+                ghi_w_m2: self.latest_env.weather.ghi_w_m2,
             };
             let step = self.clock.current_step();
             let diag = diagnostics::capture(step, &self.latest_env, &self.ports, Some(envelope));

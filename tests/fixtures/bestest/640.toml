@@ -206,7 +206,7 @@ id = "south-window-1"
 area_m2 = 6.0
 azimuth_deg = 180.0
 u_factor_w_m2_k = 3.0
-shgc = 0.789
+shgc = 0.769
 attached_to_wall_id = "south-wall"
 
 [[windows]]
@@ -214,7 +214,7 @@ id = "south-window-2"
 area_m2 = 6.0
 azimuth_deg = 180.0
 u_factor_w_m2_k = 3.0
-shgc = 0.789
+shgc = 0.769
 attached_to_wall_id = "south-wall"
 
 [schedule]

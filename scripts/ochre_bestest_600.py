@@ -74,7 +74,13 @@ WALL_AZIMUTHS_DEG = [180, 0, 90, 270]  # south, north, east, west
 WINDOW_AREAS_M2 = [6.0, 6.0]
 WINDOW_AZIMUTHS_DEG = [180, 180]
 WINDOW_U_FACTOR = 3.0  # W/m2-K, per 600.toml
-WINDOW_SHGC = 0.789  # per 600.toml
+# ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1 — WINDOW 7 program output
+# for the updated BESTEST Case 600 window (double-pane clear glass, 3.048 mm panes,
+# 12 mm air gap, tauSol=0.834, rhoSol=0.075 per pane). The WINDOW 7 computation
+# reports SHGCc = 0.769 at normal incidence (0°). The LBNL Modelica Buildings
+# library (Win600/Glass600 records) defines only the layer construction properties
+# and does not publish the derived whole-window SHGC.
+WINDOW_SHGC = 0.769  # ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1, WINDOW 7 SHGCc
 
 # Roof: flat, 48 m2
 ROOF_AREA_M2 = 48.0

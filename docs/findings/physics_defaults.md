@@ -297,7 +297,7 @@ No fix required. The documentation could be strengthened:
 /// Low-E coatings: 0.04–0.20 (not modeled by this constant).
 pub const EMISSIVITY_WINDOW: f64 = 0.84;
 Impact on BESTEST
-None — the BESTEST windows use single-pane clear glass (U=3.0, SHGC=0.789), for which 0.84 is correct.
+None — the BESTEST windows use double-pane clear glass, 3.048 mm panes, 12 mm air gap (U=3.0, SHGC=0.769), for which 0.84 is correct. SHGC per ASHRAE 140-2017 Addendum a (2020) Annex B6.1 Table B6-1, WINDOW 7 program output (SHGCc = 0.769 at normal incidence). Glazing layer properties per LBNL Modelica Buildings library reference implementation (Win600/Glass600 records in Buildings.ThermalZones.Detailed.Validation.BESTEST.Data).
 ---
 Cross-Cutting: BESTEST Impact Summary
 Item	BESTEST Impact	Reason
