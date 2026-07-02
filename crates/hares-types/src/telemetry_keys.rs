@@ -758,6 +758,41 @@ pub fn tank_node_key(index: usize) -> String {
 
 // ── Compile-time scope catalogue ───────────────────────────────────────────
 
+/// Returns physically reasonable observation-space `(low, high)` bounds for
+/// a given telemetry key, mirroring the Python `_observation_field_bounds`
+/// in `gym_env.py` so that Rust consumers can validate bounds independently.
+///
+/// Keys not explicitly recognised receive the broad fallback `(-1e6, 1e6)`
+/// which is finite and safe for normalisation wrappers.
+pub fn observation_field_bounds(key: &str) -> (f64, f64) {
+    let key = key.trim().to_lowercase();
+    match key.as_str() {
+        "outdoor_temp" | "outdoor_temp_c" => (-50.0, 55.0),
+        "outdoor_rh" => (0.0, 1.0),
+        "outdoor_humidity_ratio" => (0.0, 0.1),
+        "total_power_kw" | "total_electric_kw" => (-100.0, 100.0),
+        "battery_soc" | "ev_soc" => (0.0, 1.0),
+        _ => {
+            if key.starts_with("zone_temp[") && key.ends_with(']') {
+                return (0.0, 50.0);
+            }
+            if key.starts_with("setpoint_heat[") && key.ends_with(']') {
+                return (0.0, 50.0);
+            }
+            if key.starts_with("setpoint_cool[") && key.ends_with(']') {
+                return (0.0, 50.0);
+            }
+            if key.starts_with("equipment_soc[") && key.ends_with(']') {
+                return (0.0, 1.0);
+            }
+            if key.starts_with("equipment_power[") && key.ends_with(']') {
+                return (0.0, 100.0);
+            }
+            (-1e6_f64, 1e6_f64)
+        }
+    }
+}
+
 /// All telemetry keys that are marked `scope: output`.
 ///
 /// These keys have a defined output column contract: their value is placed into
@@ -1095,5 +1130,251 @@ mod tests {
                 "OUTPUT_SCOPE_KEYS entry '{output_key}' not found in all_keys audit list"
             );
         }
+    }
+
+    /// Every known telemetry key constant produces finite, non-NaN,
+    /// non-inverted bounds from `observation_field_bounds`, and the
+    /// single explicitly-matched constant `OUTDOOR_TEMP_C` resolves to
+    /// the expected temperature range.
+    #[test]
+    fn test_observation_field_bounds_all_keys_finite() {
+        let all_keys: &[&str] = &[
+            // Electrical power
+            ELECTRIC_KW,
+            ACTIVE_POWER_KW,
+            AC_POWER_KW,
+            ELECTRIC_OUTPUT_KW,
+            ELECTRIC_POWER_W,
+            REACTIVE_POWER_KVAR,
+            // Fuel & thermal
+            FUEL_INPUT_W,
+            FUEL_IDLE_W,
+            FUEL_LOAD_W,
+            THERMAL_OUTPUT_W,
+            FLUE_LOSS_W,
+            JACKET_LOSS_W,
+            SKIN_LOSS_W,
+            SENSIBLE_GAIN_W,
+            TOTAL_SENSIBLE_GAIN_W,
+            LATENT_GAIN_W,
+            SENSIBLE_COOLING_W,
+            LATENT_COOLING_W,
+            COIL_SENSIBLE_COOLING_W,
+            COIL_LATENT_COOLING_W,
+            LATENT_GAINS_W,
+            FAN_HEAT_W,
+            IDEAL_CAPACITY_W,
+            IDEAL_CAPACITY_DEGRADED,
+            // Context
+            OUTDOOR_TEMP_C,
+            INDOOR_TEMP_C,
+            // Temperature
+            CELL_TEMP_C,
+            BATTERY_TEMP_C,
+            SUPPLY_TEMP_C,
+            SUPPLY_AIR_TEMP_C,
+            RETURN_TEMP_C,
+            TANK_AVG_TEMP_C,
+            OUTLET_TEMP_C,
+            APPARATUS_DEW_POINT_C,
+            CURRENT_TARGET_C,
+            BOILER_CP_USED_J_KG_K,
+            // Setpoints
+            HEATING_SETPOINT_C,
+            COOLING_SETPOINT_C,
+            // Setpoint chain
+            SCHEDULE_HEATING_SETPOINT_C,
+            SCHEDULE_COOLING_SETPOINT_C,
+            RUNTIME_HEATING_SETPOINT_C,
+            RUNTIME_COOLING_SETPOINT_C,
+            // Operating state
+            OPERATING_MODE,
+            STATE,
+            RUNTIME_FRACTION,
+            SPEED_INDEX,
+            // Speed/staging
+            SPEED_FRAC,
+            PART_LOAD_RATIO,
+            PART_LOAD_FACTOR,
+            STARTUP_MULTIPLIER,
+            DUTY_CYCLE,
+            TIME_AT_CURRENT_SPEED_S,
+            MODE_DURATION_S,
+            COOLING_OAT_LOCKOUT,
+            DEFROST_ACTIVE,
+            DEFROST_TIME_FRACTION,
+            DEFROST_EXTRA_POWER_W,
+            DEFROST_Q_W,
+            DEFROST_CAPACITY_MULTIPLIER,
+            DEFROST_CYCLE_STATE,
+            DEFROST_ACCUMULATED_FROST_S,
+            DEFROST_ELAPSED_S,
+            BYPASS_ACTIVE,
+            BYPASS_FACTOR,
+            IS_ON,
+            RAMP_LIMITED,
+            CYCLE_PHASE,
+            // Control overrides
+            MAX_CAPACITY_FRACTION,
+            // Efficiency
+            COP,
+            EIR,
+            SHR,
+            CAP_MULT,
+            ETA_ELECTRIC,
+            INVERTER_EFFICIENCY,
+            CAP_RATIO,
+            CAP_RATIO_RAW,
+            EIR_RATIO,
+            BIQUADRATIC_CURVE_SOURCE,
+            // Battery / storage
+            SOC,
+            OHMIC_LOSS_W,
+            STANDBY_POWER_W,
+            HEATER_POWER_W,
+            DISCHARGE_DERATE,
+            CAPACITY_DERATE,
+            CHARGE_DERATE,
+            CYCLE_COUNT,
+            CAPACITY_FADE_PCT,
+            TERMINAL_VOLTAGE_V,
+            CURRENT_A,
+            DR_POWER_FRACTION,
+            DR_LEVEL,
+            N_SERIES,
+            N_PARALLEL,
+            AH_CELL,
+            V_CELL,
+            DERIVATION_SOURCE,
+            IMPLIED_CAPACITY_KWH,
+            DECLARED_CAPACITY_KWH,
+            // EV
+            CONNECTION_STATE,
+            CHARGING_LEVEL,
+            V2L_ACTIVE,
+            V2L_POWER_KW,
+            AWAY_CHARGE_POWER_KW,
+            CAPACITY_KWH,
+            FUEL_ECONOMY_KWH_PER_MI,
+            // PV
+            DC_POWER_KW,
+            IRRADIANCE_W_M2,
+            CURTAILMENT_KW,
+            INVERTER_CLIPPING_KW,
+            SOILING_RATIO,
+            SHADING_FACTOR,
+            PV_LUT_INTERP_METHOD,
+            PV_LUT_NN_FALLBACK_COUNT,
+            // HVAC capacity
+            HVAC_HEATING_CAPACITY_W,
+            HVAC_COOLING_CAPACITY_W,
+            HEATING_LATENT_W,
+            // Component power
+            COMPRESSOR_KW,
+            COMPRESSOR_POWER_W,
+            FAN_KW,
+            FAN_ELECTRIC_W,
+            FAN_POWER_W,
+            MAIN_POWER_KW,
+            DUCT_LOSS_W,
+            BACKUP_ER_KW,
+            PAN_HEATER_KW,
+            HP_CAPACITY_W,
+            ER_CAPACITY_W,
+            HP_LOCKOUT_TEMP_C,
+            ER_LOCKOUT_TEMP_C,
+            ER_SETPOINT_OFFSET_C,
+            ER_HARD_LOCKOUT_TIME_S,
+            BACKUP_CAPACITY_W,
+            BACKUP_EIR,
+            ER_STAGES_ON,
+            MIN_COMPRESSOR_FRACTION,
+            PUMP_POWER_KW,
+            // Water heater
+            ELEMENT_KW,
+            PILOT_KW,
+            FUEL_INPUT_KW,
+            DRAW_FLOW_RATE_KG_S,
+            UPPER_ELEMENT_POWER_W,
+            LOWER_ELEMENT_POWER_W,
+            BURNER_EFFICIENCY,
+            BURNER_EFFICIENCY_SOURCE,
+            BURNER_POWER_W,
+            PILOT_POWER_W,
+            BACKUP_ELEMENT_POWER_W,
+            ZONE_HEAT_EXTRACTION_W,
+            WALL_SENSIBLE_GAIN_W,
+            UNMET_LOAD_W,
+            PARASITIC_ELECTRIC_W,
+            PILOT_HEAT_TO_WATER_W,
+            PILOT_HEAT_TO_AMBIENT_W,
+            // Envelope
+            ENERGY_BALANCE_RESIDUAL_W,
+            // Ventilation
+            SENSIBLE_RECOVERY_W,
+            LATENT_RECOVERY_W,
+            VENT_SUPPLY_FAN_POWER_W,
+            VENT_EXHAUST_FAN_POWER_W,
+            // Dehumidifier
+            WATER_REMOVAL_L_DAY,
+            LATENT_REMOVAL_W,
+            TARGET_RH,
+            MIN_RH,
+            MAX_RH,
+            MOISTURE_MASS_FLOW_KG_S,
+            HUMIDITY_SEMI_IMPLICIT_ALPHA,
+            HUMIDITY_SOLVER_TELEMETRY_KEY,
+            // Dwelling-level
+            LAST_POWER_KW,
+            LAST_SOC_TARGET,
+            // Protocol bridge
+            PROTOCOL_ID,
+            PAYLOAD_SIZE_BYTES,
+            DISPATCH_COUNT,
+            PARSED_COMMAND_COUNT,
+            PARSE_ERROR_COUNT,
+            TOTAL_COMMANDS_PARSED,
+            // Generator
+            THERMAL_POWER_DELIVERED_W,
+            HEAT_REC_RATIO,
+            THERMAL_AVAILABLE_W,
+            LOOP_RETURN_TEMP_C,
+            JACKET_WATER_W,
+            LUBE_OIL_W,
+            EXHAUST_WATER_W,
+            SUPPLY_TEMP_JACKET_C,
+            SUPPLY_TEMP_EXHAUST_C,
+            // Fuel cell
+            FUEL_CELL_DC_KW,
+            FUEL_CELL_INVERTER_LOSS_W,
+            FUEL_CELL_STACK_HEAT_W,
+        ];
+
+        for &key in all_keys {
+            let (low, high) = observation_field_bounds(key);
+            assert!(
+                low.is_finite(),
+                "low bound {low} not finite for key '{key}'"
+            );
+            assert!(
+                high.is_finite(),
+                "high bound {high} not finite for key '{key}'"
+            );
+            assert!(!low.is_nan(), "low bound NaN for key '{key}'");
+            assert!(!high.is_nan(), "high bound NaN for key '{key}'");
+            assert!(
+                low < high,
+                "bounds inverted for key '{key}': {low} >= {high}"
+            );
+        }
+
+        // Sanity: the one key that matches an explicit branch resolves to the
+        // correct temperature range.
+        assert_eq!(observation_field_bounds(OUTDOOR_TEMP_C), (-50.0, 55.0));
+        // Sanity: unrecognised keys use the broad but finite fallback.
+        assert_eq!(
+            observation_field_bounds("nonexistent_field"),
+            (-1e6_f64, 1e6_f64)
+        );
     }
 }

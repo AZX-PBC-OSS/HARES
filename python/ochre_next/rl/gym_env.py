@@ -8,6 +8,7 @@ from datetime import timedelta
 import math
 import secrets
 from typing import Any, TypedDict
+import warnings
 
 import numpy as np
 
@@ -56,6 +57,7 @@ class StepInfo(TypedDict):
     seed: int
     timestep_index: int
     step: dict[str, Any]
+    observation_bounds: dict[str, tuple[float, float]]
 
 
 class StepResult(TypedDict):
@@ -188,6 +190,31 @@ def _field_bounds(field: str) -> tuple[float, float]:
         return (-50.0, 80.0)
     if name in {"deadband_c"}:
         return (0.0, 30.0)
+    return (_BROAD_LOW, _BROAD_HIGH)
+
+
+def _observation_field_bounds(field: str) -> tuple[float, float]:
+    key = field.strip().lower()
+    if key in {"outdoor_temp", "outdoor_temp_c"}:
+        return (-50.0, 55.0)
+    if key == "outdoor_rh":
+        return (0.0, 1.0)
+    if key == "outdoor_humidity_ratio":
+        return (0.0, 0.1)
+    if key in {"total_power_kw", "total_electric_kw"}:
+        return (-100.0, 100.0)
+    if _bracket_name(key, "zone_temp") is not None:
+        return (0.0, 50.0)
+    if _bracket_name(key, "setpoint_heat") is not None:
+        return (0.0, 50.0)
+    if _bracket_name(key, "setpoint_cool") is not None:
+        return (0.0, 50.0)
+    if _bracket_name(key, "equipment_soc") is not None:
+        return (0.0, 1.0)
+    if _bracket_name(key, "equipment_power") is not None:
+        return (0.0, 100.0)
+    if key in {"battery_soc", "ev_soc"}:
+        return (0.0, 1.0)
     return (_BROAD_LOW, _BROAD_HIGH)
 
 
@@ -329,6 +356,7 @@ class DwellingGymEnv(_GYM_BASE):
         action_space_config: Mapping[str, Sequence[str]],
         reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
+        field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
     ) -> None:
         if gym is None or spaces is None:
             raise ImportError("gymnasium is required for RL environments")
@@ -356,12 +384,35 @@ class DwellingGymEnv(_GYM_BASE):
         self._dwelling.initialize()
         self._initial_snapshot = bytes(self._dwelling.save_state())
 
+        bounds = [
+            _observation_field_bounds(f) for f in self._observation_fields
+        ]
+        if field_bounds_overrides:
+            for idx, field in enumerate(self._observation_fields):
+                override = field_bounds_overrides.get(field)
+                if override is not None:
+                    bounds[idx] = (float(override[0]), float(override[1]))
+        self._observation_bounds = {
+            field: (float(low), float(high))
+            for field, (low, high) in zip(self._observation_fields, bounds)
+        }
+        obs_low = np.asarray([b[0] for b in bounds], dtype=np.float64)
+        obs_high = np.asarray([b[1] for b in bounds], dtype=np.float64)
         self.observation_space = spaces.Box(
-            low=np.full(len(self._observation_fields), -np.inf, dtype=np.float64),
-            high=np.full(len(self._observation_fields), np.inf, dtype=np.float64),
+            low=obs_low,
+            high=obs_high,
             shape=(len(self._observation_fields),),
             dtype=np.float64,
         )
+        if not np.all(np.isfinite(obs_low)) or not np.all(np.isfinite(obs_high)):
+            warnings.warn(
+                "Observation space contains infinite bounds for fields: "
+                + ", ".join(sorted(set(
+                    f for f, (l, h) in self._observation_bounds.items()
+                    if not (np.isfinite(l) and np.isfinite(h))
+                ))),
+                stacklevel=2,
+            )
 
         action_low: list[float] = []
         action_high: list[float] = []
@@ -449,5 +500,6 @@ class DwellingGymEnv(_GYM_BASE):
             step=step_data,
             seed=self._active_seed if self._active_seed is not None else 0,
             timestep_index=self._steps_elapsed,
+            observation_bounds=self._observation_bounds,
         )
         return obs, reward, False, truncated, info

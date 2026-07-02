@@ -11,7 +11,7 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("gymnasium")
 
 from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next.rl.gym_env import DwellingGymEnv, _sorted_action_layout
+from ochre_next.rl.gym_env import DwellingGymEnv, _observation_field_bounds, _sorted_action_layout
 from ochre_next.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +32,7 @@ _DWELLING_CONFIG = {
 
 # Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
 _ACTION_CONFIG: dict[str, list[str]] = {"Gas Furnace": ["heat_c"]}
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp_c"]
+_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
 
 
 def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEnv:
@@ -130,6 +130,13 @@ def test_vec_gym_step_batch_shape():
     assert dones.shape == (4,)
     assert truncs.shape == (4,)
     assert len(infos) == 4
+    for info in infos:
+        assert "obs_total_power_kw_low" in info
+        assert "obs_total_power_kw_high" in info
+        assert "obs_outdoor_temp_low" in info
+        assert "obs_outdoor_temp_high" in info
+        assert np.isfinite(info["obs_total_power_kw_low"])
+        assert np.isfinite(info["obs_total_power_kw_high"])
 
 
 def test_vec_gym_reset_seed_batch_shape():
@@ -347,3 +354,160 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
             assert low[power_idx] <= val <= high[power_idx], (
                 f"active_power_kw {val} should be in [{low[power_idx]}, {high[power_idx]}]"
             )
+
+
+# ---------------------------------------------------------------------------
+# Observation bounds tests (T-0339)
+# ---------------------------------------------------------------------------
+
+
+def test_observation_field_bounds_all_finite():
+    """Every known observation key (and the fallback) returns finite bounds."""
+    from ochre_next.rl.gym_env import _observation_field_bounds
+
+    fields = [
+        "outdoor_temp",
+        "outdoor_temp_c",
+        "outdoor_rh",
+        "outdoor_humidity_ratio",
+        "total_power_kw",
+        "total_electric_kw",
+        "zone_temp[Living Room]",
+        "zone_temp[Building]",
+        "setpoint_heat[Main]",
+        "setpoint_cool[Main]",
+        "equipment_soc[Battery]",
+        "equipment_power[Gas Furnace]",
+        "battery_soc",
+        "ev_soc",
+        "unknown_field",
+    ]
+    for field in fields:
+        low, high = _observation_field_bounds(field)
+        assert np.isfinite(low), f"low bound {low} is not finite for field {field!r}"
+        assert np.isfinite(high), f"high bound {high} is not finite for field {field!r}"
+        assert not np.isnan(low), f"low bound is NaN for field {field!r}"
+        assert not np.isnan(high), f"high bound is NaN for field {field!r}"
+        assert low < high, f"bounds inverted for {field!r}: {low} >= {high}"
+
+
+def test_observation_space_bounds_all_finite():
+    """Observation space arrays must contain no -inf or +inf values."""
+    env = _make_env()
+    low = np.asarray(env.observation_space.low, dtype=np.float64)
+    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    assert np.all(np.isfinite(low)), f"non-finite low bounds: {low}"
+    assert np.all(np.isfinite(high)), f"non-finite high bounds: {high}"
+
+
+def test_observation_bounds_in_step_info():
+    """step() info dict must include per-field observation bounds."""
+    env = _make_env()
+    _, _, _, _, info = env.step(np.array([21.0], dtype=np.float64))
+    assert "observation_bounds" in info, "StepInfo missing observation_bounds key"
+    bounds = info["observation_bounds"]
+    assert isinstance(bounds, dict)
+    for field in _OBS_FIELDS:
+        assert field in bounds, f"field {field!r} not in observation_bounds"
+        low, high = bounds[field]
+        assert np.isfinite(low)
+        assert np.isfinite(high)
+        assert low < high
+
+
+def test_normalize_observation_wraps_without_error():
+    """NormalizeObservation can wrap the env (requires finite obs space bounds)."""
+    gym = pytest.importorskip("gymnasium")
+    env = _make_env()
+    wrapped = gym.wrappers.NormalizeObservation(env)
+    obs, _ = wrapped.reset(seed=42)
+    assert obs.shape == (len(_OBS_FIELDS),)
+    step_obs, _, _, _, _ = wrapped.step(np.array([21.0], dtype=np.float64))
+    assert step_obs.shape == (len(_OBS_FIELDS),)
+    assert np.all(np.isfinite(step_obs))
+
+
+def test_field_bounds_overrides_apply():
+    """field_bounds_overrides replace default bounds for specified fields."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+    )
+    low = env.observation_space.low
+    high = env.observation_space.high
+    total_power_idx = _OBS_FIELDS.index("total_power_kw")
+    assert np.isclose(float(low[total_power_idx]), -200.0), f"override low not applied: {low}"
+    assert np.isclose(float(high[total_power_idx]), 200.0), f"override high not applied: {high}"
+
+
+def test_observation_field_bounds_case_insensitive():
+    """Bracket-prefixed fields match regardless of case or leading whitespace."""
+    tests = [
+        ("zone_temp[Living Room]", (0.0, 50.0)),
+        ("Zone_Temp[Living Room]", (0.0, 50.0)),
+        (" ZONE_TEMP[Kitchen]", (0.0, 50.0)),
+        ("setpoint_heat[Main]", (0.0, 50.0)),
+        ("Setpoint_Heat[Main]", (0.0, 50.0)),
+        (" setpoint_cool[Upstairs]", (0.0, 50.0)),
+        ("equipment_soc[Battery]", (0.0, 1.0)),
+        ("Equipment_Soc[Battery]", (0.0, 1.0)),
+        (" equipment_power[Gas Furnace]", (0.0, 100.0)),
+    ]
+    for field, expected in tests:
+        low, high = _observation_field_bounds(field)
+        assert low == expected[0] and high == expected[1], (
+            f"{field!r}: expected {expected}, got ({low}, {high})"
+        )
+
+
+def test_observation_field_bounds_broad_fallback_is_finite():
+    """Unrecognised fields return the broad but finite fallback, not ±inf."""
+    for field in ("giraffe_temp_c", "  fluffy_rh  "):
+        low, high = _observation_field_bounds(field)
+        assert np.isfinite(low), f"fallback low {low} not finite for {field!r}"
+        assert np.isfinite(high), f"fallback high {high} not finite for {field!r}"
+        assert low < high, f"fallback bounds inverted for {field!r}"
+
+
+def test_vec_gym_observation_space_bounds_finite():
+    """VecDwellingGymEnv observation space must contain no -inf or +inf values."""
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    low = np.asarray(env.observation_space.low, dtype=np.float64)
+    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    assert np.all(np.isfinite(low)), f"non-finite low bounds in VecDwellingGymEnv: {low}"
+    assert np.all(np.isfinite(high)), f"non-finite high bounds in VecDwellingGymEnv: {high}"
+
+
+def test_vec_gym_field_bounds_overrides_in_info():
+    """VecDwellingGymEnv step() info dicts must use override-aware bounds,
+    not stale defaults that silently disagree with observation_space."""
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+    )
+    _, _, _, _, infos = env.step(
+        np.full((2, 1), 21.0, dtype=np.float64)
+    )
+    for info in infos:
+        assert np.isclose(
+            float(info["obs_total_power_kw_low"]), -200.0
+        ), f"override low not in info: {info}"
+        assert np.isclose(
+            float(info["obs_total_power_kw_high"]), 200.0
+        ), f"override high not in info: {info}"

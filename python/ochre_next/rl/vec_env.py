@@ -26,6 +26,7 @@ from .gym_env import (
     RewardContext,
     _build_control_signal,
     _field_bounds,
+    _observation_field_bounds,
     _sorted_action_layout,
     telemetry_to_observation,
 )
@@ -39,6 +40,7 @@ class VecDwellingGymEnv:
         action_space_config: Mapping[str, Sequence[str]],
         reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
+        field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
     ) -> None:
         start_method = multiprocessing.get_start_method(allow_none=True)
         if start_method == "fork":
@@ -71,9 +73,19 @@ class VecDwellingGymEnv:
         action_low_arr = np.asarray(action_low, dtype=np.float64)
         action_high_arr = np.asarray(action_high, dtype=np.float64)
         if spaces is not None:
+            bounds = [
+                _observation_field_bounds(f) for f in observation_fields
+            ]
+            if field_bounds_overrides:
+                for idx, field in enumerate(observation_fields):
+                    override = field_bounds_overrides.get(field)
+                    if override is not None:
+                        bounds[idx] = (float(override[0]), float(override[1]))
+            obs_low = np.asarray([b[0] for b in bounds], dtype=np.float64)
+            obs_high = np.asarray([b[1] for b in bounds], dtype=np.float64)
             self.observation_space = spaces.Box(
-                low=np.full(len(observation_fields), -np.inf, dtype=np.float64),
-                high=np.full(len(observation_fields), np.inf, dtype=np.float64),
+                low=obs_low,
+                high=obs_high,
                 shape=(len(observation_fields),),
                 dtype=np.float64,
             )
@@ -92,6 +104,10 @@ class VecDwellingGymEnv:
                 "high": action_high_arr,
             }
         self._observation_fields = list(observation_fields)
+        self._observation_bounds: dict[str, tuple[float, float]] = {
+            field: (float(low), float(high))
+            for field, (low, high) in zip(observation_fields, bounds)
+        }
         self._reward_fn = reward_fn
         self._steps_elapsed = np.zeros(self.num_envs, dtype=np.int64)
         self._max_steps = max(1, int(np.ceil(episode_length.total_seconds() / 60.0)))
@@ -178,6 +194,11 @@ class VecDwellingGymEnv:
             rewards = np.asarray(rewards, dtype=np.float64)
             dones = np.asarray(dones, dtype=np.bool_)
             truncs = np.asarray(truncs, dtype=np.bool_)
+
+        for info in infos:
+            for field, (low, high) in self._observation_bounds.items():
+                info[f"obs_{field}_low"] = float(low)
+                info[f"obs_{field}_high"] = float(high)
 
         self._steps_elapsed += 1
         auto_trunc = self._steps_elapsed >= self._max_steps
