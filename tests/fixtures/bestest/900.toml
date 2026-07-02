@@ -1,5 +1,14 @@
 building_id = 900
 
+internal_gains_w = 200.0
+internal_gains_constant = true
+internal_gains_sensible_fraction = 1.0
+# EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3 (30% radiant, 70% convective).
+# Source: E+ I/O Reference §Group-InternalGains, OtherEquipment object; confirmed in
+# E+ IDD V9-6-0-Energy+.idd N5 field default=0 but BESTEST IDF overrides to 0.3.
+# This matches E+ v9.6 BESTEST test reference value.
+internal_gains_radiant_fraction = 0.3
+
 [simulation]
 start_time = "2024-01-01T00:00:00-07:00"
 time_res_s = 3600
@@ -30,11 +39,6 @@ setpoint_deadband_c = 0.0
 
 [infiltration]
 ach = 0.5
-
-internal_gains_w = 200.0
-internal_gains_constant = true
-internal_gains_sensible_fraction = 1.0
-internal_gains_radiant_fraction = 0.3
 
 [[boundaries]]
 id = "south-wall"

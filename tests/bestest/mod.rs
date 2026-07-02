@@ -72,11 +72,13 @@ fn run_single_case(case: &BestestCase) {
 // Root-cause fixes applied (T-0301): free-float initialization uses outdoor
 // temperature (not 21°C default) when HVAC setpoints are absent; internal gains
 // use 30% radiant fraction per EnergyPlus BESTEST IDF specification.
-// IGNORED: annual_heating=3260 vs band [4296,5709] kWh (below) and
-// annual_cooling=6040 vs band [6137,7964] kWh (slightly below). The 30%
-// radiant fraction shifts internal gains from zone air to surfaces, reducing
-// apparent heating load — additional physics fixes needed to bring loads back
-// within ASHRAE 140 bands.
+// T-0352 corrected a TOML parse bug: internal_gains_radiant_fraction was silently
+// dropped because the keys appeared after a [section] header and were absorbed
+// into that section's table. The radiant fraction is now correctly parsed and
+// applied — 200 W × 0.3 = 60 W radiant to surfaces, 140 W convective to zone air.
+// IGNORED: annual_heating=3205 vs band [4296,5709] kWh (below) and
+// annual_cooling=5892 vs band [6137,7964] kWh (below). Additional physics fixes
+// are needed; the radiant split alone does not account for the gap.
 #[test]
 #[ignore = "heating/cooling loads below ASHRAE 140 bands after radiant fraction fix (T-0301)"]
 fn bestest_case_600() {
@@ -99,8 +101,8 @@ fn bestest_case_600() {
 // ASHRAE band. E+ Eng.Ref "Inside Surface Heat Balance".
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
-// IGNORED: annual_heating=992 vs band [1170,2041] kWh (below). The 30% radiant
-// fraction and heavyweight thermal mass interact to depress heating load.
+// T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
+// IGNORED: annual_heating=987 vs band [1170,2041] kWh (below).
 // Annual cooling passes [2132,3415] kWh band.
 #[test]
 #[ignore = "annual heating load below ASHRAE 140 band after radiant fraction fix (T-0301)"]
@@ -123,10 +125,9 @@ fn bestest_case_900() {
 // (ASHRAE 140-2017 Table B8-3a).
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
-// IGNORED: peak_zone_temp=73.6 vs band [64.9,69.5]°C (above). The 30% radiant
-// fraction shifts 60 W of internal gains to surfaces, increasing peak zone
-// temperature through LWR re-radiation. Min temp (min=-12.0°C vs [-18.8,0.0])
-// passes.
+// T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
+// IGNORED: peak_zone_temp=72.3 vs band [64.9,69.5]°C (above).
+// Min temp (min=-12.0°C vs [-18.8,0.0]) passes.
 #[test]
 #[ignore = "peak zone temp above ASHRAE 140 band after radiant fraction fix (T-0301)"]
 fn bestest_case_600ff() {
@@ -150,11 +151,13 @@ fn bestest_case_600ff() {
 // temperature [-6.4, -1.6]°C (ASHRAE 140-2017 Table B8-3a). ASHRAE 140
 // bands are published oracles and must NOT be widened.
 // Root-cause fixes applied (T-0301): free-float init now uses outdoor temp
-// and internal gains use 30% radiant fraction.  However, the 21-day warmup
-// already washes out initial-condition effects, and the radiant fraction alone
-// is insufficient to restore min_zone_temp into the ASHRAE band.
-// IGNORED: peak_zone_temp=46.5 vs band [41.6,44.8]°C (above) and
-// min_zone_temp=3.35 vs band [-6.4,-1.6]°C (above). Additional physics fixes
+// and internal gains use 30% radiant fraction.  T-0352 corrected a TOML parse
+// bug that silently dropped the radiant fraction before T-0301's fix could take
+// effect.  However, the 21-day warmup already washes out initial-condition
+// effects, and the radiant fraction alone is insufficient to restore
+// min_zone_temp into the ASHRAE band.
+// IGNORED: peak_zone_temp=46.2 vs band [41.6,44.8]°C (above) and
+// min_zone_temp=3.37 vs band [-6.4,-1.6]°C (above). Additional physics fixes
 // (S4/S5 warmup refinement, envelope conductance calibration, infiltration
 // model tuning) are needed alongside the applied root-cause corrections.
 #[test]
@@ -180,10 +183,8 @@ fn bestest_case_900ff() {
 // (ASHRAE 140-2017 Table B8-2).
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
-// IGNORED: annual_heating_energy=2171 vs band [2751,3803] kWh (below).
-// The 30% radiant fraction reduces apparent heating load for the same reasons
-// as Case 600 — the setback schedule amplifies the effect because the building
-// cools more overnight when radiant gains don't reach zone air.
+// T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
+// IGNORED: annual_heating_energy=2134 vs band [2751,3803] kWh (below).
 #[test]
 #[ignore = "annual heating energy below ASHRAE 140 band after radiant fraction fix (T-0301)"]
 fn bestest_case_640() {

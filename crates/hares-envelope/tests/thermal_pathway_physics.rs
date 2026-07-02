@@ -428,7 +428,7 @@ fn rc_network_exposes_ground_column() {
 /// Setup: single-zone model (3 inputs: outdoor, surface, zone-air), one opaque
 /// interior surface with `radiation_frac = 1.0` (all radiant gain routed to
 /// surface RC node).  A port carries 700 W convective + 300 W radiant (30/70
-/// split matching the BESTEST ASHRAE 140-2017 §5.2.4.3 specification).
+/// split matching the EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3).
 ///
 /// The production path calls both `apply_port_convective_inputs` and
 /// `apply_port_radiant_inputs`.  `zone_sensible_breakdown_debug` currently

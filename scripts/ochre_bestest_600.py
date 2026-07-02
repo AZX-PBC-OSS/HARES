@@ -103,13 +103,20 @@ DEADBAND_C = 0.0  # 600.toml specifies deadband_c = 0.0
 # Infiltration (matching 600.toml)
 INFILTRATION_ACH = 0.5
 
-# Internal gains (matching 600.toml)
+# Internal gains (matching 600.toml).  EnergyPlus BESTEST IDF OtherEquipment
+# Fraction Radiant = 0.3 (30% radiant, 70% convective).  Source: E+ I/O Reference
+# §Group-InternalGains, OtherEquipment object; E+ IDD V9-6-0-Energy+.idd N5 field.
+# This matches E+ v9.6 BESTEST test reference value.  ASHRAE 140-2017 Addendum a
+# §5.2.1.7 describes 60% radiant for occupants, not equipment; the 60% figure in
+# earlier script versions was a misattribution.
+#
+# OCHRE's model cannot inject radiant internal gains — it hardcodes Radiative Gain
+# Fraction = 0 (hpxml.py:1567) and combines convective+radiative into a single
+# sensible fraction (Equipment.py:80-84).  A FUTURE comment at Equipment.py:79-87
+# acknowledges this deficiency.  This script therefore runs OCHRE with OCHRE's
+# convention (0% radiant) to produce OCHRE-side reference data.  The discrepancy
+# is documented in review scr-03 Finding 3 and HARES ticket T-0352.
 INTERNAL_GAINS_W = 200.0
-# Note: OCHRE injects all internal gains convectively (Radiative Gain Fraction
-# = 0, hardcoded in hpxml.py:1567).  HARES 600.toml uses 30% radiant.
-# This script runs OCHRE with OCHRE's own convention (0% radiant) to produce
-# OCHRE-side reference data.  The radiant-fraction discrepancy is documented
-# in the review finding scr-03 Finding 3.
 
 # Surface optical properties (matching 600.toml)
 SOLAR_ABSORPTANCE = 0.6

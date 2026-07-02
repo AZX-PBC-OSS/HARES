@@ -13,6 +13,12 @@
 //!   2. Internal gains 100 % convective; EnergyPlus BESTEST IDF specifies
 //!      Fraction Radiant = 0.3 (30% of total gain is radiant).
 //!      Measured impact: −0.295 °C.
+//!      Note (T-0352): the radiant fraction was silently dropped by a TOML
+//!      parse bug in the BESTEST fixtures — the keys appeared after a [section]
+//!      header and were absorbed into that section's table, so
+//!      internal_gains_radiant_fraction was never read. The −0.295 °C
+//!      measurement above was taken from a direct code-level test, not from
+//!      the fixture path. The fixture parse bug is now fixed.
 //!
 //! Ruled out (measured delta ≈ 0 or wrong direction):
 //!   - RC discretization (2→4 concrete nodes): +0.029 °C (wrong direction)

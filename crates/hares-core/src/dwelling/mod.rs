@@ -10499,6 +10499,49 @@ occupancy = 1.0
         }
     }
 
+    /// Parse 600.toml fixture and verify the internal gains radiative fraction
+    /// matches the EnergyPlus BESTEST authoritative value.
+    ///
+    /// EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3 (30% radiant,
+    /// 70% convective). Source: E+ I/O Reference §Group-InternalGains,
+    /// OtherEquipment object; E+ IDD V9-6-0-Energy+.idd N5 field default=0 but
+    /// BESTEST IDF overrides to 0.3. This matches E+ v9.6 BESTEST test reference
+    /// value. The prior claim of 60% in audit documents was a misattribution
+    /// (the 60% figure refers to occupant sensible gain conventions, not
+    /// OtherEquipment); documented in docs/findings/consolidated.md §1.
+    #[test]
+    fn bestest_600_internal_gains_radiant_fraction_matches_energyplus() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let toml_str = fs::read_to_string(&base_path).expect("read 600.toml");
+        let config: SyntheticTomlConfig = toml::from_str(&toml_str).expect("parse 600.toml");
+
+        assert!(
+            config.internal_gains_w.is_some(),
+            "600.toml must have internal_gains_w"
+        );
+        assert!(
+            config.internal_gains_sensible_fraction.is_some(),
+            "600.toml must have internal_gains_sensible_fraction"
+        );
+        assert!(
+            config.internal_gains_radiant_fraction.is_some(),
+            "600.toml must have internal_gains_radiant_fraction"
+        );
+
+        let sensible_frac = config.internal_gains_sensible_fraction.unwrap();
+        let radiant_frac = config.internal_gains_radiant_fraction.unwrap();
+
+        assert!(
+            (sensible_frac - 1.0).abs() < 1e-9,
+            "600.toml sensible_fraction = {sensible_frac}, expected 1.0 (all-sensible BESTEST gains)"
+        );
+        assert!(
+            (radiant_frac - 0.3).abs() < 1e-9,
+            "600.toml radiant_fraction = {radiant_frac}, expected 0.3 (E+ BESTEST IDF FractionRadiant)"
+        );
+    }
+
     #[test]
     fn dwelling_equipment_creation_errors_on_unknown_class() {
         let registry = EquipmentRegistry::new();

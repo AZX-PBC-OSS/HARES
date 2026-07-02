@@ -45,6 +45,19 @@ is approximately **−0.22°C**.  This must be re-measured.
 correct specification for the BESTEST 900FF OtherEquipment is
 Fraction Radiant = 0.3 (30% of total gain is radiant).
 
+**TOML parse bug (T-0352)**: The BESTEST TOML fixtures placed
+`internal_gains_radiant_fraction` (and `internal_gains_sensible_fraction`,
+`internal_gains_constant`) after a `[section]` header (e.g. `[infiltration]`
+or `[setpoints]`). In TOML, keys after a `[table]` header belong to that
+table until the next header — so these fields were silently absorbed into
+the wrong section and never parsed into `SyntheticTomlConfig`'s top-level
+fields. The `internal_gains_w` field had a fallback to
+`config.infiltration.internal_gains_w`, but the other three fields had no
+fallback and were silently dropped. This means the radiant fraction was 0%
+(not 30%) in all BESTEST fixture runs before T-0352. The fix moved the
+fields to the true top level (before any `[section]` header) and added
+fallback logic for all four fields in `build_synthetic_building`.
+
 ### 2. Window interior LWR (B2) makes the zone COOLER, not warmer
 
 **consolidated.md (original) claims**: "+0.5–1.0°C (makes 900FF worse)"

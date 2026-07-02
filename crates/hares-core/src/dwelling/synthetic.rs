@@ -406,6 +406,12 @@ pub(crate) struct SyntheticInfiltrationConfig {
     /// in synthetic BESTEST-style fixtures.
     #[serde(default)]
     pub(crate) internal_gains_w: Option<f64>,
+    #[serde(default)]
+    pub(crate) internal_gains_constant: Option<bool>,
+    #[serde(default)]
+    pub(crate) internal_gains_sensible_fraction: Option<f64>,
+    #[serde(default)]
+    pub(crate) internal_gains_radiant_fraction: Option<f64>,
 }
 
 fn default_interior_zone() -> String {
@@ -806,9 +812,52 @@ pub(crate) fn build_synthetic_building(
             },
         ];
 
-        let is_constant = config.internal_gains_constant.unwrap_or(false);
-        let sensible_frac = config.internal_gains_sensible_fraction;
-        if is_constant || sensible_frac.is_some() {
+        let is_constant = config
+            .internal_gains_constant
+            .or_else(|| {
+                config
+                    .infiltration
+                    .as_ref()
+                    .and_then(|i| i.internal_gains_constant)
+            })
+            .unwrap_or(false);
+        let sensible_frac = config.internal_gains_sensible_fraction.or_else(|| {
+            config
+                .infiltration
+                .as_ref()
+                .and_then(|i| i.internal_gains_sensible_fraction)
+        });
+        let radiant_frac_toplevel_or_infilt =
+            config.internal_gains_radiant_fraction.or_else(|| {
+                config
+                    .infiltration
+                    .as_ref()
+                    .and_then(|i| i.internal_gains_radiant_fraction)
+            });
+        // Internal gains deliver all energy to the zone — no FractionLost.
+        // EnergyPlus convention (InternalHeatGains.cc:1958):
+        //   FractionConvected = 1 - (FractionLatent + FractionRadiant + FractionLost)
+        // With FractionLost = 0 for internal gains, the full accounting is:
+        //   radiant + convective + latent = 1.0
+        // where convective = sensible - radiant and latent = 1 - sensible.
+        // Assert this at startup so a misconfigured fixture fails immediately
+        // rather than producing silently wrong heat splits at runtime.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(sf) = sensible_frac {
+            let rf = radiant_frac_toplevel_or_infilt.unwrap_or(0.0);
+            let cf = sf - rf;
+            let lf = (1.0 - sf).max(0.0);
+            debug_assert!(
+                (rf + cf + lf - 1.0).abs() <= 1e-6,
+                "internal gains fraction accounting: radiant ({rf}) + convective ({cf}) + latent ({lf}) = {} (expected 1.0 ± 1e-6)",
+                rf + cf + lf,
+            );
+            debug_assert!(
+                rf >= 0.0 && rf <= sf,
+                "internal gains radiant_fraction ({rf}) must be in [0, sensible_fraction ({sf})]"
+            );
+        }
+        if is_constant || sensible_frac.is_some() || radiant_frac_toplevel_or_infilt.is_some() {
             let mut ext_children = Vec::new();
             if is_constant {
                 let flat_24 = std::iter::repeat_n("0.04167", 24)
@@ -849,7 +898,7 @@ pub(crate) fn build_synthetic_building(
                     children: Vec::new(),
                 });
             }
-            if let Some(rf) = config.internal_gains_radiant_fraction {
+            if let Some(rf) = radiant_frac_toplevel_or_infilt {
                 ext_children.push(hares_io::hpxml::building::XmlNode {
                     name: "FracRadiant".to_string(),
                     attrs: HashMap::new(),
