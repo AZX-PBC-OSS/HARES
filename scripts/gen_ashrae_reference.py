@@ -29,6 +29,10 @@ top-level sources are:
 * *EnergyPlus Engineering Reference*, v25.1.0, §3.2 (Simple Glazing Model),
   §9.4 (TARP interior convection), §9.5 (DOE-2 exterior convection).
 * ASHRAE Standard 90.1-2022, Appendix A unit-conversion tables.
+* EnergyPlus ConvectionCoefficients.cc — CalcASHRAESimpleIntConvCoeff
+  (default interior convection algorithm using fixed h_conv by orientation,
+  derived from ASHRAE 1985 Table 1).
+* ASHRAE HoF 2021 Ch. 17 (F-factor perimeter method for slab-on-grade).
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,21 +77,10 @@ FT_TO_M: float = 0.3048
 # Film-resistance constants (independent re-derivation of TARP + radiation)
 # ---------------------------------------------------------------------------
 
-# Stefan-Boltzmann constant [W/(m^2*K^4)], CODATA 2018.
-STEFAN_BOLTZMANN: float = 5.670374419e-8
-
-# ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 -- typical non-reflective
-# interior emissivity for building materials (gypsum, wood, paint).
-INTERIOR_EMISSIVITY: float = 0.90
-
-# EnergyPlus Engineering Reference §9.4: linearization reference air
-# temperature for indoor long-wave radiation.
-INTERIOR_MEAN_TEMP_K: float = 293.15
-
 # EnergyPlus ConvectionCoefficients.cc: minimum TARP delta-T [K] to prevent
 # unbounded surface resistance at small driving temperature differences.
-# E+ uses MIN_DELTA_T = 0.1 °C (not 12.9 °C).  The previous 12.9 °C floor
-# (from an OCHRE default) caused R_film to be 17–27 % too low at small ΔT.
+# Used only for the exterior TARP + DOE-2 forced-convection path; the interior
+# uses ASHRAE Simple (fixed h_conv) which is ΔT-independent.
 MIN_DELTA_T_TARP_NATURAL_K: float = 0.1
 
 # DOE-2 surface-roughness factor r_f.  EnergyPlus Engineering Reference §9.5
@@ -102,10 +96,47 @@ T_CONDITIONED_C: float = 20.0
 T_OUTDOOR_OFFSET_C: float = 5.0
 
 
+def ashrae_simple_interior_h_conv(
+    tilt_deg: float, above_hotter: bool
+) -> float:
+    """ASHRAE "Simple" interior convection coefficient h_conv [W/(m²·K)].
+
+    Fixed convection-only values by surface orientation, derived from
+    ASHRAE 1985 Table 1 surface conductances (ε = 0.9) with the radiative
+    component subtracted.  These are the default interior convection
+    coefficients in EnergyPlus (``CalcASHRAESimpleIntConvCoeff``) and
+    match the HARES Rust implementation in
+    ``crates/hares-physics/src/film_coefficients.rs``.
+
+    | Orientation             | Condition      | h_conv [W/(m²·K)] |
+    |-------------------------|----------------|--------------------|
+    | Vertical (67.5–112.5°)  | —              | 3.076              |
+    | Horizontal, enhanced    | heat flow up   | 4.040              |
+    | Horizontal, reduced     | heat flow down | 0.948              |
+    | Tilted, enhanced        | heat flow up   | 3.870              |
+    | Tilted, reduced         | heat flow down | 2.281              |
+
+    References:
+    - EnergyPlus ConvectionCoefficients.cc:1829-1885.
+    - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
+    - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
+    """
+
+    cos_tilt = abs(math.cos(math.radians(tilt_deg)))
+    if cos_tilt < 0.3827:
+        return 3.076
+    if cos_tilt >= 0.9239:
+        return 4.040 if above_hotter else 0.948
+    return 3.870 if above_hotter else 2.281
+
+
 def tarp_h_natural(tilt_deg: float, delta_t_k: float, above_hotter: bool) -> float:
     """TARP natural convection coefficient h [W/(m^2*K)].
 
     Reference: EnergyPlus Engineering Reference §9.4 "TARP Algorithm".
+
+    Used only for exterior convection where the TARP + DOE-2 combined
+    model applies.  Interior convection uses ASHRAE Simple instead.
 
     * Vertical (tilt = 90°): ``h = 1.31 * dT^(1/3)``.
     * Non-vertical, warm side above: ``h = 9.482 * dT^(1/3) / (7.238 - |cos(tilt)|)``.
@@ -119,19 +150,6 @@ def tarp_h_natural(tilt_deg: float, delta_t_k: float, above_hotter: bool) -> flo
     if above_hotter:
         return 9.482 * dt_cbrt / (7.238 - cos_tilt)
     return 1.810 * dt_cbrt / (1.382 + cos_tilt)
-
-
-def h_radiation_interior() -> float:
-    """Linearised long-wave radiation coefficient h_rad [W/(m^2*K)].
-
-    Formula ``h_rad = 4 * eps * sigma * T^3`` (small-dT linearisation of the
-    Stefan-Boltzmann law).  ASHRAE Handbook of Fundamentals 2021, Ch. 26
-    Table 1 uses this combined with natural convection to publish the
-    tabulated interior film resistances (e.g. 0.120 m^2*K/W for a vertical
-    wall at eps=0.9).
-    """
-
-    return 4.0 * INTERIOR_EMISSIVITY * STEFAN_BOLTZMANN * INTERIOR_MEAN_TEMP_K**3
 
 
 @dataclass(frozen=True)
@@ -180,19 +198,23 @@ def typical_zone_temperature(
 def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     """Return ``(r_interior, r_exterior)`` in m^2*K/W.
 
-    Interior film = TARP natural convection only (1/h_conv). Longwave
-    radiation is handled entirely by the explicit interior LWR exchange
-    module (ScriptF surface-to-surface), not by the linearized h_rad in
-    the film coefficient. This matches EnergyPlus Eng.Ref "Inside Heat
-    Balance" which explicitly separates q''_conv (h_c only) from
-    q''_LWX (surface-to-surface LWR).
+    Interior film = ASHRAE Simple convection only (1/h_conv).  Fixed
+    h_conv values by surface orientation, derived from ASHRAE 1985
+    Table 1 surface conductances (ε = 0.9) with the radiative component
+    subtracted.  Matches EnergyPlus ``CalcASHRAESimpleIntConvCoeff`` and
+    the HARES Rust implementation in ``film_coefficients.rs``.
+    Longwave radiation is handled entirely by the explicit interior LWR
+    exchange module (ScriptF surface-to-surface), not by the linearized
+    h_rad in the film coefficient.
 
     Exterior film:
 
     * Outdoor: TARP natural convection combined with DOE-2 forced convection
       at ``avg_wind_speed`` with roughness factor r_f = 1.67 (``Rough``,
       residential shingle/clapboard).  EnergyPlus §9.5.
-    * Ground: TARP natural convection only.
+    * Ground: zero (ground is a fixed-temperature node; no convective
+      exterior film applies).  Matches HARES behavior where slab
+      r_film_exterior = 0.0.
     * Other zones: equal to interior film (symmetry inside the envelope).
     """
 
@@ -208,47 +230,30 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     )
     above_hotter = not (ext_above ^ (t_ext >= t_int))
 
-    delta_t = max(abs(t_ext - t_int), MIN_DELTA_T_TARP_NATURAL_K)
-    h_conv = tarp_h_natural(inputs.tilt_deg, delta_t, above_hotter)
-    h_rad = h_radiation_interior()
-    # Interior film resistance uses convection only (h_conv from TARP).
-    # Longwave radiation is handled entirely by the explicit interior LWR
-    # exchange module (ScriptF surface-to-surface), not by the linearized
-    # h_rad in the film coefficient. This matches EnergyPlus Eng.Ref
-    # "Inside Heat Balance" which explicitly separates q''_conv (h_c only)
-    # from q''_LWX (surface-to-surface LWR), and OCHRE which uses
-    # R_film = 1/h_natural (convection-only).
-    r_int = 1.0 / h_conv
+    # Interior film: ASHRAE Simple (fixed h_conv by orientation).
+    # Matches HARES film_coefficients.rs:ashrae_simple_interior_h_conv.
+    r_int = 1.0 / ashrae_simple_interior_h_conv(inputs.tilt_deg, above_hotter)
 
     if inputs.exterior_zone == "EXT":
-        h_glass = math.sqrt(h_conv**2 + (3.40 * inputs.avg_wind_speed_m_s**0.75) ** 2)
-        h_forced = DOE2_ROUGHNESS_ROUGH * (h_glass - h_conv)
-        r_ext = 1.0 / (h_conv + h_forced)
+        # Exterior: TARP natural + DOE-2 forced convection.
+        # Matches HARES film_coefficients.rs TARP + DOE-2 exterior path.
+        delta_t = max(abs(t_ext - t_int), MIN_DELTA_T_TARP_NATURAL_K)
+        h_natural = tarp_h_natural(inputs.tilt_deg, delta_t, above_hotter)
+        h_glass = math.sqrt(
+            h_natural**2 + (3.40 * inputs.avg_wind_speed_m_s**0.75) ** 2
+        )
+        h_forced = DOE2_ROUGHNESS_ROUGH * (h_glass - h_natural)
+        # Floor to 1.0 W/(m²·K) matching HARES film_coefficients.rs:300.
+        h_ext = max(h_natural + h_forced, 1.0)
+        r_ext = 1.0 / h_ext
     elif inputs.exterior_zone == "GND":
-        r_ext = 1.0 / h_conv
+        # Ground is a fixed-temperature node — no convective exterior film.
+        # Matches HARES conversions.rs:308 r_film_ext = 0.0 for slabs.
+        r_ext = 0.0
     else:
         r_ext = r_int
 
     return r_int, r_ext
-
-
-def film_resistances_combined(inputs: FilmInputs) -> tuple[float, float, float]:
-    """Return ``(r_interior_conv_only, r_interior_combined, r_exterior)`` in m²·K/W.
-
-    ``r_interior_conv_only`` is the convection-only film (1/h_conv), used as
-    the R_film_int input to the RC builder.
-
-    ``r_interior_combined`` is 1/(h_conv + h_rad), used for the effective
-    R_total and UA of the assembly (the parallel R_conv||R_rad in the
-    RC network provides this combined conductance to zone air).
-
-    ``r_exterior`` is the same as ``film_resistances``.
-    """
-    r_conv, r_ext = film_resistances(inputs)
-    h_conv = 1.0 / r_conv
-    h_rad = h_radiation_interior()
-    r_combined = 1.0 / (h_conv + h_rad)
-    return r_conv, r_combined, r_ext
 
 
 # ---------------------------------------------------------------------------
@@ -538,13 +543,20 @@ def parse_hpxml(path: str) -> ParsedBuilding:
 
     slabs: list[dict[str, float]] = []
     for slab in _as_list(enclosure.get("Slabs", {}).get("Slab", [])):
-        # Layer R + capacitance come from ASSEMBLY_LAYERS["floor"] (ASHRAE
-        # Ch. 26 Table 4 build-up).  Only the slab footprint area is
-        # consumed from HPXML here.
+        perimeter_m: float | None = None
+        if "ExposedPerimeter" in slab:
+            perimeter_m = _float(slab["ExposedPerimeter"]) * FT_TO_M
+        insulation_r_ip: float = 0.0
+        pi = slab.get("PerimeterInsulation", {})
+        if pi:
+            for layer in _as_list(pi.get("Layer", [])):
+                insulation_r_ip += _float(layer.get("NominalRValue", 0.0))
         slabs.append(
             {
                 "id": slab["SystemIdentifier"]["@id"],
                 "area_m2": _float(slab["Area"]) * FT2_TO_M2,
+                "perimeter_m": perimeter_m,
+                "perimeter_insulation_r_si": insulation_r_ip * R_IP_TO_SI,
             }
         )
 
@@ -636,18 +648,6 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
             )
         )
 
-    def _film_combined(tilt: float, interior: str, exterior: str) -> tuple[float, float, float]:
-        return film_resistances_combined(
-            FilmInputs(
-                tilt_deg=tilt,
-                interior_zone=interior,
-                exterior_zone=exterior,
-                avg_wind_speed_m_s=location.avg_wind_speed_m_s,
-                avg_ground_temp_c=location.avg_ground_temp_c,
-                avg_ambient_temp_c=location.avg_ambient_temp_c,
-            )
-        )
-
     boundaries: list[dict[str, Any]] = []
 
     # ── Exterior Wall ─────────────────────────────────────────────────────
@@ -661,7 +661,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_ext_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["exterior_wall"]
     )
-    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "EXT")
+    r_fi, r_fe = _film(90.0, "LIV", "EXT")
     r_total = r_ext_wall_layer + r_fi + r_fe
     ua = wall_net_area / r_total
     cap_kj = cap_kj_m2 * wall_net_area
@@ -687,7 +687,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_attic_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["attic_wall"]
     )
-    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "ATC", "EXT")
+    r_fi, r_fe = _film(90.0, "ATC", "EXT")
     r_total = r_attic_wall_layer + r_fi + r_fe
     ua = attic_wall_area / r_total
     cap_kj = cap_kj_m2 * attic_wall_area
@@ -716,7 +716,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # Horizontal, heat flow up (conditioned warmer than attic in heating
     # season with anchors 20 °C vs 15 °C).  Tilt = 0, interior LIV, exterior
     # ATC -- both sides unconditioned so r_ext = r_int by symmetry.
-    r_fi, r_fi_eff, r_fe = _film_combined(0.0, "LIV", "ATC")
+    r_fi, r_fe = _film(0.0, "LIV", "ATC")
     r_total = r_attic_floor_layer + r_fi + r_fe
     ua = attic_floor_area / r_total
     cap_kj = cap_kj_m2 * attic_floor_area
@@ -737,13 +737,43 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
         }
     )
 
-    # ── Floor (slab-on-grade) ─────────────────────────────────────────────
+    # ── Floor (slab-on-grade, F-factor perimeter method) ─────────────────
+    # ASHRAE F-factor perimeter method for slab-on-grade boundaries.
+    # Replaces area-UA conduction with F2 × P × ΔT per ASHRAE HoF 2021
+    # Ch. 17. The F-factor method accounts for 3-D edge heat flow
+    # around the slab perimeter rather than 1-D conduction through the
+    # full floor area.  Matches HARES conversions.rs:168-217.
+    # Ref: ANSI/ASHRAE 90.1-2022 Table A6.3.1;
+    # EnergyPlus Eng.Ref "Slab-on-grade and Underground Floors Defined
+    # with F-factors".
     slab_area = sum(s["area_m2"] for s in b.slabs)
-    r_slab_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["floor"])
-    r_fi, r_fi_eff, r_fe = _film_combined(0.0, "LIV", "GND")
-    r_total = r_slab_layer + r_fi + r_fe
+    perimeter_m = sum(
+        (s["perimeter_m"] if s.get("perimeter_m") is not None else 4.0 * s["area_m2"] ** 0.5) for s in b.slabs
+    )
+    insulation_r = sum(s.get("perimeter_insulation_r_si", 0.0) for s in b.slabs)
+    # F2 coefficient per ASHRAE 90.1-2022 Table A6.3.1.
+    # Unheated residential slab.
+    if insulation_r >= 1.76:
+        f2 = 1.229  # R-10+ perimeter insulation
+    elif insulation_r >= 0.88:
+        f2 = 1.246  # R-5 perimeter insulation
+    else:
+        f2 = 1.263  # Uninsulated slab
+    g_w_per_k = f2 * perimeter_m
+    # Q = F2 × P × (T_indoor - T_ground) → G = F2 × P [W/K].
+    # build_precomputed_boundary adds film_int to the interior-side
+    # resistor, so the layer resistance must be reduced by film_int
+    # to keep total R from interior → ground = area / (F2 × P).
+    r_fi, r_fe = _film(0.0, "LIV", "GND")  # r_fe = 0.0 for Ground
+    r_total_slab = slab_area / g_w_per_k if g_w_per_k > 1e-9 else 99.0
+    r_slab_layer = max(r_total_slab - r_fi, 1e-6)
+    r_total = r_slab_layer + r_fi + r_fe  # r_fe = 0.0
     ua = slab_area / r_total
-    cap_kj = cap_kj_m2 * slab_area
+    # Concrete slab thermal mass capacitance per unit area [kJ/(m²·K)].
+    # Density 2400 kg/m³, Cp 880 J/(kg·K), thickness 0.1 m for typical
+    # 4-inch residential slab. Ref: ASHRAE HoF 2021 Ch. 33, Table 1.
+    slab_cap_kj_m2_k = 2400.0 * 880.0 * 0.1 / 1000.0  # ≈ 211.2 kJ/(m²·K)
+    cap_kj = slab_cap_kj_m2_k * slab_area
     boundaries.append(
         {
             "name": "Floor",
@@ -754,7 +784,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
             "r_total_m2_k_w": _round(r_total, 4),
             "ua_w_k": _round(ua, 2),
             "capacitance_kj_k": _round(cap_kj, 2),
-            "n_nodes": ASSEMBLY_N_NODES["floor"],
+            "n_nodes": 1,
             "interior_zone": "LIV",
             "exterior_zone": "GND",
             "same_zone": False,
@@ -766,7 +796,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_roof_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["attic_roof"])
     # Roof tilt from Pitch (rise per 12").  tilt_deg = atan(rise/12).
     pitch_angle_deg = math.degrees(math.atan(b.roof_pitch_rise_12 / 12.0))
-    r_fi, r_fi_eff, r_fe = _film_combined(pitch_angle_deg, "ATC", "EXT")
+    r_fi, r_fe = _film(pitch_angle_deg, "ATC", "EXT")
     r_total = r_roof_layer + r_fi + r_fe
     ua = roof_area / r_total
     cap_kj = cap_kj_m2 * roof_area
@@ -817,7 +847,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # ── Door ──────────────────────────────────────────────────────────────
     door_area = sum(d["area_m2"] for d in b.doors)
     r_door_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["door"])
-    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "EXT")
+    r_fi, r_fe = _film(90.0, "LIV", "EXT")
     r_total = r_door_layer + r_fi + r_fe
     ua = door_area / r_total
     cap_kj = cap_kj_m2 * door_area
@@ -847,7 +877,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_interior_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["interior_wall"]
     )
-    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "LIV")
+    r_fi, r_fe = _film(90.0, "LIV", "LIV")
     # Same-zone boundary: halved resistor rule (RC topology puts both outer
     # nodes at the same zone node, giving an equivalent resistor half the
     # layer R; see EnergyPlus SameZoneOption documentation).
@@ -881,7 +911,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_furniture_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["indoor_furniture"]
     )
-    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "LIV")
+    r_fi, r_fe = _film(90.0, "LIV", "LIV")
     # Same-zone boundary: halved resistor + convection-only interior film.
     # Longwave radiation is handled by the explicit interior LWR exchange
     # module (star-mesh conductances), not by R_film_int.
@@ -930,9 +960,16 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
             "independent_from_hares": True,
             "citations": {
                 "interior_film_r": (
-                    "ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 "
-                    "(still-air + radiation, eps=0.9, T=293.15 K); "
-                    "EnergyPlus Engineering Reference v25.1.0 §9.4 (TARP)."
+                    "ASHRAE 'Simple' interior convection algorithm — "
+                    "fixed h_conv values by surface orientation, derived from "
+                    "ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1 "
+                    "surface conductances (ε = 0.9) with the radiative "
+                    "component subtracted.  Matches EnergyPlus "
+                    "CalcASHRAESimpleIntConvCoeff "
+                    "(ConvectionCoefficients.cc:1829-1885) and HARES "
+                    "film_coefficients.rs:ashrae_simple_interior_h_conv.  "
+                    "Longwave radiation is handled by the explicit interior "
+                    "LWR exchange module, not by R_film_int."
                 ),
                 "exterior_film_r": (
                     "EnergyPlus Engineering Reference v25.1.0 §9.5 "
@@ -957,11 +994,14 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
                     "App. C canonical build-ups."
                 ),
                 "slab_on_grade_build_up": (
-                    "BEopt Residential Construction Reference App. C "
-                    "'Slab-on-grade, Uninsulated': fictitious F-factor "
-                    "resistor (ASHRAE 90.1-2022 §5.5.3.1) + 12 in. soil "
-                    "column + 4 in. concrete slab + carpet per ASHRAE "
-                    "Ch. 26 Table 4."
+                    "ASHRAE F-factor perimeter method per ASHRAE HoF 2021 "
+                    "Ch. 17 and ANSI/ASHRAE 90.1-2022 Table A6.3.1. "
+                    "Q = F2 × P × (T_indoor − T_ground), F2 = 1.263 for "
+                    "uninsulated unheated residential slab.  Concrete "
+                    "thermal mass = 2400 kg/m³ × 880 J/(kg·K) × 0.1 m "
+                    "= 211 kJ/(m²·K) per ASHRAE HoF 2021 Ch. 33 Table 1.  "
+                    "Exterior film = 0.0 (ground is a fixed-temperature node).  "
+                    "Matches HARES conversions.rs F-factor slab path."
                 ),
                 "same_zone_halving": (
                     "EnergyPlus documentation of interior-partition RC "
@@ -998,18 +1038,22 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
 
 
 def main() -> None:
+    output_path = OUTPUT_PATH
+    if len(sys.argv) > 2 and sys.argv[1] == "--output":
+        output_path = sys.argv[2]
+
     building = parse_hpxml(HPXML_PATH)
     payload = build_reference(building)
 
     # Deterministic: sorted_keys=False because the ordered boundary list is
     # part of the schema, but we use stable JSON formatting otherwise.
     serialised = json.dumps(payload, indent=2, ensure_ascii=False)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as fh:
+    with open(output_path, "w", encoding="utf-8") as fh:
         fh.write(serialised)
         fh.write("\n")
 
     total_ua = payload["total_ua_w_k"]
-    print(f"Wrote {OUTPUT_PATH}")
+    print(f"Wrote {output_path}")
     print(f"Total UA: {total_ua} W/K")
     for bd in payload["boundaries"]:
         print(

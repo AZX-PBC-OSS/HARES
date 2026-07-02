@@ -93,6 +93,17 @@ jobs:
       - run: uv sync --extra pybamm
       - run: bash scripts/check_ocv.sh
 
+  check-ashrae-reference:
+    name: "ASHRAE reference fixture sync"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --extra ochre
+      - run: bash scripts/check_ashrae_reference.sh
+
   bench-check:
     name: "cargo bench --no-run"
     runs-on: ubuntu-latest
