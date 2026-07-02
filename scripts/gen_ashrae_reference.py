@@ -124,10 +124,15 @@ def ashrae_simple_interior_h_conv(
 
     cos_tilt = abs(math.cos(math.radians(tilt_deg)))
     if cos_tilt < 0.3827:
-        return 3.076
-    if cos_tilt >= 0.9239:
-        return 4.040 if above_hotter else 0.948
-    return 3.870 if above_hotter else 2.281
+        result = 3.076
+    elif cos_tilt >= 0.9239:
+        result = 4.040 if above_hotter else 0.948
+    elif above_hotter:
+        result = 3.870
+    else:
+        result = 2.281
+    assert result > 0.0, f"film_coefficient invariant: h_conv must be > 0, got {result}"
+    return result
 
 
 def tarp_h_natural(tilt_deg: float, delta_t_k: float, above_hotter: bool) -> float:
@@ -232,7 +237,8 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
 
     # Interior film: ASHRAE Simple (fixed h_conv by orientation).
     # Matches HARES film_coefficients.rs:ashrae_simple_interior_h_conv.
-    r_int = 1.0 / ashrae_simple_interior_h_conv(inputs.tilt_deg, above_hotter)
+    h_conv_int = ashrae_simple_interior_h_conv(inputs.tilt_deg, above_hotter)
+    r_int = 1.0 / h_conv_int
 
     if inputs.exterior_zone == "EXT":
         # Exterior: TARP natural + DOE-2 forced convection.
@@ -253,6 +259,12 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     else:
         r_ext = r_int
 
+    print(
+        f"  film_resistances: {inputs.interior_zone}->{inputs.exterior_zone} "
+        f"tilt={inputs.tilt_deg:.1f}° "
+        f"h_conv_int={h_conv_int:.3f} r_int={r_int:.4f} "
+        f"r_ext={r_ext:.4f}"
+    )
     return r_int, r_ext
 
 
