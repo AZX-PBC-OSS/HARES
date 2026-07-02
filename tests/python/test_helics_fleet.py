@@ -1152,3 +1152,171 @@ def test_fleet_per_dwelling_voltage_valid_property_reflects_flag(
     orchestrator._sub_voltage_dwelling[0].push_double(0.97)
     orchestrator._read_subscriptions()
     assert orchestrator.per_dwelling_voltage_valid is True
+
+
+# ---------------------------------------------------------------------------
+# Stale-subscription tracking and registration completeness tests
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_stale_subscription_count_increases_when_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fleet subscription that never receives data increments stale count each timestep."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    for i in range(1, module.STALE_SUBSCRIPTION_THRESHOLD + 1):
+        orchestrator._read_subscriptions()
+        row = orchestrator.get_diagnostic_row()
+        if i < module.STALE_SUBSCRIPTION_THRESHOLD:
+            assert row["helics_stale_subscription_count"] == 0
+        else:
+            assert row["helics_stale_subscription_count"] >= 1
+        assert row["helics_update_mask"] == 0
+
+
+def test_fleet_stale_subscription_count_resets_on_data_arrival(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fleet stale count resets to 0 when a subscription receives data."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    for _ in range(5):
+        orchestrator._read_subscriptions()
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(1.0)
+    orchestrator._read_subscriptions()
+    row = orchestrator.get_diagnostic_row()
+    assert row["helics_stale_subscription_count"] == 0
+    assert row["helics_update_mask"] == 1
+
+
+def test_fleet_update_mask_shows_subscription_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fleet update mask reflects which subscriptions received data this timestep."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        control_topic="grid/control",
+    )
+
+    # No data -> mask = 0
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0
+
+    # Fleet-wide voltage only -> bit 0
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.95)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b01
+
+    # Both -> bits 0, 1
+    orchestrator._sub_voltage_all.push_double(0.95)
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"HVAC": {"type": "ThermalSetpoint", "heating_setpoint_c": 20.0, "cooling_setpoint_c": 24.0}})
+    )
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b11
+
+
+def test_fleet_update_mask_per_dwelling_voltage_bits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-dwelling voltage subscriptions each get their own mask bit."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+    )
+
+    # Dwelling 0 only -> bit 0
+    orchestrator._sub_voltage_dwelling[0].push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b001
+
+    # Dwellings 0 and 2 -> bits 0, 2
+    orchestrator._sub_voltage_dwelling[0].push_double(1.0)
+    orchestrator._sub_voltage_dwelling[2].push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b101
+
+    # All three -> bits 0, 1, 2
+    orchestrator._sub_voltage_dwelling[0].push_double(1.0)
+    orchestrator._sub_voltage_dwelling[1].push_double(1.0)
+    orchestrator._sub_voltage_dwelling[2].push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b111
+
+
+def test_fleet_diagnostic_row_includes_stale_and_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_diagnostic_row() includes helics_stale_subscription_count and helics_update_mask."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.95)
+    orchestrator._read_subscriptions()
+
+    row = orchestrator.get_diagnostic_row()
+    assert "helics_stale_subscription_count" in row
+    assert "helics_update_mask" in row
+    assert row["helics_stale_subscription_count"] == 0
+    assert row["helics_update_mask"] == 1
+
+
+def test_fleet_required_publication_missing_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing required publication key appears in the fleet's returned missing set."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications(required_keys={"grid/fleet_1/nonexistent_signal"})
+    orchestrator.register_subscriptions()
+
+    missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
+    assert "nonexistent_signal" in " ".join(sorted(missing_pubs))
+    assert len(missing_subs) == 0
+
+
+def test_fleet_required_subscription_missing_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing required subscription key appears in the fleet's returned missing set."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        required_keys={"grid/nonexistent_topic"},
+    )
+
+    missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
+    assert "nonexistent_topic" in " ".join(sorted(missing_subs))
+    assert len(missing_pubs) == 0

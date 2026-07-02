@@ -954,3 +954,75 @@ def test_zone_temperature_publication_subscribed_by_aggregator() -> None:
         )
     finally:
         _disconnect_broker(broker)
+
+
+def test_mismatched_subscription_topic_logs_stale_warning() -> None:
+    """Dwelling subscribes to a misspelled topic; stale warning fires.
+
+    The dwelling registers a subscription to ``grid/voltage_typo`` while the
+    aggregator publishes to ``grid/voltage``.  After 10 consecutive timesteps
+    without an update the dwelling logs a stale-subscription warning and the
+    diagnostic row reflects the stale count.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling(bldg_id=88)
+        federate_ready = threading.Event()
+        orchestrator_ref: list[HELICSDwelling] = []
+
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling,
+                fed_name="house_stale",
+                broker_address=f"localhost:{broker_port}",
+            )
+            orchestrator_ref.append(helics_dwelling)
+            helics_dwelling.register_publications()
+            # Subscribe to a topic the aggregator does NOT publish to
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage_typo")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-stale")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port, time_res_s=_TIME_RES_S)
+        aggregator = helics.helicsCreateValueFederate("aggregator_stale", fedinfo)
+        sub_power = aggregator.register_subscription("house_stale/total_power_kw", "double")
+        # Aggregator publishes to the correct topic (not to voltage_typo)
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        try:
+            aggregator.enter_executing_mode()
+            for step_idx in range(_TOTAL_STEPS):
+                pub_voltage.publish(1.0)
+                aggregator.request_time(step_idx * _TIME_RES_S)
+                if sub_power.is_updated():
+                    _ = float(sub_power.double)
+        finally:
+            aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert len(orchestrator_ref) == 1
+        orch = orchestrator_ref[0]
+        # After _TOTAL_STEPS (=10) steps with no data, the stale count should
+        # reflect the unresponsive subscription.
+        row = orch.get_diagnostic_row()
+        assert row["helics_stale_subscription_count"] >= 1, (
+            "Expected at least one stale subscription after %d steps without data; "
+            "got stale_count=%d, update_mask=%d"
+            % (_TOTAL_STEPS, row["helics_stale_subscription_count"], row["helics_update_mask"])
+        )
+        assert row["helics_update_mask"] == 0, (
+            "No subscription should have received data; got update_mask=%d"
+            % row["helics_update_mask"]
+        )
+    finally:
+        _disconnect_broker(broker)

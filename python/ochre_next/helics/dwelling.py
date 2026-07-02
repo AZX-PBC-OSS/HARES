@@ -92,6 +92,10 @@ THERMAL_SETPOINT_COOL_MAX_C = 60.0
 DUTY_CYCLE_ON_FRACTION_MIN = 0.0
 DUTY_CYCLE_ON_FRACTION_MAX = 1.0
 
+# Number of consecutive timesteps a subscription can go without receiving
+# data before a stale-subscription warning is emitted.
+STALE_SUBSCRIPTION_THRESHOLD = 10
+
 
 def _validate_control_signal(
     signal_body: dict[str, Any],
@@ -327,8 +331,17 @@ class HELICSDwelling:
         self._last_price_negative = False
         self._control_clamped = 0
         self._range_violations_total = 0
+        self._stale_counts: dict[str, int] = {}
+        self._update_mask: int = 0
+        self._stale_subscription_count: int = 0
+        self._required_publication_keys: set[str] = set()
+        self._required_subscription_keys: set[str] = set()
 
-    def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
+    def register_publications(
+        self,
+        prefix: str = "",
+        required_keys: set[str] | None = None,
+    ) -> list[HELICSPublicationConfig]:
         """Register typed double publications and return config metadata.
 
         HELICS prepends the federate name to every local publication name, so
@@ -338,6 +351,12 @@ class HELICSDwelling:
 
         The ``prefix`` is a namespace prepended to the *config* key returned
         to callers (e.g. ``"grid/"``), not to the local publication name.
+
+        Args:
+            prefix: Namespace prepended to each returned config key.
+            required_keys: Optional set of fully-qualified publication keys that
+                must be registered. After entering execution mode, any missing
+                required key is logged as an error.
         """
         power_name = "total_power_kw"
         reactive_name = "reactive_power_kvar"
@@ -397,6 +416,8 @@ class HELICSDwelling:
         configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{pv_key}"))
 
         self._publication_configs = configs
+        if required_keys is not None:
+            self._required_publication_keys = set(required_keys)
         _LOG.info(
             "HELICS federate %s registered %d publications: %s",
             self._fed_name,
@@ -410,8 +431,18 @@ class HELICSDwelling:
         voltage_topic: str | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register subscriptions for grid voltage, controls, and price."""
+        """Register subscriptions for grid voltage, controls, and price.
+
+        Args:
+            voltage_topic: HELICS topic for grid voltage (per-unit).
+            control_topic: HELICS topic for JSON control messages.
+            price_topic: HELICS topic for real-time electricity price.
+            required_keys: Optional set of fully-qualified subscription keys that
+                must be registered. After entering execution mode, any missing
+                required key is logged as an error.
+        """
         configs: list[HELICSSubscriptionConfig] = []
 
         if voltage_topic is not None:
@@ -427,6 +458,14 @@ class HELICSDwelling:
             configs.append(HELICSSubscriptionConfig(key=price_topic, type="double"))
 
         self._subscription_configs = configs
+        if required_keys is not None:
+            self._required_subscription_keys = set(required_keys)
+        _LOG.info(
+            "HELICS federate %s registered %d subscriptions: %s",
+            self._fed_name,
+            len(configs),
+            [c.key for c in configs],
+        )
         return list(self._subscription_configs)
 
     def run(self) -> None:
@@ -447,6 +486,8 @@ class HELICSDwelling:
                 raise RuntimeError("Publications are not registered; call register_publications() first")
 
             self._fed.enter_executing_mode()
+            self._verify_registration_completeness()
+            self._verify_helics_counts()
             for timestamp in self._timesteps:
                 exit_time_s = (timestamp - self._start_time).total_seconds() + self._period_s
                 granted = float(self._fed.request_time(exit_time_s))
@@ -490,9 +531,49 @@ class HELICSDwelling:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
         self._control_clamped = 0
-        try:
+        self._update_mask = 0
+        self._stale_subscription_count = 0
 
-            if self._sub_voltage is not None and self._sub_voltage.is_updated():
+        # Call is_updated() exactly once per registered subscription so that
+        # stale tracking and business logic share the same result.  Building
+        # _sub_objs in the same order as register_subscriptions ensures the
+        # zip below matches _subscription_configs.
+        _sub_objs: list[HelicsSubscriptionLike] = []
+        if self._sub_voltage is not None:
+            _sub_objs.append(self._sub_voltage)
+        if self._sub_control is not None:
+            _sub_objs.append(self._sub_control)
+        if self._sub_price is not None:
+            _sub_objs.append(self._sub_price)
+
+        _updates: list[bool] = []
+        for sub_obj in _sub_objs:
+            _updates.append(sub_obj.is_updated())
+
+        # Map subscription object → its is_updated() result for the business logic.
+        _update_by_sub = dict(zip(_sub_objs, _updates))
+
+        for bit_idx, (config, sub_obj, updated) in enumerate(
+            zip(self._subscription_configs, _sub_objs, _updates)
+        ):
+            topic = config.key
+            if updated:
+                self._stale_counts[topic] = 0
+                self._update_mask |= 1 << bit_idx
+            else:
+                count = self._stale_counts.get(topic, 0) + 1
+                self._stale_counts[topic] = count
+                if count >= STALE_SUBSCRIPTION_THRESHOLD:
+                    self._stale_subscription_count += 1
+                    if count == STALE_SUBSCRIPTION_THRESHOLD:
+                        _LOG.warning(
+                            "Subscription '%s' has gone %d consecutive timesteps without data",
+                            topic,
+                            count,
+                        )
+
+        try:
+            if self._sub_voltage is not None and _update_by_sub.get(self._sub_voltage, False):
                 try:
                     voltage_pu = float(self._sub_voltage.double)
                     if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
@@ -508,7 +589,7 @@ class HELICSDwelling:
                 except Exception as exc:
                     _LOG.warning("Failed to apply grid voltage: %s", exc)
 
-            if self._sub_price is not None and self._sub_price.is_updated():
+            if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
                 try:
                     price = float(self._sub_price.double)
                     if price < 0.0:
@@ -521,7 +602,9 @@ class HELICSDwelling:
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
-            if self._sub_control is None or not self._sub_control.is_updated():
+            if self._sub_control is None:
+                return
+            if not _update_by_sub.get(self._sub_control, False):
                 return
 
             payload = self._sub_control.string
@@ -557,6 +640,75 @@ class HELICSDwelling:
                 self._range_violations_total += 1
             if self._last_price_negative:
                 self._range_violations_total += 1
+
+    def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
+        """Check that every required publication and subscription key is registered.
+
+        Logs an error for each required key that was not registered.  This is a
+        no-op when no required keys were configured.
+
+        Returns:
+            (missing_publications, missing_subscriptions) — the sets of required
+            keys that were not registered.  Callers can inspect these to verify
+            completeness without capturing log output.
+        """
+        registered_pub_keys: set[str] = {c.key for c in self._publication_configs}
+        missing_pubs = self._required_publication_keys - registered_pub_keys
+        for key in sorted(missing_pubs):
+            _LOG.error(
+                "Required publication '%s' was not registered; "
+                "external federates subscribing to this topic will receive defaults",
+                key,
+            )
+
+        registered_sub_keys: set[str] = {c.key for c in self._subscription_configs}
+        missing_subs = self._required_subscription_keys - registered_sub_keys
+        for key in sorted(missing_subs):
+            _LOG.error(
+                "Required subscription '%s' was not registered; "
+                "incoming data on this topic will not reach the dwelling model",
+                key,
+            )
+
+        return missing_pubs, missing_subs
+
+    def _verify_helics_counts(self) -> None:
+        """Query HELICS for actual publication and input counts.
+
+        Compares the HELICS-reported counts against the configured config
+        lists and logs a warning on mismatch.  Gracefully degrades when the
+        HELICS query API is unavailable.
+        """
+        try:
+            actual_pub_count = helics.helicsFederateGetPublicationCount(self._fed)
+        except AttributeError:
+            # helicsFederateGetPublicationCount not exposed by this HELICS build
+            return
+        except Exception:
+            return
+
+        expected_pub_count = len(self._publication_configs)
+        if actual_pub_count != expected_pub_count:
+            _LOG.warning(
+                "HELICS publication count mismatch: expected %d, HELICS reports %d",
+                expected_pub_count,
+                actual_pub_count,
+            )
+
+        try:
+            actual_input_count = helics.helicsFederateGetInputCount(self._fed)
+        except AttributeError:
+            return
+        except Exception:
+            return
+
+        expected_input_count = len(self._subscription_configs)
+        if actual_input_count != expected_input_count:
+            _LOG.warning(
+                "HELICS subscription (input) count mismatch: expected %d, HELICS reports %d",
+                expected_input_count,
+                actual_input_count,
+            )
 
     def _publish_results(self) -> None:
         telemetry = self._dwelling.telemetry()
@@ -645,7 +797,9 @@ class HELICSDwelling:
         """Return a dict of HELICS diagnostic fields for this timestep.
 
         Keys: ``helics_voltage_valid`` (bool), ``helics_price_valid`` (bool),
-        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int).
+        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int),
+        ``helics_stale_subscription_count`` (int),
+        ``helics_update_mask`` (int).
 
         Callers can collect these per-timestep and write to a CSV or telemetry sink.
         """
@@ -654,6 +808,8 @@ class HELICSDwelling:
             "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,
+            "helics_stale_subscription_count": self._stale_subscription_count,
+            "helics_update_mask": self._update_mask,
         }
 
     def _peek_timing(self, dwelling: PyDwelling) -> tuple[datetime, float]:

@@ -1173,3 +1173,179 @@ def test_helics_price_valid_property_reflects_flag(
     orchestrator._read_subscriptions()
     assert orchestrator.helics_price_valid is False
 
+
+def test_stale_subscription_count_increases_when_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscription that never receives data increments stale count each timestep."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    # Call _read_subscriptions THRESHOLD times without pushing any data
+    for i in range(1, module.STALE_SUBSCRIPTION_THRESHOLD + 1):
+        orchestrator._read_subscriptions()
+        row = orchestrator.get_diagnostic_row()
+        if i < module.STALE_SUBSCRIPTION_THRESHOLD:
+            assert row["helics_stale_subscription_count"] == 0
+        else:
+            assert row["helics_stale_subscription_count"] >= 1
+        assert row["helics_update_mask"] == 0  # no subscription received data
+
+
+def test_stale_subscription_count_resets_on_data_arrival(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale count resets to 0 when a subscription receives data."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    # Build up 5 stale timesteps
+    for _ in range(5):
+        orchestrator._read_subscriptions()
+
+    # Push data and read — stale count should reset
+    orchestrator._sub_voltage.push_double(1.0)
+    orchestrator._read_subscriptions()
+    row = orchestrator.get_diagnostic_row()
+    assert row["helics_stale_subscription_count"] == 0
+    assert row["helics_update_mask"] == 1  # bit 0 = voltage
+
+
+def test_update_mask_shows_all_subscription_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Update mask reflects which subscriptions received data this timestep."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        control_topic="grid/control",
+        price_topic="grid/price",
+    )
+
+    # No data → mask = 0
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0
+
+    # Voltage only → bit 0
+    orchestrator._sub_voltage.push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b001
+
+    # Voltage + price → bits 0, 2
+    orchestrator._sub_voltage.push_double(1.0)
+    orchestrator._sub_price.push_double(0.15)
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b101
+
+    # All three → bits 0, 1, 2
+    orchestrator._sub_voltage.push_double(1.0)
+    orchestrator._sub_price.push_double(0.15)
+    orchestrator._sub_control.push_string(
+        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_kw": 3.0}})
+    )
+    orchestrator._read_subscriptions()
+    assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b111
+
+
+def test_publication_list_available_from_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The list of registered publications is returned from register_publications()."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    pubs = orchestrator.register_publications()
+
+    pub_keys = [p.key for p in pubs]
+    assert "house_1/total_power_kw" in pub_keys
+    assert "house_1/reactive_power_kvar" in pub_keys
+
+
+def test_subscription_list_available_from_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The list of registered subscriptions is returned from register_subscriptions()."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    subs = orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        control_topic="grid/control",
+    )
+
+    sub_keys = [s.key for s in subs]
+    assert "grid/voltage" in sub_keys
+    assert "grid/control" in sub_keys
+
+
+def test_required_publication_missing_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing required publication key appears in the returned missing set."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications(required_keys={"grid/house_1/nonexistent_signal"})
+    orchestrator.register_subscriptions()
+
+    missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
+    assert "nonexistent_signal" in " ".join(sorted(missing_pubs))
+    assert len(missing_subs) == 0
+
+
+def test_required_subscription_missing_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing required subscription key appears in the returned missing set."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        required_keys={"grid/nonexistent_voltage_topic"},
+    )
+
+    missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
+    assert "nonexistent_voltage_topic" in " ".join(sorted(missing_subs))
+    assert len(missing_pubs) == 0
+
+
+def test_diagnostic_row_includes_stale_and_mask_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_diagnostic_row() includes helics_stale_subscription_count and helics_update_mask."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+    orchestrator._sub_voltage.push_double(0.95)
+    orchestrator._read_subscriptions()
+
+    row = orchestrator.get_diagnostic_row()
+    assert "helics_stale_subscription_count" in row
+    assert "helics_update_mask" in row
+    assert row["helics_stale_subscription_count"] == 0
+    assert row["helics_update_mask"] == 1  # voltage received data
+
