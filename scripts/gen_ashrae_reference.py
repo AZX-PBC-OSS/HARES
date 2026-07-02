@@ -77,10 +77,17 @@ FT_TO_M: float = 0.3048
 # Film-resistance constants (independent re-derivation of TARP + radiation)
 # ---------------------------------------------------------------------------
 
-# EnergyPlus ConvectionCoefficients.cc: minimum TARP delta-T [K] to prevent
-# unbounded surface resistance at small driving temperature differences.
-# Used only for the exterior TARP + DOE-2 forced-convection path; the interior
-# uses ASHRAE Simple (fixed h_conv) which is ΔT-independent.
+# EnergyPlus ConvectionCoefficients.cc `MIN_DELTA_T` = 0.1 K — the TARP-specific
+# delta-T floor that prevents unbounded surface resistance when the driving
+# temperature difference approaches zero.  This value matches the EnergyPlus
+# source guard (ConvectionCoefficients.cc) and the HARES Rust implementation
+# (film_coefficients.rs `(t_ext - t_int).abs().max(0.1)`).
+#
+# Used only for the exterior TARP natural + DOE-2 forced-convection path.
+# Interior film resistance uses ASHRAE Simple (fixed h_conv by orientation,
+# independent of ΔT), matching HARES's interior convection algorithm.
+# The TARP natural convection function itself is also used for exterior only;
+# interior convection follows EnergyPlus's default `CalcASHRAESimpleIntConvCoeff`.
 MIN_DELTA_T_TARP_NATURAL_K: float = 0.1
 
 # DOE-2 surface-roughness factor r_f.  EnergyPlus Engineering Reference §9.5
@@ -243,7 +250,9 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     if inputs.exterior_zone == "EXT":
         # Exterior: TARP natural + DOE-2 forced convection.
         # Matches HARES film_coefficients.rs TARP + DOE-2 exterior path.
-        delta_t = max(abs(t_ext - t_int), MIN_DELTA_T_TARP_NATURAL_K)
+        raw_dt = abs(t_ext - t_int)
+        floored = raw_dt < MIN_DELTA_T_TARP_NATURAL_K
+        delta_t = max(raw_dt, MIN_DELTA_T_TARP_NATURAL_K)
         h_natural = tarp_h_natural(inputs.tilt_deg, delta_t, above_hotter)
         h_glass = math.sqrt(
             h_natural**2 + (3.40 * inputs.avg_wind_speed_m_s**0.75) ** 2
@@ -256,8 +265,14 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
         # Ground is a fixed-temperature node — no convective exterior film.
         # Matches HARES conversions.rs:308 r_film_ext = 0.0 for slabs.
         r_ext = 0.0
+        delta_t = 0.0
+        h_natural = 0.0
+        floored = False
     else:
         r_ext = r_int
+        delta_t = 0.0
+        h_natural = 0.0
+        floored = False
 
     print(
         f"  film_resistances: {inputs.interior_zone}->{inputs.exterior_zone} "
@@ -265,6 +280,12 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
         f"h_conv_int={h_conv_int:.3f} r_int={r_int:.4f} "
         f"r_ext={r_ext:.4f}"
     )
+    if inputs.exterior_zone == "EXT":
+        dt_tag = " (FLOORED)" if floored else ""
+        print(
+            f"    exterior TARP: raw_ΔT={raw_dt:.3f}K → δT={delta_t:.3f}K{dt_tag} "
+            f"h_natural={h_natural:.4f}"
+        )
     return r_int, r_ext
 
 
