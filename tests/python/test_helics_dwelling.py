@@ -150,6 +150,8 @@ class _FakeDwelling:
         log: list[tuple[Any, ...]],
         *,
         raise_on_step: int | None = None,
+        n_zones: int = 1,
+        n_equipment: int = 1,
     ) -> None:
         self._log = log
         self._raise_on_step = raise_on_step
@@ -162,6 +164,13 @@ class _FakeDwelling:
         self.grid_voltage_values: list[float] = []
         self.price_signals: list[dict[str, float | None]] = []
         self.applied_controls: list[tuple[str, Any]] = []
+        self._n_zones = n_zones
+        self._n_equipment = n_equipment
+        self._zone_temps = [21.5] * n_zones
+        self._equip_powers = [1.0] * n_equipment
+        self._equip_socs = [0.5] * n_equipment
+        self._equip_modes = [1.0] * n_equipment
+        self._equip_names = [f"Equip_{i}" for i in range(n_equipment)]
 
     def timesteps(self) -> Iterator[datetime]:
         return iter(self._times)
@@ -176,7 +185,38 @@ class _FakeDwelling:
     def telemetry(self) -> Any:
         idx = max(self._step_count - 1, 0)
         p_kw, q_kvar = self._telemetry_values[idx]
-        return SimpleNamespace(total_power_kw=p_kw, reactive_power_kvar=q_kvar)
+
+        zt = self._zone_temps
+        en = self._equip_names
+        ep = self._equip_powers
+        es = self._equip_socs
+        em = self._equip_modes
+
+        class _FakeZoneDict(dict):
+            pass
+
+        class _FakeEquipDict(dict):
+            pass
+
+        zone_dict = _FakeZoneDict({
+            "names": [f"Zone_{i}" for i in range(self._n_zones)],
+            "temperature_c": list(zt),
+        })
+
+        equip_dict = _FakeEquipDict({
+            "names": list(en),
+            "power_kw": list(ep),
+            "soc": list(es),
+            "modes": list(em),
+        })
+
+        return SimpleNamespace(
+            total_power_kw=p_kw,
+            reactive_power_kvar=q_kvar,
+            zone=lambda: zone_dict,
+            equipment=lambda: equip_dict,
+            timestep_index=self._step_count,
+        )
 
     def set_grid_voltage(self, voltage_pu: float) -> None:
         self.grid_voltage_values.append(voltage_pu)
@@ -271,6 +311,11 @@ def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch
     assert [p.key for p in pubs] == [
         "grid/house_1/total_power_kw",
         "grid/house_1/reactive_power_kvar",
+        "grid/house_1/zone_0/temp_air_c",
+        "grid/house_1/equipment_0/power_kw",
+        "grid/house_1/equipment_0/soc_pct",
+        "grid/house_1/equipment_0/operating_mode",
+        "grid/house_1/pv_generation_kw",
     ]
 
     subs = orchestrator.register_subscriptions(
@@ -754,4 +799,146 @@ def test_set_publication_info_attaches_unit_metadata(
     reactive_pub = fed.publications["reactive_power_kvar"]
     assert power_pub._info == "units=kW"
     assert reactive_pub._info == "units=kvar"
+
+
+def test_register_publications_includes_zone_temperature_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log, n_zones=2)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    assert "house_1/zone_0/temp_air_c" in keys
+    assert "house_1/zone_1/temp_air_c" in keys
+
+
+def test_register_publications_includes_equipment_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log, n_equipment=3)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    assert "house_1/equipment_0/power_kw" in keys
+    assert "house_1/equipment_0/soc_pct" in keys
+    assert "house_1/equipment_0/operating_mode" in keys
+    assert "house_1/equipment_2/power_kw" in keys
+    assert "house_1/equipment_2/soc_pct" in keys
+    assert "house_1/equipment_2/operating_mode" in keys
+
+
+def test_register_publications_includes_pv_generation_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    assert "house_1/pv_generation_kw" in keys
+
+
+def test_publish_results_outputs_zone_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log, n_zones=1)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    # Simulate a step
+    dwelling._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    zone_pub = fed.publications["zone_0/temp_air_c"]
+    assert zone_pub.published == [21.5]
+
+
+def test_publish_results_outputs_equipment_soc_as_percentage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log, n_equipment=2)
+    dwelling._equip_socs = [0.45, 0.80]
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    dwelling._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    soc_pub_0 = fed.publications["equipment_0/soc_pct"]
+    soc_pub_1 = fed.publications["equipment_1/soc_pct"]
+    assert soc_pub_0.published == [45.0]  # 0.45 * 100
+    assert soc_pub_1.published == [80.0]  # 0.80 * 100
+
+
+def test_publish_results_outputs_equipment_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log, n_equipment=1)
+    dwelling._equip_modes = [2.0]
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    dwelling._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    mode_pub = fed.publications["equipment_0/operating_mode"]
+    assert mode_pub.published == [2.0]
+
+
+def test_compute_pv_generation_sums_negative_power_from_pv_equipment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    class _PvTelemetry:
+        def zone(self):
+            return {"names": [], "temperature_c": []}
+
+        def equipment(self):
+            return {
+                "names": ["PV_Array", "Battery", "Load"],
+                "power_kw": [-5.0, 0.0, 2.0],
+                "soc": [0.0, 0.5, 0.0],
+                "modes": [0.0, 0.0, 0.0],
+            }
+
+    telemetry = _PvTelemetry()
+    pv_kw = module.HELICSDwelling._compute_pv_generation(telemetry)
+    assert pv_kw == 5.0
+
+
+def test_compute_pv_generation_zero_when_no_pv_equipment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    class _NoPvTelemetry:
+        def zone(self):
+            return {"names": [], "temperature_c": []}
+
+        def equipment(self):
+            return {
+                "names": ["Battery", "Load"],
+                "power_kw": [0.0, 2.0],
+                "soc": [0.5, 0.0],
+                "modes": [0.0, 0.0],
+            }
+
+    telemetry = _NoPvTelemetry()
+    pv_kw = module.HELICSDwelling._compute_pv_generation(telemetry)
+    assert pv_kw == 0.0
 

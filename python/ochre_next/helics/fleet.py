@@ -17,6 +17,29 @@ All publication keys and their expected physical units:
 ``{prefix}{fed_name}/dwelling_{index}/reactive_power_kvar``
     Per-dwelling reactive power in kilovolt-amperes reactive (kvar).
 
+``{prefix}{fed_name}/aggregate_zone_temp_c``
+    Mean zone indoor air temperature across the fleet in degrees Celsius (degC).
+
+``{prefix}{fed_name}/aggregate_soc_pct``
+    Mean equipment state of charge across the fleet as a percentage (0-100).
+
+``{prefix}{fed_name}/dwelling_{index}/zone_{zone_index}/temp_air_c``
+    Per-dwelling zone indoor air temperature in degrees Celsius (degC).
+
+``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/power_kw``
+    Per-dwelling, per-equipment active power in kilowatts (kW).
+
+``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/soc_pct``
+    Per-dwelling, per-equipment state of charge as a percentage (0-100).
+
+``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/operating_mode``
+    Per-dwelling, per-equipment operating mode as a numeric code (see
+    ``OperatingMode`` in ``hares-types``).
+
+Zone and equipment counts are queried per-dwelling at registration time so
+heterogeneous fleets (dwellings with different zone/equipment rosters) each
+get their own correctly-sized publication surface.
+
 Expected HELICS subscription units
 -----------------------------------
 
@@ -103,6 +126,13 @@ class HELICSFleet:
         self._pub_dwelling_power: list[HelicsPublicationLike] = []
         self._pub_dwelling_reactive: list[HelicsPublicationLike] = []
 
+        self._pub_aggregate_zone_temp: HelicsPublicationLike | None = None
+        self._pub_aggregate_soc: HelicsPublicationLike | None = None
+        self._pub_dwelling_zone_temp: list[list[HelicsPublicationLike]] = []
+        self._pub_dwelling_equipment_power: list[list[HelicsPublicationLike]] = []
+        self._pub_dwelling_equipment_soc: list[list[HelicsPublicationLike]] = []
+        self._pub_dwelling_equipment_mode: list[list[HelicsPublicationLike]] = []
+
         self._sub_voltage_all: HelicsSubscriptionLike | None = None
         self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
         self._sub_control: HelicsSubscriptionLike | None = None
@@ -135,11 +165,12 @@ class HELICSFleet:
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
-        configs = [
+        configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_power_name}"),
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_reactive_name}"),
         ]
 
+        # Per-dwelling power and reactive (existing)
         for dwelling_index in range(self._n_dwellings):
             power_name = f"dwelling_{dwelling_index}/total_power_kw"
             reactive_name = f"dwelling_{dwelling_index}/reactive_power_kvar"
@@ -152,7 +183,75 @@ class HELICSFleet:
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
 
+        # Aggregate zone temperature publication (mean across fleet)
+        agg_zone_temp_name = "aggregate_zone_temp_c"
+        self._pub_aggregate_zone_temp = self._fed.register_publication(agg_zone_temp_name, "double")
+        _set_publication_info(self._pub_aggregate_zone_temp, "units=degC")
+        configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{agg_zone_temp_name}"))
+
+        # Aggregate SOC publication (mean across fleet)
+        agg_soc_name = "aggregate_soc_pct"
+        self._pub_aggregate_soc = self._fed.register_publication(agg_soc_name, "double")
+        _set_publication_info(self._pub_aggregate_soc, "units=pct")
+        configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{agg_soc_name}"))
+
+        # Per-dwelling zone and equipment publications — each dwelling's
+        # publication surface is sized to its own telemetry shape so
+        # heterogeneous fleets (different zone/equipment counts per
+        # dwelling) get the correct publications.
+        self._pub_dwelling_zone_temp = []
+        self._pub_dwelling_equipment_power = []
+        self._pub_dwelling_equipment_soc = []
+        self._pub_dwelling_equipment_mode = []
+        for dwelling_index in range(self._n_dwellings):
+            dwelling_telemetry = self._fleet.telemetry(dwelling_index)
+            zonedata = dwelling_telemetry.zone()
+            zone_count = len(list(zonedata.get("names", [])))
+            equipdata = dwelling_telemetry.equipment()
+            equip_count = len(list(equipdata.get("names", [])))
+
+            dwelling_zone_pubs: list[HelicsPublicationLike] = []
+            for zi in range(zone_count):
+                key = f"dwelling_{dwelling_index}/zone_{zi}/temp_air_c"
+                pub = self._fed.register_publication(key, "double")
+                _set_publication_info(pub, "units=degC")
+                dwelling_zone_pubs.append(pub)
+                configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{key}"))
+            self._pub_dwelling_zone_temp.append(dwelling_zone_pubs)
+
+            dw_power_pubs: list[HelicsPublicationLike] = []
+            dw_soc_pubs: list[HelicsPublicationLike] = []
+            dw_mode_pubs: list[HelicsPublicationLike] = []
+            for ei in range(equip_count):
+                p_key = f"dwelling_{dwelling_index}/equipment_{ei}/power_kw"
+                s_key = f"dwelling_{dwelling_index}/equipment_{ei}/soc_pct"
+                m_key = f"dwelling_{dwelling_index}/equipment_{ei}/operating_mode"
+
+                pub_p = self._fed.register_publication(p_key, "double")
+                _set_publication_info(pub_p, "units=kW")
+                dw_power_pubs.append(pub_p)
+                configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{p_key}"))
+
+                pub_s = self._fed.register_publication(s_key, "double")
+                _set_publication_info(pub_s, "units=pct")
+                dw_soc_pubs.append(pub_s)
+                configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{s_key}"))
+
+                pub_m = self._fed.register_publication(m_key, "double")
+                _set_publication_info(pub_m, "units=enum")
+                dw_mode_pubs.append(pub_m)
+                configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{m_key}"))
+            self._pub_dwelling_equipment_power.append(dw_power_pubs)
+            self._pub_dwelling_equipment_soc.append(dw_soc_pubs)
+            self._pub_dwelling_equipment_mode.append(dw_mode_pubs)
+
         self._publication_configs = configs
+        _LOG.info(
+            "HELICS fleet federate %s registered %d publications: %s",
+            self._fed_name,
+            len(configs),
+            [c.key for c in configs],
+        )
         return list(self._publication_configs)
 
     def register_subscriptions(
@@ -336,6 +435,11 @@ class HELICSFleet:
     def _publish_results(self) -> None:
         aggregate_power_kw = 0.0
         aggregate_reactive_kvar = 0.0
+        total_zone_temp = 0.0
+        total_zone_count = 0
+        total_soc = 0.0
+        total_soc_count = 0
+
         for dwelling_index in range(self._n_dwellings):
             telemetry = self._fleet.telemetry(dwelling_index)
             power_kw = float(telemetry.total_power_kw)
@@ -344,13 +448,76 @@ class HELICSFleet:
             aggregate_power_kw += power_kw
             aggregate_reactive_kvar += reactive_kvar
 
+            # Per-dwelling power (existing)
             if dwelling_index < len(self._pub_dwelling_power):
                 self._pub_dwelling_power[dwelling_index].publish(power_kw)
             if dwelling_index < len(self._pub_dwelling_reactive):
                 self._pub_dwelling_reactive[dwelling_index].publish(reactive_kvar)
 
+            # Per-dwelling zone temperatures
+            if dwelling_index < len(self._pub_dwelling_zone_temp):
+                zonedata = telemetry.zone()
+                temps: list[float] = list(zonedata.get("temperature_c", []))
+                for zi, pub in enumerate(self._pub_dwelling_zone_temp[dwelling_index]):
+                    if zi < len(temps):
+                        value = float(temps[zi])
+                        pub.publish(value)
+                        total_zone_temp += value
+                        total_zone_count += 1
+
+            # Per-dwelling equipment power, SOC, mode
+            equipdata = telemetry.equipment()
+            powers: list[float] = list(equipdata.get("power_kw", []))
+            socs: list[float] = list(equipdata.get("soc", []))
+            modes: list[float] = list(equipdata.get("modes", []))
+
+            if dwelling_index < len(self._pub_dwelling_equipment_power):
+                for ei, pub in enumerate(self._pub_dwelling_equipment_power[dwelling_index]):
+                    if ei < len(powers):
+                        pub.publish(float(powers[ei]))
+            if dwelling_index < len(self._pub_dwelling_equipment_soc):
+                for ei, pub in enumerate(self._pub_dwelling_equipment_soc[dwelling_index]):
+                    if ei < len(socs):
+                        soc_val = float(socs[ei]) * 100.0  # fraction -> pct
+                        pub.publish(soc_val)
+                        total_soc += soc_val
+                        total_soc_count += 1
+            if dwelling_index < len(self._pub_dwelling_equipment_mode):
+                for ei, pub in enumerate(self._pub_dwelling_equipment_mode[dwelling_index]):
+                    if ei < len(modes):
+                        pub.publish(float(modes[ei]))
+
         self._pub_aggregate_power.publish(aggregate_power_kw)  # type: ignore[union-attr]
         self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)  # type: ignore[union-attr]
+
+        _published_count = (
+            2  # aggregate power + reactive
+            + len(self._pub_dwelling_power)
+            + len(self._pub_dwelling_reactive)
+            + sum(len(pubs) for pubs in self._pub_dwelling_zone_temp)
+            + sum(len(pubs) for pubs in self._pub_dwelling_equipment_power)
+            + sum(len(pubs) for pubs in self._pub_dwelling_equipment_soc)
+            + sum(len(pubs) for pubs in self._pub_dwelling_equipment_mode)
+        )
+
+        # Aggregate zone temperature (mean across fleet)
+        if self._pub_aggregate_zone_temp is not None:
+            agg_zone_temp = (total_zone_temp / total_zone_count) if total_zone_count > 0 else 0.0
+            self._pub_aggregate_zone_temp.publish(agg_zone_temp)
+            _published_count += 1
+
+        # Aggregate SOC (mean across fleet)
+        if self._pub_aggregate_soc is not None:
+            agg_soc = (total_soc / total_soc_count) if total_soc_count > 0 else 0.0
+            self._pub_aggregate_soc.publish(agg_soc)
+            _published_count += 1
+
+        _LOG.debug(
+            "HELICS fleet federate %s published %d signals at step %d",
+            self._fed_name,
+            _published_count,
+            self._fleet.current_step(),
+        )
 
     @staticmethod
     def _create_federate_info() -> HelicsFederateInfoLike:

@@ -11,6 +11,23 @@ All publication keys and their expected physical units:
 ``{prefix}{fed_name}/reactive_power_kvar``
     Reactive power in kilovolt-amperes reactive (kvar).
 
+``{prefix}{fed_name}/zone_{index}/temp_air_c``
+    Zone indoor air temperature in degrees Celsius (degC).
+
+``{prefix}{fed_name}/equipment_{index}/power_kw``
+    Per-equipment active power in kilowatts (kW).
+
+``{prefix}{fed_name}/equipment_{index}/soc_pct``
+    Per-equipment state of charge as a percentage (0-100).
+
+``{prefix}{fed_name}/equipment_{index}/operating_mode``
+    Per-equipment operating mode as a numeric code (see ``OperatingMode`` in
+    ``hares-types``).
+
+``{prefix}{fed_name}/pv_generation_kw``
+    PV generation in kilowatts (kW), identified heuristically from equipment
+    name and negative power.
+
 Expected HELICS subscription units
 -----------------------------------
 
@@ -178,6 +195,12 @@ class HELICSDwelling:
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
 
+        self._pub_zone_temp: list[HelicsPublicationLike] = []
+        self._pub_equipment_power: list[HelicsPublicationLike] = []
+        self._pub_equipment_soc: list[HelicsPublicationLike] = []
+        self._pub_equipment_mode: list[HelicsPublicationLike] = []
+        self._pub_pv_generation: HelicsPublicationLike | None = None
+
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
@@ -205,10 +228,61 @@ class HELICSDwelling:
         _set_publication_info(self._pub_power, "units=kW")
         _set_publication_info(self._pub_reactive, "units=kvar")
 
-        self._publication_configs = [
+        configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"),
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"),
         ]
+
+        # Zone temperature publications
+        zonedata = self._dwelling.telemetry().zone()
+        zone_names: list[str] = list(zonedata.get("names", []))
+        self._pub_zone_temp = []
+        for zi in range(len(zone_names)):
+            key = f"zone_{zi}/temp_air_c"
+            pub = self._fed.register_publication(key, "double")
+            _set_publication_info(pub, "units=degC")
+            self._pub_zone_temp.append(pub)
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{key}"))
+
+        # Per-equipment publications: power, SOC, operating mode
+        equipdata = self._dwelling.telemetry().equipment()
+        equip_names: list[str] = list(equipdata.get("names", []))
+        self._pub_equipment_power = []
+        self._pub_equipment_soc = []
+        self._pub_equipment_mode = []
+        for ei in range(len(equip_names)):
+            power_key = f"equipment_{ei}/power_kw"
+            soc_key = f"equipment_{ei}/soc_pct"
+            mode_key = f"equipment_{ei}/operating_mode"
+
+            pub_power = self._fed.register_publication(power_key, "double")
+            _set_publication_info(pub_power, "units=kW")
+            self._pub_equipment_power.append(pub_power)
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_key}"))
+
+            pub_soc = self._fed.register_publication(soc_key, "double")
+            _set_publication_info(pub_soc, "units=pct")
+            self._pub_equipment_soc.append(pub_soc)
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{soc_key}"))
+
+            pub_mode = self._fed.register_publication(mode_key, "double")
+            _set_publication_info(pub_mode, "units=enum")
+            self._pub_equipment_mode.append(pub_mode)
+            configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{mode_key}"))
+
+        # PV generation publication
+        pv_key = "pv_generation_kw"
+        self._pub_pv_generation = self._fed.register_publication(pv_key, "double")
+        _set_publication_info(self._pub_pv_generation, "units=kW")
+        configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{pv_key}"))
+
+        self._publication_configs = configs
+        _LOG.info(
+            "HELICS federate %s registered %d publications: %s",
+            self._fed_name,
+            len(configs),
+            [c.key for c in configs],
+        )
         return list(self._publication_configs)
 
     def register_subscriptions(
@@ -353,6 +427,64 @@ class HELICSDwelling:
         telemetry = self._dwelling.telemetry()
         self._pub_power.publish(float(telemetry.total_power_kw))  # type: ignore[union-attr]
         self._pub_reactive.publish(float(telemetry.reactive_power_kvar))  # type: ignore[union-attr]
+
+        _published_count = 2
+
+        # Zone temperatures
+        if self._pub_zone_temp:
+            zonedata = telemetry.zone()
+            temps: list[float] = list(zonedata.get("temperature_c", []))
+            for i, pub in enumerate(self._pub_zone_temp):
+                value = float(temps[i]) if i < len(temps) else 0.0
+                pub.publish(value)
+                _published_count += 1
+
+        # Per-equipment power, SOC, and operating mode
+        if self._pub_equipment_power or self._pub_equipment_soc or self._pub_equipment_mode:
+            equipdata = telemetry.equipment()
+            powers: list[float] = list(equipdata.get("power_kw", []))
+            socs: list[float] = list(equipdata.get("soc", []))
+            modes: list[float] = list(equipdata.get("modes", []))
+
+            for i in range(len(self._pub_equipment_power)):
+                if i < len(powers):
+                    self._pub_equipment_power[i].publish(float(powers[i]))
+                    _published_count += 1
+            for i in range(len(self._pub_equipment_soc)):
+                if i < len(socs):
+                    self._pub_equipment_soc[i].publish(float(socs[i]) * 100.0)
+                    _published_count += 1
+            for i in range(len(self._pub_equipment_mode)):
+                if i < len(modes):
+                    self._pub_equipment_mode[i].publish(float(modes[i]))
+                    _published_count += 1
+
+        # PV generation: sum of negative electric power from PV equipment
+        if self._pub_pv_generation is not None:
+            pv_gen_kw = self._compute_pv_generation(telemetry)
+            self._pub_pv_generation.publish(pv_gen_kw)
+            _published_count += 1
+
+        _LOG.debug(
+            "HELICS federate %s published %d signals at step %d",
+            self._fed_name,
+            _published_count,
+            telemetry.timestep_index,
+        )
+
+    @staticmethod
+    def _compute_pv_generation(telemetry: Any) -> float:
+        """Sum the magnitude of negative electric power from PV equipment."""
+        equipdata = telemetry.equipment()
+        powers: list[float] = list(equipdata.get("power_kw", []))
+        names: list[str] = list(equipdata.get("names", []))
+        pv_gen_kw = 0.0
+        for i, p in enumerate(powers):
+            if p < 0.0 and i < len(names):
+                name_lower = names[i].lower()
+                if "pv" in name_lower or "solar" in name_lower:
+                    pv_gen_kw += abs(float(p))
+        return pv_gen_kw
 
     def _peek_timing(self, dwelling: PyDwelling) -> tuple[datetime, float]:
         """Infer start time and period from the first two timesteps.

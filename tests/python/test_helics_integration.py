@@ -897,3 +897,60 @@ def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
         )
     finally:
         _disconnect_broker(broker)
+
+
+def test_zone_temperature_publication_subscribed_by_aggregator() -> None:
+    """An external federate subscribes to zone_0/temp_air_c and receives non-zero values.
+
+    Regression test: zone temperature must be published via HELICS so external
+    controllers can implement closed-loop HVAC control.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling()
+        federate_ready = threading.Event()
+
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling,
+                fed_name="house_zt",
+                broker_address=f"localhost:{broker_port}",
+            )
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-zt")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port)
+        aggregator = helics.helicsCreateValueFederate("aggregator_zt", fedinfo)
+        sub_zone_temp = aggregator.register_subscription("house_zt/zone_0/temp_air_c", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        zone_temp_trace: list[float] = []
+        try:
+            aggregator.enter_executing_mode()
+            for step_idx in range(_TOTAL_STEPS):
+                pub_voltage.publish(1.0)
+                aggregator.request_time(step_idx * _TIME_RES_S)
+                if sub_zone_temp.is_updated():
+                    zone_temp_trace.append(float(sub_zone_temp.double))
+        finally:
+            aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert zone_temp_trace, "aggregator should receive zone temperature publications"
+        assert all(abs(t) > 0.1 for t in zone_temp_trace), (
+            f"zone temperature should be non-zero (winter outdoor temp); got {zone_temp_trace}"
+        )
+    finally:
+        _disconnect_broker(broker)

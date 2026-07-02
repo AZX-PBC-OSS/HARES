@@ -167,11 +167,15 @@ class _FakeFleet:
         log: list[tuple[Any, ...]],
         *,
         raise_on_step: int | None = None,
+        zone_counts: list[int] | None = None,
+        equip_counts: list[int] | None = None,
     ) -> None:
         self._log = log
         self._raise_on_step = raise_on_step
         self._step_count = 0
         self._time_res = 60.0
+        self._zone_counts = zone_counts
+        self._equip_counts = equip_counts
         self._power_steps = [
             [(1.0, 0.1), (2.0, 0.2), (3.0, 0.3)],
             [(1.5, 0.15), (2.5, 0.25), (3.5, 0.35)],
@@ -182,7 +186,7 @@ class _FakeFleet:
         self.applied_controls: list[tuple[int, str, Any]] = []
 
     def __len__(self) -> int:
-        return 3
+        return len(self._zone_counts) if self._zone_counts is not None else 3
 
     def time_res_s(self) -> float:
         return self._time_res
@@ -206,7 +210,43 @@ class _FakeFleet:
     def telemetry(self, dwelling_index: int) -> Any:
         idx = max(self._step_count - 1, 0)
         p_kw, q_kvar = self._power_steps[idx][dwelling_index]
-        return SimpleNamespace(total_power_kw=p_kw, reactive_power_kvar=q_kvar)
+        zone_count = (
+            self._zone_counts[dwelling_index]
+            if self._zone_counts is not None and dwelling_index < len(self._zone_counts)
+            else 1
+        )
+        equip_count = (
+            self._equip_counts[dwelling_index]
+            if self._equip_counts is not None and dwelling_index < len(self._equip_counts)
+            else 1
+        )
+
+        class _FakeZoneDict(dict):
+            pass
+
+        class _FakeEquipDict(dict):
+            pass
+
+        base_temp = 22.0 + dwelling_index * 0.5
+        zone_dict = _FakeZoneDict({
+            "names": [f"Zone_{dwelling_index}_{zi}" for zi in range(zone_count)],
+            "temperature_c": [base_temp + zi * 0.1 for zi in range(zone_count)],
+        })
+
+        equip_dict = _FakeEquipDict({
+            "names": [f"Equip_{dwelling_index}_{ei}" for ei in range(equip_count)],
+            "power_kw": [p_kw / max(equip_count, 1)] * equip_count,
+            "soc": [0.5 + dwelling_index * 0.1] * equip_count,
+            "modes": [1.0] * equip_count,
+        })
+
+        return SimpleNamespace(
+            total_power_kw=p_kw,
+            reactive_power_kvar=q_kvar,
+            zone=lambda: zone_dict,
+            equipment=lambda: equip_dict,
+            timestep_index=self._step_count,
+        )
 
     def set_grid_voltage_all(self, voltage_pu: float) -> None:
         self.grid_voltage_all_values.append(voltage_pu)
@@ -289,6 +329,20 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
         "grid/fleet_1/dwelling_1/reactive_power_kvar",
         "grid/fleet_1/dwelling_2/total_power_kw",
         "grid/fleet_1/dwelling_2/reactive_power_kvar",
+        "grid/fleet_1/aggregate_zone_temp_c",
+        "grid/fleet_1/aggregate_soc_pct",
+        "grid/fleet_1/dwelling_0/zone_0/temp_air_c",
+        "grid/fleet_1/dwelling_0/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_0/equipment_0/soc_pct",
+        "grid/fleet_1/dwelling_0/equipment_0/operating_mode",
+        "grid/fleet_1/dwelling_1/zone_0/temp_air_c",
+        "grid/fleet_1/dwelling_1/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_1/equipment_0/soc_pct",
+        "grid/fleet_1/dwelling_1/equipment_0/operating_mode",
+        "grid/fleet_1/dwelling_2/zone_0/temp_air_c",
+        "grid/fleet_1/dwelling_2/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_2/equipment_0/soc_pct",
+        "grid/fleet_1/dwelling_2/equipment_0/operating_mode",
     ]
 
     per_dwelling_topics = [
@@ -757,3 +811,173 @@ def test_set_publication_info_attaches_unit_metadata(
         assert pub._info == "units=kW"
         pub = fed.publications[f"dwelling_{dwelling_index}/reactive_power_kvar"]
         assert pub._info == "units=kvar"
+
+
+def test_fleet_register_publications_includes_aggregate_zone_temp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    assert "fleet_1/aggregate_zone_temp_c" in keys
+
+
+def test_fleet_register_publications_includes_aggregate_soc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    assert "fleet_1/aggregate_soc_pct" in keys
+
+
+def test_fleet_register_publications_includes_per_dwelling_zone_temp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    pubs = orchestrator.register_publications()
+
+    keys = [p.key for p in pubs]
+    for di in range(3):
+        assert f"fleet_1/dwelling_{di}/zone_0/temp_air_c" in keys
+        assert f"fleet_1/dwelling_{di}/equipment_0/power_kw" in keys
+        assert f"fleet_1/dwelling_{di}/equipment_0/soc_pct" in keys
+        assert f"fleet_1/dwelling_{di}/equipment_0/operating_mode" in keys
+
+
+def test_fleet_publish_aggregate_zone_temp_is_mean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fleet._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    agg_zone = fed.publications["aggregate_zone_temp_c"]
+    # Zone temps: 22.0, 22.5, 23.0 -> mean = 22.5
+    assert agg_zone.published == [pytest.approx(22.5)]
+
+
+def test_fleet_publish_aggregate_soc_is_mean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fleet._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    agg_soc = fed.publications["aggregate_soc_pct"]
+    # SOC: 0.5, 0.6, 0.7 -> percentage: 50, 60, 70
+    assert agg_soc.published == [pytest.approx(60.0)]
+
+
+def test_helics_fleet_registers_heterogeneous_per_dwelling_publications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each dwelling registers only the publications for its own zone/equipment count.
+
+    Regression test: the prior code derived zone_count/equip_count once from
+    dwelling index 0 and applied them uniformly, silently dropping signals for
+    dwellings with more zones or equipment.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    # Dwelling 0: 1 zone, 2 equipment
+    # Dwelling 1: 2 zones, 1 equipment
+    # Dwelling 2: 3 zones, 4 equipment
+    fleet = _FakeFleet(
+        fake_helics.log,
+        zone_counts=[1, 2, 3],
+        equip_counts=[2, 1, 4],
+    )
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    pubs = orchestrator.register_publications()
+    keys = set(p.key for p in pubs)
+
+    # Aggregate publications still present
+    assert "fleet_1/aggregate_zone_temp_c" in keys
+    assert "fleet_1/aggregate_soc_pct" in keys
+    assert "fleet_1/aggregate_power_kw" in keys
+    assert "fleet_1/aggregate_reactive_kvar" in keys
+
+    # Dwelling 0: 1 zone, 2 equipment
+    assert "fleet_1/dwelling_0/zone_0/temp_air_c" in keys
+    assert "fleet_1/dwelling_0/zone_1/temp_air_c" not in keys
+    for ei in range(2):
+        assert f"fleet_1/dwelling_0/equipment_{ei}/power_kw" in keys
+        assert f"fleet_1/dwelling_0/equipment_{ei}/soc_pct" in keys
+        assert f"fleet_1/dwelling_0/equipment_{ei}/operating_mode" in keys
+    assert "fleet_1/dwelling_0/equipment_2/power_kw" not in keys
+
+    # Dwelling 1: 2 zones, 1 equipment
+    for zi in range(2):
+        assert f"fleet_1/dwelling_1/zone_{zi}/temp_air_c" in keys
+    assert "fleet_1/dwelling_1/zone_2/temp_air_c" not in keys
+    assert "fleet_1/dwelling_1/equipment_0/power_kw" in keys
+    assert "fleet_1/dwelling_1/equipment_1/power_kw" not in keys
+
+    # Dwelling 2: 3 zones, 4 equipment
+    for zi in range(3):
+        assert f"fleet_1/dwelling_2/zone_{zi}/temp_air_c" in keys
+    assert "fleet_1/dwelling_2/zone_3/temp_air_c" not in keys
+    for ei in range(4):
+        assert f"fleet_1/dwelling_2/equipment_{ei}/power_kw" in keys
+        assert f"fleet_1/dwelling_2/equipment_{ei}/soc_pct" in keys
+        assert f"fleet_1/dwelling_2/equipment_{ei}/operating_mode" in keys
+    assert "fleet_1/dwelling_2/equipment_4/power_kw" not in keys
+
+
+def test_helics_fleet_publishes_heterogeneous_dwelling_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish publishes per-dwelling signals sized to each dwelling's own shape."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    # Dwelling 0: 1 zone, 3 equipment
+    # Dwelling 1: 2 zones, 1 equipment
+    fleet = _FakeFleet(
+        fake_helics.log,
+        zone_counts=[1, 2],
+        equip_counts=[3, 1],
+    )
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fleet._step_count = 1
+    orchestrator._publish_results()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+
+    # Dwelling 0: 1 zone pub, 9 equipment pubs (3 power + 3 soc + 3 mode)
+    assert "dwelling_0/zone_0/temp_air_c" in fed.publications
+    assert fed.publications["dwelling_0/zone_0/temp_air_c"].published == [pytest.approx(22.0)]
+    assert "dwelling_0/zone_1/temp_air_c" not in fed.publications
+
+    assert "dwelling_0/equipment_0/power_kw" in fed.publications
+    assert "dwelling_0/equipment_2/power_kw" in fed.publications
+
+    # Dwelling 1: 2 zone pubs, 3 equipment pubs (1 power + 1 soc + 1 mode)
+    assert "dwelling_1/zone_0/temp_air_c" in fed.publications
+    assert "dwelling_1/zone_1/temp_air_c" in fed.publications
+    assert fed.publications["dwelling_1/zone_0/temp_air_c"].published == [pytest.approx(22.5)]
+    assert fed.publications["dwelling_1/zone_1/temp_air_c"].published == [pytest.approx(22.6)]
+
+    assert "dwelling_1/equipment_0/power_kw" in fed.publications
+    assert "dwelling_1/equipment_1/power_kw" not in fed.publications
