@@ -796,3 +796,104 @@ def test_fleet_completion_signal_unblocks_aggregator() -> None:
         )
     finally:
         _disconnect_broker(broker)
+
+
+def test_publication_info_via_helics_api_fallback() -> None:
+    """_set_publication_info attaches metadata via helicsPublicationSetInfo fallback.
+
+    On HELICS 3.6.1 ``HelicsPublication`` has no ``set_info`` method, so
+    ``_set_publication_info`` falls through to ``helics.helicsPublicationSetInfo``.
+    This integration test exercises that production code path by retrieving the
+    metadata with ``helicsPublicationGetInfo``.
+    """
+    broker = create_broker(n_federates=1, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling()
+        helics_dwelling = HELICSDwelling(
+            dwelling=dwelling,
+            fed_name="house_meta",
+            broker_address=f"localhost:{broker_port}",
+        )
+        helics_dwelling.register_publications()
+
+        assert helics_dwelling._pub_power is not None
+        assert helics_dwelling._pub_reactive is not None
+
+        power_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_power)
+        assert power_info == "units=kW"
+
+        reactive_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_reactive)
+        assert reactive_info == "units=kvar"
+    finally:
+        _disconnect_broker(broker)
+
+
+def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
+    """Publish grid voltage in absolute volts (240 V) instead of per-unit.
+
+    An external federate that publishes voltage in volts (e.g. 240) when
+    HARES expects per-unit (~0.95) produces a 240× error. The HELICS boundary
+    must detect the unit mismatch so the operator or an external caller can
+    act on it.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling_raw = Dwelling.from_hpxml(
+            HPXML, SCHEDULE, WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=300,  # 5 steps at 60s
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=99,
+            master_seed=0,
+            output_verbosity=0,
+        )
+        dwelling_raw.initialize()
+        federate_ready = threading.Event()
+        orchestrator_ref: list[HELICSDwelling] = []
+
+        def _run_federate() -> None:
+            helics_dwelling = HELICSDwelling(
+                dwelling=dwelling_raw,
+                fed_name="house_240v",
+                broker_address=f"localhost:{broker_port}",
+            )
+            orchestrator_ref.append(helics_dwelling)
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="dwelling-240v")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port, time_res_s=60.0)
+        aggregator = helics.helicsCreateValueFederate("aggregator_240v", fedinfo)
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        try:
+            aggregator.enter_executing_mode()
+            for step_idx in range(5):
+                # Publish 240 V (absolute volts, not per-unit)
+                pub_voltage.publish(240.0)
+                aggregator.request_time(step_idx * 60.0)
+        finally:
+            aggregator.disconnect()
+
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert len(orchestrator_ref) == 1
+        assert orchestrator_ref[0]._last_voltage_out_of_range is True, (
+            "Expected out-of-range voltage detection for 240 V; "
+            "the HELICS boundary should detect unit mismatch between volts and per-unit"
+        )
+    finally:
+        _disconnect_broker(broker)

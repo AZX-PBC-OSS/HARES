@@ -1,4 +1,31 @@
-"""HELICS fleet-as-single-federate co-simulation orchestrator."""
+"""HELICS fleet-as-single-federate co-simulation orchestrator.
+
+Expected HELICS publication units
+----------------------------------
+
+All publication keys and their expected physical units:
+
+``{prefix}{fed_name}/aggregate_power_kw``
+    Aggregate active power across all dwellings in kilowatts (kW).
+
+``{prefix}{fed_name}/aggregate_reactive_kvar``
+    Aggregate reactive power across all dwellings in kilovolt-amperes reactive (kvar).
+
+``{prefix}{fed_name}/dwelling_{index}/total_power_kw``
+    Per-dwelling active power in kilowatts (kW).
+
+``{prefix}{fed_name}/dwelling_{index}/reactive_power_kvar``
+    Per-dwelling reactive power in kilovolt-amperes reactive (kvar).
+
+Expected HELICS subscription units
+-----------------------------------
+
+``grid/voltage`` (or caller-provided fleet-wide topic)
+    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
+
+Per-dwelling voltage topics (caller-provided)
+    Same per-unit voltage range (0.5–1.5 pu).
+"""
 
 from __future__ import annotations
 
@@ -18,7 +45,7 @@ from ochre_next._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
 from .broker import allocate_ephemeral_port
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant
+from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant, _set_publication_info, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN
 
 _LOG = logging.getLogger(__name__)
 
@@ -84,6 +111,8 @@ class HELICSFleet:
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
         self._federation_terminated = False
+        self._last_voltage_all_out_of_range = False
+        self._last_per_dwelling_voltage_out_of_range = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register aggregate and per-dwelling typed double publications.
@@ -101,6 +130,9 @@ class HELICSFleet:
         self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
 
+        _set_publication_info(self._pub_aggregate_power, "units=kW")
+        _set_publication_info(self._pub_aggregate_reactive, "units=kvar")
+
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
         configs = [
@@ -111,8 +143,12 @@ class HELICSFleet:
         for dwelling_index in range(self._n_dwellings):
             power_name = f"dwelling_{dwelling_index}/total_power_kw"
             reactive_name = f"dwelling_{dwelling_index}/reactive_power_kvar"
-            self._pub_dwelling_power.append(self._fed.register_publication(power_name, "double"))
-            self._pub_dwelling_reactive.append(self._fed.register_publication(reactive_name, "double"))
+            pub_power = self._fed.register_publication(power_name, "double")
+            pub_reactive = self._fed.register_publication(reactive_name, "double")
+            self._pub_dwelling_power.append(pub_power)
+            self._pub_dwelling_reactive.append(pub_reactive)
+            _set_publication_info(pub_power, "units=kW")
+            _set_publication_info(pub_reactive, "units=kvar")
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
 
@@ -236,14 +272,34 @@ class HELICSFleet:
     def _read_subscriptions(self) -> None:
         if self._sub_voltage_all is not None and self._sub_voltage_all.is_updated():
             try:
-                self._fleet.set_grid_voltage_all(float(self._sub_voltage_all.double))
+                voltage_pu = float(self._sub_voltage_all.double)
+                if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                    self._last_voltage_all_out_of_range = True
+                    _LOG.warning(
+                        "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                        "check that the external federate publishes per-unit (not volts)",
+                        voltage_pu,
+                        VOLTAGE_PU_MIN,
+                        VOLTAGE_PU_MAX,
+                    )
+                self._fleet.set_grid_voltage_all(voltage_pu)
             except Exception as exc:
                 _LOG.warning("Failed to apply fleet-wide grid voltage: %s", exc)
 
         for dwelling_index, subscription in enumerate(self._sub_voltage_dwelling):
             if subscription.is_updated():
                 try:
-                    self._fleet.set_grid_voltage(dwelling_index, float(subscription.double))
+                    voltage_pu = float(subscription.double)
+                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                        self._last_per_dwelling_voltage_out_of_range = True
+                        _LOG.warning(
+                            "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]",
+                            dwelling_index,
+                            voltage_pu,
+                            VOLTAGE_PU_MIN,
+                            VOLTAGE_PU_MAX,
+                        )
+                    self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
                 except Exception as exc:
                     _LOG.warning("Failed to apply grid voltage for dwelling %d: %s", dwelling_index, exc)
 

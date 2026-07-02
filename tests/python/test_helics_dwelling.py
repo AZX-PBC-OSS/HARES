@@ -20,6 +20,11 @@ class _FakePublication:
         self.data_type = data_type
         self.published: list[float] = []
         self._log = log
+        self._info: str | None = None
+
+    def set_info(self, info: str) -> None:
+        self._info = info
+        self._log.append(("set_info", self.key, info))
 
     def publish(self, value: float) -> None:
         self.published.append(value)
@@ -660,4 +665,93 @@ def test_peek_timing_defaults_period_for_single_timestep(
     orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
     assert orchestrator._period_s == pytest.approx(1.0)
     assert orchestrator._start_time == datetime(2020, 1, 1, 0, 0, 0)
+
+
+def test_voltage_out_of_range_flagged_and_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    # Voltage below range (< 0.5)
+    orchestrator._sub_voltage.push_double(0.1)
+    orchestrator._read_subscriptions()
+    assert orchestrator._last_voltage_out_of_range is True
+    assert dwelling.grid_voltage_values == [0.1]
+
+    # Voltage above range (> 1.5)
+    orchestrator._sub_voltage.push_double(10.0)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [0.1, 10.0]
+
+
+def test_voltage_in_range_forwarded_correctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    orchestrator._sub_voltage.push_double(0.95)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [0.95]
+
+
+def test_negative_price_flagged_and_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    orchestrator._sub_price.push_double(-0.05)
+    orchestrator._read_subscriptions()
+    assert orchestrator._last_price_negative is True
+    assert dwelling.price_signals == [{"electricity_price": -0.05}]
+
+
+def test_non_negative_price_forwarded_correctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    orchestrator._sub_price.push_double(0.12)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"electricity_price": 0.12}]
+
+
+def test_set_publication_info_attaches_unit_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+
+    power_pub = fed.publications["total_power_kw"]
+    reactive_pub = fed.publications["reactive_power_kvar"]
+    assert power_pub._info == "units=kW"
+    assert reactive_pub._info == "units=kvar"
 

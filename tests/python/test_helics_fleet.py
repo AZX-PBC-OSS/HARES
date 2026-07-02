@@ -18,6 +18,11 @@ class _FakePublication:
         self.data_type = data_type
         self.published: list[float] = []
         self._log = log
+        self._info: str | None = None
+
+    def set_info(self, info: str) -> None:
+        self._info = info
+        self._log.append(("set_info", self.key, info))
 
     def publish(self, value: float) -> None:
         self.published.append(value)
@@ -681,3 +686,74 @@ def test_fleet_constructor_tracks_timing_from_fleet_object(
     assert orchestrator._time_res_s == pytest.approx(60.0)
     assert orchestrator._total_steps == 2
     assert orchestrator._n_dwellings == 3
+
+
+def test_fleet_wide_voltage_out_of_range_flagged_and_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage_all is not None
+
+    orchestrator._sub_voltage_all.push_double(0.1)
+    orchestrator._read_subscriptions()
+    assert orchestrator._last_voltage_all_out_of_range is True
+    assert fleet.grid_voltage_all_values == [0.1]
+
+    orchestrator._sub_voltage_all.push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_all_values == [0.1, 1.0]
+
+
+def test_per_dwelling_voltage_out_of_range_flagged_and_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+    )
+
+    assert len(orchestrator._sub_voltage_dwelling) == 3
+
+    orchestrator._sub_voltage_dwelling[0].push_double(10.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator._last_per_dwelling_voltage_out_of_range is True
+    assert fleet.grid_voltage_values == [(0, 10.0)]
+
+    orchestrator._sub_voltage_dwelling[0].push_double(0.97)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_values == [(0, 10.0), (0, 0.97)]
+
+
+def test_set_publication_info_attaches_unit_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+
+    aggregate_power = fed.publications["aggregate_power_kw"]
+    aggregate_reactive = fed.publications["aggregate_reactive_kvar"]
+    assert aggregate_power._info == "units=kW"
+    assert aggregate_reactive._info == "units=kvar"
+
+    for dwelling_index in range(3):
+        pub = fed.publications[f"dwelling_{dwelling_index}/total_power_kw"]
+        assert pub._info == "units=kW"
+        pub = fed.publications[f"dwelling_{dwelling_index}/reactive_power_kvar"]
+        assert pub._info == "units=kvar"

@@ -1,4 +1,28 @@
-"""HELICS single-dwelling co-simulation orchestrator."""
+"""HELICS single-dwelling co-simulation orchestrator.
+
+Expected HELICS publication units
+----------------------------------
+
+All publication keys and their expected physical units:
+
+``{prefix}{fed_name}/total_power_kw``
+    Active power in kilowatts (kW).
+
+``{prefix}{fed_name}/reactive_power_kvar``
+    Reactive power in kilovolt-amperes reactive (kvar).
+
+Expected HELICS subscription units
+-----------------------------------
+
+``grid/voltage`` (or caller-provided topic)
+    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
+    Voltage values in absolute volts (e.g. 240) are out of range and will
+    trigger a diagnostic warning.  External federates must publish per-unit.
+
+``grid/price`` (or caller-provided topic)
+    Real-time electricity price in currency/kWh. Must be non-negative;
+    a negative value triggers a diagnostic warning.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +48,12 @@ from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscri
 from .broker import allocate_ephemeral_port
 
 _LOG = logging.getLogger(__name__)
+
+# Per-unit voltage range guards: values outside [0.5, 1.5] pu are physically
+# implausible for a connected grid and indicate a likely unit mismatch between
+# the external federate (publishing in volts) and HARES (expecting per-unit).
+VOLTAGE_PU_MIN = 0.5
+VOLTAGE_PU_MAX = 1.5
 
 
 def _handle_time_grant(requested: float, granted: float) -> bool:
@@ -65,6 +95,27 @@ def _handle_time_grant(requested: float, granted: float) -> bool:
         )
         return False
     return True
+
+
+def _set_publication_info(pub: HelicsPublicationLike, info: str) -> None:
+    """Attach unit metadata to a HELICS publication via ``setInfo()``.
+
+    HELICS ``setInfo()`` stores an arbitrary string that external federates can
+    retrieve with ``helicsPublicationGetInfo()`` / ``helicsInputGetInfo()`` at
+    the subscription side, so downstream consumers can query expected units
+    programmatically rather than inferring them from the publication key.
+
+    Calling ``setInfo()`` is a best-effort metadata operation — if the HELICS
+    bindings do not expose the API (unusual but possible with older wrappers),
+    the call is silently skipped.
+    """
+    try:
+        if hasattr(pub, "set_info"):
+            pub.set_info(info)
+        elif hasattr(helics, "helicsPublicationSetInfo"):
+            helics.helicsPublicationSetInfo(pub, info)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +182,8 @@ class HELICSDwelling:
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
         self._federation_terminated = False
+        self._last_voltage_out_of_range = False
+        self._last_price_negative = False
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register typed double publications and return config metadata.
@@ -148,6 +201,9 @@ class HELICSDwelling:
 
         self._pub_power = self._fed.register_publication(power_name, "double")
         self._pub_reactive = self._fed.register_publication(reactive_name, "double")
+
+        _set_publication_info(self._pub_power, "units=kW")
+        _set_publication_info(self._pub_reactive, "units=kvar")
 
         self._publication_configs = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"),
@@ -239,13 +295,29 @@ class HELICSDwelling:
     def _read_subscriptions(self) -> None:
         if self._sub_voltage is not None and self._sub_voltage.is_updated():
             try:
-                self._dwelling.set_grid_voltage(float(self._sub_voltage.double))
+                voltage_pu = float(self._sub_voltage.double)
+                if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                    self._last_voltage_out_of_range = True
+                    _LOG.warning(
+                        "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                        "check that the external federate publishes per-unit (not volts)",
+                        voltage_pu,
+                        VOLTAGE_PU_MIN,
+                        VOLTAGE_PU_MAX,
+                    )
+                self._dwelling.set_grid_voltage(voltage_pu)
             except Exception as exc:
                 _LOG.warning("Failed to apply grid voltage: %s", exc)
 
         if self._sub_price is not None and self._sub_price.is_updated():
             try:
                 price = float(self._sub_price.double)
+                if price < 0.0:
+                    self._last_price_negative = True
+                    _LOG.warning(
+                        "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                        price,
+                    )
                 self._dwelling.set_price_signal({"electricity_price": price})
             except Exception as exc:
                 _LOG.warning("Failed to apply price signal: %s", exc)
