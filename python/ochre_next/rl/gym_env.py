@@ -27,6 +27,8 @@ except ImportError:  # pragma: no cover - optional dependency
 _BROAD_LOW = -1.0e6
 _BROAD_HIGH = 1.0e6
 
+_warned_initial_nan: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Typed config
@@ -58,6 +60,7 @@ class StepInfo(TypedDict):
     timestep_index: int
     step: dict[str, Any]
     observation_bounds: dict[str, tuple[float, float]]
+    initial_observation_mask: np.ndarray | None
 
 
 class StepResult(TypedDict):
@@ -66,6 +69,7 @@ class StepResult(TypedDict):
     terminated: bool
     truncated: bool
     info: StepInfo
+    initial_observation_mask: np.ndarray | None
 
 
 class RewardContext(TypedDict):
@@ -237,6 +241,11 @@ def _index_map(names: Sequence[str]) -> dict[str, int]:
 
 
 def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) -> np.ndarray:
+    initialized = getattr(telemetry, "initialized", True)
+    if not initialized:
+        out_arr = np.full(len(observation_fields), np.nan, dtype=np.float64)
+        return np.ascontiguousarray(out_arr)
+
     zone = telemetry.zone()
     equipment = telemetry.equipment()
     zone_idx = _index_map(list(zone.get("names", [])))
@@ -246,10 +255,10 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
     for field in observation_fields:
         key = str(field)
         if key in {"outdoor_temp", "outdoor_temp_c"}:
-            out.append(float(zone.get("outdoor_temp_c", 0.0)))
+            out.append(float(zone.get("outdoor_temp_c", float("nan"))))
             continue
         if key in {"outdoor_humidity_ratio"}:
-            out.append(float(zone.get("outdoor_humidity_ratio", 0.0)))
+            out.append(float(zone.get("outdoor_humidity_ratio", float("nan"))))
             continue
         if key in {"total_power_kw", "total_electric_kw"}:
             out.append(float(telemetry.total_power_kw))
@@ -503,7 +512,22 @@ class DwellingGymEnv(_GYM_BASE):
         self._active_seed = applied_seed
 
         obs = self._observation()
-        return obs, {"seed": applied_seed}
+        obs_mask = ~np.isfinite(obs)
+        obs_valid = np.all(np.isfinite(obs))
+
+        global _warned_initial_nan
+        if not obs_valid and not _warned_initial_nan:
+            _warned_initial_nan = True
+            warnings.warn(
+                "Initial observation contains NaN for uninitialized fields "
+                "— replace with 0.0 or mask before training.",
+                stacklevel=2,
+            )
+
+        return obs, {
+            "seed": applied_seed,
+            "initial_observation_mask": obs_mask,
+        }
 
     def step(
         self, action: np.ndarray
@@ -534,5 +558,6 @@ class DwellingGymEnv(_GYM_BASE):
             seed=self._active_seed if self._active_seed is not None else 0,
             timestep_index=self._steps_elapsed,
             observation_bounds=self._observation_bounds,
+            initial_observation_mask=None,
         )
         return obs, reward, False, truncated, info

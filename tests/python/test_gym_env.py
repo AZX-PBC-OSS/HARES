@@ -417,16 +417,32 @@ def test_observation_bounds_in_step_info():
         assert low < high
 
 
-def test_normalize_observation_wraps_without_error():
-    """NormalizeObservation can wrap the env (requires finite obs space bounds)."""
-    gym = pytest.importorskip("gymnasium")
+def test_normalize_observation_wrapper_no_crash_or_shape_mismatch():
+    """NormalizeObservation wrapper does not crash on reset()/step().
+    
+    gymnasium.wrappers.NormalizeObservation is a documented Known Limitation:
+    its obs_rms is contaminated by NaN reset observations. This test exercises
+    the wrapper's reset()/step() protocol to catch regressions that would
+    produce shape mismatches, dtype errors, or exceptions — failures that
+    are silent because no other test touches NormalizeObservation.
+    """
+    import gymnasium as gym
+
     env = _make_env()
     wrapped = gym.wrappers.NormalizeObservation(env)
-    obs, _ = wrapped.reset(seed=42)
+
+    obs, info = wrapped.reset(seed=42)
     assert obs.shape == (len(_OBS_FIELDS),)
-    step_obs, _, _, _, _ = wrapped.step(np.array([21.0], dtype=np.float64))
+    assert np.issubdtype(obs.dtype, np.floating)
+
+    step_obs, reward, terminated, truncated, step_info = wrapped.step(
+        np.array([21.0], dtype=np.float64)
+    )
     assert step_obs.shape == (len(_OBS_FIELDS),)
-    assert np.all(np.isfinite(step_obs))
+    assert np.issubdtype(step_obs.dtype, np.floating)
+    assert isinstance(reward, float)
+    assert terminated is False
+    assert isinstance(truncated, bool)
 
 
 def test_field_bounds_overrides_apply():
@@ -639,3 +655,212 @@ def test_actor_telemetry_fields_in_dwelling_gym_observation():
     assert obs[0] != 0.0, "built-in total_power_kw should be non-zero after step"
     assert obs[1] == 0.0
     assert obs[2] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Initial observation NaN & initialized flag tests (T-0341)
+# ---------------------------------------------------------------------------
+
+
+class _MockTelemetryMissingOutdoor:
+    """Mock telemetry where zone() dict lacks outdoor_temp_c and outdoor_humidity_ratio."""
+
+    def __init__(self):
+        pass
+
+    @property
+    def initialized(self):
+        return True
+
+    @property
+    def total_power_kw(self):
+        return 0.0
+
+    @property
+    def current_time(self):
+        import datetime
+        return datetime.datetime(2019, 1, 1, 0, 0, 0)
+
+    def zone(self):
+        return {"names": [], "temperature_c": [], "setpoint_heat_c": [], "setpoint_cool_c": []}
+
+    def equipment(self):
+        return {"names": [], "modes": [], "soc": [], "power_kw": []}
+
+    def actors(self):
+        return {}
+
+
+def test_telemetry_to_observation_nan_fallback_for_missing_outdoor_temp():
+    """When zone dict lacks outdoor_temp_c / outdoor_humidity_ratio, fallback is NaN not 0.0."""
+    mock = _MockTelemetryMissingOutdoor()
+    obs = telemetry_to_observation(mock, ["outdoor_temp"])
+    assert obs.shape == (1,)
+    assert np.isnan(obs[0]), f"expected NaN for missing outdoor_temp_c, got {obs[0]}"
+
+
+def test_telemetry_to_observation_nan_fallback_for_missing_outdoor_rh():
+    """When zone dict lacks outdoor_humidity_ratio, fallback is NaN not 0.0."""
+    mock = _MockTelemetryMissingOutdoor()
+    obs = telemetry_to_observation(mock, ["outdoor_humidity_ratio"])
+    assert obs.shape == (1,)
+    assert np.isnan(obs[0]), f"expected NaN for missing outdoor_humidity_ratio, got {obs[0]}"
+
+
+def test_reset_observation_contains_nan_for_uninitialized():
+    """After reset(), pre-first-step observation contains NaN for uninitialized fields."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    obs, info = env.reset(seed=42)
+    assert obs.shape == (6,)
+    # All fields should be NaN because initialized == False at reset()
+    assert np.all(np.isnan(obs)), f"expected all NaN on reset, got {obs}"
+
+    mask = info.get("initial_observation_mask")
+    assert mask is not None, "reset info must include initial_observation_mask"
+    assert mask.shape == obs.shape
+    assert np.all(mask), "all fields should be masked (NaN) on initial observation"
+
+    assert "seed" in info
+
+
+def test_step_observation_all_finite_after_first_step():
+    """After the first step(), all observation dimensions must be finite (no lingering NaN)."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=42)
+    step_obs, reward, terminated, truncated, info = env.step(np.array([21.0], dtype=np.float64))
+    assert step_obs.shape == (6,)
+    assert np.all(np.isfinite(step_obs)), f"expected all finite after step(), got {step_obs}"
+
+    # initial_observation_mask should be None after step (no longer initial)
+    assert info.get("initial_observation_mask") is None, (
+        "initial_observation_mask should be None after step()"
+    )
+
+
+def test_telemetry_to_observation_all_nan_when_uninitialized():
+    """telemetry_to_observation returns all NaN when telemetry.initialized is False."""
+    # Use a real dwelling post-construction (before any step)
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    tel = dwelling.telemetry()
+    assert tel.initialized is False, "telemetry should be uninitialized before first step"
+
+    obs = telemetry_to_observation(
+        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+    )
+    assert obs.shape == (4,)
+    assert np.all(np.isnan(obs)), f"expected all NaN when uninitialized, got {obs}"
+
+
+def test_telemetry_to_observation_finite_after_step():
+    """telemetry_to_observation returns finite values after a simulation step."""
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    dwelling.step()
+    tel = dwelling.telemetry()
+    assert tel.initialized is True, "telemetry should be initialized after step()"
+
+    obs = telemetry_to_observation(
+        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+    )
+    assert obs.shape == (4,)
+    assert np.all(np.isfinite(obs)), f"expected all finite after step(), got {obs}"
+
+
+def test_initialized_flag_present_on_telemetry():
+    """Telemetry object exposes the initialized boolean property."""
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    tel = dwelling.telemetry()
+    assert hasattr(tel, "initialized")
+    assert isinstance(tel.initialized, bool)
+    assert tel.initialized is False
+
+    dwelling.step()
+    tel = dwelling.telemetry()
+    assert tel.initialized is True
+
+
+def test_initial_observation_warning_emitted_once():
+    """One-time warning is emitted on first reset() when observation contains NaN."""
+    import warnings
+
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "reactive_power_kvar"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+
+    # Reset the module-level flag so we get a clean test
+    import ochre_next.rl.gym_env as gym_env_mod
+    gym_env_mod._warned_initial_nan = False
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env.reset(seed=1)
+        assert len(w) == 1, f"expected exactly 1 warning, got {len(w)}"
+        assert "NaN" in str(w[0].message), f"warning message should mention NaN, got {w[0].message!r}"
+        assert issubclass(w[0].category, UserWarning)
+
+    # Second reset should NOT emit a second warning
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env.reset(seed=2)
+        assert len(w) == 0, f"expected no warning on second reset, got {len(w)}"
+
+
+def test_vec_gym_reset_observation_nan_and_mask():
+    """VecDwellingGymEnv.reset() returns NaN obs with per-env mask and one-time warning."""
+    import warnings
+    import ochre_next.rl.vec_env as ve
+
+    dwellings = [_make_dwelling(seed=i) for i in range(4)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+
+    ve._warned_initial_nan = False
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        obs, infos = env.reset(seed=123)
+
+        assert obs.shape == (4, len(_OBS_FIELDS))
+        assert obs.dtype == np.float64
+        assert np.all(np.isnan(obs)), f"expected all NaN on reset, got {obs}"
+
+        assert len(infos) == 4
+        for info in infos:
+            mask = info.get("initial_observation_mask")
+            assert mask is not None, "reset info must include initial_observation_mask"
+            assert mask.shape == (len(_OBS_FIELDS),)
+            assert np.all(mask), "all fields should be masked (NaN) on initial observation"
+
+        assert len(w) == 1, f"expected exactly 1 warning, got {len(w)}"
+        assert "NaN" in str(w[0].message)
+        assert issubclass(w[0].category, UserWarning)
+
+    # Second reset must not emit a second warning.
+    ve._warned_initial_nan = True  # already warned during first reset above
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env.reset(seed=456)
+        assert len(w) == 0, f"expected no warning on second reset, got {len(w)}"

@@ -7,6 +7,7 @@ from datetime import timedelta
 import multiprocessing
 import secrets
 from typing import Any
+import warnings
 
 import numpy as np
 
@@ -30,6 +31,8 @@ from .gym_env import (
     _sorted_action_layout,
     telemetry_to_observation,
 )
+
+_warned_initial_nan: bool = False
 
 
 class VecDwellingGymEnv:
@@ -139,7 +142,20 @@ class VecDwellingGymEnv:
         obs = np.vstack(
             [telemetry_to_observation(d.telemetry(), self._observation_fields) for d in self._dwellings]
         )
+
+        row_has_nan = ~np.all(np.isfinite(obs), axis=1)
+        global _warned_initial_nan
+        if np.any(row_has_nan) and not _warned_initial_nan:
+            _warned_initial_nan = True
+            warnings.warn(
+                "Initial observation contains NaN for uninitialized fields "
+                "— replace with 0.0 or mask before training.",
+                stacklevel=2,
+            )
+
         infos = [{"seed": seeds[idx]} for idx in range(self.num_envs)]
+        for idx in range(self.num_envs):
+            infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
 
     def step(self, actions: np.ndarray):

@@ -3526,6 +3526,7 @@ impl Dwelling {
             actor_telemetry,
             dwelling_failed: self.failed,
             telemetry_consistency_flag: true,
+            initialized: self.clock.current_step() > 0,
         };
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]

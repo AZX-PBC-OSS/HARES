@@ -82,6 +82,11 @@ impl PyTelemetry {
     }
 
     #[getter]
+    pub fn initialized(&self) -> bool {
+        self.inner.initialized
+    }
+
+    #[getter]
     pub fn current_time<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         fixed_to_py_datetime(py, self.inner.current_time)
     }

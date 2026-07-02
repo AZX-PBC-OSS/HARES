@@ -38,6 +38,11 @@ pub struct DwellingTelemetry {
     /// before using the snapshot. Always `true` in release builds where the
     /// checks are not compiled in.
     pub telemetry_consistency_flag: bool,
+    /// `true` when at least one simulation `step()` has completed.
+    /// Before the first step all fields reflect construction-time defaults
+    /// rather than simulated state; consumers should treat all observation
+    /// vector entries as `f64::NAN` when this flag is `false`.
+    pub initialized: bool,
 }
 
 /// Throttle gate: warn once per process when actor_telemetry dot-notation resolution is used.
@@ -73,6 +78,9 @@ impl DwellingTelemetry {
 
     /// Selects named observation channels into a flat contiguous vector.
     pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+        if !self.initialized {
+            return Ok(vec![f64::NAN; fields.len()]);
+        }
         let mut out = Vec::with_capacity(fields.len());
         let zone_index = index_map(&self.zone_names);
         let equip_index = index_map(&self.equipment_names);
@@ -276,6 +284,7 @@ mod tests {
             actor_telemetry: HashMap::new(),
             dwelling_failed: false,
             telemetry_consistency_flag: true,
+            initialized: true,
         }
     }
 
@@ -571,5 +580,67 @@ mod tests {
         let obs = t.to_observation_vec(&["time_sin"]).unwrap();
         let expected = (2.0 * std::f64::consts::PI * 1.5 / 24.0).sin();
         assert!((obs[0] - expected).abs() < 1e-10);
+    }
+
+    // --- initialized flag ---
+
+    fn sample_uninitialized() -> DwellingTelemetry {
+        let mut t = sample();
+        t.initialized = false;
+        t.timestep_index = 0;
+        t
+    }
+
+    #[test]
+    fn to_observation_vec_returns_nan_when_uninitialized() {
+        let t = sample_uninitialized();
+        let fields = &[
+            "outdoor_temp",
+            "outdoor_humidity_ratio",
+            "total_power_kw",
+            "reactive_power_kvar",
+            "zone_temp[Indoor]",
+            "setpoint_heat[Indoor]",
+            "setpoint_cool[Indoor]",
+            "zone_energy_balance[Indoor]",
+            "equipment_soc[Battery]",
+            "equipment_power[Battery]",
+            "battery_soc",
+            "ev_soc",
+            "time_sin",
+            "time_cos",
+        ];
+        let obs = t.to_observation_vec(fields).unwrap();
+        assert_eq!(obs.len(), fields.len());
+        for &v in &obs {
+            assert!(v.is_nan(), "expected NaN when initialized=false, got {v}");
+        }
+    }
+
+    #[test]
+    fn to_observation_vec_returns_valid_when_initialized() {
+        let t = sample();
+        assert!(t.initialized);
+        let fields = &["outdoor_temp", "zone_temp[Indoor]", "total_power_kw"];
+        let obs = t.to_observation_vec(fields).unwrap();
+        assert_eq!(obs.len(), fields.len());
+        for &v in &obs {
+            assert!(
+                v.is_finite(),
+                "expected finite when initialized=true, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_observation_vec_initialized_flag_is_settable() {
+        let mut t = sample();
+        t.initialized = false;
+        let obs = t.to_observation_vec(&["outdoor_temp"]).unwrap();
+        assert!(obs[0].is_nan(), "expected NaN for uninitialized");
+
+        t.initialized = true;
+        let obs = t.to_observation_vec(&["outdoor_temp"]).unwrap();
+        assert!(obs[0].is_finite(), "expected finite for initialized");
     }
 }
