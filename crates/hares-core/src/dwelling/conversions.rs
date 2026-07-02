@@ -191,6 +191,17 @@ pub fn building_to_boundary_inputs(
                 let f2 = f2_coefficient(insulation_r, false); // unheated residential slab
                 let g_w_per_k = f2 * perimeter_m;
 
+                tracing::trace!(
+                    slab_id = %bd.id,
+                    area_m2 = bd.area_m2,
+                    perimeter_m,
+                    insulation_r_m2_k_w = insulation_r,
+                    f2_w_per_m_k = f2,
+                    conductance_w_per_k = g_w_per_k,
+                    r_film_int_m2_k_w = r_film_int,
+                    "slab F-factor perimeter method: ASHRAE 90.1-2022 Table A6.3.1"
+                );
+
                 // Q = F2 × P × (T_indoor - T_ground) → G = F2 × P [W/K].
                 // build_precomputed_boundary adds film_int to the interior-side
                 // resistor, so the layer resistance must be reduced by film_int
@@ -210,6 +221,14 @@ pub fn building_to_boundary_inputs(
                     * hares_physics::constants::CONCRETE_CP_J_KG_K
                     * TYPICAL_SLAB_THICKNESS_M
                     / 1000.0;
+
+                tracing::trace!(
+                    slab_id = %bd.id,
+                    r_slab_layer_m2_k_w = r_slab_m2_k_w,
+                    r_total_m2_k_w = r_slab_m2_k_w + r_film_int,
+                    slab_cap_kj_m2_k,
+                    "slab precomputed RC layer: single resistor node via F-factor perimeter method"
+                );
 
                 vec![PrecomputedRCLayer {
                     resistance_m2_k_w: r_slab_m2_k_w,

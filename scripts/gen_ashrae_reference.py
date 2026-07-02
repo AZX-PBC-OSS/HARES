@@ -363,26 +363,32 @@ _ATTIC_FLOOR_LAYERS: list[_Material] = [
     ("GYPSUM BOARD", 0.0127, 0.16, 801, 837.4),
 ]
 
-# Slab-on-grade, uninsulated, with 80% carpet coverage.  BEopt "Minimal slab
-# uninsulated" convention aligning with ASHRAE 90.1 App. A slab-on-grade
-# build-up:
-#   (1) Fictitious insulating layer (lumps perimeter heat-loss resistance
-#       per ASHRAE 90.1 F-factor method; pure resistance, no mass).
-#   (2) Effective soil column (1 ft below slab) -- ASHRAE Ch. 26 Table 4
-#       row "Sandy soil, 12 in. depth": k=1.731 W/(m*K), rho=1842 kg/m^3,
-#       cp=0.419 kJ/(kg*K).
-#   (3) 4-in concrete slab -- Ch. 26 Table 4 "Concrete, normal-weight"
-#       k=1.31 W/(m*K), rho=2243 kg/m^3, cp=0.838 kJ/(kg*K).
-#   (4) Carpet + fibrous pad -- Ch. 26 Table 4 row "Carpet, fibrous pad".
-_FLOOR_LAYERS: list[_Material] = [
-    # Fictitious perimeter-loss resistor: ASHRAE 90.1 F-factor derivation
-    # for uninsulated slab-on-grade with 140 ft exposed perimeter on a
-    # 1200 ft^2 footprint gives R_eq = 0.4237 m^2*K/W for this geometry.
-    ("FICTITIOUS INSULATING LAYER", 0.4237, 1.0, 0.0, 0.0),
-    ("SOIL (12 IN.)", 0.3048, 1.731, 1842.3, 418.752),
-    ("CONCRETE SLAB (4 IN.)", 0.1016, 1.312675, 2242.8, 837.504),
-    ("CARPET + FIBROUS PAD", 0.0254, 0.086680426, 1.2143808, 40050.0),
-]
+def f2_coefficient(insulation_r_m2_k_w: float, heated: bool) -> float:
+    """Perimeter loss coefficient F2 [W/(m·K)] per ASHRAE 90.1-2022 Table A6.3.1.
+
+    Returns the F2 heat loss coefficient for slab-on-grade per unit length of
+    exposed perimeter. Values are derived from the ASHRAE 90.1-2022 F-factor
+    table (Table A6.3.1) via the conversion Btu/(h·ft·°F) × 1.73074 = W/(m·K).
+
+    Mirrors ``crates/hares-physics/src/ground.rs::f2_coefficient``.
+
+    Args:
+        insulation_r_m2_k_w: Perimeter insulation nominal R-value [m²·K/W].
+            Domestic slabs are assumed uninsulated when this is zero.
+        heated: Whether the slab is heated (heating coils present).
+            Typical residential slabs-on-grade are unheated.
+
+    Returns:
+        F2 perimeter heat loss coefficient [W/(m·K)].
+    """
+    if insulation_r_m2_k_w >= 1.76:
+        # R-10+ perimeter insulation
+        return 2.250 if heated else 1.229
+    if insulation_r_m2_k_w >= 0.88:
+        # R-5 perimeter insulation
+        return 2.267 if heated else 1.246
+    # Uninsulated slab
+    return 2.336 if heated else 1.263
 
 # Pitched attic roof: asphalt/fibreglass shingles over OSB sheathing, with a
 # thin roof rigid-insulation layer per BEopt "Unfinished, Uninsulated,
@@ -435,7 +441,6 @@ ASSEMBLY_LAYERS: dict[str, list[_Material]] = {
     "exterior_wall": _EXTERIOR_WALL_LAYERS,
     "attic_wall": _ATTIC_WALL_LAYERS,
     "attic_floor": _ATTIC_FLOOR_LAYERS,
-    "floor": _FLOOR_LAYERS,
     "attic_roof": _ATTIC_ROOF_LAYERS,
     "door": _DOOR_LAYERS,
     "interior_wall": _INTERIOR_WALL_LAYERS,
@@ -451,8 +456,6 @@ ASSEMBLY_N_NODES: dict[str, int] = {
     # Attic floor (loose-fill + stud + gypsum): 3 capacitive nodes after
     # EnergyPlus CTF sublayer collapse.
     "attic_floor": 3,
-    # Slab-on-grade with soil coupling: 3 nodes (interior, mid, outer).
-    "floor": 3,
     # Attic roof: 3 layers * 2 sublayers -> 6.
     "attic_roof": 6,
     # Solid-core door: single lumped node.
@@ -784,15 +787,15 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
         (s["perimeter_m"] if s.get("perimeter_m") is not None else 4.0 * s["area_m2"] ** 0.5) for s in b.slabs
     )
     insulation_r = sum(s.get("perimeter_insulation_r_si", 0.0) for s in b.slabs)
-    # F2 coefficient per ASHRAE 90.1-2022 Table A6.3.1.
-    # Unheated residential slab.
-    if insulation_r >= 1.76:
-        f2 = 1.229  # R-10+ perimeter insulation
-    elif insulation_r >= 0.88:
-        f2 = 1.246  # R-5 perimeter insulation
-    else:
-        f2 = 1.263  # Uninsulated slab
+    # F2 perimeter heat loss coefficient per ASHRAE 90.1-2022 Table A6.3.1.
+    # Unheated residential slab (heated=False). Matches
+    # crates/hares-physics/src/ground.rs::f2_coefficient.
+    f2 = f2_coefficient(insulation_r, heated=False)
     g_w_per_k = f2 * perimeter_m
+    print(
+        f"  Slab F-factor: area={slab_area:.2f} m² perimeter={perimeter_m:.2f} m "
+        f"insulation_r={insulation_r:.2f} m²·K/W F2={f2:.4f} W/(m·K) G={g_w_per_k:.4f} W/K"
+    )
     # Q = F2 × P × (T_indoor - T_ground) → G = F2 × P [W/K].
     # build_precomputed_boundary adds film_int to the interior-side
     # resistor, so the layer resistance must be reduced by film_int
@@ -800,6 +803,10 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_fi, r_fe = _film(0.0, "LIV", "GND")  # r_fe = 0.0 for Ground
     r_total_slab = slab_area / g_w_per_k if g_w_per_k > 1e-9 else 99.0
     r_slab_layer = max(r_total_slab - r_fi, 1e-6)
+    print(
+        f"  Slab R: total_r={r_total_slab:.6f} m²·K/W layer_r={r_slab_layer:.6f} "
+        f"m²·K/W r_film_int={r_fi:.4f} m²·K/W"
+    )
     r_total = r_slab_layer + r_fi + r_fe  # r_fe = 0.0
     ua = slab_area / r_total
     # Concrete slab thermal mass capacitance per unit area [kJ/(m²·K)].
