@@ -1082,10 +1082,95 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     }
 
 
+def self_test() -> None:
+    """Regression guard: verify ``film_resistances`` returns only consumed values.
+
+    Guards against reintroducing a dead ``r_interior_combined`` /
+    ``h_radiation_interior`` / ``film_resistances_combined`` path:
+    ``film_resistances`` must return a 2-tuple of (r_interior, r_exterior) —
+    no combined convection+radiation term.
+    """
+    test_inputs = [
+        FilmInputs(
+            tilt_deg=90.0,
+            interior_zone="LIV",
+            exterior_zone="EXT",
+            avg_wind_speed_m_s=AVG_WIND_SPEED_M_S,
+            avg_ground_temp_c=AVG_GROUND_TEMP_C,
+            avg_ambient_temp_c=AVG_AMBIENT_TEMP_C,
+        ),
+        FilmInputs(
+            tilt_deg=0.0,
+            interior_zone="LIV",
+            exterior_zone="GND",
+            avg_wind_speed_m_s=AVG_WIND_SPEED_M_S,
+            avg_ground_temp_c=AVG_GROUND_TEMP_C,
+            avg_ambient_temp_c=AVG_AMBIENT_TEMP_C,
+        ),
+        FilmInputs(
+            tilt_deg=90.0,
+            interior_zone="LIV",
+            exterior_zone="LIV",
+            avg_wind_speed_m_s=AVG_WIND_SPEED_M_S,
+            avg_ground_temp_c=AVG_GROUND_TEMP_C,
+            avg_ambient_temp_c=AVG_AMBIENT_TEMP_C,
+        ),
+        FilmInputs(
+            tilt_deg=0.0,
+            interior_zone="LIV",
+            exterior_zone="ATC",
+            avg_wind_speed_m_s=AVG_WIND_SPEED_M_S,
+            avg_ground_temp_c=AVG_GROUND_TEMP_C,
+            avg_ambient_temp_c=AVG_AMBIENT_TEMP_C,
+        ),
+        FilmInputs(
+            tilt_deg=90.0,
+            interior_zone="ATC",
+            exterior_zone="EXT",
+            avg_wind_speed_m_s=AVG_WIND_SPEED_M_S,
+            avg_ground_temp_c=AVG_GROUND_TEMP_C,
+            avg_ambient_temp_c=AVG_AMBIENT_TEMP_C,
+        ),
+    ]
+    for fi in test_inputs:
+        result = film_resistances(fi)
+        assert isinstance(result, tuple), (
+            f"film_resistances must return a tuple, got {type(result).__name__}"
+        )
+        assert len(result) == 2, (
+            f"film_resistances must return 2 values (r_int, r_ext), "
+            f"got {len(result)}. A 3-value return means the dead "
+            f"r_interior_combined path has regressed."
+        )
+        r_int, r_ext = result
+        assert isinstance(r_int, float)
+        assert isinstance(r_ext, float)
+        assert r_int > 0.0, (
+            f"interior film resistance must be > 0, got {r_int} "
+            f"for {fi.interior_zone}→{fi.exterior_zone}"
+        )
+        if fi.exterior_zone == "GND":
+            assert r_ext == 0.0, (
+                f"ground-contact exterior film must be zero, got {r_ext}"
+            )
+        else:
+            assert r_ext > 0.0, (
+                f"exterior film resistance must be > 0, got {r_ext} "
+                f"for {fi.interior_zone}→{fi.exterior_zone}"
+            )
+    print("  self_test: all film_resistances assertions passed.")
+
+
 def main() -> None:
     output_path = OUTPUT_PATH
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        self_test()
+        return
+
     if len(sys.argv) > 2 and sys.argv[1] == "--output":
         output_path = sys.argv[2]
+
+    self_test()
 
     building = parse_hpxml(HPXML_PATH)
     payload = build_reference(building)
