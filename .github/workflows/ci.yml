@@ -167,7 +167,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --group dev --extra helics
+      - run: uv sync --group dev --extra helics --group ochre
       - run: uv run maturin develop
       - run: uv run pytest -m slow --junitxml=test-results-slow.xml
       - uses: actions/upload-artifact@v4

@@ -1,291 +1,565 @@
+"""Run BESTEST Case 600 in OCHRE and compare annual loads to ASHRAE 140 bands.
+
+Instantiates an OCHRE ``Envelope`` with boundary materials matching
+``tests/fixtures/bestest/600.toml`` exactly, loads the identical Denver TMY3
+EPW weather file, runs an annual simulation with ideal HVAC (thermostat at
+20 C heating / 27 C cooling, zero deadband), and compares the resulting
+annual heating and cooling loads against the ASHRAE 140-2017 Table B8-2
+reference bands for Case 600.
+
+The script uses OCHRE's full envelope pipeline: multi-node RC network with
+material lookups from custom CSV files, TARP interior / DOE-2 exterior film
+resistances (convection-only, OCHRE's standard convention), exterior
+longwave radiation, interior longwave radiation exchange between surfaces,
+and pvlib-based solar irradiance on each oriented surface.
+
+Ideal HVAC is implemented using OCHRE's ``solve_for_inputs`` method -- the
+same method OCHRE's own HVAC equipment uses -- to solve for the heat
+injection that maintains the zone temperature at the setpoint at each
+timestep.
+
+Outputs:
+  - Time-series CSV (``ochre_bestest_600_results.csv``): zone air
+    temperature, heating load, cooling load, and outdoor temperature
+    at each hourly timestep.
+  - Annual summary printed to stdout: peak/min zone temps, annual
+    heating/cooling loads, and ASHRAE 140 band pass/fail.
+
+Usage::
+
+    python scripts/ochre_bestest_600.py [--output-dir DIR]
+
+Requires the OCHRE dependency group::
+
+    uv sync --group ochre
 """
-Run BESTEST Case 600 in OCHRE to determine if OCHRE's convection-only R_film
-architecture also fails ASHRAE 140 reference bands.
 
-Case 600: Low-mass conditioned building, annual heating/cooling loads.
-- 8m x 6m x 2.7m, south-facing window (12m2)
-- Lightweight wall (wood siding + insulation + plasterboard), U = 0.514 W/m2K
-- Lightweight roof, U = 0.318 W/m2K
-- Lightweight floor, U = 0.040 W/m2K (over crawlspace)
-- Infiltration: 0.5 ACH (altitude-corrected for Denver 1609m)
-- Internal gains: 200W continuous (60% radiative / 40% convective)
-- Thermostat: heat < 20C, cool > 27C, deadband
-- Denver TMY weather
+from __future__ import annotations
 
-This script constructs the OCHRE envelope directly (bypassing HPXML)
-and runs an annual simulation, comparing results to ASHRAE 140 bands.
-"""
-
+import argparse
 import datetime as dt
-import numpy as np
-import pandas as pd
 import sys
-import os
+import tempfile
+from pathlib import Path
 
-# Add OCHRE to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendors", "OCHRE"))
+import pandas as pd
 
-from ochre.Models.Envelope import Envelope
-from ochre.utils import envelope as env_utils
+# Ensure vendored OCHRE is importable
+_ROOT = Path(__file__).resolve().parents[1]
+_VENDOR_OCHRE = _ROOT / "vendors" / "OCHRE"
+if str(_VENDOR_OCHRE) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_OCHRE))
 
-# BESTEST Case 600 parameters
-ZONE_VOLUME = 8 * 6 * 2.7  # 129.6 m3
-ZONE_FLOOR_AREA = 8 * 6  # 48 m2
+from ochre.Models.Envelope import Envelope  # noqa: E402
+from ochre.utils import envelope as env_utils  # noqa: E402
+from ochre.utils.schedule import import_weather, resample_and_reindex  # noqa: E402
 
-# Wall areas (4 walls)
-SOUTH_WALL_AREA = 8 * 2.7 - 12  # 9.6 m2 (minus window)
-NORTH_WALL_AREA = 8 * 2.7  # 21.6 m2
-EAST_WALL_AREA = 6 * 2.7  # 16.2 m2
-WEST_WALL_AREA = 6 * 2.7  # 16.2 m2
 
-# Window: south-facing, 12 m2
-WINDOW_AREA = 12.0
+# ---------------------------------------------------------------------------
+# BESTEST Case 600 parameters -- sourced from tests/fixtures/bestest/600.toml
+# ---------------------------------------------------------------------------
 
-# Roof area
-ROOF_AREA = ZONE_FLOOR_AREA  # flat roof, 48 m2
+# Geometry: 8 m x 6 m x 2.7 m single zone
+ZONE_VOLUME_M3 = 8 * 6 * 2.7  # 129.6
 
-# Floor area
-FLOOR_AREA = ZONE_FLOOR_AREA  # 48 m2
+# Wall areas (gross wall = boundary height x width; south wall net of window)
+# South wall: 8 m wide x 2.7 m tall - 12 m2 window = 9.6 m2 net
+# North wall: 8 m wide x 2.7 m tall = 21.6 m2
+# East wall:  6 m wide x 2.7 m tall = 16.2 m2
+# West wall:  6 m wide x 2.7 m tall = 16.2 m2
+WALL_AREAS_M2 = [9.6, 21.6, 16.2, 16.2]
+WALL_AZIMUTHS_DEG = [180, 0, 90, 270]  # south, north, east, west
 
-# Film resistances from OCHRE's calculate_film_resistances
-# Denver: avg wind speed 4.02 m/s, avg ambient temp ~10C + 5C = 15C
-# Ground temp ~10C
-LOCATION = {
-    "Average Wind Speed (m/s)": 4.02,
-    "Average Ambient Temperature (C)": 10,
-    "Average Ground Temperature (C)": 10,
+# Windows: two 6 m2 south-facing windows (12 m2 total), per 600.toml
+WINDOW_AREAS_M2 = [6.0, 6.0]
+WINDOW_AZIMUTHS_DEG = [180, 180]
+WINDOW_U_FACTOR = 3.0  # W/m2-K, per 600.toml
+WINDOW_SHGC = 0.789  # per 600.toml
+
+# Roof: flat, 48 m2
+ROOF_AREA_M2 = 48.0
+ROOF_TILT_DEG = 0.0
+
+# Floor: over crawlspace, 48 m2, exterior zone = Ground
+FLOOR_AREA_M2 = 48.0
+FLOOR_TILT_DEG = 180.0  # inverted horizontal (interior above, ground below)
+
+# Simulation parameters (matching 600.toml)
+TIMESTEP_S = 3600
+WARMUP_HOURS = 24  # 1 day, per 600.toml initialization_duration_s = 86400
+SIM_YEAR = 2023  # non-leap year for 365 days = 8760 hours
+
+# HVAC setpoints (matching 600.toml)
+HEATING_SETPOINT_C = 20.0
+COOLING_SETPOINT_C = 27.0
+DEADBAND_C = 0.0  # 600.toml specifies deadband_c = 0.0
+
+# Infiltration (matching 600.toml)
+INFILTRATION_ACH = 0.5
+
+# Internal gains (matching 600.toml)
+INTERNAL_GAINS_W = 200.0
+# Note: OCHRE injects all internal gains convectively (Radiative Gain Fraction
+# = 0, hardcoded in hpxml.py:1567).  HARES 600.toml uses 30% radiant.
+# This script runs OCHRE with OCHRE's own convention (0% radiant) to produce
+# OCHRE-side reference data.  The radiant-fraction discrepancy is documented
+# in the review finding scr-03 Finding 3.
+
+# Surface optical properties (matching 600.toml)
+SOLAR_ABSORPTANCE = 0.6
+EMITTANCE = 0.9
+
+# Weather file -- identical EPW used by HARES
+EPW_PATH = str(
+    _VENDOR_OCHRE
+    / "ochre"
+    / "defaults"
+    / "Weather"
+    / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+)
+
+# ASHRAE 140-2017 Table B8-2: Case 600 annual load reference bands (kWh)
+ASHRAE_140_BANDS = {
+    "annual_heating_load_kwh": (4296.0, 5709.0),
+    "annual_cooling_load_kwh": (6137.0, 7964.0),
 }
 
-# Interior: TARP vertical, delta_t=12.9 -> h_natural = 1.31 * 12.9^(1/3) = 3.076
-# R_film_int = 1/3.076 = 0.325 m2K/W (convection only)
-# Exterior (rough): DOE-2 with wind=4.02 m/s
-# h_natural ~ 3.076, h_glass = sqrt(3.076^2 + (3.4*4.02^0.75)^2) ~ 8.0
-# r_f = 1.67 (rough), h_forced = 1.67*(8.0-3.076) = 8.23, h_total = 3.076+8.23 = 11.3
-# Wait, that's not 29.3... Let me just use OCHRE's function to get the actual values
 
-r_film_ext_wall = env_utils.calculate_film_resistances("South Wall", {
-    "Exterior Zone Label": "EXT",
-    "Interior Zone Label": "LIV",
-    "Tilt (deg)": 90,
-}, LOCATION)
-r_film_ext_roof = env_utils.calculate_film_resistances("Roof", {
-    "Exterior Zone Label": "EXT",
-    "Interior Zone Label": "LIV",
-    "Tilt (deg)": 0,
-}, LOCATION)
-r_film_floor = env_utils.calculate_film_resistances("Floor", {
-    "Exterior Zone Label": "GND",
-    "Interior Zone Label": "LIV",
-    "Tilt (deg)": 0,
-}, LOCATION)
+# ---------------------------------------------------------------------------
+# Custom material CSV files for BESTEST 600 boundaries
+# ---------------------------------------------------------------------------
+# OCHRE looks up boundary RC parameters from CSV files.  We create custom
+# files with material layers matching 600.toml exactly so OCHRE's full
+# pipeline (multi-node RC, film resistances, solar irradiance, LWR) runs
+# with correct materials.
 
-print("=== OCHRE Film Resistances ===")
-print(f"Wall:   ext={r_film_ext_wall['Exterior Film Resistance (m^2-K/W)']:.4f}, int={r_film_ext_wall['Interior Film Resistance (m^2-K/W)']:.4f}")
-print(f"Roof:   ext={r_film_ext_roof['Exterior Film Resistance (m^2-K/W)']:.4f}, int={r_film_ext_roof['Interior Film Resistance (m^2-K/W)']:.4f}")
-print(f"Floor:  ext={r_film_floor['Exterior Film Resistance (m^2-K/W)']:.4f}, int={r_film_floor['Interior Film Resistance (m^2-K/W)']:.4f}")
+_BOUNDARIES_CSV = """\
+Boundary Name,Boundary Label,Exterior Zone Label,Interior Zone Label
+Exterior Wall,EW,EXT,LIV
+Roof,RF,EXT,LIV
+Floor,FL,GND,LIV
+Window,WD,EXT,LIV
+"""
 
-# The BESTEST specification requires:
-# R_so = 1/29.3 = 0.0341 (rough surface)
-# R_si = 1/8.29 = 0.1206 (combined vertical)
-# But OCHRE gives conv-only R_si = 0.3255
+# Assembly R Value = material-only R (without film resistances).
+# OCHRE adds film_r (0.9 for most boundaries) during lookup matching.
+# Since each boundary name has exactly one type, matching always succeeds.
+_BOUNDARY_TYPES_CSV = """\
+Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Received From,Assembly R Value
+Exterior Wall,BESTEST600,,,,BESTEST,1.789
+Roof,BESTEST600,,,,BESTEST,2.994
+Floor,BESTEST600,,,,BESTEST,25.254
+"""
 
-# Case 600 wall: U = 0.514 W/m2K, so R_total = 1.946 m2K/W
-# R_total = R_so + R_material + R_si
-# With ASHRAE values: R_material = 1.946 - 0.0341 - 0.1206 = 1.791
-# With OCHRE conv-only: R_total = 0.0341 + 1.791 + 0.3255 = 2.151 (10.5% too high)
+# Material layers from 600.toml:
+#   Wall: 9mm wood siding (k=0.140, rho=530, cp=900)
+#         + 66mm insulation (k=0.040, rho=12, cp=840)
+#         + 12mm plasterboard (k=0.160, rho=950, cp=840)
+#   Roof: 19mm wood (k=0.140, rho=530, cp=900)
+#         + 111.8mm insulation (k=0.040, rho=12, cp=840)
+#         + 10mm board (k=0.160, rho=950, cp=840)
+#   Floor: 1003mm insulation (k=0.040, rho=12, cp=840)
+#          + 25mm wood (k=0.140, rho=530, cp=900)
+# Resistance = thickness / conductivity (m2-K/W)
+# Capacitance = thickness * density * specific_heat / 1000 (kJ/m2-K)
+_MATERIALS_CSV = """\
+Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Material Name,Thickness (m),Conductivity (W/m-K),Density (kg/m^3),Specific Heat (kJ/kg-K),Resistance (m^2-K/W),Capacitance (kJ/m^2-K),Received From,Specific Heat (J/kg-K)
+Exterior Wall,BESTEST600,,,,BESTEST Wood Siding,0.009,0.140,530.0,0.900,0.064286,4.293,BESTEST,900
+Exterior Wall,BESTEST600,,,,BESTEST Wall Insulation,0.066,0.040,12.0,0.840,1.650000,0.665,BESTEST,840
+Exterior Wall,BESTEST600,,,,BESTEST Plasterboard,0.012,0.160,950.0,0.840,0.075000,9.576,BESTEST,840
+Roof,BESTEST600,,,,BESTEST Roof Wood,0.019,0.140,530.0,0.900,0.135714,9.063,BESTEST,900
+Roof,BESTEST600,,,,BESTEST Roof Insulation,0.1118,0.040,12.0,0.840,2.795000,1.127,BESTEST,840
+Roof,BESTEST600,,,,BESTEST Roof Board,0.010,0.160,950.0,0.840,0.062500,7.980,BESTEST,840
+Floor,BESTEST600,,,,BESTEST Floor Insulation,1.003,0.040,12.0,0.840,25.075000,10.110,BESTEST,840
+Floor,BESTEST600,,,,BESTEST Floor Wood,0.025,0.140,530.0,0.900,0.178571,11.925,BESTEST,900
+"""
 
-# We need to construct OCHRE with the BESTEST material R-values
-# and see what annual loads it produces
 
-# Case 600 wall construction (from EnergyPlus BESTEST report):
-# R_material = 1.791 m2K/W (from U=0.514 minus films)
-# Case 600 roof: U = 0.318 W/m2K, R_total = 3.145 m2K/W
-# R_material_roof = 3.145 - 0.0341 - 0.1206 = 2.990 (roughly)
-# Actually roof is horizontal, so R_si = 1/9.26 = 0.108 (upward) or 1/6.13=0.163 (downward)
-# For roof (heat up through roof in winter), downward flow: R_si = 1/6.13 = 0.163
-# But OCHRE uses conv-only which will be different
+def _write_material_csvs(output_dir: Path) -> tuple[str, str, str]:
+    """Write custom CSV files for BESTEST 600 materials and return their paths."""
+    boundaries_path = output_dir / "bestest_boundaries.csv"
+    boundary_types_path = output_dir / "bestest_boundary_types.csv"
+    materials_path = output_dir / "bestest_materials.csv"
 
-# Case 600 floor: U = 0.040 W/m2K over crawlspace (not ground-coupled)
-# Floor is over crawlspace at outdoor temperature, so R_so applies
-# R_total = 1/0.040 = 25.0 m2K/W
-# R_material_floor = 25.0 - 0.0341 - 0.163 = 24.80 (downward flow from room)
+    boundaries_path.write_text(_BOUNDARIES_CSV)
+    boundary_types_path.write_text(_BOUNDARY_TYPES_CSV)
+    materials_path.write_text(_MATERIALS_CSV)
 
-# Window: U = 3.0 W/m2K (double pane), SHGC = 0.767
+    return str(boundaries_path), str(boundary_types_path), str(materials_path)
 
-# Let me use OCHRE's simple Envelope interface with explicit capacitances/resistances
-# rather than HPXML boundaries, so we can control the exact R-values
 
-# For a simple 1-node-per-boundary model:
-# Wall: C_wall (lightweight), R_wall (material only)
-# The film resistances get added by OCHRE
+# ---------------------------------------------------------------------------
+# Schedule construction
+# ---------------------------------------------------------------------------
 
-# Actually, the simplest approach: use OCHRE's direct capacitance/resistance interface
-# and manually construct the RC network
 
-# For BESTEST Case 600, the zones are: Indoor (LIV), Outdoor (EXT), Ground (GND)
-# We need: 4 walls + roof + floor + window, each as a boundary
+def _build_schedule(
+    weather_df: pd.DataFrame,
+    location: dict,
+    boundaries: dict,
+    start_time: dt.datetime,
+    duration: dt.timedelta,
+    time_res: dt.timedelta,
+) -> pd.DataFrame:
+    """Build the full schedule DataFrame from weather, solar, and HVAC setpoints.
 
-# Actually, let me just build the simplest possible model:
-# Single zone with lumped wall R-value to outdoor
+    ``start_time`` must be timezone-naive.  OCHRE's ``resample_and_reindex``
+    strips the weather timezone when the start time is naive (matching the
+    pattern in ``load_schedule``), then ``calculate_solar_irradiance``
+    re-localizes using the saved timezone for solar position calculations.
+    """
+    # Save weather timezone before resampling strips it
+    weather_tz = weather_df.index.tzinfo
 
-# Total wall UA (excluding window and floor):
-# South wall (net): 9.6 * 0.514 = 4.934
-# North wall: 21.6 * 0.514 = 11.102
-# East wall: 16.2 * 0.514 = 8.327
-# West wall: 16.2 * 0.514 = 8.327
-# Roof: 48 * 0.318 = 15.264
-# Floor: 48 * 0.040 = 1.920
-# Window: 12 * 3.0 = 36.0
-# Total UA = 4.934 + 11.102 + 8.327 + 8.327 + 15.264 + 1.920 + 36.0 = 85.874
+    # Resample weather to simulation timestep.
+    # resample_and_reindex strips the timezone when start_time is naive,
+    # matching the load_schedule pattern (schedule.py:587).
+    house_args = {
+        "start_time": start_time,
+        "duration": duration,
+        "time_res": time_res,
+    }
+    df_weather = resample_and_reindex(weather_df, **house_args)
 
-# This approach is too simplified. Let me instead construct proper OCHRE boundaries.
-# OCHRE needs HPXML-style boundary definitions. Let me check what format it expects.
+    # Compute solar irradiance for each exterior boundary.
+    # calculate_solar_irradiance re-localizes the index with weather_tz
+    # for solar position calculations, then strips it back.
+    df_weather = env_utils.calculate_solar_irradiance(
+        df_weather, weather_tz, location, boundaries
+    )
 
-# Actually, for a quick test, the simplest approach is to just construct a minimal
-# envelope with the right total UA and thermal mass, and compare heating/cooling loads.
-# The key question is: does conv-only R_film + LWR produce the same loads as combined R_film?
+    # Add HVAC setpoints and internal gains (constant for BESTEST)
+    df_weather["HVAC Heating Setpoint (C)"] = HEATING_SETPOINT_C
+    df_weather["HVAC Cooling Setpoint (C)"] = COOLING_SETPOINT_C
+    df_weather["HVAC Heating Deadband (C)"] = DEADBAND_C
+    df_weather["HVAC Cooling Deadband (C)"] = DEADBAND_C
+    df_weather["Internal Gains (W)"] = INTERNAL_GAINS_W
+    df_weather["Occupancy (Persons)"] = 0.0
 
-# Let me try running OCHRE in both "full" and "linear" modes with the same wall
-# and see if they produce different annual loads.
+    return df_weather
 
-# For the minimal test, I'll create a single boundary with the Case 600 wall properties
-# and run a short simulation.
 
-# First, let me understand how OCHRE constructs boundaries from HPXML
-print("\n=== Checking OCHRE boundary construction ===")
-print("OCHRE needs HPXML-style boundary data. Checking get_boundary_rc_values...")
+# ---------------------------------------------------------------------------
+# Boundary definitions
+# ---------------------------------------------------------------------------
 
-# Let me look at what OCHRE needs for boundary construction
-from ochre.utils.envelope import get_boundary_rc_values, BOUNDARY_GROUPS
 
-# Actually, let me try a different approach - use the Dwelling class which has
-# HPXML import. But we don't have BESTEST HPXML files.
-# Let me instead directly construct the RC model.
+def _build_boundaries() -> dict:
+    """Build the OCHRE boundary properties dict for BESTEST Case 600."""
+    return {
+        "Exterior Wall": {
+            "Exterior Zone": "Outdoor",
+            "Interior Zone": "Indoor",
+            "Area (m^2)": WALL_AREAS_M2,
+            "Azimuth (deg)": WALL_AZIMUTHS_DEG,
+            "Tilt (deg)": 90,
+            "Exterior Solar Absorptivity (-)": SOLAR_ABSORPTANCE,
+            "Exterior Emissivity (-)": EMITTANCE,
+            "Interior Emissivity (-)": EMITTANCE,
+            "Boundary R Value": 1.789 + 0.9,  # material R + approximate film R
+        },
+        "Roof": {
+            "Exterior Zone": "Outdoor",
+            "Interior Zone": "Indoor",
+            "Area (m^2)": [ROOF_AREA_M2],
+            "Azimuth (deg)": [0],  # flat roof, azimuth irrelevant
+            "Tilt (deg)": ROOF_TILT_DEG,
+            "Exterior Solar Absorptivity (-)": SOLAR_ABSORPTANCE,
+            "Exterior Emissivity (-)": EMITTANCE,
+            "Interior Emissivity (-)": EMITTANCE,
+            "Boundary R Value": 2.994 + 0.9,
+        },
+        "Floor": {
+            "Exterior Zone": "Ground",
+            "Interior Zone": "Indoor",
+            "Area (m^2)": [FLOOR_AREA_M2],
+            "Azimuth (deg)": [0],
+            "Tilt (deg)": FLOOR_TILT_DEG,
+            "Exterior Solar Absorptivity (-)": SOLAR_ABSORPTANCE,
+            "Exterior Emissivity (-)": EMITTANCE,
+            "Interior Emissivity (-)": EMITTANCE,
+            "Boundary R Value": 25.254 + 1.5,  # floor uses film_r=1.5 in lookup
+        },
+        "Window": {
+            "Exterior Zone": "Outdoor",
+            "Interior Zone": "Indoor",
+            "Area (m^2)": WINDOW_AREAS_M2,
+            "Azimuth (deg)": WINDOW_AZIMUTHS_DEG,
+            "Tilt (deg)": 90,
+            "U Factor (W/m^2-K)": WINDOW_U_FACTOR,
+            "SHGC (-)": WINDOW_SHGC,
+            "Shading Fraction (-)": 1.0,
+        },
+    }
 
-# Simplest approach: construct an Envelope with direct capacitances/resistances
-# that match Case 600, run it in both modes.
 
-# Case 600 RC network (simplified 1R1C for the zone):
-# Zone air node: LIV
-# External node: EXT
-# Single boundary: wall with combined UA
+# ---------------------------------------------------------------------------
+# Ideal HVAC simulation
+# ---------------------------------------------------------------------------
 
-# For a proper test, let me create a proper OCHRE envelope with boundaries
-# using the HPXML-style boundary format that OCHRE expects.
 
-# Boundary format from OCHRE's get_boundary_rc_values:
-# Each boundary has: Area, Zone, R Value, etc.
+def _run_simulation(
+    envelope: Envelope,
+    schedule: pd.DataFrame,
+    n_warmup_steps: int,
+) -> pd.DataFrame:
+    """Run step-by-step simulation with ideal HVAC control.
 
-# Let me try a super-simple approach: single wall, single zone, Denver TMY
+    Uses OCHRE's ``solve_for_inputs`` to compute the heat injection that
+    maintains the zone temperature at the heating or cooling setpoint at
+    each timestep.  This is the same method OCHRE's own HVAC equipment
+    uses (HVAC.py:422).
 
-# For a quick diagnostic, I can compute what the steady-state heating load
-# difference would be between conv-only and combined R_film, without running
-# a full annual simulation.
+    Returns a DataFrame with columns: Temperature - Indoor (C),
+    Heating Load (W), Cooling Load (W), Outdoor Temperature (C).
+    """
+    zone = envelope.indoor_zone
+    t_idx = zone.t_idx
+    h_idx = zone.h_idx
 
-# The key insight: in steady state, LWR injection DOES compensate for conv-only R_film
-# because the total effective conductance is h_conv + h_rad_to_zone.
-# The question is whether the transient (hourly) lag causes a 7% error.
+    results = []
+    total_steps = len(schedule)
 
-# Let me compute this analytically instead of running a full sim.
+    for step_idx in range(total_steps):
+        # Advance schedule and prepare inputs (solar, infiltration, etc.)
+        schedule_inputs = schedule.iloc[step_idx].to_dict()
+        envelope.update_inputs(schedule_inputs)
 
-print("\n=== Analytical comparison: conv-only vs combined R_film ===")
+        # Solve for the heat injection needed at each setpoint.
+        # solve_for_inputs returns the TOTAL heat (W) at h_idx required to
+        # achieve the target temperature, accounting for all inputs already
+        # in inputs_init (solar, infiltration, occupancy).
+        # internal_sens_gain (200 W) is NOT in inputs_init -- it gets added
+        # in update_model.  So:
+        #   hvac_sens_gain = u_desired - internal_sens_gain
+        internal_gains = zone.internal_sens_gain  # 200 W from schedule
 
-# Case 600 wall (vertical, interior side)
-h_conv = 3.076  # TARP vertical, delta_t=12.9
-h_rad = 4 * 0.9 * 5.670374e-8 * 293.15**3  # at T=20C
-h_combined = h_conv + h_rad
-R_film_conv = 1.0 / h_conv
-R_film_combined = 1.0 / h_combined
+        h_heating = envelope.solve_for_inputs(
+            t_idx, [h_idx], HEATING_SETPOINT_C
+        )
+        h_cooling = envelope.solve_for_inputs(
+            t_idx, [h_idx], COOLING_SETPOINT_C
+        )
 
-print(f"h_conv = {h_conv:.4f} W/m2K")
-print(f"h_rad  = {h_rad:.4f} W/m2K") 
-print(f"h_combined = {h_combined:.4f} W/m2K")
-print(f"R_film_conv = {R_film_conv:.4f} m2K/W")
-print(f"R_film_combined = {R_film_combined:.4f} m2K/W")
-print(f"ASHRAE R_si = {1/8.29:.4f} m2K/W")
+        if h_heating > internal_gains:
+            # Free-floating temp would be below heating setpoint
+            hvac_gain = h_heating - internal_gains
+            heating_w = hvac_gain
+            cooling_w = 0.0
+        elif h_cooling < internal_gains:
+            # Free-floating temp would be above cooling setpoint
+            hvac_gain = h_cooling - internal_gains
+            heating_w = 0.0
+            cooling_w = -hvac_gain
+        else:
+            # Within deadband -- no HVAC needed
+            hvac_gain = 0.0
+            heating_w = 0.0
+            cooling_w = 0.0
 
-# Material R-value (same in both modes)
-R_material = 1.0/0.514 - 1.0/29.3 - 1.0/8.29  # from spec
-R_so = 1.0/29.3
+        zone.hvac_sens_gain = hvac_gain
+        envelope.update_model()
+        envelope.update_results()
 
-# In "combined" mode, total wall R:
-R_total_combined = R_so + R_material + R_film_combined
-U_combined = 1.0 / R_total_combined
+        # Collect results
+        t_zone = zone.temperature
+        t_out = schedule_inputs.get("Ambient Dry Bulb (C)", float("nan"))
 
-# In "conv-only + LWR" mode:
-# The RC network has R_total_conv = R_so + R_material + R_film_conv
-# But LWR adds an additional path from surface to zone air
-# In steady state, effective conductance = h_conv + h_rad_to_zone_air
-# The radiation_frac determines how much LWR goes to zone air directly
+        results.append(
+            {
+                "Time": schedule.index[step_idx],
+                "Temperature - Indoor (C)": t_zone,
+                "Heating Load (W)": heating_w,
+                "Cooling Load (W)": cooling_w,
+                "Outdoor Temperature (C)": t_out,
+            }
+        )
 
-# With conv-only R_film:
-# radiation_frac = R_film_conv / (R_film_conv + R_material/2)  # for a 2-node wall
-# For a 1-node wall (no half-R), it's different
+    df = pd.DataFrame(results).set_index("Time")
 
-# Actually in OCHRE, radiation_frac = res_film / (res_film + res_material)
-# where res_film is in K/W (area-normalized), res_material is in K/W
-# For a 1-node wall: res_film = R_film * Area, res_material = R_material * Area
+    # Remove warmup period from output
+    if n_warmup_steps > 0:
+        df = df.iloc[n_warmup_steps:]
 
-# For a 2-node wall (2R1C), OCHRE splits R_material into two halves
-# radiation_frac = res_film / (res_film + res_material_half)
+    return df
 
-# The key: radiation_frac with conv-only R_film is much higher than with combined
-# This means MORE LWR goes to the surface node and LESS to zone air
-# The LWR that goes to surface node must still flow through R_film to reach zone air
-# This creates a lag.
 
-# Let me compute the effective time constant for both modes
-# tau = C * R (where C is thermal capacitance, R is the dominant resistance)
+# ---------------------------------------------------------------------------
+# ASHRAE 140 band comparison
+# ---------------------------------------------------------------------------
 
-# Case 600 wall thermal mass (very lightweight):
-# Wood siding: 5mm, rho=544, cp=1210 -> C = 0.005*544*1210 = 3291 J/m2K
-# Insulation: 65mm, rho=12, cp=840 -> C = 0.065*12*840 = 655 J/m2K
-# Plasterboard: 12mm, rho=950, cp=840 -> C = 0.012*950*840 = 9576 J/m2K
-# Total: ~13522 J/m2K (lightweight)
 
-C_wall = 13522  # J/m2K, approximate for Case 600 wall
+def _compare_to_bands(df: pd.DataFrame) -> dict:
+    """Compute annual metrics and compare to ASHRAE 140 reference bands."""
+    dt_hours = TIMESTEP_S / 3600.0
 
-# Time constant with combined R_film (surface to zone air)
-tau_combined = C_wall * R_film_combined  # seconds
-tau_conv_only = C_wall * R_film_conv  # seconds
+    heating_kwh = (df["Heating Load (W)"] / 1000.0 * dt_hours).sum()
+    cooling_kwh = (df["Cooling Load (W)"] / 1000.0 * dt_hours).sum()
+    peak_temp = df["Temperature - Indoor (C)"].max()
+    min_temp = df["Temperature - Indoor (C)"].min()
 
-print(f"\nWall thermal mass: {C_wall:.0f} J/m2K")
-print(f"tau (combined R_film): {tau_combined/3600:.3f} hours")
-print(f"tau (conv-only R_film): {tau_conv_only/3600:.3f} hours")
+    h_min, h_max = ASHRAE_140_BANDS["annual_heating_load_kwh"]
+    c_min, c_max = ASHRAE_140_BANDS["annual_cooling_load_kwh"]
 
-# For the full wall (surface to outdoor):
-tau_full_combined = C_wall * (R_film_combined + R_material + R_so)
-tau_full_conv = C_wall * (R_film_conv + R_material + R_so)
-print(f"tau_full (combined): {tau_full_combined/3600:.2f} hours")
-print(f"tau_full (conv-only): {tau_full_conv/3600:.2f} hours")
+    metrics = {
+        "annual_heating_load_kwh": heating_kwh,
+        "annual_cooling_load_kwh": cooling_kwh,
+        "peak_zone_temp_c": peak_temp,
+        "min_zone_temp_c": min_temp,
+        "heating_in_band": h_min <= heating_kwh <= h_max,
+        "cooling_in_band": c_min <= cooling_kwh <= c_max,
+        "heating_band": f"[{h_min}, {h_max}]",
+        "cooling_band": f"[{c_min}, {c_max}]",
+    }
 
-# The difference in time constant is ~0.55 hours, which on a 1-hour timestep
-# introduces a phase lag. For heating-dominated climates (Denver winter),
-# this lag means the zone doesn't warm up as fast during setback recovery,
-# leading to higher heating consumption. But we're seeing LOWER heating...
+    return metrics
 
-# Wait - both heating AND cooling are below band minimums.
-# This means the zone is TOO WELL INSULATED, not too poorly insulated.
-# The 10.5% higher wall R means less heat flows through walls in BOTH directions.
 
-# In steady state, LWR should compensate. But does it?
-# ScriptF exchanges heat BETWEEN surfaces - it's zero-sum.
-# The only net heat flow to zone air from LWR is through the radiation_frac split.
-# With conv-only R_film, radiation_frac ≈ 0.89, so only 11% of LWR goes to zone air.
-# With combined R_film, radiation_frac ≈ 0.76, so 24% of LWR goes to zone air.
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
-# But wait - LWR IS zero-sum. The net LWR to all surfaces is zero.
-# The split only determines where the zero-sum exchange is injected.
-# In steady state, the total heat flow through the wall should be the same
-# regardless of the split, because the surface temperature adjusts.
 
-# The issue is TRANSIENT: on an hourly timestep, the surface temperature
-# doesn't fully adjust, so the effective coupling is different.
+def run_bestest_600(output_dir: str | Path | None = None) -> dict:
+    """Run the OCHRE BESTEST Case 600 simulation.
 
-# Let me compute the effective hourly-averaged coupling
-# This requires solving the transient RC equations, which is complex.
-# Instead, let me just run the OCHRE experiment.
+    Args:
+        output_dir: Directory for output CSV.  Defaults to CWD.
 
-print("\n=== OCHRE experiment needed ===")
-print("Need to run OCHRE Case 600 in both 'full' and 'linear' modes")
-print("to determine if conv-only R_film is the root cause of BESTEST failures.")
+    Returns:
+        Dict with annual metrics and band comparison results.
+    """
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write custom material CSVs to a temp directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        boundaries_csv, boundary_types_csv, materials_csv = (
+            _write_material_csvs(Path(tmpdir))
+        )
+
+        # Load weather from the EPW file.
+        # import_weather uses start_time.year to set the EPW data year and
+        # returns a DataFrame with a timezone-aware DatetimeIndex.
+        # We start at Jan 1 of the simulation year.  The first WARMUP_HOURS
+        # timesteps serve as initialization (discarded from output).  For a
+        # lightweight building (time constant ~1 h), 24 h of warmup is more
+        # than sufficient per ASHRAE 140 Section 5.2.1.
+        start_time = dt.datetime(SIM_YEAR, 1, 1)
+        duration = dt.timedelta(hours=8760)  # 365 days
+        time_res = dt.timedelta(seconds=TIMESTEP_S)
+
+        weather_df, location = import_weather(
+            weather_file=EPW_PATH,
+            start_time=start_time,
+        )
+
+        # Adopt the weather timezone for the simulation start time,
+        # matching OCHRE's Dwelling.__init__ pattern (Dwelling.py:87).
+        weather_tz = weather_df.index.tzinfo
+        sim_start = start_time.replace(tzinfo=weather_tz)
+
+        # Build boundaries dict
+        boundaries = _build_boundaries()
+
+        # Build schedule (weather + solar + HVAC setpoints + internal gains)
+        schedule = _build_schedule(
+            weather_df,
+            location,
+            boundaries,
+            start_time,  # naive -- resample_and_reindex strips tz
+            duration,
+            time_res,
+        )
+
+        # Build location dict for film resistances.
+        # import_weather already computed averages and added them to location.
+        loc_for_envelope = {
+            "Average Wind Speed (m/s)": location.get(
+                "Average Wind Speed (m/s)", 4.02
+            ),
+            "Average Ambient Temperature (C)": location.get(
+                "Average Ambient Temperature (C)", 10.0
+            ),
+            "Average Ground Temperature (C)": location.get(
+                "Average Ground Temperature (C)", 10.0
+            ),
+        }
+
+        # Create the Envelope with full boundary pipeline
+        envelope = Envelope(
+            zones={
+                "Indoor": {
+                    "Volume (m^3)": ZONE_VOLUME_M3,
+                    "Infiltration Method": "ACH",
+                    "Air Changes (1/hour)": INFILTRATION_ACH,
+                },
+            },
+            boundaries=boundaries,
+            location=loc_for_envelope,
+            external_radiation_method="full",
+            internal_radiation_method="full",
+            schedule=schedule,
+            initial_schedule=schedule.iloc[0].to_dict(),
+            initial_temp_setpoint=HEATING_SETPOINT_C,
+            start_time=sim_start,
+            duration=duration,
+            time_res=time_res,
+            verbosity=5,
+            save_results=False,
+            main_sim_name="",
+            boundaries_file=boundaries_csv,
+            boundary_types_file=boundary_types_csv,
+            materials_file=materials_csv,
+        )
+
+        # Run the simulation
+        n_warmup = WARMUP_HOURS
+        df = _run_simulation(envelope, schedule, n_warmup)
+
+    # Save time-series CSV
+    csv_path = output_dir / "ochre_bestest_600_results.csv"
+    df.to_csv(csv_path, index=True, index_label="Time")
+
+    # Compute annual metrics and compare to ASHRAE 140 bands
+    metrics = _compare_to_bands(df)
+
+    # Print summary
+    print("\n=== OCHRE BESTEST Case 600 Results ===")
+    print(f"  Simulation period: {df.index[0]} to {df.index[-1]}")
+    print(f"  Timesteps: {len(df)}")
+    print(f"  Peak zone temp:   {metrics['peak_zone_temp_c']:.2f} C")
+    print(f"  Min zone temp:    {metrics['min_zone_temp_c']:.2f} C")
+    print(
+        f"  Annual heating:   {metrics['annual_heating_load_kwh']:.0f} kWh "
+        f"(ASHRAE 140 band {metrics['heating_band']}) "
+        f"-> {'PASS' if metrics['heating_in_band'] else 'FAIL'}"
+    )
+    print(
+        f"  Annual cooling:   {metrics['annual_cooling_load_kwh']:.0f} kWh "
+        f"(ASHRAE 140 band {metrics['cooling_band']}) "
+        f"-> {'PASS' if metrics['cooling_in_band'] else 'FAIL'}"
+    )
+    print(f"\n  Results CSV: {csv_path}")
+
+    return metrics
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run OCHRE BESTEST Case 600 and compare to ASHRAE 140 bands."
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for output CSV (default: current directory)",
+    )
+    args = parser.parse_args()
+    run_bestest_600(args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
