@@ -37,9 +37,12 @@ Requires the OCHRE dependency group::
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
+import io
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import pandas as pd
@@ -186,6 +189,70 @@ Roof,BESTEST600,,,,BESTEST Roof Board,0.010,0.160,950.0,0.840,0.062500,7.980,BES
 Floor,BESTEST600,,,,BESTEST Floor Insulation,1.003,0.040,12.0,0.840,25.075000,10.110,BESTEST,840
 Floor,BESTEST600,,,,BESTEST Floor Wood,0.025,0.140,530.0,0.900,0.178571,11.925,BESTEST,900
 """
+
+
+def _compare_c_wall() -> None:
+    """Print diagnostic comparing analytically-computed wall C_wall against
+    the value derived from reading ``tests/fixtures/bestest/600.toml`` at
+    runtime.  A non-zero delta signals that the script's material constants
+    have drifted from the canonical HARES fixture.
+    """
+    toml_path = _ROOT / "tests" / "fixtures" / "bestest" / "600.toml"
+    if not toml_path.is_file():
+        print(f"[c_wall diag] WARNING: fixture not found at {toml_path}")
+        return
+
+    with open(toml_path, "rb") as fh:
+        fixture = tomllib.load(fh)
+
+    # Analytical C_wall derived by parsing _MATERIALS_CSV — the same data
+    # OCHRE consumes to build the simulation's wall assembly.  Parsing the
+    # CSV directly ensures this diagnostic catches drift between the CSV
+    # and the fixture even when one is edited without the other.
+    reader = csv.DictReader(io.StringIO(_MATERIALS_CSV))
+    analytical_c_wall = sum(
+        float(row["Thickness (m)"])
+        * float(row["Density (kg/m^3)"])
+        * float(row["Specific Heat (J/kg-K)"])
+        for row in reader
+        if row["Boundary Name"] == "Exterior Wall"
+    )  # J/(m²·K)
+
+    # TOML-derived C_wall: sum thickness × density × cp for the south-wall
+    # material layers (the fixture's first boundary is the south wall).
+    toml_c_wall = None
+    boundaries = fixture.get("boundaries", [])
+    for boundary in boundaries:
+        if boundary.get("id") == "south-wall":
+            toml_c_wall = 0.0
+            for layer in boundary.get("material_layers", []):
+                toml_c_wall += (
+                    layer["thickness_m"]
+                    * layer["density_kg_m3"]
+                    * layer["specific_heat_j_kg_k"]
+                )
+            break
+
+    if toml_c_wall is None:
+        print("[c_wall diag] WARNING: south-wall not found in fixture")
+        return
+
+    delta = analytical_c_wall - toml_c_wall
+    delta_pct = 100.0 * delta / toml_c_wall if toml_c_wall != 0.0 else 0.0
+    print(
+        f"[c_wall diag] analytical C_wall = {analytical_c_wall:.1f} J/(m²·K)"
+    )
+    print(
+        f"[c_wall diag] TOML-derived C_wall = {toml_c_wall:.1f} J/(m²·K)"
+    )
+    print(
+        f"[c_wall diag] delta = {delta:+.1f} J/(m²·K) ({delta_pct:+.3f}%)"
+    )
+    if abs(delta_pct) > 0.01:
+        print(
+            "[c_wall diag] WARNING: analytical and fixture C_wall differ"
+            " — OCHRE material CSV may have drifted from 600.toml"
+        )
 
 
 def _write_material_csvs(output_dir: Path) -> tuple[str, str, str]:
@@ -447,6 +514,9 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Print diagnostic: compare analytical C_wall against 600.toml at runtime
+    _compare_c_wall()
 
     # Write custom material CSVs to a temp directory
     with tempfile.TemporaryDirectory() as tmpdir:

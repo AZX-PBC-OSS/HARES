@@ -1,5 +1,6 @@
 mod bestest_diagnostic;
 mod cases;
+mod material_check;
 mod reference_bands;
 
 use std::collections::BTreeMap;
