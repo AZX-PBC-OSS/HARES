@@ -12,11 +12,13 @@
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Read;
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
+    use sha2::{Digest, Sha256};
 
     fn project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -212,6 +214,60 @@ mod tests {
         if output_path.exists() {
             assert_physics_bounds(&output_path);
         }
+    }
+
+    fn compute_sha256_hex(file_path: &Path) -> String {
+        let mut file = fs::File::open(file_path).expect("open fixture file");
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buf).expect("read fixture file");
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn manifest_invariant_fixtures_match_hashes() {
+        let fixtures_root = project_root().join("tests/fixtures/resstock");
+        let manifest_path = fixtures_root.join("manifest.sha256");
+        let manifest =
+            fs::read_to_string(&manifest_path).expect("manifest.sha256 must exist and be readable");
+
+        let mut verified = 0usize;
+        for (line_no, line) in manifest.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (expected_hash, rel_path) = line.split_once("  ").unwrap_or_else(|| {
+                panic!("line {}: invalid manifest format: {line:?}", line_no + 1)
+            });
+
+            let file_path = fixtures_root.join(rel_path);
+            assert!(
+                file_path.exists(),
+                "manifest line {}: fixture file missing at {rel_path}",
+                line_no + 1,
+            );
+
+            let actual_hash = compute_sha256_hex(&file_path);
+            assert_eq!(
+                actual_hash,
+                expected_hash,
+                "manifest line {}: SHA256 mismatch for {rel_path}\n  expected: {expected_hash}\n  actual:   {actual_hash}",
+                line_no + 1,
+            );
+            verified += 1;
+        }
+        assert!(
+            verified > 0,
+            "manifest.sha256 must contain at least one entry"
+        );
     }
 
     #[test]
