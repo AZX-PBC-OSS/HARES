@@ -981,3 +981,174 @@ def test_helics_fleet_publishes_heterogeneous_dwelling_shapes(
 
     assert "dwelling_1/equipment_0/power_kw" in fed.publications
     assert "dwelling_1/equipment_1/power_kw" not in fed.publications
+
+
+def test_fleet_control_signal_thermal_setpoint_out_of_range_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"HVAC": {"type": "ThermalSetpoint", "heating_setpoint_c": 500.0}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_fleet_control_signal_duty_cycle_out_of_range_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"WaterHeater": {"type": "DutyCycle", "on_fraction": 1.5}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_fleet_control_signal_power_setpoint_nan_kw_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    # Push a huge-but-finite value through JSON (NaN can't be represented in JSON)
+    orchestrator._sub_control.push_string(
+        json.dumps(
+            {
+                "0": {
+                    "equipment": "Battery",
+                    "signal": {"type": "PowerSetpoint", "active_power_kw": 1e15},
+                }
+            }
+        )
+    )
+
+    with caplog.at_level("WARNING"):
+        orchestrator.run()
+
+    # 1e15 kW is finite, so no warning from the boundary validator.
+    assert "PowerSetpoint" not in caplog.text
+
+
+def test_fleet_control_signal_helics_control_clamped_increments(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    # Dwelling-indexed format targets a single dwelling
+    orchestrator._sub_control.push_string(
+        json.dumps(
+            {
+                "0": {
+                    "equipment": "HVAC",
+                    "signal": {
+                        "type": "ThermalSetpoint",
+                        "heating_setpoint_c": 999.0,
+                        "cooling_setpoint_c": -200.0,
+                    },
+                }
+            }
+        )
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 2
+
+
+def test_fleet_control_signal_valid_thermal_setpoint_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps(
+            {
+                "HVAC": {
+                    "type": "ThermalSetpoint",
+                    "heating_setpoint_c": 20.0,
+                    "cooling_setpoint_c": 24.0,
+                },
+            }
+        )
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 0
+
+
+def test_fleet_helics_voltage_all_valid_property_reflects_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_voltage_all_valid is True
+
+    orchestrator._sub_voltage_all.push_double(0.1)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_voltage_all_valid is False
+
+
+def test_fleet_per_dwelling_voltage_valid_property_reflects_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+    )
+
+    assert len(orchestrator._sub_voltage_dwelling) == 3
+    orchestrator._sub_voltage_dwelling[0].push_double(10.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.per_dwelling_voltage_valid is False
+
+    orchestrator._sub_voltage_dwelling[0].push_double(0.97)
+    orchestrator._read_subscriptions()
+    assert orchestrator.per_dwelling_voltage_valid is True

@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
+import math
 from itertools import chain
 from typing import Any
 
@@ -71,6 +72,123 @@ _LOG = logging.getLogger(__name__)
 # the external federate (publishing in volts) and HARES (expecting per-unit).
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
+
+# Control signal value range guards.
+# These Python-level guards mirror the Rust layer's validate_numeric_bounds()
+# ranges so that out-of-range values produce a diagnostic warning at the HELICS
+# boundary before deserialization, consistent with the Rust rejection in
+# apply_control(). Mismatched ranges produce inconsistent diagnostics (valid
+# per Python, rejected per Rust with no boundary warning).
+#   ThermalSetpoint.heating_setpoint_c: [-50, 100] °C  (Rust: [-50, 100])
+#   ThermalSetpoint.cooling_setpoint_c: [0, 60] °C      (Rust: [0, 60])
+#   DutyCycle.on_fraction: [0, 1]
+#   PowerSetpoint.active_power_kw: finite only (Rust: finite only)
+THERMAL_SETPOINT_HEAT_MIN_C = -50.0
+THERMAL_SETPOINT_HEAT_MAX_C = 100.0
+THERMAL_SETPOINT_COOL_MIN_C = 0.0
+THERMAL_SETPOINT_COOL_MAX_C = 60.0
+
+# DutyCycle on_fraction must be in [0, 1].
+DUTY_CYCLE_ON_FRACTION_MIN = 0.0
+DUTY_CYCLE_ON_FRACTION_MAX = 1.0
+
+
+def _validate_control_signal(
+    signal_body: dict[str, Any],
+    equipment: str,
+    logger: logging.Logger,
+) -> int:
+    """Validate control signal dict values at the HELICS boundary.
+
+    Returns the count of clamped/flagged fields (0 if all values pass).
+    """
+    signal_type: str = signal_body.get("type", "")
+    clamped = 0
+
+    if signal_type == "ThermalSetpoint":
+        for field, label, lo, hi in [
+            ("heating_setpoint_c", "heating_setpoint_c", THERMAL_SETPOINT_HEAT_MIN_C, THERMAL_SETPOINT_HEAT_MAX_C),
+            ("cooling_setpoint_c", "cooling_setpoint_c", THERMAL_SETPOINT_COOL_MIN_C, THERMAL_SETPOINT_COOL_MAX_C),
+        ]:
+            val = signal_body.get(field)
+            if val is not None:
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    clamped += 1
+                    logger.warning(
+                        "Control signal '%s' %s for equipment '%s' is not a number: %r; "
+                        "expected [%.0f, %.0f] °C",
+                        signal_type,
+                        label,
+                        equipment,
+                        val,
+                        lo,
+                        hi,
+                    )
+                    continue
+                if not math.isfinite(v) or v < lo or v > hi:
+                    clamped += 1
+                    logger.warning(
+                        "Control signal '%s' %s for equipment '%s' = %.1f outside range [%.0f, %.0f] °C",
+                        signal_type,
+                        label,
+                        equipment,
+                        v,
+                        lo,
+                        hi,
+                    )
+    elif signal_type == "DutyCycle":
+        val = signal_body.get("on_fraction")
+        if val is not None:
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                clamped += 1
+                logger.warning(
+                    "Control signal '%s' on_fraction for equipment '%s' is not a number: %r; "
+                    "expected [%.1f, %.1f]",
+                    signal_type,
+                    equipment,
+                    val,
+                    DUTY_CYCLE_ON_FRACTION_MIN,
+                    DUTY_CYCLE_ON_FRACTION_MAX,
+                )
+            else:
+                if not math.isfinite(v) or v < DUTY_CYCLE_ON_FRACTION_MIN or v > DUTY_CYCLE_ON_FRACTION_MAX:
+                    clamped += 1
+                    logger.warning(
+                        "Control signal '%s' on_fraction for equipment '%s' = %.3f outside range [%.1f, %.1f]",
+                        signal_type,
+                        equipment,
+                        v,
+                        DUTY_CYCLE_ON_FRACTION_MIN,
+                        DUTY_CYCLE_ON_FRACTION_MAX,
+                    )
+    elif signal_type == "PowerSetpoint":
+        val = signal_body.get("active_power_kw")
+        if val is not None:
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                clamped += 1
+                logger.warning(
+                    "Control signal '%s' active_power_kw for equipment '%s' is not a number: %r",
+                    signal_type,
+                    equipment,
+                    val,
+                )
+            else:
+                if not math.isfinite(v):
+                    clamped += 1
+                    logger.warning(
+                        "Control signal '%s' active_power_kw for equipment '%s' = %.2f is not finite",
+                        signal_type,
+                        equipment,
+                        v,
+                    )
+
+    return clamped
 
 
 def _handle_time_grant(requested: float, granted: float) -> bool:
@@ -207,6 +325,8 @@ class HELICSDwelling:
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._control_clamped = 0
+        self._range_violations_total = 0
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register typed double publications and return config metadata.
@@ -367,61 +487,76 @@ class HELICSDwelling:
         self._finalized = True
 
     def _read_subscriptions(self) -> None:
-        if self._sub_voltage is not None and self._sub_voltage.is_updated():
-            try:
-                voltage_pu = float(self._sub_voltage.double)
-                if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                    self._last_voltage_out_of_range = True
-                    _LOG.warning(
-                        "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
-                        "check that the external federate publishes per-unit (not volts)",
-                        voltage_pu,
-                        VOLTAGE_PU_MIN,
-                        VOLTAGE_PU_MAX,
-                    )
-                self._dwelling.set_grid_voltage(voltage_pu)
-            except Exception as exc:
-                _LOG.warning("Failed to apply grid voltage: %s", exc)
-
-        if self._sub_price is not None and self._sub_price.is_updated():
-            try:
-                price = float(self._sub_price.double)
-                if price < 0.0:
-                    self._last_price_negative = True
-                    _LOG.warning(
-                        "Price signal %.3f is negative; expected >= 0 currency/kWh",
-                        price,
-                    )
-                self._dwelling.set_price_signal({"electricity_price": price})
-            except Exception as exc:
-                _LOG.warning("Failed to apply price signal: %s", exc)
-
-        if self._sub_control is None or not self._sub_control.is_updated():
-            return
-
-        payload = self._sub_control.string
+        self._last_voltage_out_of_range = False
+        self._last_price_negative = False
+        self._control_clamped = 0
         try:
-            control_message = json.loads(payload)
-        except (TypeError, ValueError) as exc:
-            _LOG.warning("Invalid control payload JSON: %s", exc)
-            return
 
-        try:
-            entries = self._iter_control_entries(control_message)
-        except ValueError as exc:
-            _LOG.warning("Invalid control message shape: %s", exc)
-            return
+            if self._sub_voltage is not None and self._sub_voltage.is_updated():
+                try:
+                    voltage_pu = float(self._sub_voltage.double)
+                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                        self._last_voltage_out_of_range = True
+                        _LOG.warning(
+                            "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "check that the external federate publishes per-unit (not volts)",
+                            voltage_pu,
+                            VOLTAGE_PU_MIN,
+                            VOLTAGE_PU_MAX,
+                        )
+                    self._dwelling.set_grid_voltage(voltage_pu)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid voltage: %s", exc)
 
-        for equipment, signal_body in entries:
+            if self._sub_price is not None and self._sub_price.is_updated():
+                try:
+                    price = float(self._sub_price.double)
+                    if price < 0.0:
+                        self._last_price_negative = True
+                        _LOG.warning(
+                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            price,
+                        )
+                    self._dwelling.set_price_signal({"electricity_price": price})
+                except Exception as exc:
+                    _LOG.warning("Failed to apply price signal: %s", exc)
+
+            if self._sub_control is None or not self._sub_control.is_updated():
+                return
+
+            payload = self._sub_control.string
             try:
-                signal = ControlSignal.from_dict(signal_body)
-                self._dwelling.apply_control(equipment, signal)
-            except (ValueError, TypeError, KeyError) as exc:
-                _LOG.warning(
-                    "Failed to apply control for equipment '%s': %s",
-                    equipment,
-                    exc,
-                )
+                control_message = json.loads(payload)
+            except (TypeError, ValueError) as exc:
+                _LOG.warning("Invalid control payload JSON: %s", exc)
+                return
+
+            try:
+                entries = self._iter_control_entries(control_message)
+            except ValueError as exc:
+                _LOG.warning("Invalid control message shape: %s", exc)
+                return
+
+            for equipment, signal_body in entries:
+                clamped = _validate_control_signal(signal_body, equipment, _LOG)
+                self._control_clamped += clamped
+                try:
+                    signal = ControlSignal.from_dict(signal_body)
+                    self._dwelling.apply_control(equipment, signal)
+                except (ValueError, TypeError, KeyError) as exc:
+                    _LOG.warning(
+                        "Failed to apply control for equipment '%s': %s",
+                        equipment,
+                        exc,
+                    )
+
+        finally:
+            if self._control_clamped > 0:
+                self._range_violations_total += self._control_clamped
+            if self._last_voltage_out_of_range:
+                self._range_violations_total += 1
+            if self._last_price_negative:
+                self._range_violations_total += 1
 
     def _publish_results(self) -> None:
         telemetry = self._dwelling.telemetry()
@@ -485,6 +620,41 @@ class HELICSDwelling:
                 if "pv" in name_lower or "solar" in name_lower:
                     pv_gen_kw += abs(float(p))
         return pv_gen_kw
+
+    @property
+    def helics_voltage_valid(self) -> bool:
+        """True when the most recent voltage subscription was in [0.5, 1.5] pu."""
+        return not self._last_voltage_out_of_range
+
+    @property
+    def helics_price_valid(self) -> bool:
+        """True when the most recent price subscription was non-negative."""
+        return not self._last_price_negative
+
+    @property
+    def helics_control_clamped(self) -> int:
+        """Count of control signal fields that exceeded validation ranges this timestep."""
+        return self._control_clamped
+
+    @property
+    def helics_range_violations_total(self) -> int:
+        """Cumulative count of all range violations (voltage, price, control) across the run."""
+        return self._range_violations_total
+
+    def get_diagnostic_row(self) -> dict[str, object]:
+        """Return a dict of HELICS diagnostic fields for this timestep.
+
+        Keys: ``helics_voltage_valid`` (bool), ``helics_price_valid`` (bool),
+        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int).
+
+        Callers can collect these per-timestep and write to a CSV or telemetry sink.
+        """
+        return {
+            "helics_voltage_valid": self.helics_voltage_valid,
+            "helics_price_valid": self.helics_price_valid,
+            "helics_control_clamped": self.helics_control_clamped,
+            "helics_range_violations_total": self.helics_range_violations_total,
+        }
 
     def _peek_timing(self, dwelling: PyDwelling) -> tuple[datetime, float]:
         """Infer start time and period from the first two timesteps.

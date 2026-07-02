@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
 try:
@@ -68,7 +69,7 @@ from ochre_next._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
 from .broker import allocate_ephemeral_port
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant, _set_publication_info, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN
+from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant, _set_publication_info, _validate_control_signal, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN
 
 _LOG = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ class HELICSFleet:
         self._federation_terminated = False
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
+        self._control_clamped = 0
+        self._range_violations_total = 0
 
     def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
         """Register aggregate and per-dwelling typed double publications.
@@ -369,68 +372,83 @@ class HELICSFleet:
         self._finalized = True
 
     def _read_subscriptions(self) -> None:
-        if self._sub_voltage_all is not None and self._sub_voltage_all.is_updated():
-            try:
-                voltage_pu = float(self._sub_voltage_all.double)
-                if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                    self._last_voltage_all_out_of_range = True
-                    _LOG.warning(
-                        "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
-                        "check that the external federate publishes per-unit (not volts)",
-                        voltage_pu,
-                        VOLTAGE_PU_MIN,
-                        VOLTAGE_PU_MAX,
-                    )
-                self._fleet.set_grid_voltage_all(voltage_pu)
-            except Exception as exc:
-                _LOG.warning("Failed to apply fleet-wide grid voltage: %s", exc)
+        self._last_voltage_all_out_of_range = False
+        self._last_per_dwelling_voltage_out_of_range = False
+        self._control_clamped = 0
+        try:
 
-        for dwelling_index, subscription in enumerate(self._sub_voltage_dwelling):
-            if subscription.is_updated():
+            if self._sub_voltage_all is not None and self._sub_voltage_all.is_updated():
                 try:
-                    voltage_pu = float(subscription.double)
+                    voltage_pu = float(self._sub_voltage_all.double)
                     if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                        self._last_per_dwelling_voltage_out_of_range = True
+                        self._last_voltage_all_out_of_range = True
                         _LOG.warning(
-                            "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]",
-                            dwelling_index,
+                            "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "check that the external federate publishes per-unit (not volts)",
                             voltage_pu,
                             VOLTAGE_PU_MIN,
                             VOLTAGE_PU_MAX,
                         )
-                    self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
+                    self._fleet.set_grid_voltage_all(voltage_pu)
                 except Exception as exc:
-                    _LOG.warning("Failed to apply grid voltage for dwelling %d: %s", dwelling_index, exc)
+                    _LOG.warning("Failed to apply fleet-wide grid voltage: %s", exc)
 
-        if self._sub_control is None or not self._sub_control.is_updated():
-            return
+            for dwelling_index, subscription in enumerate(self._sub_voltage_dwelling):
+                if subscription.is_updated():
+                    try:
+                        voltage_pu = float(subscription.double)
+                        if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                            self._last_per_dwelling_voltage_out_of_range = True
+                            _LOG.warning(
+                                "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]",
+                                dwelling_index,
+                                voltage_pu,
+                                VOLTAGE_PU_MIN,
+                                VOLTAGE_PU_MAX,
+                            )
+                        self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
+                    except Exception as exc:
+                        _LOG.warning("Failed to apply grid voltage for dwelling %d: %s", dwelling_index, exc)
 
-        try:
-            payload = json.loads(self._sub_control.string)
-        except (TypeError, ValueError) as exc:
-            _LOG.warning("Invalid control payload JSON: %s", exc)
-            return
+            if self._sub_control is None or not self._sub_control.is_updated():
+                return
 
-        try:
-            controls = self._iter_control_entries(payload)
-        except ValueError as exc:
-            _LOG.warning("Invalid control message shape: %s", exc)
-            return
-
-        for dwelling_index, equipment_name, signal_dict in controls:
-            if dwelling_index < 0 or dwelling_index >= self._n_dwellings:
-                _LOG.warning("Control payload references invalid dwelling index %d", dwelling_index)
-                continue
             try:
-                signal = ControlSignal.from_dict(signal_dict)
-                self._fleet.apply_control(dwelling_index, equipment_name, signal)
-            except (ValueError, TypeError, KeyError) as exc:
-                _LOG.warning(
-                    "Failed to apply control for dwelling %d equipment '%s': %s",
-                    dwelling_index,
-                    equipment_name,
-                    exc,
-                )
+                payload = json.loads(self._sub_control.string)
+            except (TypeError, ValueError) as exc:
+                _LOG.warning("Invalid control payload JSON: %s", exc)
+                return
+
+            try:
+                controls = self._iter_control_entries(payload)
+            except ValueError as exc:
+                _LOG.warning("Invalid control message shape: %s", exc)
+                return
+
+            for dwelling_index, equipment_name, signal_dict in controls:
+                if dwelling_index < 0 or dwelling_index >= self._n_dwellings:
+                    _LOG.warning("Control payload references invalid dwelling index %d", dwelling_index)
+                    continue
+                clamped = _validate_control_signal(signal_dict, equipment_name, _LOG)
+                self._control_clamped += clamped
+                try:
+                    signal = ControlSignal.from_dict(signal_dict)
+                    self._fleet.apply_control(dwelling_index, equipment_name, signal)
+                except (ValueError, TypeError, KeyError) as exc:
+                    _LOG.warning(
+                        "Failed to apply control for dwelling %d equipment '%s': %s",
+                        dwelling_index,
+                        equipment_name,
+                        exc,
+                    )
+
+        finally:
+            if self._control_clamped > 0:
+                self._range_violations_total += self._control_clamped
+            if self._last_voltage_all_out_of_range:
+                self._range_violations_total += 1
+            if self._last_per_dwelling_voltage_out_of_range:
+                self._range_violations_total += 1
 
     def _publish_results(self) -> None:
         aggregate_power_kw = 0.0
@@ -593,6 +611,41 @@ class HELICSFleet:
         if "://" in address:
             return address
         return f"tcp://{address}"
+
+    @property
+    def helics_voltage_all_valid(self) -> bool:
+        """True when the most recent fleet-wide voltage subscription was in [0.5, 1.5] pu."""
+        return not self._last_voltage_all_out_of_range
+
+    @property
+    def per_dwelling_voltage_valid(self) -> bool:
+        """True when all per-dwelling voltage subscriptions were in [0.5, 1.5] pu this timestep."""
+        return not self._last_per_dwelling_voltage_out_of_range
+
+    @property
+    def helics_control_clamped(self) -> int:
+        """Count of control signal fields that exceeded validation ranges this timestep."""
+        return self._control_clamped
+
+    @property
+    def helics_range_violations_total(self) -> int:
+        """Cumulative count of all range violations (voltage, control) across the run."""
+        return self._range_violations_total
+
+    def get_diagnostic_row(self) -> dict[str, object]:
+        """Return a dict of HELICS diagnostic fields for this timestep.
+
+        Keys: ``helics_voltage_all_valid`` (bool), ``per_dwelling_voltage_valid`` (bool),
+        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int).
+
+        Callers can collect these per-timestep and write to a CSV or telemetry sink.
+        """
+        return {
+            "helics_voltage_all_valid": self.helics_voltage_all_valid,
+            "per_dwelling_voltage_valid": self.per_dwelling_voltage_valid,
+            "helics_control_clamped": self.helics_control_clamped,
+            "helics_range_violations_total": self.helics_range_violations_total,
+        }
 
     def _iter_control_entries(self, payload: Any) -> list[tuple[int, str, dict[str, Any]]]:
         if not isinstance(payload, dict):

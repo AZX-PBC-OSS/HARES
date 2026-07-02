@@ -942,3 +942,234 @@ def test_compute_pv_generation_zero_when_no_pv_equipment(
     pv_kw = module.HELICSDwelling._compute_pv_generation(telemetry)
     assert pv_kw == 0.0
 
+
+def test_control_signal_thermal_setpoint_heat_out_of_range_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"HVAC": {"type": "ThermalSetpoint", "heating_setpoint_c": 500.0}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_control_signal_thermal_setpoint_cool_out_of_range_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"HVAC": {"type": "ThermalSetpoint", "cooling_setpoint_c": -100.0}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_control_signal_duty_cycle_out_of_range_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"WaterHeater": {"type": "DutyCycle", "on_fraction": 1.5}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_control_signal_power_setpoint_nan_kw_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    # Push a huge-but-finite value through JSON (NaN can't be represented in JSON)
+    orchestrator._sub_control.push_string(
+        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_kw": 1e15}})
+    )
+
+    with caplog.at_level("WARNING"):
+        orchestrator.run()
+
+    # 1e15 kW is finite, so no warning from the boundary validator.
+    # Verify no spurious warning was logged for this valid input.
+    assert "PowerSetpoint" not in caplog.text
+
+
+def test_validate_control_signal_rejects_nan_power_setpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        clamped = module._validate_control_signal(
+            {"type": "PowerSetpoint", "active_power_kw": float("nan")},
+            "Battery",
+            module.logging.getLogger("test"),
+        )
+
+    assert clamped == 1
+    assert "not finite" in caplog.text
+
+
+def test_control_signal_helics_control_clamped_increments_per_timestep(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps(
+            {
+                "HVAC": {
+                    "type": "ThermalSetpoint",
+                    "heating_setpoint_c": 999.0,
+                    "cooling_setpoint_c": -200.0,
+                },
+            }
+        )
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 2
+
+
+def test_control_signal_valid_thermal_setpoint_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps(
+            {
+                "HVAC": {
+                    "type": "ThermalSetpoint",
+                    "heating_setpoint_c": 20.0,
+                    "cooling_setpoint_c": 24.0,
+                },
+            }
+        )
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 0
+
+
+def test_control_signal_valid_duty_cycle_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"WaterHeater": {"type": "DutyCycle", "on_fraction": 0.5}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 0
+
+
+def test_control_signal_duty_cycle_negative_fraction_warns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(
+        json.dumps({"WaterHeater": {"type": "DutyCycle", "on_fraction": -0.1}})
+    )
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped >= 1
+
+
+def test_helics_voltage_valid_property_reflects_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+    orchestrator._sub_voltage.push_double(1.0)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_voltage_valid is True
+
+    orchestrator._sub_voltage.push_double(0.1)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_voltage_valid is False
+
+
+def test_helics_price_valid_property_reflects_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+    orchestrator._sub_price.push_double(0.12)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_price_valid is True
+
+    orchestrator._sub_price.push_double(-0.05)
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_price_valid is False
+
