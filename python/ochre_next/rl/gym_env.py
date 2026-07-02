@@ -215,6 +215,8 @@ def _observation_field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 100.0)
     if key in {"battery_soc", "ev_soc"}:
         return (0.0, 1.0)
+    if key in {"time_sin", "time_cos"}:
+        return (-1.0, 1.0)
     return (_BROAD_LOW, _BROAD_HIGH)
 
 
@@ -279,6 +281,37 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
             continue
         if key == "ev_soc":
             out.append(float(equipment["soc"][equip_idx["electric vehicle"]]))
+            continue
+
+        # Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
+        if key == "time_sin":
+            dt = telemetry.current_time
+            fhour = float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0
+            out.append(math.sin(2.0 * math.pi * fhour / 24.0))
+            continue
+        if key == "time_cos":
+            dt = telemetry.current_time
+            fhour = float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0
+            out.append(math.cos(2.0 * math.pi * fhour / 24.0))
+            continue
+
+        # Actor telemetry fallback: dot-separated <actor>.<channel>.
+        found_in_actors = False
+        if "." in key:
+            actor_name, channel_name = key.split(".", 1)
+            actors = telemetry.actors()
+            if actor_name in actors and channel_name in actors[actor_name]:
+                out.append(float(actors[actor_name][channel_name]))
+                found_in_actors = True
+        # Bare field name: search all actors (non-deterministic on duplicates).
+        if not found_in_actors:
+            actors = telemetry.actors()
+            for actor_channels in actors.values():
+                if key in actor_channels:
+                    out.append(float(actor_channels[key]))
+                    found_in_actors = True
+                    break
+        if found_in_actors:
             continue
 
         raise KeyError(f"unknown observation field `{key}`")

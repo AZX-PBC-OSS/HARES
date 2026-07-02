@@ -1,8 +1,9 @@
 //! Dwelling telemetry payloads used by control and RL integrations.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::HaresError;
 use hares_types::normalize_ascii;
 
@@ -38,6 +39,12 @@ pub struct DwellingTelemetry {
     /// checks are not compiled in.
     pub telemetry_consistency_flag: bool,
 }
+
+/// Throttle gate: warn once per process when actor_telemetry dot-notation resolution is used.
+static WARNED_ACTOR_TELEMETRY_DOT: AtomicBool = AtomicBool::new(false);
+
+/// Throttle gate: warn once per process when actor_telemetry bare-name resolution is used.
+static WARNED_ACTOR_TELEMETRY_BARE: AtomicBool = AtomicBool::new(false);
 
 impl DwellingTelemetry {
     /// Verifies that `sum(equipment_power_kw) ≈ total_power_kw` within
@@ -139,6 +146,66 @@ impl DwellingTelemetry {
             if field == "ev_soc" {
                 let idx = single_instance_alias(&equip_index, "Electric Vehicle", field)?;
                 out.push(self.equipment_soc[idx]);
+                continue;
+            }
+
+            // Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
+            if field == "time_sin" {
+                let fhour = self.current_time.hour() as f64
+                    + self.current_time.minute() as f64 / 60.0
+                    + self.current_time.second() as f64 / 3600.0;
+                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).sin());
+                continue;
+            }
+            if field == "time_cos" {
+                let fhour = self.current_time.hour() as f64
+                    + self.current_time.minute() as f64 / 60.0
+                    + self.current_time.second() as f64 / 3600.0;
+                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).cos());
+                continue;
+            }
+
+            // Actor telemetry fallback: dot-separated <actor>.<channel>.
+            let mut found_in_actors = false;
+            if let Some((actor_name, channel_name)) = field.split_once('.') {
+                if let Some(channels) = self.actor_telemetry.get(actor_name) {
+                    // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
+                    if let Some(&value) = channels.get(channel_name) {
+                        if WARNED_ACTOR_TELEMETRY_DOT
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            tracing::warn!(
+                                field = field,
+                                actor_telemetry_key = channel_name,
+                                "resolving observation field via actor_telemetry (throttled to once per process)"
+                            );
+                        }
+                        out.push(value);
+                        found_in_actors = true;
+                    }
+                }
+            }
+            // Bare field name: search all actors (non-deterministic on duplicates).
+            if !found_in_actors {
+                for channels in self.actor_telemetry.values() {
+                    if let Some(&value) = channels.get(field) {
+                        if WARNED_ACTOR_TELEMETRY_BARE
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            tracing::warn!(
+                                field = field,
+                                "resolving observation field via actor_telemetry (bare name, throttled to once per process)"
+                            );
+                        }
+                        out.push(value);
+                        found_in_actors = true;
+                        break;
+                    }
+                }
+            }
+            if found_in_actors {
                 continue;
             }
 
@@ -368,5 +435,141 @@ mod tests {
             t.telemetry_consistency_flag,
             "0.0001 kW error is within 0.001 kW absolute tolerance"
         );
+    }
+
+    // --- actor_telemetry resolution ---
+
+    #[test]
+    fn actor_telemetry_dot_notation_resolves_field() {
+        let mut t = sample();
+        let mut channels = HashMap::new();
+        channels.insert("price".to_string(), 0.12);
+        t.actor_telemetry.insert("market".to_string(), channels);
+        let obs = t.to_observation_vec(&["market.price"]).unwrap();
+        assert_eq!(obs, vec![0.12]);
+    }
+
+    #[test]
+    fn actor_telemetry_bare_name_resolves_field() {
+        let mut t = sample();
+        let mut channels = HashMap::new();
+        channels.insert("dr_flag".to_string(), 1.0);
+        t.actor_telemetry.insert("dr_actor".to_string(), channels);
+        let obs = t.to_observation_vec(&["dr_flag"]).unwrap();
+        assert_eq!(obs, vec![1.0]);
+    }
+
+    #[test]
+    fn actor_telemetry_builtin_wins_over_actor_fallback() {
+        let mut t = sample();
+        // Put a bogus outdoor_temp in actor_telemetry: built-in must win.
+        let mut channels = HashMap::new();
+        channels.insert("outdoor_temp".to_string(), 999.0);
+        t.actor_telemetry.insert("weather".to_string(), channels);
+        let obs = t.to_observation_vec(&["outdoor_temp"]).unwrap();
+        assert_eq!(
+            obs,
+            vec![10.0],
+            "built-in outdoor_temp must not be overridden by actor_telemetry"
+        );
+    }
+
+    #[test]
+    fn actor_telemetry_respects_dot_notation_priority() {
+        // Dot notation is tried before bare-name fallback.  If both an
+        // actor.xyz and a bare xyz exist, dot notation wins.
+        let mut t = sample();
+        let mut ch_a = HashMap::new();
+        ch_a.insert("val".to_string(), 1.0);
+        t.actor_telemetry.insert("a".to_string(), ch_a);
+        let mut ch_b = HashMap::new();
+        ch_b.insert("a.val".to_string(), 2.0);
+        t.actor_telemetry.insert("b".to_string(), ch_b);
+        let obs = t.to_observation_vec(&["a.val"]).unwrap();
+        assert_eq!(obs, vec![1.0]);
+    }
+
+    #[test]
+    fn actor_telemetry_nonexistent_actor_still_fails() {
+        let t = sample();
+        let err = t.to_observation_vec(&["nonexistent.channel"]).unwrap_err();
+        assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    // --- time_sin / time_cos ---
+
+    #[test]
+    fn time_sin_at_midnight_is_zero() {
+        use chrono::TimeZone;
+        let mut t = sample();
+        t.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .unwrap();
+        let obs = t.to_observation_vec(&["time_sin"]).unwrap();
+        assert!((obs[0] - 0.0).abs() < 1e-10, "sin(0) ≈ 0, got {}", obs[0]);
+    }
+
+    #[test]
+    fn time_cos_at_midnight_is_one() {
+        use chrono::TimeZone;
+        let mut t = sample();
+        t.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .unwrap();
+        let obs = t.to_observation_vec(&["time_cos"]).unwrap();
+        assert!((obs[0] - 1.0).abs() < 1e-10, "cos(0) ≈ 1, got {}", obs[0]);
+    }
+
+    #[test]
+    fn time_sin_cos_at_six_am() {
+        use chrono::TimeZone;
+        // 6:00 → 6/24 = 0.25 → 2π·0.25 = π/2
+        // sin(π/2) = 1, cos(π/2) ≈ 0
+        let mut t = sample();
+        t.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 6, 0, 0)
+            .single()
+            .unwrap();
+        let obs = t.to_observation_vec(&["time_sin"]).unwrap();
+        assert!((obs[0] - 1.0).abs() < 1e-10, "sin(π/2) ≈ 1, got {}", obs[0]);
+        let obs = t.to_observation_vec(&["time_cos"]).unwrap();
+        assert!((obs[0] - 0.0).abs() < 1e-10, "cos(π/2) ≈ 0, got {}", obs[0]);
+    }
+
+    #[test]
+    fn time_sin_cos_at_noon() {
+        use chrono::TimeZone;
+        // 12:00 → 12/24 = 0.5 → 2π·0.5 = π
+        // sin(π) ≈ 0, cos(π) = -1
+        let mut t = sample();
+        t.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+            .single()
+            .unwrap();
+        let obs = t.to_observation_vec(&["time_sin"]).unwrap();
+        assert!((obs[0] - 0.0).abs() < 1e-10, "sin(π) ≈ 0, got {}", obs[0]);
+        let obs = t.to_observation_vec(&["time_cos"]).unwrap();
+        assert!((obs[0] + 1.0).abs() < 1e-10, "cos(π) = -1, got {}", obs[0]);
+    }
+
+    #[test]
+    fn time_sin_cos_respects_minutes() {
+        use chrono::TimeZone;
+        // 1:30 = 1.5 hours. sin(2π·1.5/24) ≈ sin(π/8) ≈ 0.382683
+        let mut t = sample();
+        t.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 1, 30, 0)
+            .single()
+            .unwrap();
+        let obs = t.to_observation_vec(&["time_sin"]).unwrap();
+        let expected = (2.0 * std::f64::consts::PI * 1.5 / 24.0).sin();
+        assert!((obs[0] - expected).abs() < 1e-10);
     }
 }

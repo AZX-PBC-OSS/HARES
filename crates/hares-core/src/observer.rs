@@ -30,6 +30,13 @@ pub struct StepSnapshot {
     /// the `observe` feature is enabled without invariant checks.
     #[cfg(feature = "observe")]
     pub moisture_invariant: Option<MoistureInvariantCapture>,
+    /// sin(2π · fractional_hour / 24) for verifying time_sin observation field.
+    pub time_sin: f64,
+    /// cos(2π · fractional_hour / 24) for verifying time_cos observation field.
+    pub time_cos: f64,
+    /// Per-actor telemetry channel keys present at this timestep:
+    /// actor_name → list of channel keys.
+    pub actor_telemetry_keys: Vec<(String, Vec<String>)>,
 }
 
 /// Incrementally populated captures for each phase of `run_timestep`.

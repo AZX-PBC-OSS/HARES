@@ -772,6 +772,7 @@ pub fn observation_field_bounds(key: &str) -> (f64, f64) {
         "outdoor_humidity_ratio" => (0.0, 0.1),
         "total_power_kw" | "total_electric_kw" => (-100.0, 100.0),
         "battery_soc" | "ev_soc" => (0.0, 1.0),
+        "time_sin" | "time_cos" => (-1.0, 1.0),
         _ => {
             if key.starts_with("zone_temp[") && key.ends_with(']') {
                 return (0.0, 50.0);

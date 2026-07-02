@@ -3416,6 +3416,20 @@ impl Dwelling {
             }
         }
 
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            step = self.clock.current_step(),
+            telemetry_keys = ?actor_telemetry
+                .iter()
+                .map(|(name, channels)| {
+                    let mut keys: Vec<_> = channels.keys().cloned().collect();
+                    keys.sort();
+                    (name.clone(), keys)
+                })
+                .collect::<Vec<_>>(),
+            "actor_telemetry keys at timestep"
+        );
+
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             let w = self.latest_env.weather.outdoor_humidity_ratio;
@@ -5175,6 +5189,29 @@ impl Dwelling {
                 actor_skips,
                 actor_calls,
                 moisture_invariant,
+                time_sin: {
+                    let fhour = self.latest_env.current_time.hour() as f64
+                        + self.latest_env.current_time.minute() as f64 / 60.0
+                        + self.latest_env.current_time.second() as f64 / 3600.0;
+                    (2.0 * std::f64::consts::PI * fhour / 24.0).sin()
+                },
+                time_cos: {
+                    let fhour = self.latest_env.current_time.hour() as f64
+                        + self.latest_env.current_time.minute() as f64 / 60.0
+                        + self.latest_env.current_time.second() as f64 / 3600.0;
+                    (2.0 * std::f64::consts::PI * fhour / 24.0).cos()
+                },
+                actor_telemetry_keys: self
+                    .actors
+                    .iter()
+                    .filter_map(|actor| {
+                        actor.telemetry().map(|tel| {
+                            let mut keys: Vec<String> = tel.0.keys().cloned().collect();
+                            keys.sort();
+                            (actor.name().to_string(), keys)
+                        })
+                    })
+                    .collect(),
             });
         }
 

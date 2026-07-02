@@ -11,7 +11,7 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("gymnasium")
 
 from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next.rl.gym_env import DwellingGymEnv, _observation_field_bounds, _sorted_action_layout
+from ochre_next.rl.gym_env import DwellingGymEnv, _observation_field_bounds, _sorted_action_layout, telemetry_to_observation
 from ochre_next.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -380,6 +380,8 @@ def test_observation_field_bounds_all_finite():
         "equipment_power[Gas Furnace]",
         "battery_soc",
         "ev_soc",
+        "time_sin",
+        "time_cos",
         "unknown_field",
     ]
     for field in fields:
@@ -511,3 +513,129 @@ def test_vec_gym_field_bounds_overrides_in_info():
         assert np.isclose(
             float(info["obs_total_power_kw_high"]), 200.0
         ), f"override high not in info: {info}"
+
+
+# ---------------------------------------------------------------------------
+# time_sin / time_cos bounds and integration tests (T-0340)
+# ---------------------------------------------------------------------------
+
+
+def test_observation_field_bounds_time_sin_cos():
+    """time_sin and time_cos have bounds [-1, 1]."""
+    low, high = _observation_field_bounds("time_sin")
+    assert low == -1.0 and high == 1.0, f"time_sin: ({low}, {high})"
+    low, high = _observation_field_bounds("time_cos")
+    assert low == -1.0 and high == 1.0, f"time_cos: ({low}, {high})"
+
+
+def test_time_sin_cos_fields_in_observation():
+    """time_sin and time_cos produce finite, in-bounds values via telemetry_to_observation."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["time_sin", "time_cos"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=42)
+    obs, _, _, _, _ = env.step(np.array([21.0], dtype=np.float64))
+    assert obs.shape == (2,)
+    assert np.all(np.isfinite(obs)), f"non-finite observation: {obs}"
+    assert -1.0 <= obs[0] <= 1.0, f"time_sin out of bounds: {obs[0]}"
+    assert -1.0 <= obs[1] <= 1.0, f"time_cos out of bounds: {obs[1]}"
+
+
+def test_time_sin_cos_observation_space_finite():
+    """Observation space with time_sin/time_cos has only finite bounds."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["time_sin", "time_cos", "total_power_kw"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    low = np.asarray(env.observation_space.low, dtype=np.float64)
+    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    assert np.all(np.isfinite(low)), f"non-finite low: {low}"
+    assert np.all(np.isfinite(high)), f"non-finite high: {high}"
+    assert np.isclose(float(low[0]), -1.0)
+    assert np.isclose(float(high[0]), 1.0)
+
+
+# ---------------------------------------------------------------------------
+# actor_telemetry resolution tests (T-0340)
+# ---------------------------------------------------------------------------
+
+
+def test_telemetry_to_observation_actor_telemetry_dot_notation():
+    """telemetry_to_observation resolves actor_telemetry fields via <actor>.<channel> dot notation."""
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
+    dwelling.step()
+    tel = dwelling.telemetry()
+
+    obs = telemetry_to_observation(tel, ["DRAgent.dr_level"])
+    assert obs.shape == (1,)
+    assert obs[0] == 0.0, f"dr_level should be 0.0 for Normal DR level, got {obs[0]}"
+
+
+def test_telemetry_to_observation_actor_telemetry_bare_name():
+    """telemetry_to_observation resolves actor_telemetry fields via bare-name search across all actors."""
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
+    dwelling.step()
+    tel = dwelling.telemetry()
+
+    obs = telemetry_to_observation(tel, ["dr_active"])
+    assert obs.shape == (1,)
+    assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
+
+
+def test_telemetry_to_observation_builtin_wins_over_actor_fallback():
+    """Built-in telemetry fields take priority over actor_telemetry for the same key name."""
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
+    dwelling.step()
+    tel = dwelling.telemetry()
+
+    # total_power_kw is a built-in field; actor_telemetry must not override it.
+    obs = telemetry_to_observation(tel, ["total_power_kw"])
+    assert obs.shape == (1,)
+    assert obs[0] != 0.0, "built-in total_power_kw should not fall through to actor_telemetry"
+
+
+def test_actor_telemetry_fields_in_dwelling_gym_observation():
+    """End-to-end: actor-injected fields appear in the observation vector via telemetry_to_observation.
+
+    Creates a dwelling, adds a DrCompliance actor, steps, and verifies that
+    actor_telemetry fields resolve correctly in the observation output.
+    This exercises the full actor → dwelling.step → telemetry → telemetry_to_observation
+    pipeline without going through DwellingGymEnv's reset cycle (which recreates the
+    dwelling and would discard dynamically-added actors).
+    """
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
+    dwelling.step()
+    tel = dwelling.telemetry()
+
+    # Dot-notation: <actor>.<channel>
+    obs = telemetry_to_observation(tel, ["DRAgent.dr_level"])
+    assert obs.shape == (1,)
+    assert obs[0] == 0.0, f"dr_level should be 0.0 for Normal DR level, got {obs[0]}"
+
+    # Bare-name search
+    obs = telemetry_to_observation(tel, ["dr_active"])
+    assert obs.shape == (1,)
+    assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
+
+    # Combined: built-in + actor_telemetry fields in the same observation vector
+    obs = telemetry_to_observation(tel, ["total_power_kw", "DRAgent.dr_level", "DRAgent.dr_active"])
+    assert obs.shape == (3,)
+    assert np.all(np.isfinite(obs)), f"non-finite observation: {obs}"
+    assert obs[0] != 0.0, "built-in total_power_kw should be non-zero after step"
+    assert obs[1] == 0.0
+    assert obs[2] == 0.0
