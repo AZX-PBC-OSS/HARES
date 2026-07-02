@@ -17,11 +17,17 @@ SOC convention:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pybamm
 
 SOC_POINTS = 51
 SOC = np.linspace(0.0, 1.0, SOC_POINTS)
+
+# TOML output directory (relative to script location)
+TOML_DIR = Path(__file__).resolve().parent.parent / "defaults" / "ocv_tables"
 
 
 def build_ocv_curve(
@@ -93,6 +99,12 @@ def lto_ocp_Colclasure2011(sto: float | np.ndarray) -> float | np.ndarray:
         + 0.0020 * np.exp(-10.0 * (1.0 - sto))
     )
 
+
+# ---------------------------------------------------------------------------
+# Version info
+# ---------------------------------------------------------------------------
+print(f"PyBaMM version: {pybamm.__version__}")
+print()
 
 # NMC (Chen2020): NMC811/Graphite, LG M50
 print("=" * 70)
@@ -238,3 +250,64 @@ for name, source, ocv, _ in chemistries:
     v100 = ocv[-1]
     mono = "YES" if np.all(np.diff(ocv) > 0) else ("FLAT" if np.all(np.diff(ocv) >= 0) else "NO")
     print(f"{name:<10} {source:<35} {v0:>7.4f} {v50:>7.4f} {v100:>8.4f} {mono:>10}")
+
+# ---------------------------------------------------------------------------
+# TOML output
+#
+# Writes per-chemistry TOML files suitable for runtime loading via
+# Battery::set_ocv_table(). Files are written to defaults/ocv_tables/.
+# ---------------------------------------------------------------------------
+print()
+print("=" * 70)
+print("TOML OUTPUT")
+print("=" * 70)
+
+TOML_DIR.mkdir(parents=True, exist_ok=True)
+
+# Mapping of chemical symbol to directory-safe name
+TOML_NAMES = {
+    "NMC": "nmc",
+    "LFP": "lfp",
+    "NCA": "nca",
+    "LTO": "lto",
+}
+
+for name, source, ocv, u_neg in chemistries:
+    stem = TOML_NAMES[name]
+    ocv_path = TOML_DIR / f"{stem}_ocv.toml"
+    uneg_path = TOML_DIR / f"{stem}_u_neg.toml"
+
+    # OCV table
+    ocv_path.write_text(
+        "# {name} OCV table (51 points, SOC 0.00–1.00)\n"
+        "# PyBaMM version: {pybamm_version}\n"
+        "# Source: {source}\n"
+        "# Use this file with Battery::set_ocv_table() for runtime injection.\n"
+        "soc_points = [{soc_points}]\n"
+        "voltage_v = [{voltage_v}]\n".format(
+            name=name,
+            pybamm_version=pybamm.__version__,
+            source=source,
+            soc_points=", ".join(f"{s:.4f}" for s in SOC),
+            voltage_v=", ".join(f"{v:.6f}" for v in ocv),
+        )
+    )
+
+    # U_neg table
+    uneg_path.write_text(
+        "# {name} U_neg table (51 points, SOC 0.00–1.00)\n"
+        "# PyBaMM version: {pybamm_version}\n"
+        "# Source: {source}\n"
+        "# Use this file with Battery::set_u_neg_table() for runtime injection.\n"
+        "soc_points = [{soc_points}]\n"
+        "potential_v = [{potential_v}]\n".format(
+            name=name,
+            pybamm_version=pybamm.__version__,
+            source=source,
+            soc_points=", ".join(f"{s:.4f}" for s in SOC),
+            potential_v=", ".join(f"{v:.6f}" for v in u_neg),
+        )
+    )
+
+    print(f"  Wrote {ocv_path}")
+    print(f"  Wrote {uneg_path}")

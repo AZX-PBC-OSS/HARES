@@ -258,7 +258,13 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
 /// verify per-zone thermal attribution without inspecting config internals.
 /// The optional `zone_type` is the HPXML `<Location>` label for water heater
 /// equipment.
-pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16, Option<String>)]) {
+///
+/// `ocv_sources` provides `ocv_source` provenance tags for battery/EV equipment.
+pub fn write_equipment_init(
+    w: &mut impl Write,
+    equipment: &[(String, u16, Option<String>)],
+    ocv_sources: &[(String, String)],
+) {
     for (name, zone_id, zone_type) in equipment {
         match zone_type {
             Some(zt) => {
@@ -271,6 +277,9 @@ pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16, Optio
                 let _ = writeln!(w, "# eq zone_id: {name} -> ZoneId({zone_id})");
             }
         }
+    }
+    for (name, source) in ocv_sources {
+        let _ = writeln!(w, "# eq ocv_source: {name} -> {source}");
     }
 }
 

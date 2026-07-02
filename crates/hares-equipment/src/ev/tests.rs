@@ -1209,6 +1209,22 @@ fn reset_u_neg_table_restores_chemistry_default() {
     assert!(!ev.has_custom_u_neg_table());
 }
 
+#[test]
+fn ocv_source_hardcoded_on_construction() {
+    let config = ev_config(base_raw());
+    let ev = Ev::new(config);
+    assert_eq!(ev.ocv_source().unwrap(), "hardcoded-NMC-v26.3.0");
+}
+
+#[test]
+fn ocv_source_changes_after_set_ocv_table() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config);
+    let custom = OcvTable::for_chemistry(BatteryChemistry::Lfp);
+    ev.set_ocv_table(custom).unwrap();
+    assert_eq!(ev.ocv_source().unwrap(), "hardcoded-LFP-v26.3.0");
+}
+
 // ── Control signal invariant tests ────────────────────────────────
 
 #[test]

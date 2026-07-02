@@ -331,6 +331,12 @@ pub trait Equipment: Send + Sync {
     fn has_custom_u_neg_table(&self) -> bool {
         false
     }
+
+    /// OCV data provenance for diagnostic observability.
+    /// Returns None for equipment that does not use OCV tables.
+    fn ocv_source(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Re-export postcard CRC32 serialisation helpers from the serial module.
@@ -672,6 +678,12 @@ mod tests {
     fn default_reset_u_neg_table_returns_err() {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         assert!(eq.reset_u_neg_table().is_err());
+    }
+
+    #[test]
+    fn default_ocv_source_returns_none() {
+        let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert!(eq.ocv_source().is_none());
     }
 
     #[test]

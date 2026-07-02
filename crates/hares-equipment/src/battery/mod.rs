@@ -1723,6 +1723,10 @@ impl Equipment for Battery {
         self.custom_u_neg
     }
 
+    fn ocv_source(&self) -> Option<&str> {
+        Some(self.ocv_table.ocv_source.as_str())
+    }
+
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }
@@ -4286,6 +4290,32 @@ mod tests {
         bat.set_ocv_table(table).unwrap();
         let v = bat.ocv_table.voltage_at_soc(0.5);
         assert!((v - 3.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ocv_source_reports_hardcoded_after_construction() {
+        let config = battery_config(&[]);
+        let bat = Battery::new(config);
+        assert_eq!(bat.ocv_source().unwrap(), "hardcoded-NMC-v26.3.0");
+    }
+
+    #[test]
+    fn ocv_source_reports_runtime_injected_after_set_ocv_table() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        bat.set_ocv_table(table).unwrap();
+        assert_eq!(bat.ocv_source().unwrap(), "runtime-injected");
+    }
+
+    #[test]
+    fn ocv_source_restored_after_reset_ocv_table() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+        assert_eq!(bat.ocv_source().unwrap(), "hardcoded-NMC-v26.3.0");
     }
 
     #[test]

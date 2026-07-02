@@ -1149,6 +1149,10 @@ impl Equipment for Ev {
         self.custom_u_neg
     }
 
+    fn ocv_source(&self) -> Option<&str> {
+        Some(self.ocv_table.ocv_source.as_str())
+    }
+
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }

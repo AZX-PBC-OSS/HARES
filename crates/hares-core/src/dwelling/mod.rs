@@ -2447,7 +2447,15 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 })
             })
             .collect();
-        diagnostics::write_equipment_init(&mut writer, &equipment_zones);
+        let ocv_sources: Vec<(String, String)> = dwelling
+            .equipment
+            .iter()
+            .filter_map(|eq| {
+                eq.ocv_source()
+                    .map(|s| (eq.descriptor().name.clone(), s.to_string()))
+            })
+            .collect();
+        diagnostics::write_equipment_init(&mut writer, &equipment_zones, &ocv_sources);
         Some(writer)
     } else {
         None

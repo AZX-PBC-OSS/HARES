@@ -1,0 +1,5 @@
+# Pinned PyBaMM version for reproducible OCV table regeneration.
+# The hardcoded tables in crates/hares-equipment/src/battery/ocv.rs were
+# generated with this exact version. CI enforces synchronisation via
+# `make check-ocv`.
+pybamm==26.3.0
