@@ -771,6 +771,7 @@ pub fn observation_field_bounds(key: &str) -> (f64, f64) {
         "outdoor_rh" => (0.0, 1.0),
         "outdoor_humidity_ratio" => (0.0, 0.1),
         "total_power_kw" | "total_electric_kw" => (-100.0, 100.0),
+        "reactive_power_kvar" => (-100.0, 100.0),
         "battery_soc" | "ev_soc" => (0.0, 1.0),
         "time_sin" | "time_cos" => (-1.0, 1.0),
         _ => {
@@ -782,6 +783,9 @@ pub fn observation_field_bounds(key: &str) -> (f64, f64) {
             }
             if key.starts_with("setpoint_cool[") && key.ends_with(']') {
                 return (0.0, 50.0);
+            }
+            if key.starts_with("zone_energy_balance[") && key.ends_with(']') {
+                return (-1e6_f64, 1e6_f64);
             }
             if key.starts_with("equipment_soc[") && key.ends_with(']') {
                 return (0.0, 1.0);

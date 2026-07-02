@@ -44,6 +44,7 @@ class VecDwellingGymEnv:
         reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
+        verify_observation_equivalence: bool = False,
     ) -> None:
         start_method = multiprocessing.get_start_method(allow_none=True)
         if start_method == "fork":
@@ -112,6 +113,7 @@ class VecDwellingGymEnv:
             for field, (low, high) in zip(observation_fields, bounds)
         }
         self._reward_fn = reward_fn
+        self._verify_observation_equivalence = verify_observation_equivalence
         self._steps_elapsed = np.zeros(self.num_envs, dtype=np.int64)
         self._max_steps = max(1, int(np.ceil(episode_length.total_seconds() / 60.0)))
 
@@ -184,6 +186,27 @@ class VecDwellingGymEnv:
             dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)
             truncs = np.asarray([bool(row["truncated"]) for row in raw], dtype=np.bool_)
             infos = [dict(row.get("info", {})) for row in raw]
+
+            if self._verify_observation_equivalence:
+                for i, dwelling in enumerate(self._dwellings):
+                    py_obs = telemetry_to_observation(dwelling.telemetry(), self._observation_fields)
+                    py_obs = np.asarray(py_obs, dtype=np.float64)
+                    if not np.allclose(obs[i], py_obs, atol=1e-9, rtol=1e-5, equal_nan=True):
+                        raw_diff = np.abs(obs[i] - py_obs)
+                        nan_mismatch = np.isnan(obs[i]) != np.isnan(py_obs)
+                        diff = np.where(nan_mismatch, np.inf, raw_diff)
+                        max_idx = int(np.argmax(diff))
+                        max_diff = float(diff[max_idx])
+                        max_diff_str = (
+                            "NaN mismatch" if np.isinf(max_diff) else f"{max_diff:.9g}"
+                        )
+                        warnings.warn(
+                            f"Rust-Python observation mismatch for dwelling {i} at field "
+                            f"{self._observation_fields[max_idx]!r}: "
+                            f"Rust={obs[i][max_idx]:.9g}, Python={py_obs[max_idx]:.9g}, "
+                            f"max absolute diff={max_diff_str}",
+                            stacklevel=2,
+                        )
         else:
             for idx, dwelling in enumerate(self._dwellings):
                 self._apply_controls(dwelling, arr[idx])

@@ -207,12 +207,16 @@ def _observation_field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 0.1)
     if key in {"total_power_kw", "total_electric_kw"}:
         return (-100.0, 100.0)
+    if key == "reactive_power_kvar":
+        return (-100.0, 100.0)
     if _bracket_name(key, "zone_temp") is not None:
         return (0.0, 50.0)
     if _bracket_name(key, "setpoint_heat") is not None:
         return (0.0, 50.0)
     if _bracket_name(key, "setpoint_cool") is not None:
         return (0.0, 50.0)
+    if _bracket_name(key, "zone_energy_balance") is not None:
+        return (_BROAD_LOW, _BROAD_HIGH)
     if _bracket_name(key, "equipment_soc") is not None:
         return (0.0, 1.0)
     if _bracket_name(key, "equipment_power") is not None:
@@ -263,6 +267,9 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
         if key in {"total_power_kw", "total_electric_kw"}:
             out.append(float(telemetry.total_power_kw))
             continue
+        if key == "reactive_power_kvar":
+            out.append(float(telemetry.reactive_power_kvar))
+            continue
 
         zone_name = _bracket_name(key, "zone_temp")
         if zone_name is not None:
@@ -275,6 +282,10 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
         zone_name = _bracket_name(key, "setpoint_cool")
         if zone_name is not None:
             out.append(float(zone["setpoint_cool_c"][zone_idx[zone_name.strip().lower()]]))
+            continue
+        zone_name = _bracket_name(key, "zone_energy_balance")
+        if zone_name is not None:
+            out.append(float(zone["energy_balance_residuals"][zone_idx[zone_name.strip().lower()]]))
             continue
         equip_name = _bracket_name(key, "equipment_soc")
         if equip_name is not None:

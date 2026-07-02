@@ -864,3 +864,225 @@ def test_vec_gym_reset_observation_nan_and_mask():
         warnings.simplefilter("always")
         env.reset(seed=456)
         assert len(w) == 0, f"expected no warning on second reset, got {len(w)}"
+
+
+# ---------------------------------------------------------------------------
+# Field dispatch regression tests (T-0342)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTelemetry:
+    """Minimal fake telemetry for unit-testing telemetry_to_observation field dispatch.
+
+    Requires no native _hares module, no HPXML fixtures, and no Dwelling construction.
+    """
+
+    initialized = True
+    total_power_kw = 5.0
+    reactive_power_kvar = 1.5
+
+    def __init__(self):
+        import datetime
+        self.current_time = datetime.datetime(2019, 1, 1, 12, 0, 0)
+
+    def zone(self):
+        return {
+            "names": ["Living Room", "Kitchen"],
+            "temperature_c": [22.0, 23.5],
+            "setpoint_heat_c": [20.0, 19.0],
+            "setpoint_cool_c": [24.0, 25.0],
+            "energy_balance_residuals": [10.0, -5.0],
+            "outdoor_temp_c": 5.0,
+            "outdoor_humidity_ratio": 0.004,
+        }
+
+    def equipment(self):
+        return {
+            "names": ["Battery", "Gas Furnace", "electric vehicle"],
+            "soc": [0.5, 0.0, 0.8],
+            "power_kw": [1.0, 2.0, 0.0],
+        }
+
+    def actors(self):
+        return {}
+
+
+def test_telemetry_to_observation_reactive_power_kvar_no_keyerror():
+    """telemetry_to_observation handles reactive_power_kvar without raising KeyError."""
+    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_kvar"])
+    assert obs.shape == (1,)
+    assert np.isfinite(obs[0])
+    assert obs[0] == 1.5
+
+
+def test_telemetry_to_observation_reactive_power_kvar_in_mixed_fields():
+    """reactive_power_kvar coexists with other fields in a single observation vector."""
+    obs = telemetry_to_observation(
+        _FakeTelemetry(),
+        ["total_power_kw", "reactive_power_kvar", "outdoor_temp"],
+    )
+    assert obs.shape == (3,)
+    assert np.all(np.isfinite(obs))
+    assert obs[1] == 1.5
+
+
+def test_telemetry_to_observation_zone_energy_balance_no_keyerror():
+    """telemetry_to_observation handles zone_energy_balance[name] without raising KeyError."""
+    obs = telemetry_to_observation(_FakeTelemetry(), ["zone_energy_balance[Living Room]"])
+    assert obs.shape == (1,)
+    assert np.isfinite(obs[0])
+
+
+def test_telemetry_to_observation_unknown_field_keyerror():
+    """telemetry_to_observation raises KeyError for truly unrecognised fields."""
+    with pytest.raises(KeyError, match="unknown observation field"):
+        telemetry_to_observation(_FakeTelemetry(), ["nonexistent_field_name"])
+
+
+def test_telemetry_to_observation_all_known_scalar_keys_no_keyerror():
+    """All known scalar (non-bracket, non-actor) observation keys resolve without KeyError."""
+    fake = _FakeTelemetry()
+    scalar_fields = [
+        "outdoor_temp",
+        "outdoor_temp_c",
+        "outdoor_humidity_ratio",
+        "total_power_kw",
+        "total_electric_kw",
+        "reactive_power_kvar",
+        "battery_soc",
+        "ev_soc",
+        "time_sin",
+        "time_cos",
+    ]
+    obs = telemetry_to_observation(fake, scalar_fields)
+    assert obs.shape == (len(scalar_fields),)
+    assert np.all(np.isfinite(obs))
+
+
+def test_telemetry_to_observation_bracket_keys_no_keyerror():
+    """All bracket-prefixed observation keys resolve without KeyError."""
+    fake = _FakeTelemetry()
+    bracket_fields = [
+        "zone_temp[Living Room]",
+        "zone_temp[Kitchen]",
+        "setpoint_heat[Living Room]",
+        "setpoint_cool[Living Room]",
+        "zone_energy_balance[Living Room]",
+        "equipment_soc[Battery]",
+        "equipment_power[Gas Furnace]",
+    ]
+    obs = telemetry_to_observation(fake, bracket_fields)
+    assert obs.shape == (len(bracket_fields),)
+    assert np.all(np.isfinite(obs))
+
+
+# ---------------------------------------------------------------------------
+# Dual-path observation equivalence verification (T-0342)
+# ---------------------------------------------------------------------------
+
+
+def test_vec_gym_verify_observation_equivalence_no_crash():
+    """VecDwellingGymEnv with verify_observation_equivalence=True steps without crashing.
+
+    When Rust batch_step and Python telemetry_to_observation produce equivalent
+    observations, the comparison should emit no false-positive warnings.
+    """
+    import warnings
+
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+        verify_observation_equivalence=True,
+    )
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        for _step_index in range(3):
+            env.step(np.full((2, 1), 21.0, dtype=np.float64))
+        equivalence_warnings = [
+            _w for _w in w
+            if "Rust-Python observation mismatch" in str(_w.message)
+        ]
+        assert len(equivalence_warnings) == 0, (
+            f"unexpected mismatch warnings: {[str(_w.message) for _w in equivalence_warnings]}"
+        )
+
+
+def test_vec_gym_verify_observation_equivalence_flag_defaults_off():
+    """VecDwellingGymEnv does not run the verification when flag is not set."""
+    import warnings
+
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        for _step_index in range(3):
+            env.step(np.full((2, 1), 21.0, dtype=np.float64))
+        equivalence_warnings = [
+            _w for _w in w
+            if "Rust-Python observation mismatch" in str(_w.message)
+        ]
+        assert len(equivalence_warnings) == 0, (
+            f"verification warnings emitted with flag off: "
+            f"{[str(_w.message) for _w in equivalence_warnings]}"
+        )
+
+
+def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
+    """NaN mismatch diagnostic names the divergent field, not a non-divergent one."""
+    import warnings
+    from unittest.mock import patch
+
+    import ochre_next.rl.vec_env as vec_env_module
+
+    dwellings = [_make_dwelling(seed=0) for _ in range(1)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+        verify_observation_equivalence=True,
+    )
+
+    # Inject a one-sided NaN at index 0 ("total_power_kw") in the Python path.
+    def divergent_telemetry(telemetry, fields):
+        result = np.asarray(
+            telemetry_to_observation(telemetry, fields), dtype=np.float64
+        )
+        result[0] = np.nan
+        return result
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        with patch.object(
+            vec_env_module, "telemetry_to_observation",
+            new=divergent_telemetry,
+        ):
+            env.step(np.full((1, 1), 21.0, dtype=np.float64))
+        mismatch_warnings = [
+            _w for _w in w
+            if "Rust-Python observation mismatch" in str(_w.message)
+        ]
+    assert len(mismatch_warnings) == 1, (
+        f"expected exactly one mismatch warning, got {len(mismatch_warnings)}: "
+        f"{[str(_w.message) for _w in mismatch_warnings]}"
+    )
+    warning_text = str(mismatch_warnings[0].message)
+    assert "total_power_kw" in warning_text, (
+        f"warning should name 'total_power_kw', got: {warning_text}"
+    )
+    assert "NaN mismatch" in warning_text, (
+        f"warning should report 'NaN mismatch', got: {warning_text}"
+    )

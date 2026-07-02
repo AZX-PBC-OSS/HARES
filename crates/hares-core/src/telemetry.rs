@@ -222,11 +222,21 @@ impl DwellingTelemetry {
             )));
         }
 
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            fields = ?fields,
+            observation = ?out,
+            "observation vector built via Rust dispatch"
+        );
+
         Ok(out)
     }
 }
 
 fn index_map(names: &[String]) -> HashMap<String, usize> {
+    // normalize_ascii(s) = s.trim().to_ascii_lowercase() (hares-types/src/text.rs:11).
+    // Equivalent to Python's name.strip().lower() for ASCII input — HARES zone and
+    // equipment names are always ASCII, so the two index maps resolve identically.
     names
         .iter()
         .enumerate()
@@ -642,5 +652,168 @@ mod tests {
         t.initialized = true;
         let obs = t.to_observation_vec(&["outdoor_temp"]).unwrap();
         assert!(obs[0].is_finite(), "expected finite for initialized");
+    }
+
+    // --- conformance: all known field keys ---
+
+    /// All scalar (non-bracket, non-alias, non-temporal, non-actor) field keys
+    /// that `to_observation_vec` handles.
+    const SCALAR_OBSERVATION_KEYS: &[&str] = &[
+        "outdoor_temp",
+        "outdoor_humidity_ratio",
+        "total_power_kw",
+        "total_electric_kw",
+        "reactive_power_kvar",
+    ];
+
+    /// Bracket-based keys with a known zone.
+    const ZONE_BRACKET_KEYS: &[&str] = &[
+        "zone_temp[Indoor]",
+        "setpoint_heat[Indoor]",
+        "setpoint_cool[Indoor]",
+        "zone_energy_balance[Indoor]",
+    ];
+
+    /// Bracket-based keys with a known equipment.
+    const EQUIP_BRACKET_KEYS: &[&str] = &["equipment_soc[Battery]", "equipment_power[Battery]"];
+
+    /// Flat aliases whose canonical equipment is present in the sample.
+    const FLAT_ALIAS_KEYS: &[&str] = &["battery_soc"];
+
+    /// Temporal encoding keys.
+    const TEMPORAL_KEYS: &[&str] = &["time_sin", "time_cos"];
+
+    fn sample_with_ev() -> DwellingTelemetry {
+        let mut t = sample();
+        t.equipment_names = vec!["Battery".to_string(), "Electric Vehicle".to_string()];
+        t.equipment_soc = vec![0.5, 0.8];
+        t.equipment_modes = vec![1.0, 0.0];
+        t.equipment_power_kw = vec![1.2, 0.0];
+        t
+    }
+
+    #[test]
+    fn all_scalar_observation_keys_produce_values() {
+        let t = sample();
+        let obs = t.to_observation_vec(SCALAR_OBSERVATION_KEYS).unwrap();
+        assert_eq!(obs.len(), SCALAR_OBSERVATION_KEYS.len());
+        for &v in &obs {
+            assert!(
+                v.is_finite() || v.is_nan(),
+                "non-finite non-NaN in scalar observation: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn reactive_power_kvar_is_observable() {
+        let mut t = sample();
+        t.reactive_power_kvar = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        assert_eq!(obs.len(), 1);
+        assert!((obs[0] - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zone_energy_balance_bracket_is_observable() {
+        let mut t = sample();
+        t.energy_balance_residuals = vec![150.0];
+        let obs = t
+            .to_observation_vec(&["zone_energy_balance[Indoor]"])
+            .unwrap();
+        assert_eq!(obs, vec![150.0]);
+    }
+
+    #[test]
+    fn all_zone_bracket_keys_produce_values() {
+        let t = sample();
+        let obs = t.to_observation_vec(ZONE_BRACKET_KEYS).unwrap();
+        assert_eq!(obs.len(), ZONE_BRACKET_KEYS.len());
+    }
+
+    #[test]
+    fn all_equipment_bracket_keys_produce_values() {
+        let t = sample();
+        let obs = t.to_observation_vec(EQUIP_BRACKET_KEYS).unwrap();
+        assert_eq!(obs.len(), EQUIP_BRACKET_KEYS.len());
+    }
+
+    #[test]
+    fn flat_alias_keys_produce_values() {
+        let t = sample();
+        let obs = t.to_observation_vec(FLAT_ALIAS_KEYS).unwrap();
+        assert_eq!(obs.len(), FLAT_ALIAS_KEYS.len());
+    }
+
+    #[test]
+    fn ev_soc_alias_produces_value() {
+        let t = sample_with_ev();
+        let obs = t.to_observation_vec(&["ev_soc"]).unwrap();
+        assert_eq!(obs.len(), 1);
+        assert!((obs[0] - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn temporal_keys_produce_values() {
+        let t = sample();
+        let obs = t.to_observation_vec(TEMPORAL_KEYS).unwrap();
+        assert_eq!(obs.len(), TEMPORAL_KEYS.len());
+        for &v in &obs {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn comprehensive_field_list_produces_correct_length() {
+        let t = sample_with_ev();
+        let mut fields: Vec<&str> = Vec::new();
+        fields.extend_from_slice(SCALAR_OBSERVATION_KEYS);
+        fields.extend_from_slice(ZONE_BRACKET_KEYS);
+        fields.extend_from_slice(EQUIP_BRACKET_KEYS);
+        fields.extend_from_slice(&["battery_soc", "ev_soc"]);
+        fields.extend_from_slice(TEMPORAL_KEYS);
+        let obs = t.to_observation_vec(&fields).unwrap();
+        assert_eq!(obs.len(), fields.len());
+        // All values should be finite (telemetry is initialized with real data).
+        for &v in &obs {
+            assert!(v.is_finite(), "expected finite, got {v}");
+        }
+    }
+
+    #[test]
+    fn unknown_zone_in_bracket_returns_err() {
+        let t = sample();
+        let err = t
+            .to_observation_vec(&["zone_temp[NonExistent]"])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown zone"));
+    }
+
+    #[test]
+    fn unknown_equipment_in_bracket_returns_err() {
+        let t = sample();
+        let err = t
+            .to_observation_vec(&["equipment_power[NonExistent]"])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown equipment"));
+    }
+
+    #[test]
+    fn ev_soc_alias_without_ev_returns_err() {
+        let t = sample(); // only Battery
+        let err = t.to_observation_vec(&["ev_soc"]).unwrap_err();
+        assert!(
+            err.to_string().contains("Electric Vehicle"),
+            "expected error about missing EV, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zone_energy_balance_unknown_zone_returns_err() {
+        let t = sample();
+        let err = t
+            .to_observation_vec(&["zone_energy_balance[NonExistent]"])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown zone"));
     }
 }
