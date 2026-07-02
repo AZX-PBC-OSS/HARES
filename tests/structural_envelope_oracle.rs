@@ -361,6 +361,20 @@ mod tests {
             ground_count >= 1,
             "slab must connect to ExteriorTarget::Ground, got ground_count={ground_count}"
         );
+
+        // Verify slab (ground-contact) boundary has r_film_exterior == 0.0.
+        // ASHRAE HoF 2021 Ch. 17: ground is a fixed-temperature node; no
+        // convective exterior film applies. The zeroing happens in
+        // conversions.rs building_to_boundary_inputs (r_film_ext set to 0.0
+        // for BoundaryType::Slab), not in film_resistances itself.
+        for bi in &boundary_inputs {
+            if bi.exterior == ExteriorTarget::Ground {
+                assert_eq!(
+                    bi.r_film_exterior_m2_k_w, 0.0,
+                    "slab boundary r_film_exterior_m2_k_w must be zero for ground-contact"
+                );
+            }
+        }
     }
 
     // ── Test 3: RC network topology ──────────────────────────────────────
@@ -1008,6 +1022,23 @@ mod tests {
 
         assert_within_pct(hares_total, ref_total_ua, 8.0, "total building UA");
 
+        // Verify ground-contact (Floor) boundary has r_film_ext == 0.0.
+        // ASHRAE HoF 2021 Ch. 17: ground is a fixed-temperature node; no
+        // convective exterior film applies. Matches HARES conversions.rs
+        // slab r_film_ext = 0.0 convention.
+        if let Some(floor) = ref_boundaries
+            .iter()
+            .find(|b| b["name"].as_str() == Some("Floor"))
+        {
+            let re = floor["r_film_ext_m2_k_w"]
+                .as_f64()
+                .expect("Floor r_film_ext_m2_k_w must be a number");
+            assert_eq!(
+                re, 0.0,
+                "Floor r_film_ext_m2_k_w must be zero for ground-contact boundary per ASHRAE HoF 2021 Ch. 17"
+            );
+        }
+
         // Zone capacitances within 1%. Conditioned zone TCM = 1.0 because
         // furniture boundaries are present (see building_to_zone_inputs);
         // attic TCM = 1.0 (air only). OCHRE's uniform x7 over-counts both.
@@ -1099,7 +1130,7 @@ mod tests {
             "interior film R for slab must be positive"
         );
 
-        // Layer R = total R - film_int (film_ext is zero for ground contact).
+        // Layer R = total R - film_int (film_ext = 0.0 for ground contact).
         // r_film_exterior is zeroed for slabs in conversions.rs:308. This is correct
         // per ASHRAE HoF 2021 Ch. 17 — ground is a fixed-temperature node.
         let r_slab_layer = (r_total_slab - r_film_int).max(1e-6);

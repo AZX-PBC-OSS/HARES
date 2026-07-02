@@ -801,6 +801,11 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # resistor, so the layer resistance must be reduced by film_int
     # to keep total R from interior → ground = area / (F2 × P).
     r_fi, r_fe = _film(0.0, "LIV", "GND")  # r_fe = 0.0 for Ground
+    assert r_fe == 0.0, (
+        f"Floor exterior film must be zero for ground-contact boundary, "
+        f"got {r_fe}. ASHRAE HoF 2021 Ch. 17: ground is a fixed-temperature "
+        f"node; no convective exterior film applies."
+    )
     r_total_slab = slab_area / g_w_per_k if g_w_per_k > 1e-9 else 99.0
     r_slab_layer = max(r_total_slab - r_fi, 1e-6)
     print(
