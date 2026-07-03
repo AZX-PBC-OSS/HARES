@@ -1085,8 +1085,10 @@ dependencies = [
  "proptest",
  "rand 0.10.0",
  "rand_chacha 0.10.0",
+ "regex",
  "serde",
  "serde_json",
+ "syn",
  "tracing",
  "uom",
 ]

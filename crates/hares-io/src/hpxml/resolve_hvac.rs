@@ -2201,7 +2201,8 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         apply_building_setpoint_profiles(building, &mut params, false, true);
-        if name != "Room AC" {
+        // Room AC and MSHP Cooler are ductless — skip duct params.
+        if name != "Room AC" && name != "MSHP Cooler" {
             duct_params.insert_into_map(&mut params);
         }
         if let Some(zone_id) = conditioned_zone_id(building) {
@@ -2210,8 +2211,10 @@ pub(super) fn resolve_hvac(
         let typed_config = match name.as_str() {
             "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
             "Room AC" => try_build_room_ac_config(&name, &params),
-            // Unreachable: canonical_hvac_cooling_name generates exactly the
-            // two names matched above and rejects all others with Err.
+            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)
+                .ok()
+                .flatten(),
+            // Unreachable: canonical_hvac_cooling_name validates all names.
             _ => unreachable!(
                 "canonical_hvac_cooling_name validated '{}' but typed_config match did not cover it",
                 name,
@@ -2720,7 +2723,12 @@ fn canonical_hvac_cooling_name(
         "central air conditioner" => "Air Conditioner",
         "room air conditioner" => "Room AC",
         "packaged terminal air conditioner" => "Room AC",
-        "mini-split" => "Room AC",
+        // Mini-split cooling-only systems use the MSHP Cooler model (4-speed,
+        // variable-speed, SEER-based) — the same model used for mini-split
+        // HeatPumps.  Mapping to Room AC was incorrect: Room AC requires EER
+        // (not SEER) and is single-speed only.  OCHRE also maps mini-split to
+        // "MSHP Cooler" (vendors/OCHRE/ochre/utils/equipment.py:24).
+        "mini-split" => "MSHP Cooler",
         _ => {
             return Err(HpxmlError::Parse(
                 format!("unsupported HPXML cooling system type: CoolingSystemType='{ty}'").into(),
@@ -5235,6 +5243,33 @@ mod tests {
             cfg.shr, None,
             "shr should be None when SensibleHeatFraction is absent"
         );
+    }
+
+    #[test]
+    fn canonical_cooling_name_maps_mini_split_to_mshp_cooler() {
+        // Mini-split cooling-only systems must map to MSHP Cooler (SEER-based,
+        // 4-speed variable-speed), not Room AC (EER-based, single-speed only).
+        // OCHRE applies the same mapping (equipment.py:24).
+        let name = canonical_hvac_cooling_name("mini-split", FuelType::Electric)
+            .expect("mini-split must resolve to a known cooling name");
+        assert_eq!(
+            name, "MSHP Cooler",
+            "mini-split CoolingSystem must map to MSHP Cooler, not Room AC"
+        );
+    }
+
+    #[test]
+    fn canonical_cooling_name_maps_room_ac() {
+        let name = canonical_hvac_cooling_name("room air conditioner", FuelType::Electric)
+            .expect("room AC must resolve");
+        assert_eq!(name, "Room AC");
+    }
+
+    #[test]
+    fn canonical_cooling_name_maps_central_ac() {
+        let name = canonical_hvac_cooling_name("central air conditioner", FuelType::Electric)
+            .expect("central AC must resolve");
+        assert_eq!(name, "Air Conditioner");
     }
 
     #[test]

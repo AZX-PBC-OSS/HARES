@@ -27,3 +27,5 @@ check_invariants = []
 [dev-dependencies]
 proptest = { workspace = true }
 uom = { workspace = true }
+regex = { workspace = true }
+syn = { version = "2", features = ["full", "visit"] }

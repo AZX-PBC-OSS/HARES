@@ -390,7 +390,15 @@ pub fn build_schema(
                 DataType::Float64,
                 true,
             ));
-            if matches!(fuel, FuelType::Gas | FuelType::Propane | FuelType::Oil) {
+            if matches!(
+                fuel,
+                FuelType::Gas
+                    | FuelType::Propane
+                    | FuelType::Oil
+                    | FuelType::Wood
+                    | FuelType::Coal
+                    | FuelType::WoodPellet
+            ) {
                 fields.push(Field::new(
                     format!("{name} {GAS_POWER_SUFFIX}"),
                     DataType::Float64,
@@ -1049,6 +1057,23 @@ mod tests {
         assert!(names.contains(&"ASHP Heater Electric Power (kW)"));
         assert!(names.contains(&"Gas Furnace Electric Power (kW)"));
         assert!(names.contains(&"Gas Furnace Gas Power (therms/hour)"));
+    }
+
+    #[test]
+    fn verbosity_1_creates_gas_power_column_for_combustion_fuels() {
+        // Wood, coal, and wood pellet boilers are mapped to "Gas Boiler" by
+        // canonical_hvac_heating_name. The output schema must create the gas
+        // power column for these fuels, not just natural gas/propane/oil.
+        for fuel in [FuelType::Wood, FuelType::Coal, FuelType::WoodPellet] {
+            let specs = vec![make_spec("Gas Boiler", fuel)];
+            let schema = build_schema(&specs, 1, &[]);
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert!(
+                names.contains(&"Gas Boiler Gas Power (therms/hour)"),
+                "Gas Boiler with fuel {:?} must have a gas power column",
+                fuel
+            );
+        }
     }
 
     #[test]
