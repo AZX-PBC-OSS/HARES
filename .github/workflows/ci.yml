@@ -35,6 +35,15 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
 
+  check-si-guard:
+    name: "SI guard (imperial unit markers)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-nextest
+      - run: bash scripts/check-si-guard.sh
+
   build:
     name: "cargo build --release"
     runs-on: ubuntu-latest
