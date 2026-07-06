@@ -129,6 +129,16 @@ pub struct PyBattery {
     pub charge_efficiency: Option<f64>,
     #[pyo3(get)]
     pub discharge_efficiency: Option<f64>,
+    /// Displacement power-factor magnitude for the battery inverter.
+    /// `None` defaults to 1.0 (unity, no reactive power). Values in (0, 1]
+    /// produce lagging reactive power proportional to active power.
+    #[pyo3(get)]
+    pub power_factor: Option<f64>,
+    /// Inverter apparent-power rating [kVA]. When `None`, defaults to
+    /// `max(max_charge_kw, max_discharge_kw)` at init time. Caps
+    /// `|Q| ≤ sqrt(S² − P²)` (active-power priority).
+    #[pyo3(get)]
+    pub inverter_capacity_kva: Option<f64>,
     #[pyo3(get)]
     pub self_discharge_pct_per_day: Option<f64>,
     #[pyo3(get)]
@@ -175,6 +185,8 @@ impl PyBattery {
             inverter_efficiency: None,
             charge_efficiency: Some(eta),
             discharge_efficiency: Some(eta),
+            power_factor: None,
+            inverter_capacity_kva: None,
             self_discharge_pct_per_day: Some(spec.self_discharge_pct_per_day),
             standby_power_w: Some(spec.standby_power_w),
             import_limit_w: None,
@@ -210,6 +222,8 @@ impl PyBattery {
         inverter_efficiency=None,
         charge_efficiency=None,
         discharge_efficiency=None,
+        power_factor=None,
+        inverter_capacity_kva=None,
         self_discharge_pct_per_day=None,
         standby_power_w=None,
         import_limit_w=None,
@@ -241,6 +255,8 @@ impl PyBattery {
         inverter_efficiency: Option<f64>,
         charge_efficiency: Option<f64>,
         discharge_efficiency: Option<f64>,
+        power_factor: Option<f64>,
+        inverter_capacity_kva: Option<f64>,
         self_discharge_pct_per_day: Option<f64>,
         standby_power_w: Option<f64>,
         import_limit_w: Option<f64>,
@@ -282,6 +298,8 @@ impl PyBattery {
             inverter_efficiency,
             charge_efficiency,
             discharge_efficiency,
+            power_factor,
+            inverter_capacity_kva,
             self_discharge_pct_per_day,
             standby_power_w,
             import_limit_w,
@@ -403,6 +421,12 @@ impl PyBattery {
         }
         if let Some(v) = self.discharge_efficiency {
             parts.push(format!("discharge_efficiency={v}"));
+        }
+        if let Some(v) = self.power_factor {
+            parts.push(format!("power_factor={v}"));
+        }
+        if let Some(v) = self.inverter_capacity_kva {
+            parts.push(format!("inverter_capacity_kva={v}"));
         }
         if let Some(v) = self.self_discharge_pct_per_day {
             parts.push(format!("self_discharge_pct_per_day={v}"));

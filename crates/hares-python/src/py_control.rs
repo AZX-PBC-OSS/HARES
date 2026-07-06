@@ -774,20 +774,6 @@ fn parse_inverter_priority_or_enum(d: &Bound<'_, PyDict>, key: &str) -> PyResult
     Err(PyValueError::new_err(format!("invalid value for `{key}`")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_delay_constructs_correct_signal() {
-        let sig = PyControlSignal::event_delay(30.0);
-        assert!(matches!(
-            sig.signal,
-            ControlSignal::EventDelay { delay_s: 30.0 }
-        ));
-    }
-}
-
 fn parse_duty_cycle_component_or_enum(
     d: &Bound<'_, PyDict>,
     key: &str,
@@ -812,4 +798,18 @@ fn parse_duty_cycle_component_or_enum(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_delay_constructs_correct_signal() {
+        let sig = PyControlSignal::event_delay(30.0);
+        assert!(matches!(
+            sig.signal,
+            ControlSignal::EventDelay { delay_s: 30.0 }
+        ));
+    }
 }
