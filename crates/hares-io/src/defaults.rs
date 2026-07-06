@@ -103,6 +103,13 @@ pub struct PvPanelDefaults {
     /// inverter, shading). EnergyPlus PVWatts default = 0.14.
     #[serde(default = "PvPanelDefaults::default_system_losses")]
     pub system_losses_fraction: f64,
+    /// Marks this spec as the panel used when the caller provides no
+    /// explicit panel parameters. Exactly one spec in `defaults/pv/`
+    /// should set `default = true`; consumers fall back to the
+    /// lexicographically-first key when none is marked, so adding a new
+    /// panel spec never silently changes the default selection.
+    #[serde(default)]
+    pub default: bool,
 }
 
 impl PvPanelDefaults {

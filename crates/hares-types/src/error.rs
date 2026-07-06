@@ -22,6 +22,13 @@ pub enum HaresError {
     Control(String),
     #[error("dwelling error: {0}")]
     Dwelling(String),
+    /// Runtime simulation-state error (e.g. stepping past the configured
+    /// end, or stepping a dwelling that permanently failed). Distinct from
+    /// `Dwelling`, which covers configuration/construction problems: this
+    /// variant maps to Python's `HaresSimulationError` (a `RuntimeError`)
+    /// rather than `HaresConfigError` (a `ValueError`).
+    #[error("simulation error: {0}")]
+    Simulation(String),
     #[error("tariff error: {0}")]
     Tariff(String),
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]

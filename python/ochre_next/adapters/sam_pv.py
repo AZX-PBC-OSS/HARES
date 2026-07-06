@@ -318,6 +318,35 @@ def _run_pvwatts(
     }
 
 
+def _validate_pvwatts_output(raw: PvWattsOutput) -> None:
+    """Validate a PVWatts output mapping before LUT construction.
+
+    Raises a descriptive ``ValueError`` instead of letting a malformed
+    mapping (e.g. a stale mock, or a PySAM API change) surface as a bare
+    ``KeyError`` deep inside LUT construction.
+    """
+    series_keys = ("ac", "gh", "dn", "df", "tamb")
+    scalar_keys = ("inv_eff", "losses")
+    missing = [k for k in (*series_keys, *scalar_keys) if k not in raw]
+    if missing:
+        raise ValueError(
+            f"PVWatts output is missing required key(s) {missing}; "
+            f"expected hourly series {list(series_keys)} and scalars "
+            f"{list(scalar_keys)}. Got keys: {sorted(raw)}"
+        )
+    lengths = {k: len(raw[k]) for k in series_keys}  # type: ignore[literal-required]
+    if len(set(lengths.values())) != 1:
+        raise ValueError(
+            f"PVWatts hourly series have inconsistent lengths: {lengths}"
+        )
+    for k in scalar_keys:
+        v = raw[k]  # type: ignore[literal-required]
+        if not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(
+                f"PVWatts output scalar '{k}' must be a finite number, got {v!r}"
+            )
+
+
 def _bin_value(value: float, step: int) -> float:
     return round(round(value / step) * step, 6)
 
@@ -618,6 +647,7 @@ def generate_pv_lut(
         array_type=array_type,
         weather_file=weather_file,
     )
+    _validate_pvwatts_output(raw)
     table = _build_lut_table(
         raw,
         latitude_deg=latitude_deg,

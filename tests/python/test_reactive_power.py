@@ -237,6 +237,7 @@ class TestEvPowerFactorCharging:
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
+            charger_capacity_kva=15.0,
         )
         dw.add_ev(ev)
         dw.step()
@@ -267,6 +268,7 @@ class TestEvPowerFactorCharging:
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
+            charger_capacity_kva=15.0,
         )
         dw.add_ev(ev)
         dw.step()

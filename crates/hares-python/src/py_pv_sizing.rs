@@ -678,10 +678,15 @@ pub(crate) fn roof_planes_from_dwelling(roof_info: &RoofInfo) -> Vec<PyRoofPlane
 /// Resolve panel parameters from the defaults store when all three are None.
 ///
 /// When the caller provides no explicit panel overrides, consult the
-/// `PvPanelDefaults` store loaded from `defaults/pv/*.toml`. Uses the
-/// lexicographically first key for deterministic behaviour regardless of
-/// HashMap iteration order. If the store is empty, None propagates to the
-/// physics layer where compile-time constants apply.
+/// `PvPanelDefaults` store loaded from `defaults/pv/*.toml`. The spec
+/// marked `default = true` is used (tie-broken by lexicographically
+/// smallest key if several are marked); when none is marked, fall back to
+/// the lexicographically first key for deterministic behaviour regardless
+/// of HashMap iteration order. The explicit marker exists because a
+/// purely lexicographic pick silently changes the default whenever a new
+/// panel spec sorts before the intended one (e.g. `premium_470` <
+/// `standard_440`). If the store is empty, None propagates to the physics
+/// layer where compile-time constants apply.
 fn resolve_panel_defaults(
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
@@ -689,7 +694,13 @@ fn resolve_panel_defaults(
     store: &HashMap<String, PvPanelDefaults>,
 ) -> (Option<u32>, Option<f64>, Option<f64>) {
     if panel_watts.is_none() && panel_area_m2.is_none() && system_losses.is_none() {
-        if let Some(spec) = store.keys().min().and_then(|k| store.get(k)) {
+        let chosen = store
+            .iter()
+            .filter(|(_, spec)| spec.default)
+            .map(|(k, _)| k)
+            .min()
+            .or_else(|| store.keys().min());
+        if let Some(spec) = chosen.and_then(|k| store.get(k)) {
             return (
                 Some(spec.panel_watts),
                 Some(spec.panel_area_m2),
@@ -926,6 +937,7 @@ mod tests {
                 noct_c: 45.0,
                 module_type: "standard".to_string(),
                 system_losses_fraction: 0.14,
+                default: false,
             },
         );
 
@@ -967,6 +979,47 @@ mod tests {
             def_candidates[0].inner.max_capacity_kw > candidates[0].inner.max_capacity_kw,
             "440W default should yield higher capacity than 300W store panel"
         );
+    }
+
+    /// The spec marked `default = true` wins even when another key sorts
+    /// lexicographically earlier. Regression: `premium_470` < `standard_440`
+    /// silently became the default when the pick was purely lexicographic.
+    #[test]
+    fn resolve_panel_defaults_prefers_marked_default() {
+        let mut store = HashMap::new();
+        store.insert(
+            "a_premium_470".to_string(),
+            PvPanelDefaults {
+                name: "Premium 470W".to_string(),
+                panel_watts: 470,
+                panel_area_m2: 2.21,
+                noct_c: 43.0,
+                module_type: "premium".to_string(),
+                system_losses_fraction: 0.14,
+                default: false,
+            },
+        );
+        store.insert(
+            "z_standard_440".to_string(),
+            PvPanelDefaults {
+                name: "Standard 440W".to_string(),
+                panel_watts: 440,
+                panel_area_m2: 2.1,
+                noct_c: 45.0,
+                module_type: "standard".to_string(),
+                system_losses_fraction: 0.14,
+                default: true,
+            },
+        );
+
+        let (watts, area, losses) = resolve_panel_defaults(None, None, None, &store);
+        assert_eq!(
+            watts,
+            Some(440),
+            "marked default must win over lexicographic order"
+        );
+        assert_eq!(area, Some(2.1));
+        assert_eq!(losses, Some(0.14));
     }
 
     #[test]

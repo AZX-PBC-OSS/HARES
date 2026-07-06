@@ -1094,14 +1094,23 @@ impl MetricsCalculator {
                     None
                 },
                 efficiency: EfficiencyMetrics {
-                    hvac_heating_cop: if self.hvac_heating_electric_wh > EPSILON {
+                    // COP = delivered thermal / electric input. The delivered
+                    // columns ("HVAC * Delivered (W)") only exist at high
+                    // output verbosity; when absent the thermal numerator is
+                    // unknown (not zero), so COP must be None — reporting
+                    // 0.0 would misstate a working heat pump's efficiency.
+                    hvac_heating_cop: if self.hvac_heating_delivered_w_idx.is_some()
+                        && self.hvac_heating_electric_wh > EPSILON
+                    {
                         // Thermal output from envelope gains; electric input from telemetry column.
                         let thermal = self.envelope_hvac_heating_wh.max(0.0);
                         Some(thermal / self.hvac_heating_electric_wh)
                     } else {
                         None
                     },
-                    hvac_cooling_cop: if self.hvac_cooling_electric_wh > EPSILON {
+                    hvac_cooling_cop: if self.hvac_cooling_delivered_w_idx.is_some()
+                        && self.hvac_cooling_electric_wh > EPSILON
+                    {
                         let thermal = self.envelope_hvac_cooling_wh.abs();
                         Some(thermal / self.hvac_cooling_electric_wh)
                     } else {
@@ -1756,6 +1765,29 @@ mod tests {
         assert!(
             (cop - 5.0).abs() < 1e-9,
             "heating COP should be 5.0, got {cop}"
+        );
+    }
+
+    /// When the schema lacks the "HVAC Heating Delivered (W)" column (only
+    /// emitted at high output verbosity), the thermal numerator is unknown —
+    /// COP must be None, never a misleading 0.0. Regression test for the
+    /// verbosity-1 case where electric power exists but delivered heat does
+    /// not.
+    #[test]
+    fn hvac_heating_cop_none_without_delivered_column() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
+            ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.0]),
+        ]));
+        let metrics = calc.finish();
+        assert_eq!(
+            metrics.metrics.efficiency.hvac_heating_cop, None,
+            "COP must be None when delivered-heat column is absent (unknown thermal), not 0.0"
         );
     }
 

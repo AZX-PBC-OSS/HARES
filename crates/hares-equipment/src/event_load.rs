@@ -1583,6 +1583,10 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         "Cooking Range",
         Box::new(|config| Box::new(EventBasedLoad::new(config))),
     );
+    registry.register(
+        "Microwave",
+        Box::new(|config| Box::new(EventBasedLoad::new(config))),
+    );
 }
 
 /// Convert a 1440-minute OCHRE-style daily start-probability vector (`pdf_*.csv`)

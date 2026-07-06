@@ -712,9 +712,17 @@ def test_peek_timing_defaults_period_for_single_timestep(
     assert orchestrator._start_time == datetime(2020, 1, 1, 0, 0, 0)
 
 
-def test_voltage_out_of_range_flagged_and_forwarded(
+def test_voltage_out_of_range_flagged_and_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Out-of-range voltage is flagged but NOT applied to the dwelling.
+
+    A federate publishing absolute volts (e.g. 240) instead of per-unit
+    would inject a physically absurd voltage: ZIP loads scale with v², so
+    the simulation's thermal solution diverges and the invariant checker
+    kills the run. The boundary must detect the mismatch and keep the last
+    valid voltage rather than forwarding the bad value.
+    """
     module, fake_helics = _import_dwelling_module(monkeypatch)
     dwelling = _FakeDwelling(fake_helics.log)
     orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
@@ -723,16 +731,23 @@ def test_voltage_out_of_range_flagged_and_forwarded(
 
     assert orchestrator._sub_voltage is not None
 
-    # Voltage below range (< 0.5)
+    # Voltage below range (< 0.5): flagged, not applied
     orchestrator._sub_voltage.push_double(0.1)
     orchestrator._read_subscriptions()
     assert orchestrator._last_voltage_out_of_range is True
-    assert dwelling.grid_voltage_values == [0.1]
+    assert dwelling.grid_voltage_values == []
 
-    # Voltage above range (> 1.5)
+    # Voltage above range (> 1.5): flagged, not applied
     orchestrator._sub_voltage.push_double(10.0)
     orchestrator._read_subscriptions()
-    assert dwelling.grid_voltage_values == [0.1, 10.0]
+    assert orchestrator._last_voltage_out_of_range is True
+    assert dwelling.grid_voltage_values == []
+
+    # In-range voltage is applied and clears the flag
+    orchestrator._sub_voltage.push_double(0.95)
+    orchestrator._read_subscriptions()
+    assert orchestrator._last_voltage_out_of_range is False
+    assert dwelling.grid_voltage_values == [0.95]
 
 
 def test_voltage_in_range_forwarded_correctly(

@@ -577,15 +577,24 @@ class HELICSDwelling:
                 try:
                     voltage_pu = float(self._sub_voltage.double)
                     if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                        # Unit-mismatch guard: a federate publishing absolute
+                        # volts (e.g. 240) instead of per-unit would inject a
+                        # physically absurd voltage into the simulation
+                        # (voltage-dependent ZIP loads scale with v², so 240 pu
+                        # multiplies load power by ~57,600x and destroys the
+                        # thermal solution). Flag and warn, but do NOT apply —
+                        # the dwelling keeps its last valid voltage.
                         self._last_voltage_out_of_range = True
                         _LOG.warning(
                             "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
-                            "check that the external federate publishes per-unit (not volts)",
+                            "check that the external federate publishes per-unit (not volts). "
+                            "Value not applied; keeping last valid voltage.",
                             voltage_pu,
                             VOLTAGE_PU_MIN,
                             VOLTAGE_PU_MAX,
                         )
-                    self._dwelling.set_grid_voltage(voltage_pu)
+                    else:
+                        self._dwelling.set_grid_voltage(voltage_pu)
                 except Exception as exc:
                     _LOG.warning("Failed to apply grid voltage: %s", exc)
 

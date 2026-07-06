@@ -5,6 +5,11 @@
 name = "Standard 440W"
 panel_watts = 440
 panel_area_m2 = 2.1
+# Panel used when the caller provides no explicit panel parameters.
+# Exactly one spec in defaults/pv/ should be marked default; without a
+# marker, consumers fall back to the lexicographically first key, which
+# silently changes whenever a new spec sorts earlier (e.g. premium_470).
+default = true
 # NOCT = Nominal Operating Cell Temperature per IEC 61215.
 # 45°C is PVWatts v8 default for standard rack-mounted modules.
 # SAM PVWatts v8 Technical Reference: NREL/TP-7A40-80694 §2.4.

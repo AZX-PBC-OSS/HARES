@@ -100,7 +100,7 @@ fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) {
     }
 }
 
-pub(super) fn build_spec(
+pub(crate) fn build_spec(
     name: String,
     fuel_type: FuelType,
     mut parameters: Map<String, Value>,

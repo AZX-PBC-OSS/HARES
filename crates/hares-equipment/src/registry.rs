@@ -85,6 +85,7 @@ pub const CANONICAL_EQUIPMENT_NAMES: &[&str] = &[
     "Dishwasher",
     "Clothes Dryer",
     "Cooking Range",
+    "Microwave",
     // Ventilation
     "HRV",
     "ERV",

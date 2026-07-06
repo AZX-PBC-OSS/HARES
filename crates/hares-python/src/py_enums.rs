@@ -154,6 +154,10 @@ impl PyEndUse {
         }
     }
 
+    fn as_str(&self) -> &str {
+        self.inner.as_str()
+    }
+
     fn is_standard(&self) -> bool {
         self.inner.is_standard()
     }

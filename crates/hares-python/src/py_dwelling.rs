@@ -2373,6 +2373,7 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         HaresError::Physics(_)
         | HaresError::Control(_)
         | HaresError::Tariff(_)
+        | HaresError::Simulation(_)
         | HaresError::InvariantViolation { .. }
         | HaresError::NanDetected { .. }
         | HaresError::NegativeDeliveredEnergy { .. } => HaresSimulationError::new_err(msg),

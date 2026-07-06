@@ -561,7 +561,13 @@ fn extend_schema_with_actor_columns(
     let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
     for actor in actors {
         if let Some(tel) = actor.telemetry() {
-            for key in tel.0.keys() {
+            // Telemetry is a HashMap whose iteration order varies per
+            // process (RandomState). Sort the keys so the output schema —
+            // and therefore DataFrame column order — is deterministic
+            // across runs (fixed-seed reproducibility requirement).
+            let mut keys: Vec<&String> = tel.0.keys().collect();
+            keys.sort();
+            for key in keys {
                 let col_name = format!("actor:{}:{}", actor.name(), key);
                 if !fields.iter().any(|f| f.name() == &col_name) {
                     fields.push(Field::new(&col_name, DataType::Float64, true));
@@ -1879,6 +1885,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("defaults")),
         ),
+        &defaults,
     )?;
 
     // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
@@ -4268,12 +4275,12 @@ impl Dwelling {
 
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
         if self.failed {
-            return Err(HaresError::Dwelling(
+            return Err(HaresError::Simulation(
                 "dwelling permanently failed after prior panic, cannot step".to_string(),
             ));
         }
         if self.clock.current_step() >= self.clock.total_steps() {
-            return Err(HaresError::Dwelling(
+            return Err(HaresError::Simulation(
                 "simulation already reached configured end".to_string(),
             ));
         }
@@ -11272,11 +11279,14 @@ master_seed = 0
     }
 
     /// Verify that calling `run_timestep` after the simulation has exhausted
-    /// all steps returns `HaresError::Dwelling`, not a spurious physics error.
-    /// Regression: T-0144 reclassified the step-overflow guard from
-    /// `HaresError::Physics` to `HaresError::Dwelling`.
+    /// all steps returns `HaresError::Simulation`, not a spurious physics
+    /// error. Regression: T-0144 reclassified the step-overflow guard from
+    /// `HaresError::Physics` to `HaresError::Dwelling`; it was later moved to
+    /// `HaresError::Simulation` so the Python boundary raises
+    /// `HaresSimulationError` (a `RuntimeError`) for this runtime-state case
+    /// instead of `HaresConfigError` (a `ValueError`).
     #[test]
-    fn run_timestep_past_end_returns_dwelling_error() {
+    fn run_timestep_past_end_returns_simulation_error() {
         let toml_path = {
             let mut path = std::env::temp_dir();
             let nanos = SystemTime::now()
@@ -11339,8 +11349,8 @@ master_seed = 0
             .run_timestep(false)
             .expect_err("step past end must error");
         assert!(
-            matches!(err, HaresError::Dwelling(_)),
-            "step-past-end error must be HaresError::Dwelling, got {:?}",
+            matches!(err, HaresError::Simulation(_)),
+            "step-past-end error must be HaresError::Simulation, got {:?}",
             err
         );
     }

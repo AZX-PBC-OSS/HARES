@@ -30,7 +30,31 @@ class TestSamPvGeneratePvLut:
             "dn": [0.0 + (i % 24) * 30.0 for i in range(n)],
             "df": [0.0 + (i % 24) * 20.0 for i in range(n)],
             "tamb": [15.0 + (i % 24) * 0.5 for i in range(n)],
+            # PVWatts v8 defaults: inverter efficiency 96 %, total system
+            # losses 14 % (both stored as fractions by _run_pvwatts).
+            "inv_eff": 0.96,
+            "losses": 0.14,
         }
+
+    def test_malformed_pvwatts_output_raises_value_error(self, tmp_path: Path) -> None:
+        """A pvwatts mapping missing required keys must fail with a clear
+        ValueError, not a bare KeyError from deep inside LUT construction."""
+        from ochre_next.adapters import sam_pv
+
+        weather = self._make_weather_file(tmp_path)
+        raw_output = self._mock_pvwatts_output()
+        del raw_output["inv_eff"]
+
+        with mock.patch.object(sam_pv, "_run_pvwatts", return_value=raw_output):
+            with pytest.raises(ValueError, match="missing required key.*inv_eff"):
+                sam_pv.generate_pv_lut(
+                    system_capacity_kw=5.0,
+                    tilt=30.0,
+                    azimuth=180.0,
+                    module_type=0,
+                    array_type=0,
+                    weather_file=weather,
+                )
 
     def test_generate_returns_pvlut_with_correct_schema(self, tmp_path: Path) -> None:
         from ochre_next.adapters import sam_pv

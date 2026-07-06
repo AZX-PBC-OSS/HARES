@@ -8,8 +8,27 @@ PRODUCT_IDS = Battery.product_catalog()
 
 
 class TestBatteryProductId:
-    def test_catalog_has_11_products(self):
-        assert len(PRODUCT_IDS) == 11
+    def test_catalog_products(self):
+        """The catalog exposes exactly the expected product list.
+
+        Asserting the names (not a bare count) makes additions/removals
+        show up explicitly in the diff of this test.
+        """
+        expected = [
+            "TeslaPw3",
+            "TeslaPw2",
+            "TeslaPw2Nca",
+            "TeslaPw3X2",
+            "EnphaseIq5p",
+            "EnphaseIq5pX2",
+            "EnphaseIq10c",
+            "FranklinApower",
+            "FranklinApower2",
+            "FranklinApower2X2",
+            "SolaredgeHome",
+            "LgResu10h",
+        ]
+        assert [str(pid) for pid in PRODUCT_IDS] == expected
 
     def test_from_str_round_trips(self):
         for pid in PRODUCT_IDS:
@@ -167,14 +186,23 @@ class TestBatteryThermalBehavior:
         """Tesla PW3 with heater should warm up enough to charge in cold weather.
 
         After the heater warms cells above min_charge_temp_c (0°C), applying
-        a SOC target should result in charging. This may take many minutes
-        depending on heater power vs thermal mass.
+        a SOC target should result in charging.
+
+        Physics of the warm-up window: the PW3 catalog entry uses the
+        audited per-product thermal parameters (dercat-03): C = 90 kJ/K
+        (100 kg x 900 J/kg-K) and UA = 8.2 W/K (2.35 m^2 x 3.5 W/m^2-K),
+        giving a first-order time constant tau = C/UA ~ 3.0 h and a
+        heater equilibrium rise of 300 W / 8.2 W/K ~ 36.6 K. Starting
+        cold-soaked at Denver's ~-19 C, crossing the 0 C charge threshold
+        takes t = tau * ln(1 / (1 - 19/36.6)) ~ 2.2 h, so a 3 h window
+        gives reliable margin without masking a broken heater (which would
+        never cross 0 C at all: passive equilibrium equals ambient).
         """
         from ochre_next import ControlSignal
         from conftest import make_dwelling
 
         dw = make_dwelling(
-            duration_s=7200, time_res_s=60, start_time="2019-01-01T00:00:00"
+            duration_s=10800, time_res_s=60, start_time="2019-01-01T00:00:00"
         )
         dw.initialize()
         bat = Battery.tesla_pw3()  # 300W heater
@@ -182,7 +210,7 @@ class TestBatteryThermalBehavior:
         dw.apply_control("Tesla Powerwall 3", ControlSignal.soc_target(target=0.9))
 
         charged = False
-        for _ in range(120):  # 2 hours
+        for _ in range(180):  # 3 hours
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Tesla Powerwall 3")
@@ -191,11 +219,11 @@ class TestBatteryThermalBehavior:
                 charged = True
                 break
 
-        # With a 300W heater the battery should warm above 0°C within 2 hours
-        # and begin charging. If this fails, the heater power or thermal model
-        # may be misconfigured.
+        # With a 300W heater the battery should warm above 0°C in ~2.2 hours
+        # (see docstring) and begin charging. If this fails, the heater power
+        # or thermal model may be misconfigured.
         assert charged, (
-            f"Battery with 300W heater should warm up and charge within 2h at -19°C. "
+            f"Battery with 300W heater should warm up and charge within 3h at -19°C. "
             f"Final SOC={soc:.4f}"
         )
 

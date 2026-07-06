@@ -20,7 +20,9 @@ use serde_json::{Map, Value};
 use tracing::warn;
 
 use crate::EquipmentSpec;
+use crate::defaults::DefaultsStore;
 use crate::draw_profile::normalize_draw_profile;
+use crate::hpxml::build_spec;
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
 
 // HERS Reference Home default thermostat setpoints (ASHRAE 90.2).
@@ -411,6 +413,7 @@ pub fn inject_schedule_into_specs(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
+    defaults: &DefaultsStore,
 ) -> Result<(), HaresError> {
     let csv_col_map: HashMap<String, usize> = schedule
         .column_names
@@ -434,7 +437,7 @@ pub fn inject_schedule_into_specs(
 
     // Ensure specs exist for CSV columns that have column mappings but
     // no corresponding spec from HPXML parsing (e.g. microwave).
-    ensure_specs_for_csv_columns(specs, &csv_col_map);
+    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults);
 
     let profiles = defaults_path.map(load_default_profiles).unwrap_or_default();
 
@@ -1326,9 +1329,16 @@ const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 /// Auto-create EquipmentSpecs for CSV columns that have COLUMN_MAPPINGS entries
 /// but no corresponding spec from HPXML parsing (e.g. microwave, which is a
 /// separate schedule CSV column not produced by the HPXML appliance parser).
+///
+/// Specs are constructed through `build_spec` — the same path every HPXML-derived
+/// spec takes — so default gain fractions, fuel-type labels, and ZIP parameters
+/// are injected consistently.  This prevents the class of bug where an
+/// auto-created spec is missing a required parameter that `build_spec` would
+/// have supplied.
 fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
+    defaults: &DefaultsStore,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
@@ -1348,17 +1358,12 @@ fn ensure_specs_for_csv_columns(
         if let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) {
             params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
         }
-        specs.push(EquipmentSpec {
-            instance_name: None,
-            name: mapping.equipment_name.to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: params,
-            zip_params: None,
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-        });
+        specs.push(build_spec(
+            mapping.equipment_name.to_string(),
+            FuelType::Electric,
+            params,
+            defaults,
+        ));
     }
 }
 
@@ -1441,6 +1446,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{determine_max_kw, inject_schedule_into_specs};
+    use crate::defaults::DefaultsStore;
     use crate::{EquipmentSpec, ScheduleTimeSeries};
     use chrono::{DateTime, Duration};
     use hares_equipment::{
@@ -1672,8 +1678,13 @@ mod tests {
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1690,8 +1701,13 @@ mod tests {
 
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let expected = 876.0 / 8760.0;
         let constant_kw = specs[0]
@@ -1712,8 +1728,13 @@ mod tests {
             make_spec("Indoor Lighting", 876.0),
             make_spec("Indoor Lighting", 1752.0),
         ];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let max_a = specs[0]
             .parameters
@@ -1732,7 +1753,7 @@ mod tests {
     fn max_electric_power_w_without_annual_kwh_sets_csv_peak() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", None, Some(500.0))];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
@@ -1768,7 +1789,7 @@ mod tests {
             Some(1200.0),
             Some(500.0),
         )];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
@@ -1780,7 +1801,7 @@ mod tests {
     fn annual_kwh_only_behavior_unchanged_csv_branch() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", Some(1200.0), None)];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
 
@@ -1800,8 +1821,13 @@ mod tests {
 
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", None, Some(500.0))];
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let peak = specs[0]
             .parameters
@@ -1839,8 +1865,13 @@ mod tests {
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1862,7 +1893,7 @@ mod tests {
         let mut schedule = make_schedule_with_event_column(&[0.0, 1.0, 0.0]);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
@@ -1880,7 +1911,7 @@ mod tests {
         let mut schedule = make_schedule(4);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
@@ -1988,7 +2019,7 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         let heater_typed = specs[0]
@@ -2223,7 +2254,7 @@ mod tests {
             make_typed_tankless_spec(Some(200.0)),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         for spec in specs.iter().take(3) {
@@ -2307,7 +2338,7 @@ mod tests {
             avg_daily_l,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         let draw_col_idx = specs[0]
@@ -2350,7 +2381,8 @@ mod tests {
         );
         let mut specs = vec![make_typed_tankless_spec(None)];
 
-        let result = inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        let result =
+            inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty());
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
         let err_msg = err.to_string();
@@ -2422,7 +2454,8 @@ mod tests {
         );
         let mut specs = vec![spec];
 
-        let result = inject_schedule_into_specs(&mut specs, &mut schedule, None);
+        let result =
+            inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty());
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
         let err_msg = err.to_string();
@@ -2471,7 +2504,7 @@ mod tests {
             200.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         let typed = specs[0]
@@ -2674,8 +2707,13 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Heater: should receive a heating DailyProfile with max_value = 20 °C.
         let heater_data = typed_data_of_spec(&specs[0]);
@@ -2831,8 +2869,13 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let heater_data = typed_data_of_spec(&specs[0]);
         let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
@@ -3048,8 +3091,13 @@ mod tests {
             3.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify the occupancy column was added
         let col_idx = schedule
@@ -3104,8 +3152,13 @@ mod tests {
             2.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let col_idx = schedule.column_index["occupants"];
         let col = &schedule.columns[col_idx];
@@ -3157,8 +3210,13 @@ mod tests {
             1.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let col_idx = schedule.column_index["occupants"];
         let col = &schedule.columns[col_idx];
@@ -3195,8 +3253,13 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify the occupancy column was generated from default profile
         assert!(
@@ -3223,8 +3286,13 @@ mod tests {
 
         let mut specs = vec![make_occupancy_spec(&[0.5; 24], &[0.2; 24], &[1.0; 12], 3.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         // Verify existing column is preserved (not overwritten)
         let col_idx = schedule.column_index["occupants"];
@@ -3277,8 +3345,13 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()))
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert!(
             schedule.column_index.contains_key("occupants"),
@@ -3338,7 +3411,7 @@ mod tests {
         let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
@@ -3383,6 +3456,111 @@ mod tests {
         assert!(
             peak_kw > 0.0,
             "microwave schedule should have non-zero power; annual kWh=100"
+        );
+
+        let sensible = specs[0]
+            .parameters
+            .get("sensible_gain_fraction")
+            .and_then(Value::as_f64)
+            .expect("sensible_gain_fraction must be injected by build_spec");
+        assert!(
+            (sensible - 0.72).abs() < 1e-12,
+            "microwave sensible gain fraction should match default_gain_fractions"
+        );
+
+        let latent = specs[0]
+            .parameters
+            .get("latent_gain_fraction")
+            .and_then(Value::as_f64)
+            .expect("latent_gain_fraction must be injected by build_spec");
+        assert!(
+            (latent - 0.08).abs() < 1e-12,
+            "microwave latent gain fraction should match default_gain_fractions"
+        );
+    }
+
+    /// Regression: an auto-created Microwave spec (from a schedule CSV column
+    /// with no HPXML `<Microwave>` element) must survive the full equipment
+    /// construction path — `build_spec` → `EquipmentConfig` →
+    /// `EventBasedLoad::init()`.  Before the fix, `ensure_specs_for_csv_columns`
+    /// hand-rolled the `EquipmentSpec` without gain fractions, so `init()`
+    /// returned `Err("sensible_gain_fraction missing for 'Microwave'")`.
+    #[test]
+    fn auto_created_microwave_spec_survives_event_load_init() {
+        use chrono::TimeZone;
+        use hares_equipment::Equipment;
+        use hares_equipment::config::ConfigValue;
+        use hares_equipment::event_load::EventBasedLoad;
+        use hares_types::{
+            DomainUpdate, GridState, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        };
+
+        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
+            .expect("inject should succeed");
+
+        let spec = &specs[0];
+        assert_eq!(spec.name, "Microwave");
+
+        let raw_config: HashMap<String, ConfigValue> = spec
+            .parameters
+            .iter()
+            .filter_map(|(k, v)| {
+                let cv = match v {
+                    Value::Number(n) => n.as_f64().map(ConfigValue::Float),
+                    Value::String(s) => Some(ConfigValue::Text(s.clone())),
+                    Value::Bool(b) => Some(ConfigValue::Bool(*b)),
+                    Value::Array(arr) => {
+                        let floats: Vec<f64> = arr.iter().filter_map(Value::as_f64).collect();
+                        if floats.len() == arr.len() {
+                            Some(ConfigValue::FloatArray(floats))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                cv.map(|c| (k.clone(), c))
+            })
+            .collect();
+
+        let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config);
+
+        let env = hares_types::EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(vec![0.0, 0.0]),
+            }],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+
+        let mut eq = EventBasedLoad::new(cfg.clone());
+        eq.init(&cfg, &env).expect(
+            "auto-created Microwave spec must survive EventBasedLoad::init — \
+                     before the fix this failed with 'sensible_gain_fraction missing'",
         );
     }
 
@@ -3451,7 +3629,7 @@ mod tests {
             primary_role: None,
         }];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
             .expect("inject_schedule_into_specs should succeed");
 
         // Cooking Range must have its own schedule column
