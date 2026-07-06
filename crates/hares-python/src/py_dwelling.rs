@@ -28,11 +28,7 @@ use rand::SeedableRng;
 use std::sync::MutexGuard;
 
 pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
-pyo3::create_exception!(
-    _hares,
-    HaresEquipmentError,
-    pyo3::exceptions::PyRuntimeError
-);
+pyo3::create_exception!(_hares, HaresEquipmentError, pyo3::exceptions::PyValueError);
 pyo3::create_exception!(
     _hares,
     HaresSimulationError,
@@ -524,8 +520,8 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         initial_connection_state: ev
             .initial_connection_state
             .map(|state| EvConnectionState::from(state).to_string()),
-        power_factor: None,
-        charger_capacity_kva: None,
+        power_factor: ev.power_factor,
+        charger_capacity_kva: ev.charger_capacity_kva,
     };
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }

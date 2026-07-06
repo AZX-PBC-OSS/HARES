@@ -122,7 +122,7 @@ The real-power polynomial (`zp`, `ip`, `pp`) is also defined per class in the so
 | ScheduledLoad/EventLoad | Per-class | No | Full ZIP with byte-identical arithmetic |
 | PV | 1.0 (configurable) | **Yes** | ReactiveSetpoint, PowerFactorSetpoint, PowerSetpoint-Q |
 | Battery | 1.0 (configurable) | **Yes** | ReactiveSetpoint, PowerFactorSetpoint, PowerSetpoint-Q; kVA clamp |
-| EV | ~1.0 | **No** | PFC rectifier; rejects non-zero Q with an error |
+| EV | 1.0 (configurable) | **Yes** | ReactiveSetpoint, PowerFactorSetpoint, PowerSetpoint-Q; kVA clamp; default unity = bit-identical |
 | Generator | 0.0 (Q≡0) | **No** | Genset excitation out of scope |
 
 ## Config Override
@@ -175,7 +175,7 @@ The `"zip"` key is reserved in the override system — it is peeled out of the m
 
 ## Control Precedence
 
-For equipment that supports reactive control (PV and battery):
+For equipment that supports reactive control (PV, battery, EV):
 
 1. **`q_setpoint_kvar`** (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`): absolute override, passed through as-commanded. Positive = absorbing vars, negative = supplying vars.
 2. **PowerFactorSetpoint-updated `power_factor`**: sets the displacement power factor and zeros `q_setpoint_kvar`, so future steps use the updated pf for baseline computation.
@@ -183,7 +183,7 @@ For equipment that supports reactive control (PV and battery):
 
 On PV (generator at pf < 1), the baseline path produces negative Q (supplying vars): `bus_q_kvar = -|P_gen| · tan(acos(pf))` (`pv/mod.rs:1070`).
 
-On battery, reactive power is clamped to respect the inverter's apparent-power rating: `|Q| ≤ sqrt(max(0, S² − P²))` with active-power priority — real power is never curtailed to make room for reactive (`battery/mod.rs:1314-1319`).
+On battery and EV, reactive power is clamped to respect the inverter's apparent-power rating: `|Q| ≤ sqrt(max(0, S² − P²))` with active-power priority — real power is never curtailed to make room for reactive (`battery/mod.rs:1314-1319`, `ev/mod.rs:654-663`).
 
 ## Per-Equipment Reactive Behaviour
 
@@ -204,11 +204,12 @@ On battery, reactive power is clamped to respect the inverter's apparent-power r
 
 ### EV
 
-- Q ≡ 0 for all operating modes (physically ~unity — PFC rectifier)
-- `PowerSetpoint` with `reactive_power_kvar: Some(q)` where `q != 0.0` → `Err(Control("EV does not support reactive power control"))`
-- `ReactiveSetpoint` and `PowerFactorSetpoint` rejected via catch-all `Err`
-- No `REACTIVE` core capability
-- Q=0 is load-bearing for the calibrator's pump-vs-EV reactive gate
+- Supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` — same smart-inverter var control as the battery (IEEE 1547-2018 / SAE J3072)
+- `PowerFactorSetpoint` zeroes `q_setpoint_kvar` (same as battery)
+- kVA clamp with active-power priority: real power is never reduced for reactive
+- Config fields in `EvConfig`: `power_factor` (default 1.0 for PFC unity bit-identical baseline), `charger_capacity_kva` (default `max(max_charging_power_kw, v2g_max_discharge_kw, v2l_max_discharge_kw)`)
+- Charging EV at pf < 1 produces positive Q (absorbing vars); V2G/V2L discharge at pf < 1 produces negative Q (supplying vars — baseline sign follows P)
+- Checkpoint version 2 persists `q_setpoint_kvar` and `power_factor`; `reactive_power_kvar` resets to 0.0 on load (recomputed on next step)
 
 ### Generator
 
@@ -259,4 +260,6 @@ These are documented as potential enhancements, not currently implemented:
 | `crates/hares-types/src/zip.rs` | `ZipLoad` struct, `zip_defaults_for_class()` table, `reactive_only()` constructor |
 | `crates/hares-equipment/src/config.rs` | `resolve_zip()`, `resolve_reactive_zip()`, `validate_zip_sums()`, `EquipmentConfig.zip` sidecar |
 | `crates/hares-equipment/src/battery/config.rs` | `BatteryConfig.power_factor`, `BatteryConfig.inverter_capacity_kva` |
+| `crates/hares-equipment/src/ev/config.rs` | `EvConfig.power_factor`, `EvConfig.charger_capacity_kva` |
+| `crates/hares-equipment/src/ev/mod.rs` | `Ev::compute_reactive_kvar()`, `Ev::apply_control_unchecked()` |
 | `defaults/zip_parameters.toml` | TOML mirror of class table (drift-tested against `zip_defaults_for_class()`) |

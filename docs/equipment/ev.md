@@ -88,22 +88,37 @@ graph LR
     EV -->|"charge_kw + heater_kw"| EL["Electrical Port<br/>(+ = charging, - = V2L)"]
 ```
 
-- **Electrical only**: `active_power_kw` (positive = load, negative = generation), `reactive_power_kvar = 0`
+- **Electrical only**: `active_power_kw` (positive = load, negative = generation), `reactive_power_kvar` (signed, positive = absorbing)
 - No thermal or fuel ports
 
-### Reactive Power
+### Smart-Inverter Var Control
 
-EV reactive power is held at zero for all operating modes. The onboard charger is a PFC (power-factor-correction) rectifier, so Q ≈ 0 is physically realistic. Q=0 is also load-bearing for the calibrator's pump-vs-EV reactive signature gate.
-
-**Control rejection** — all reactive control signals on EV raise errors (no silent drops):
+The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2018 / SAE J3072 require reactive capability. The EV supports the same smart-inverter var control as the battery:
 
 | Signal | Behaviour |
 |--------|-----------|
-| `PowerSetpoint.reactive_power_kvar: Some(q)` with `q ≠ 0` | `Err(Control("EV does not support reactive power control"))` |
-| `PowerSetpoint.reactive_power_kvar: Some(0.0)` | Accepted (no-op) |
-| `ReactiveSetpoint` | Rejected via catch-all `Err` |
-| `PowerFactorSetpoint` | Rejected via catch-all `Err` |
+| `PowerSetpoint.reactive_power_kvar: Some(q)` | Sets absolute var override (finite values accepted) |
+| `ReactiveSetpoint { kvar }` | Direct var setpoint, positive = absorbing |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in `(0, 1]`, zeros `q_setpoint_kvar` |
 
-The EV does not declare `REACTIVE` core capability; `CoreOutput.flows.reactive_power_kvar` is always `None`.
+**Config fields**:
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `power_factor` | `1.0` | Displacement power factor; 1.0 = unity (PFC rectifier baseline, bit-identical to legacy behaviour) |
+| `charger_capacity_kva` | `max(max_charging_power_kw, v2g_max_discharge_kw, v2l_max_discharge_kw)` | Apparent-power rating for kVA clamp |
+
+**Precedence** (same as battery):
+1. `q_setpoint_kvar` (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`) — absolute override, passed through as-commanded
+2. `power_factor` baseline: `Q = P · tan(acos(pf))` — sign follows var flow (charging P>0 → Q>0 absorbing; V2G/V2L discharge P<0 → Q<0 supplying)
+
+**kVA clamp**: `|Q| ≤ sqrt(max(0, S² − P²))` with `S = charger_capacity_kva` — active-power priority (P never curtailed for Q).
+
+**Sign convention**: positive = inductive/absorbing vars, negative = capacitive/supplying vars. The same signed value is written to port, CoreOutput, and telemetry (`REACTIVE_POWER_KVAR` key) with no negation.
+
+**Checkpoint**: `q_setpoint_kvar` and `power_factor` are persisted in the EV checkpoint (version 2), so reactive state survives save/load. On load, `reactive_power_kvar` resets to 0.0 (recomputed on next step).
+
+**Default runs are bit-identical**: with `power_factor=1.0` (default), `compute_reactive_kvar` returns 0.0 — pre-existing simulations produce identical real power, energy, and thermal results.
+
+The EV declares `REACTIVE` core capability and `REACTIVE_SETPOINT | POWER_FACTOR_SETPOINT` control capabilities. `CoreOutput.flows.reactive_power_kvar` is `Some(q)` with signed Q matching the port.
 
 For background on why and how other equipment handles reactive power, see [power-factor.md](./power-factor.md).

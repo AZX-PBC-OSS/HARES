@@ -95,11 +95,11 @@ Three signals control reactive power on capable equipment (PV and battery; see [
 
 | Signal | Semantics | Accepts On |
 |--------|-----------|------------|
-| `ReactiveSetpoint { kvar }` | Direct var setpoint. Positive = absorbing (inductive), negative = supplying (capacitive). Passed through as-commanded with no sign flip. | PV, Battery |
-| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in (0, 1]. Zeros the `q_setpoint_kvar` so future steps use the updated pf for baseline reactive computation. | PV, Battery |
-| `PowerSetpoint.reactive_power_kvar: Some(q)` | Var command embedded in the power setpoint. If q != 0, treated as a `ReactiveSetpoint` override. | PV, Battery |
+| `ReactiveSetpoint { kvar }` | Direct var setpoint. Positive = absorbing (inductive), negative = supplying (capacitive). Passed through as-commanded with no sign flip. | PV, Battery, EV |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in (0, 1]. Zeros the `q_setpoint_kvar` so future steps use the updated pf for baseline reactive computation. | PV, Battery, EV |
+| `PowerSetpoint.reactive_power_kvar: Some(q)` | Var command embedded in the power setpoint. If q != 0, treated as a `ReactiveSetpoint` override. | PV, Battery, EV |
 
-**EV explicitly rejects all three reactive control paths.** `PowerSetpoint` with `reactive_power_kvar: Some(q)` where `q != 0` returns `Err(Control("EV does not support reactive power control"))`. `ReactiveSetpoint` and `PowerFactorSetpoint` are rejected via the catch-all arm in EV's `apply_control_unchecked()`. The EV does not declare `REACTIVE_SETPOINT` or `POWER_FACTOR_SETPOINT` capabilities. Q ≈ 0 is physically correct for the PFC rectifier and load-bearing for the calibrator's pump-vs-EV reactive signature gate.
+**EV accepts all three reactive control paths** with the same smart-inverter var-control semantics as the battery: q_setpoint > PowerFactorSetpoint > baseline precedence, kVA clamp with active-power priority, signed Q on port/CoreOutput/telemetry. The EV is an inverter-coupled DER (V2G/V2L) where IEEE 1547-2018 / SAE J3072 require reactive capability. Default `power_factor=1.0` (PFC unity baseline) produces Q=0, preserving bit-identical real power for pre-reactive simulations. See [ev.md](ev.md) for config fields and [power-factor.md](power-factor.md) for the full reactive model.
 
 ## OpenADR 3.0 Compatibility
 

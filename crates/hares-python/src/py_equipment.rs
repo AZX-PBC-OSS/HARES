@@ -585,6 +585,10 @@ pub struct PyEv {
     pub initial_soc: Option<f64>,
     #[pyo3(get)]
     pub initial_connection_state: Option<PyEvConnectionState>,
+    #[pyo3(get)]
+    pub power_factor: Option<f64>,
+    #[pyo3(get)]
+    pub charger_capacity_kva: Option<f64>,
     /// Optional 4D charging curve LUT (soc × temp × c_rate × soh → power_fraction).
     pub charging_curve_lut: Option<RegularGridInterpolator>,
 }
@@ -592,7 +596,8 @@ pub struct PyEv {
 #[pymethods]
 impl PyEv {
     #[new]
-    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, charging_curve_lut=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, charging_curve_lut=None))]
     fn new(
         py: Python<'_>,
         name: String,
@@ -600,6 +605,8 @@ impl PyEv {
         max_charging_kw: Option<f64>,
         initial_soc: Option<f64>,
         initial_connection_state: Option<PyEvConnectionState>,
+        power_factor: Option<f64>,
+        charger_capacity_kva: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let lut = match charging_curve_lut {
@@ -612,6 +619,8 @@ impl PyEv {
             max_charging_kw,
             initial_soc,
             initial_connection_state,
+            power_factor,
+            charger_capacity_kva,
             charging_curve_lut: lut,
         })
     }
@@ -643,6 +652,8 @@ impl PyEv {
             max_charging_kw: Some(max_power),
             initial_soc: None,
             initial_connection_state: None,
+            power_factor: None,
+            charger_capacity_kva: None,
             charging_curve_lut: None,
         }
     }
@@ -737,6 +748,8 @@ impl PyEv {
             max_charging_kw: Some(spec.max_l2_power_kw),
             initial_soc: None,
             initial_connection_state: None,
+            power_factor: None,
+            charger_capacity_kva: None,
             charging_curve_lut: None,
         }
     }

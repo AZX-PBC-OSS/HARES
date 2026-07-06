@@ -37,6 +37,9 @@ const DRYER_ELECTRIC_SENSIBLE_GAIN: f64 = 0.90;
 /// Source: OCHRE hpxml.py parse_clothes_dryer.
 const BTU_PER_KWH: f64 = 3412.0;
 
+/// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy (kWh).
+const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
+
 /// Resolve a bedroom count for appliance energy calculations.
 ///
 /// Reads `NumberofBedrooms` from HPXML first. When absent, derives from
@@ -195,6 +198,7 @@ pub(super) fn resolve_scheduled_loads(
             ("Refrigerator", "Refrigerator"),
             ("Freezer", "Freezer"),
             ("CookingRange", "Cooking Range"),
+            ("Microwave", "Microwave"),
             ("Dehumidifier", "Dehumidifier"),
         ] {
             let mut counter = 0u32;
@@ -437,6 +441,18 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                             params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                         }
+                    }
+                    "Microwave" if !params.contains_key("annual_electric_kwh") => {
+                        // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
+                        // HPXML Microwave element typically carries RatedAnnualkWh or
+                        // extension/AdjustedAnnualkWh; this arm applies the default only
+                        // when neither is present.
+                        let multiplier = node
+                            .child("extension")
+                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .unwrap_or(1.0);
+                        let annual_kwh = MICROWAVE_DEFAULT_ANNUAL_KWH * multiplier;
+                        params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                     }
                     "Dehumidifier" => {
                         if let Some(cap_pints_day) = child_f64(node, "Capacity") {
@@ -954,6 +970,10 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         // OCHRE: ceiling fan → 0 zone gain (parse_mel default for non-"other").
         "Ceiling Fan" => Some((0.00, 0.00)),
         "Ventilation Fan" => Some((1.00, 0.00)),
+        // OCHRE hpxml.py:1461-1472: electric cooking range sensible ~0.72, latent ~0.08.
+        // Microwave ovens have a similar fraction of input power entering the zone
+        // as sensible heat; use the same split as an electric cooking range.
+        "Microwave" => Some((0.72, 0.08)),
         // Outdoor equipment: well pump, grill, pool/hot tub, spa.
         "Well Pump" | "Gas Grill" | "Pool Heater" | "Hot Tub Heater" | "Pool Pump"
         | "Hot Tub Pump" | "Spa Pump" | "Spa Heater" => Some((0.00, 0.00)),

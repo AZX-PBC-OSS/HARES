@@ -172,8 +172,11 @@ class TestRemoveEquipment:
         assert "TestBat" not in dw.equipment_names()
 
     def test_remove_nonexistent_raises(self):
+        import hares
+
         dw = _make_dwelling()
-        with pytest.raises(ValueError, match="not found"):
+        # HaresEquipmentError is a ValueError subclass; catch the specific type.
+        with pytest.raises(hares.HaresEquipmentError, match="not found"):
             dw.remove_equipment("NoSuchEquipment")
 
     def test_step_after_remove_succeeds(self):
@@ -213,10 +216,12 @@ class TestReplaceEquipment:
 
     def test_replace_nonexistent_raises(self):
         from ochre_next import Battery
+        import hares
 
         dw = _make_dwelling()
         bat = Battery("NoSuch", 10.0)
-        with pytest.raises(ValueError, match="not found"):
+        # HaresEquipmentError is a ValueError subclass; catch the specific type.
+        with pytest.raises(hares.HaresEquipmentError, match="not found"):
             dw.replace_equipment("NoSuch", bat)
 
     def test_step_after_replace_succeeds(self):
@@ -321,8 +326,11 @@ class TestUpdateEquipment:
         )
 
     def test_update_nonexistent_raises(self):
+        import hares
+
         dw = _make_dwelling()
-        with pytest.raises(ValueError, match="not found"):
+        # HaresEquipmentError is a ValueError subclass; catch the specific type.
+        with pytest.raises(hares.HaresEquipmentError, match="not found"):
             dw.update_equipment(
                 "NoSuch",
                 ocv_table=[(0.0, 3.0), (1.0, 4.2)],
@@ -393,9 +401,11 @@ class TestSetEquipmentLut:
 
     def test_set_lut_nonexistent_raises(self):
         from ochre_next import LutType
+        import hares
 
         dw = _make_dwelling()
-        with pytest.raises(ValueError, match="not found"):
+        # HaresEquipmentError is a ValueError subclass; catch the specific type.
+        with pytest.raises(hares.HaresEquipmentError, match="not found"):
             dw.set_equipment_lut(
                 "NoSuch",
                 LutType.ocv(),

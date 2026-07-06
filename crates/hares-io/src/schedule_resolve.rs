@@ -14,7 +14,7 @@ use hares_equipment::{
 };
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_types::{
-    BoundaryPolicy, HaresError, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64,
+    BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64,
 };
 use serde_json::{Map, Value};
 use tracing::warn;
@@ -85,6 +85,11 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
     ColumnMapping {
         csv_column: "cooking_range",
         equipment_name: "Cooking Range",
+        category: ScheduleCategory::EventWindow,
+    },
+    ColumnMapping {
+        csv_column: "microwave",
+        equipment_name: "Microwave",
         category: ScheduleCategory::EventWindow,
     },
     // Power (lighting)
@@ -403,7 +408,7 @@ fn annual_mean_fraction(profile: &DefaultScheduleProfile) -> f64 {
 
 /// Inject resolved power/event schedule metadata into equipment specs.
 pub fn inject_schedule_into_specs(
-    specs: &mut [EquipmentSpec],
+    specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
 ) -> Result<(), HaresError> {
@@ -413,6 +418,23 @@ pub fn inject_schedule_into_specs(
         .enumerate()
         .map(|(i, name)| (name.clone(), i))
         .collect();
+
+    // Invariant: check for unmapped CSV columns before any processing.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let unmapped = find_unmapped_csv_columns(&csv_col_map);
+        for col_name in &unmapped {
+            warn!(
+                csv_column = %col_name,
+                "schedule CSV column has no entry in COLUMN_MAPPINGS; \
+                 this column will be silently ignored during schedule resolution"
+            );
+        }
+    }
+
+    // Ensure specs exist for CSV columns that have column mappings but
+    // no corresponding spec from HPXML parsing (e.g. microwave).
+    ensure_specs_for_csv_columns(specs, &csv_col_map);
 
     let profiles = defaults_path.map(load_default_profiles).unwrap_or_default();
 
@@ -1296,6 +1318,84 @@ fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
 
 fn normalize_schedule_col_name(name: &str) -> String {
     normalize_ascii(name).replace([' ', '-'], "_")
+}
+
+// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy.
+const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
+
+/// Auto-create EquipmentSpecs for CSV columns that have COLUMN_MAPPINGS entries
+/// but no corresponding spec from HPXML parsing (e.g. microwave, which is a
+/// separate schedule CSV column not produced by the HPXML appliance parser).
+fn ensure_specs_for_csv_columns(
+    specs: &mut Vec<EquipmentSpec>,
+    csv_col_map: &HashMap<String, usize>,
+) {
+    for mapping in COLUMN_MAPPINGS {
+        if matches!(
+            mapping.category,
+            ScheduleCategory::Ignore | ScheduleCategory::Occupancy | ScheduleCategory::Setpoint
+        ) {
+            continue;
+        }
+        let col_name = normalize_schedule_col_name(mapping.csv_column);
+        if !csv_col_map.contains_key(&col_name) {
+            continue;
+        }
+        if specs.iter().any(|s| s.name == mapping.equipment_name) {
+            continue;
+        }
+        let mut params = Map::new();
+        if let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) {
+            params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        }
+        specs.push(EquipmentSpec {
+            instance_name: None,
+            name: mapping.equipment_name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        });
+    }
+}
+
+fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
+    match equipment_name {
+        "Microwave" => {
+            // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
+            Some(MICROWAVE_DEFAULT_ANNUAL_KWH)
+        }
+        _ => {
+            warn!(
+                equipment = %equipment_name,
+                "auto-created spec for unmapped CSV column but no default annual energy; \
+                 schedule will have zero power"
+            );
+            None
+        }
+    }
+}
+
+/// Return the set of CSV column names that have no entry in COLUMN_MAPPINGS.
+///
+/// Only active under `#[cfg(any(debug_assertions, feature = "check_invariants"))]`.
+/// The caller is responsible for logging a warning for each unmapped column.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub(crate) fn find_unmapped_csv_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
+    let mut unmapped = Vec::new();
+    for col_name in csv_col_map.keys() {
+        let normalized = normalize_schedule_col_name(col_name);
+        let is_mapped = COLUMN_MAPPINGS
+            .iter()
+            .any(|m| normalize_schedule_col_name(m.csv_column) == normalized);
+        if !is_mapped {
+            unmapped.push(col_name.clone());
+        }
+    }
+    unmapped
 }
 
 /// Gated invariant: every HVAC equipment spec must have a setpoint source.
@@ -3210,5 +3310,184 @@ mod tests {
             source_step_secs: 3600,
             column_aggregations: vec![crate::schedule::ColumnAggregation::Mean],
         }
+    }
+
+    // ── Microwave column mapping tests ──
+
+    fn make_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..values.len())
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("microwave".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec!["microwave".to_string()],
+            columns: vec![values.to_vec()],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![crate::ColumnAggregation::Mean],
+        }
+    }
+
+    #[test]
+    fn microwave_csv_column_creates_spec_with_event_schedule_and_nonzero_energy() {
+        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed with valid config");
+
+        assert_eq!(
+            specs.len(),
+            1,
+            "auto-creation should produce one Microwave spec"
+        );
+        assert_eq!(specs[0].name, "Microwave");
+        assert_eq!(specs[0].fuel_type, FuelType::Electric);
+
+        let annual_kwh = specs[0]
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(Value::as_f64)
+            .expect("annual_electric_kwh must be set");
+        assert!(
+            (annual_kwh - 100.0).abs() < 1e-12,
+            "default annual kWh should be 100"
+        );
+
+        let schedule_col = specs[0]
+            .parameters
+            .get("event_window_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("event_window_schedule_col must be set");
+        assert_eq!(schedule_col, 0);
+
+        assert!(
+            specs[0].parameters.contains_key("event_power_kw_series"),
+            "non-zero annual energy should produce event_power_kw_series"
+        );
+        let kw_series = specs[0]
+            .parameters
+            .get("event_power_kw_series")
+            .and_then(Value::as_array)
+            .expect("event_power_kw_series must be an array");
+        assert_eq!(kw_series.len(), 4);
+        let peak_kw: f64 = kw_series
+            .iter()
+            .filter_map(Value::as_f64)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            peak_kw > 0.0,
+            "microwave schedule should have non-zero power; annual kWh=100"
+        );
+    }
+
+    #[test]
+    fn find_unmapped_csv_columns_detects_unknown_column() {
+        let mut column_index = HashMap::new();
+        column_index.insert("unknown_column".to_string(), 0);
+        column_index.insert("microwave".to_string(), 1);
+
+        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        assert!(
+            unmapped.contains(&"unknown_column".to_string()),
+            "unknown_column should be flagged as unmapped; got {unmapped:?}"
+        );
+        assert!(
+            !unmapped.contains(&"microwave".to_string()),
+            "microwave should NOT be in unmapped list; it has a mapping"
+        );
+    }
+
+    #[test]
+    fn find_unmapped_csv_columns_returns_empty_when_all_mapped() {
+        let mut column_index = HashMap::new();
+        column_index.insert("cooking_range".to_string(), 0);
+        column_index.insert("refrigerator".to_string(), 1);
+
+        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        assert!(unmapped.is_empty(), "all columns mapped; got {unmapped:?}");
+    }
+
+    #[test]
+    fn microwave_and_cooking_range_are_distinct_independent_schedules() {
+        // Regression: microwave addition must not affect Cooking Range.
+        use crate::schedule::ColumnAggregation;
+
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..4)
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("cooking_range".to_string(), 0);
+        column_index.insert("microwave".to_string(), 1);
+
+        let mut schedule = ScheduleTimeSeries {
+            timestamps,
+            column_names: vec!["cooking_range".to_string(), "microwave".to_string()],
+            columns: vec![vec![0.1, 0.5, 0.3, 0.1], vec![0.0, 1.0, 0.5, 0.0]],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![ColumnAggregation::Mean, ColumnAggregation::Mean],
+        };
+
+        let mut params = Map::new();
+        params.insert("annual_electric_kwh".to_string(), Value::from(600.0));
+        let mut specs: Vec<EquipmentSpec> = vec![EquipmentSpec {
+            instance_name: None,
+            name: "Cooking Range".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None)
+            .expect("inject_schedule_into_specs should succeed");
+
+        // Cooking Range must have its own schedule column
+        let cooking = specs
+            .iter()
+            .find(|s| s.name == "Cooking Range")
+            .expect("Cooking Range spec must exist");
+        assert!(
+            cooking.parameters.contains_key("event_window_schedule_col"),
+            "Cooking Range must have event_window_schedule_col"
+        );
+
+        // Microwave auto-created spec must also be independent
+        let microwave = specs
+            .iter()
+            .find(|s| s.name == "Microwave")
+            .expect("Microwave spec must be auto-created");
+        assert!(
+            microwave
+                .parameters
+                .contains_key("event_window_schedule_col"),
+            "Microwave must have event_window_schedule_col"
+        );
+
+        // Columns must be distinct
+        let cooking_col = cooking
+            .parameters
+            .get("event_window_schedule_col")
+            .and_then(Value::as_u64);
+        let microwave_col = microwave
+            .parameters
+            .get("event_window_schedule_col")
+            .and_then(Value::as_u64);
+        assert!(
+            cooking_col != microwave_col,
+            "Cooking Range and Microwave must have different schedule column indices"
+        );
     }
 }

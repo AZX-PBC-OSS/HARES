@@ -5,7 +5,9 @@ Covers:
       telemetry with Q/P ≈ tan(acos(0.9)).
   (b) Battery accepts a reactive / power-factor setpoint from Python and
       telemetry reflects it.
-  (c) EV given any reactive command raises a Python exception.
+  (c) EV accepts reactive / power-factor setpoint from Python and
+      telemetry reflects it (smart-inverter var control, IEEE 1547-2018 /
+      SAE J3072). Default EV (pf=1.0) emits Q == 0.
   (d) ZIP pf override via config dict changes REACTIVE_POWER_KVAR for that
       equipment while leaving real power bit-identical.
   (e) Default battery (pf=1.0) emits Q == 0.
@@ -216,53 +218,189 @@ class TestBatteryReactiveSetpoint:
 
 
 # ---------------------------------------------------------------------------
-# (c) EV given reactive command raises a Python exception
+# (c) EV smart-inverter var control — acceptance semantics, mirrors battery
 # ---------------------------------------------------------------------------
 
 
-class TestEvReactiveRejection:
-    def _make_dwelling_with_ev(self):
-        from ochre_next import EV
+class TestEvPowerFactorCharging:
+    def test_charging_with_pf_0_9_produces_reactive_power_q_positive(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
         dw.initialize()
-        ev = EV("TestEV", capacity_kwh=75.0, max_charging_kw=7.2, initial_soc=0.5)
+        ev = EV(
+            "TestEV",
+            capacity_kwh=75.0,
+            max_charging_kw=7.2,
+            initial_soc=0.5,
+            initial_connection_state=EvConnectionState.HomePluggedIn,
+            power_factor=0.9,
+        )
+        dw.add_ev(ev)
+        dw.step()
+
+        tel = _equipment_telemetry(dw, "TestEV")
+        p = tel["active_power_kw"]
+        q = tel["reactive_power_kvar"]
+        assert p > 0.0, f"EV should be charging (P>0), got P={p}"
+        assert q > 0.0, f"charging with pf=0.9 should yield Q>0 (absorbing), got Q={q}"
+
+        expected_ratio = math.tan(math.acos(0.9))
+        actual_ratio = q / p
+        assert math.isclose(actual_ratio, expected_ratio, rel_tol=1e-6), (
+            f"Q/P={actual_ratio} ≠ tan(acos(0.9))={expected_ratio}"
+        )
+
+    def test_core_output_reactive_matches_telemetry(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = make_dwelling(
+            duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
+        )
+        dw.initialize()
+        ev = EV(
+            "TestEV",
+            capacity_kwh=75.0,
+            max_charging_kw=7.2,
+            initial_soc=0.5,
+            initial_connection_state=EvConnectionState.HomePluggedIn,
+            power_factor=0.9,
+        )
+        dw.add_ev(ev)
+        dw.step()
+
+        co = _equipment_core_output(dw, "TestEV")
+        tel = _equipment_telemetry(dw, "TestEV")
+        assert co.reactive_power_kvar is not None
+        assert math.isclose(
+            co.reactive_power_kvar, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
+        ), "CoreOutput Q and telemetry Q must agree"
+
+
+class TestEvReactiveSetpoint:
+    def _make_ev_dwelling(self, **ev_kw):
+        from ochre_next import EV, EvConnectionState
+
+        dw = make_dwelling(
+            duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
+        )
+        dw.initialize()
+        defaults = dict(
+            capacity_kwh=75.0,
+            max_charging_kw=7.2,
+            initial_soc=0.5,
+            initial_connection_state=EvConnectionState.HomePluggedIn,
+        )
+        defaults.update(ev_kw)
+        ev = EV("TestEV", **defaults)
         dw.add_ev(ev)
         return dw
 
-    def test_power_setpoint_with_reactive_raises(self):
+    def test_reactive_setpoint_reflected_in_telemetry(self):
         from ochre_next import ControlSignal
 
-        dw = self._make_dwelling_with_ev()
-        with pytest.raises(ValueError, match="EV does not support reactive power"):
-            dw.apply_control(
-                "TestEV", ControlSignal.power_setpoint(3.0, reactive_kvar=1.0)
-            )
-
-    def test_reactive_setpoint_raises(self):
-        from ochre_next import ControlSignal
-
-        dw = self._make_dwelling_with_ev()
-        with pytest.raises(ValueError, match="unsupported control signal"):
-            dw.apply_control("TestEV", ControlSignal.reactive_setpoint(1.0))
-
-    def test_power_factor_setpoint_raises(self):
-        from ochre_next import ControlSignal
-
-        dw = self._make_dwelling_with_ev()
-        with pytest.raises(ValueError, match="unsupported control signal"):
-            dw.apply_control("TestEV", ControlSignal.power_factor_setpoint(0.95))
-
-    def test_power_setpoint_with_zero_reactive_accepted(self):
-        """PowerSetpoint with explicit Q=0 is a no-op, not an error."""
-        from ochre_next import ControlSignal
-
-        dw = self._make_dwelling_with_ev()
-        dw.apply_control(
-            "TestEV", ControlSignal.power_setpoint(3.0, reactive_kvar=0.0)
+        dw = self._make_ev_dwelling(
+            power_factor=0.9, charger_capacity_kva=10.0
         )
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(1.5))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.step()
+
+        tel = _equipment_telemetry(dw, "TestEV")
+        q = tel["reactive_power_kvar"]
+        assert math.isclose(q, 1.5, rel_tol=1e-6), (
+            f"ReactiveSetpoint(1.5) should override baseline pf, got Q={q}"
+        )
+
+    def test_power_factor_setpoint_reflected_in_telemetry(self):
+        from ochre_next import ControlSignal
+
+        dw = self._make_ev_dwelling()
+        dw.apply_control("TestEV", ControlSignal.power_factor_setpoint(0.8))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.step()
+
+        tel = _equipment_telemetry(dw, "TestEV")
+        p = tel["active_power_kw"]
+        q = tel["reactive_power_kvar"]
+        assert p > 0.0
+        expected_q = p * math.tan(math.acos(0.8))
+        assert math.isclose(q, expected_q, rel_tol=1e-6), (
+            f"PowerFactorSetpoint(0.8): expected Q={expected_q}, got Q={q}"
+        )
+
+    def test_power_setpoint_with_reactive_kvar_accepted(self):
+        from ochre_next import ControlSignal
+
+        dw = self._make_ev_dwelling(charger_capacity_kva=10.0)
+        dw.apply_control(
+            "TestEV", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
+        )
+        dw.step()
+
+        tel = _equipment_telemetry(dw, "TestEV")
+        q = tel["reactive_power_kvar"]
+        assert math.isclose(q, 0.75, rel_tol=1e-6), (
+            f"PowerSetpoint(reactive=0.75) should set Q=0.75, got Q={q}"
+        )
+
+    def test_real_power_unchanged_by_reactive_setpoint(self):
+        """Sending a ReactiveSetpoint must not alter real power."""
+        from ochre_next import ControlSignal
+
+        dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_kva=10.0)
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw.step()
+        tel_before = _equipment_telemetry(dw, "TestEV")
+        p_before = tel_before["active_power_kw"]
+
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(0.5))
+        dw.step()
+        tel_after = _equipment_telemetry(dw, "TestEV")
+        p_after = tel_after["active_power_kw"]
+        q_after = tel_after["reactive_power_kvar"]
+
+        assert math.isclose(p_after, p_before, rel_tol=1e-6), (
+            f"Real power changed after ReactiveSetpoint: {p_before} → {p_after}"
+        )
+        assert math.isclose(q_after, 0.5, rel_tol=1e-6), (
+            f"ReactiveSetpoint(0.5) should give Q=0.5, got Q={q_after}"
+        )
+
+
+class TestDefaultEvZeroQ:
+    def test_default_ev_emits_q_zero_and_real_power_unchanged(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = make_dwelling(
+            duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
+        )
+        dw.initialize()
+        ev = EV(
+            "TestEV",
+            capacity_kwh=75.0,
+            max_charging_kw=7.2,
+            initial_soc=0.5,
+            initial_connection_state=EvConnectionState.HomePluggedIn,
+        )
+        dw.add_ev(ev)
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw.step()
+
+        co = _equipment_core_output(dw, "TestEV")
+        tel = _equipment_telemetry(dw, "TestEV")
+        assert co.reactive_power_kvar is not None, (
+            "EV with REACTIVE cap must set reactive_power_kvar to Some"
+        )
+        assert abs(co.reactive_power_kvar) < 1e-9, (
+            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
+        )
+        assert abs(tel["reactive_power_kvar"]) < 1e-9, (
+            f"Telemetry Q should be ≈0 for default EV, got {tel['reactive_power_kvar']}"
+        )
+        assert tel["active_power_kw"] > 0, "Real power should be >0 with power setpoint"
 
 
 # ---------------------------------------------------------------------------
