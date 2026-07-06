@@ -25,6 +25,10 @@ struct StepResult {
     truncated: bool,
     info: HashMap<String, f64>,
     error_msg: Option<String>,
+    /// Warnings drained from the dwelling after this step (e.g.
+    /// control-dispatch rejections). Surfaced under `info["warnings"]` so RL
+    /// loops see rejected control signals without polling `take_warnings()`.
+    warnings: Vec<String>,
 }
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {

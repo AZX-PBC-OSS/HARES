@@ -499,19 +499,24 @@ pub fn build_schema(
     }
 
     if verbosity >= 5 {
-        for (name, fuel) in &names {
-            if matches!(fuel, FuelType::Electric) {
-                fields.push(Field::new(
-                    format!("{name} {REACTIVE_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(Field::new(
-                    format!("{name} {POWER_FACTOR_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
+        // Reactive-power and power-factor columns mirror the unconditional
+        // "{name} Electric Power (kW)" column above rather than gating on
+        // fuel type: gas-fueled equipment with electric parasitics (gas
+        // furnace blower at pf 0.87, gas boiler pump at 0.84, gas WH draft
+        // fan at 0.87, gas tankless electronics) emits reactive power too.
+        // Equipment that reports `CoreFlows::reactive_power_kvar = None`
+        // fills the column with 0.0 and power factor 1.0.
+        for (name, _fuel) in &names {
+            fields.push(Field::new(
+                format!("{name} {REACTIVE_POWER_SUFFIX}"),
+                DataType::Float64,
+                true,
+            ));
+            fields.push(Field::new(
+                format!("{name} {POWER_FACTOR_SUFFIX}"),
+                DataType::Float64,
+                true,
+            ));
         }
         fields.push(Field::new(
             NET_SENSIBLE_HEAT_GAIN_COL,

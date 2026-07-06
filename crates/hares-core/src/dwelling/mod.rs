@@ -305,22 +305,22 @@ fn build_equipment_column_map(
             } else {
                 None
             };
+            // Reactive/PF columns exist for every equipment at verbosity ≥ 5
+            // (mirroring the unconditional Electric Power column): gas
+            // equipment with electric parasitics (blower fans, circulation
+            // pumps, draft inducers) emits reactive power too.
             let reactive = resolve_col(
                 &format!("{name} {REACTIVE_POWER_SUFFIX}"),
                 column_index,
                 &name,
-                verbosity >= 5 && matches!(fuel, FuelType::Electric),
+                verbosity >= 5,
             );
-            let pf = if verbosity >= 5 && matches!(fuel, FuelType::Electric) {
-                resolve_col(
-                    &format!("{name} {POWER_FACTOR_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 5 && matches!(fuel, FuelType::Electric),
-                )
-            } else {
-                None
-            };
+            let pf = resolve_col(
+                &format!("{name} {POWER_FACTOR_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 5,
+            );
             let energy_kwh = resolve_col(
                 &format!("{name} {ENERGY_SUFFIX}"),
                 column_index,
@@ -2064,7 +2064,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         rng_event_stream_idx += 1;
         let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
 
-        let mut merged_cfg = merged_equipment_config(spec, &override_root);
+        let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
         setpoints_reconciled_by_equipment.insert(
             merged_cfg.name.clone(),
             merged_cfg.setpoints_reconciled.clone(),
@@ -13243,13 +13243,14 @@ master_seed = 42
         assert!(cols.duct_losses.is_none());
     }
 
-    /// Gas-fueled equipment at verbosity ≥ 5 must not resolve Power Factor
-    /// (the column is only present for electric equipment). Regression test
-    /// for the bug where `reactive.is_some() || verbosity >= 5` entered the
-    /// PF branch unconditionally at v≥5, causing spuriously `tracing::warn!`
-    /// in production builds and `panic!` in debug/invariant builds.
+    /// Gas-fueled equipment with electric parasitics (gas furnace blower at
+    /// pf 0.87, gas boiler pump at 0.84, gas WH draft fan at 0.87) emits
+    /// reactive power, so at verbosity ≥ 5 the Reactive Power / Power Factor
+    /// columns must exist and resolve for gas equipment too — the columns
+    /// mirror the unconditional Electric Power column instead of gating on
+    /// fuel type.
     #[test]
-    fn gas_equipment_power_factor_none_at_verbosity_5() {
+    fn gas_equipment_reactive_and_power_factor_columns_resolve_at_verbosity_5() {
         let specs = vec![hares_io::EquipmentSpec {
             instance_name: None,
             name: "Gas Furnace".to_string(),
@@ -13269,8 +13270,24 @@ master_seed = 42
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         let col_map = build_equipment_column_map(&equipment, &column_index, 5);
         let cols = &col_map[0];
-        assert!(cols.reactive_power.is_none());
-        assert!(cols.power_factor.is_none());
+        assert!(
+            cols.reactive_power.is_some(),
+            "gas furnace blower emits Q — reactive column must resolve"
+        );
+        assert!(
+            cols.power_factor.is_some(),
+            "gas furnace blower emits Q — power factor column must resolve"
+        );
+        // Below verbosity 5 the columns are absent for all equipment.
+        let schema_v4 = hares_io::build_schema(&specs, 4, &[]);
+        let column_index_v4 = build_output_column_index(&schema_v4);
+        let mut eq_v4 = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
+        eq_v4.descriptor.end_use = EndUse::HVAC_HEATING;
+        eq_v4.descriptor.fuel = FuelType::Gas;
+        let equipment_v4: Vec<Box<dyn Equipment>> = vec![Box::new(eq_v4)];
+        let col_map_v4 = build_equipment_column_map(&equipment_v4, &column_index_v4, 4);
+        assert!(col_map_v4[0].reactive_power.is_none());
+        assert!(col_map_v4[0].power_factor.is_none());
     }
 
     /// A typo in a column name string results in `None` index.

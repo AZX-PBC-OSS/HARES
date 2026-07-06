@@ -186,7 +186,9 @@ struct ArrayStepOutput {
 struct PvCheckpoint {
     power_limit_kw: Option<f64>,
     curtailment_fraction: f64,
-    q_setpoint_kvar: f64,
+    /// Reactive-power override [kVAR]. `None` = no override (baseline
+    /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
+    q_setpoint_kvar: Option<f64>,
     inverter_priority: InverterPriority,
     power_factor: f64,
     soiling_config: Option<soiling::SoilingConfig>,
@@ -217,7 +219,11 @@ pub struct PV {
     curtailment_fraction: f64,
     inverter_priority: InverterPriority,
     inverter_min_pf: Option<f64>,
-    q_setpoint_kvar: f64,
+    /// Reactive-power override (from ReactiveSetpoint or
+    /// PowerSetpoint.reactive_power_kvar) [kVAR]. `None` = no override, fall
+    /// through to the displacement power-factor baseline; `Some(0.0)` is a
+    /// *commanded zero* that forces Q = 0 even over a pf < 1 baseline.
+    q_setpoint_kvar: Option<f64>,
     /// ZIP carrier for the inverter power-factor used to derive the baseline
     /// reactive output. Only [`ZipLoad::tan_phi`] is consumed — PV is a
     /// generator, not a voltage-scaled ZIP load, so the reactive polynomial is
@@ -299,7 +305,7 @@ impl PV {
             curtailment_fraction: 0.0,
             inverter_priority: InverterPriority::Var,
             inverter_min_pf: Some(0.8),
-            q_setpoint_kvar: 0.0,
+            q_setpoint_kvar: None,
             zip_pf: ZipLoad::constant_power(),
             luts_by_surface: HashMap::new(),
             last_ac_power_kw: 0.0,
@@ -714,10 +720,11 @@ impl PV {
             .clamp(0.0, 1.0);
 
         self.inverter_capacity_kw = c.inverter_capacity_kw;
-        self.power_factor = c
-            .power_factor
-            .unwrap_or(DEFAULT_POWER_FACTOR)
-            .clamp(0.0, 1.0);
+        // PvConfig::validate() (called above) rejects any configured
+        // power_factor that is non-finite or outside (0, 1], matching
+        // battery/EV config validation — a misconfigured pf fails at init
+        // rather than being silently clamped.
+        self.power_factor = c.power_factor.unwrap_or(DEFAULT_POWER_FACTOR);
         // Carrier for the baseline displacement PF; tan_phi() is used in step()
         // to compute the supplying-vars reactive output. pf=1.0 (default) →
         // tan_phi = 0 → no reactive output.
@@ -1062,12 +1069,13 @@ impl Equipment for PV {
         //     PowerFactorSetpoint) produces `Q = -|P_gen| · tan(acos(pf))` —
         //     a generating inverter at pf < 1 *supplies* vars, so bus Q is
         //     negative; (3) pf = 1.0 (default) → tan_phi = 0 → Q = 0.
-        let bus_q_kvar = if self.q_setpoint_kvar != 0.0 {
-            self.q_setpoint_kvar
-        } else {
+        // A `Some` q_setpoint (including a commanded 0.0) is an absolute
+        // override; only `None` falls through to the power-factor baseline.
+        let bus_q_kvar = match self.q_setpoint_kvar {
+            Some(q) => q,
             // `total_ac_power_kw` is the positive generation magnitude; the
             // negative sign encodes "supplying vars to the bus."
-            -total_ac_power_kw * self.zip_pf.tan_phi()
+            None => -total_ac_power_kw * self.zip_pf.tan_phi(),
         };
 
         // Apply smart inverter limits (handles clipping and priority). The
@@ -1179,6 +1187,12 @@ impl Equipment for PV {
         &self.core_output
     }
 
+    fn checkpoint_version() -> u32 {
+        // v2: `q_setpoint_kvar` became Option<f64> (None = no var override;
+        //     Some(0.0) is a commanded zero).
+        2
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &PvCheckpoint {
@@ -1261,7 +1275,7 @@ impl Equipment for PV {
                             "PV PowerSetpoint reactive_power_kvar must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_kvar = *q;
+                    self.q_setpoint_kvar = Some(*q);
                 }
                 Ok(())
             }
@@ -1280,7 +1294,7 @@ impl Equipment for PV {
                         "PV ReactiveSetpoint kvar must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_kvar = *kvar;
+                self.q_setpoint_kvar = Some(*kvar);
                 Ok(())
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
@@ -1304,7 +1318,7 @@ impl Equipment for PV {
                 // rest of HARES.
                 self.power_factor = *power_factor;
                 self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, *power_factor);
-                self.q_setpoint_kvar = 0.0;
+                self.q_setpoint_kvar = None;
                 Ok(())
             }
             ControlSignal::InverterPriorityMode { priority } => {
@@ -2116,6 +2130,88 @@ mod tests {
         ));
     }
 
+    /// A commanded ReactiveSetpoint of exactly 0.0 is an absolute override:
+    /// it must force Q = 0 even though the pf = 0.9 baseline would otherwise
+    /// supply vars while generating (`Some(0.0)` is distinct from `None`).
+    #[test]
+    fn reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(2);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.power_factor = Some(0.9);
+        let cfg =
+            EquipmentConfig::from_typed("PV Q0".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        // Baseline: generating at pf = 0.9 supplies vars (Q < 0).
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let baseline_q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            baseline_q < 0.0,
+            "pf=0.9 generating baseline must supply vars (Q<0), got {baseline_q}"
+        );
+
+        // Commanded zero must beat the baseline on all three channels.
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        approx_eq(pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap(), 0.0);
+        approx_eq(
+            pv.core_output().flows.reactive_power_kvar.unwrap(),
+            0.0,
+        );
+        approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+    }
+
+    /// A misconfigured power_factor outside (0, 1] must fail at init (via
+    /// PvConfig::validate) instead of being silently clamped — matching
+    /// battery/EV config validation.
+    #[test]
+    fn out_of_range_power_factor_rejected_at_init() {
+        // NaN is excluded: serde_json cannot represent NaN, so it never
+        // survives the typed-config round-trip (it becomes null → None).
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        for bad_pf in [-0.5, 0.0, 1.2] {
+            let mut cfg = base_pv_typed_config();
+            cfg.power_factor = Some(bad_pf);
+            let cfg =
+                EquipmentConfig::from_typed("PV badpf".to_string(), "PV".to_string(), cfg)
+                    .unwrap();
+            let env = env_with_surfaces(
+                vec![SurfaceIrradiance {
+                    surface_id: sid,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                25.0,
+            );
+            let mut pv = PV::new(cfg.clone());
+            let err = pv
+                .init(&cfg, &env)
+                .expect_err("power_factor outside (0, 1] must be rejected at init");
+            assert!(
+                err.to_string().contains("power_factor"),
+                "unexpected error for pf={bad_pf}: {err}"
+            );
+        }
+    }
+
     /// ThinFilm has a smaller gamma than Standard so it loses less power at elevated
     /// temperatures: at the same high cell temperature, ThinFilm must output more DC.
     #[test]
@@ -2564,7 +2660,7 @@ mod tests {
     fn inverter_watt_priority_preserves_p_reduces_q() {
         let (mut pv, env) = make_inverter_pv(4.0);
         pv.inverter_priority = InverterPriority::Watt;
-        pv.q_setpoint_kvar = 3.0;
+        pv.q_setpoint_kvar = Some(3.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -2573,7 +2669,7 @@ mod tests {
         let p_raw = {
             let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
             pv_unlimited.inverter_priority = InverterPriority::Watt;
-            pv_unlimited.q_setpoint_kvar = 3.0;
+            pv_unlimited.q_setpoint_kvar = Some(3.0);
             let mut ports_unlimited = PortSlots::default();
             pv_unlimited
                 .step(
@@ -2602,7 +2698,7 @@ mod tests {
     fn inverter_var_priority_preserves_q_reduces_p() {
         let (mut pv, env) = make_inverter_pv(4.0);
         pv.inverter_priority = InverterPriority::Var;
-        pv.q_setpoint_kvar = 2.0;
+        pv.q_setpoint_kvar = Some(2.0);
         pv.inverter_min_pf = None;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -2619,7 +2715,7 @@ mod tests {
     fn inverter_cpf_priority_scales_proportionally() {
         let (mut pv, env) = make_inverter_pv(3.0);
         pv.inverter_priority = InverterPriority::Cpf;
-        pv.q_setpoint_kvar = 2.0;
+        pv.q_setpoint_kvar = Some(2.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -2628,7 +2724,7 @@ mod tests {
         assert!(s <= 3.0 + 1e-9, "S={s} exceeds inverter cap 3.0");
         let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
         pv_unlimited.inverter_priority = InverterPriority::Cpf;
-        pv_unlimited.q_setpoint_kvar = 2.0;
+        pv_unlimited.q_setpoint_kvar = Some(2.0);
         let mut ports_unlimited = PortSlots::default();
         pv_unlimited
             .step(
@@ -2725,7 +2821,7 @@ mod tests {
             .unwrap();
         // PowerFactorSetpoint must clear a prior ReactiveSetpoint so the PF
         // baseline path runs.
-        assert_eq!(pv.q_setpoint_kvar, 0.0);
+        assert_eq!(pv.q_setpoint_kvar, None);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -2896,11 +2992,11 @@ mod tests {
         // First command an absorbing ReactiveSetpoint.
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
             .unwrap();
-        assert_eq!(pv.q_setpoint_kvar, 1.5);
+        assert_eq!(pv.q_setpoint_kvar, Some(1.5));
         // Then a PowerFactorSetpoint must clear it and re-engage the PF path.
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.85 })
             .unwrap();
-        assert_eq!(pv.q_setpoint_kvar, 0.0);
+        assert_eq!(pv.q_setpoint_kvar, None);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -2992,7 +3088,7 @@ mod tests {
         let mut pv = PV::new(config_single());
         pv.power_limit_kw = Some(3.5);
         pv.curtailment_fraction = 0.25;
-        pv.q_setpoint_kvar = 1.2;
+        pv.q_setpoint_kvar = Some(1.2);
         pv.inverter_priority = InverterPriority::Cpf;
         pv.power_factor = 0.85;
 
@@ -3002,7 +3098,7 @@ mod tests {
 
         assert_eq!(restored.power_limit_kw, Some(3.5));
         approx_eq(restored.curtailment_fraction, 0.25);
-        approx_eq(restored.q_setpoint_kvar, 1.2);
+        assert_eq!(restored.q_setpoint_kvar, Some(1.2));
         assert_eq!(restored.inverter_priority, InverterPriority::Cpf);
         approx_eq(restored.power_factor, 0.85);
 
@@ -3020,7 +3116,7 @@ mod tests {
             max_soc: None,
         })
         .unwrap();
-        approx_eq(pv.q_setpoint_kvar, 0.75);
+        assert_eq!(pv.q_setpoint_kvar, Some(0.75));
     }
 
     #[test]
@@ -3028,7 +3124,7 @@ mod tests {
         let (mut pv, env) = make_inverter_pv(4.0);
         pv.inverter_priority = InverterPriority::Var;
         pv.inverter_min_pf = Some(0.8);
-        pv.q_setpoint_kvar = 3.0;
+        pv.q_setpoint_kvar = Some(3.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();

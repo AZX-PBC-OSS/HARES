@@ -3290,11 +3290,11 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.q_setpoint_kvar = 2.0;
+    ev.q_setpoint_kvar = Some(2.0);
     ev.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
         .unwrap();
 
-    approx_eq(ev.q_setpoint_kvar, 0.0);
+    assert_eq!(ev.q_setpoint_kvar, None);
     approx_eq(ev.power_factor, 0.8);
 
     // Force charging via PowerSetpoint so P>0.
@@ -3338,13 +3338,90 @@ fn ev_power_setpoint_stores_reactive_q() {
     })
     .unwrap();
 
-    approx_eq(ev.q_setpoint_kvar, 0.75);
+    assert_eq!(ev.q_setpoint_kvar, Some(0.75));
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
     approx_eq(q, 0.75);
+}
+
+/// A rejected PowerSetpoint must leave ALL control state unchanged: the
+/// whole signal is validated before any mutation, so a negative active
+/// power (rejected without v2l/v2g) must not arm the reactive override it
+/// carried. Regression test for the partial-mutation bug where
+/// `q_setpoint_kvar` was set before the negative-setpoint check.
+#[test]
+fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let pf_before = ev.power_factor;
+    assert_eq!(ev.q_setpoint_kvar, None);
+    assert_eq!(ev.power_setpoint_kw, None);
+
+    // Negative setpoint without v2l/v2g must be rejected in full.
+    let err = ev
+        .apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -3.0,
+            reactive_power_kvar: Some(1.25),
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect_err("negative PowerSetpoint without v2l/v2g must be rejected");
+    assert!(
+        err.to_string().contains("v2l_enabled or v2g_enabled"),
+        "unexpected error: {err}"
+    );
+
+    assert_eq!(
+        ev.q_setpoint_kvar, None,
+        "rejected signal must not arm the var override"
+    );
+    assert_eq!(ev.power_setpoint_kw, None);
+    approx_eq(ev.power_factor, pf_before);
+}
+
+/// A commanded ReactiveSetpoint of exactly 0.0 is an absolute override: it
+/// must force Q = 0 even though the pf < 1 baseline would otherwise produce
+/// nonzero Q while charging (`Some(0.0)` is distinct from `None`).
+#[test]
+fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
+    let mut raw = base_raw();
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Charge so the pf = 0.9 baseline produces Q > 0.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    let baseline_q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    assert!(
+        baseline_q > 0.0,
+        "pf=0.9 charging baseline must produce Q>0, got {baseline_q}"
+    );
+
+    // Commanded zero must beat the baseline.
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q, 0.0);
+    approx_eq(ports.electrical.reactive_power_kvar, 0.0);
 }
 
 /// kVA clamp: when Q is commanded beyond the charger's capability,
@@ -3558,7 +3635,7 @@ fn ev_checkpoint_preserves_reactive_state() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.q_setpoint_kvar = 1.5;
+    ev.q_setpoint_kvar = Some(1.5);
     ev.power_factor = 0.85;
 
     let state = ev.save_state().unwrap();
@@ -3566,7 +3643,7 @@ fn ev_checkpoint_preserves_reactive_state() {
     restored.init(&config, &env).unwrap();
     restored.load_state(&state).unwrap();
 
-    approx_eq(restored.q_setpoint_kvar, 1.5);
+    assert_eq!(restored.q_setpoint_kvar, Some(1.5));
     approx_eq(restored.power_factor, 0.85);
 
     // Double round-trip: bytes identical.
@@ -3588,7 +3665,7 @@ fn ev_unplugged_produces_zero_reactive() {
 
     // Even with a q_setpoint commanded, Q must be 0 when unplugged
     // (contactor open — no grid connection).
-    ev.q_setpoint_kvar = 2.0;
+    ev.q_setpoint_kvar = Some(2.0);
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();

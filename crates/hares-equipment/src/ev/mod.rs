@@ -144,7 +144,9 @@ pub struct Ev {
 
     // Reactive power / smart-inverter control (V2G/V2L inverter-coupled DER,
     // IEEE 1547-2018 / SAE J3072 require reactive capability).
-    q_setpoint_kvar: f64,
+    /// Reactive-power override [kVAR]. `None` = no override (baseline
+    /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
+    q_setpoint_kvar: Option<f64>,
     power_factor: f64,
     charger_capacity_kva: f64,
     /// Reactive power emitted on the last step [kVAR] — same signed value on
@@ -285,7 +287,7 @@ impl Ev {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
-            q_setpoint_kvar: 0.0,
+            q_setpoint_kvar: None,
             power_factor: config.get_f64(KEY_POWER_FACTOR).unwrap_or(1.0),
             charger_capacity_kva: config.get_f64(KEY_CHARGER_CAPACITY_KVA).unwrap_or_else(|| {
                 rated_power_kw
@@ -385,7 +387,7 @@ impl Ev {
                 .max(self.v2g_max_discharge_kw)
                 .max(self.v2l_max_discharge_kw)
         });
-        self.q_setpoint_kvar = 0.0;
+        self.q_setpoint_kvar = None;
 
         self.connection_state = c
             .initial_connection_state
@@ -652,11 +654,16 @@ impl Ev {
     /// `S = charger_capacity_kva` — active-power priority (P never
     /// curtailed by Q).
     fn compute_reactive_kvar(&self, active_power_kw: f64) -> f64 {
-        let mut q = self.q_setpoint_kvar;
-        if q == 0.0 && self.power_factor < 1.0 {
-            let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
-            q = active_power_kw * zip.tan_phi();
-        }
+        // A `Some` q_setpoint (including a commanded 0.0) is an absolute
+        // override; only `None` falls through to the power-factor baseline.
+        let q = match self.q_setpoint_kvar {
+            Some(q) => q,
+            None if self.power_factor < 1.0 => {
+                let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+                active_power_kw * zip.tan_phi()
+            }
+            None => 0.0,
+        };
         let s = self.charger_capacity_kva;
         let p2 = active_power_kw * active_power_kw;
         let q_max = (s * s - p2).max(0.0).sqrt();
@@ -1062,7 +1069,10 @@ impl Equipment for Ev {
     }
 
     fn checkpoint_version() -> u32 {
-        2
+        // v2: EvCheckpoint gained the reactive-control fields.
+        // v3: `q_setpoint_kvar` became Option<f64> (None = no var override;
+        //     Some(0.0) is a commanded zero).
+        3
     }
 
     fn validate_signal(&self, signal: &hares_types::ControlSignal) -> crate::Result<()> {
@@ -1096,18 +1106,23 @@ impl Equipment for Ev {
                 min_soc,
                 max_soc,
             } => {
+                // Validate the ENTIRE signal before mutating any state so a
+                // rejected setpoint leaves no partial effect (e.g. an armed
+                // q_setpoint from a signal whose active power was refused).
                 if let Some(q) = reactive_power_kvar {
                     if !q.is_finite() {
                         return Err(HaresError::Control(
                             "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_kvar = *q;
                 }
                 if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
                         "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),
                     ));
+                }
+                if let Some(q) = reactive_power_kvar {
+                    self.q_setpoint_kvar = Some(*q);
                 }
                 self.power_setpoint_kw = Some(*active_power_kw);
                 self.power_setpoint_min_soc = *min_soc;
@@ -1131,7 +1146,7 @@ impl Equipment for Ev {
                         "EV ReactiveSetpoint kvar must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_kvar = *kvar;
+                self.q_setpoint_kvar = Some(*kvar);
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
@@ -1140,7 +1155,7 @@ impl Equipment for Ev {
                     ));
                 }
                 self.power_factor = *power_factor;
-                self.q_setpoint_kvar = 0.0;
+                self.q_setpoint_kvar = None;
             }
             ControlSignal::EvPlugIn { state } => {
                 // Validate transitions: no direct home<->away

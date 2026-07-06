@@ -275,7 +275,9 @@ struct BatteryCheckpoint {
     dr_level: DRLevel,
     dr_duration_remaining_s: Option<f64>,
     external_power_limit_kw: Option<f64>,
-    q_setpoint_kvar: f64,
+    /// Reactive-power override [kVAR]. `None` = no override (baseline
+    /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
+    q_setpoint_kvar: Option<f64>,
     power_factor: f64,
 }
 
@@ -379,8 +381,12 @@ pub struct Battery {
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
 
-    // Reactive power / smart-inverter control
-    q_setpoint_kvar: f64,
+    // Reactive power / smart-inverter control.
+    // `q_setpoint_kvar` is an absolute var override (from ReactiveSetpoint or
+    // PowerSetpoint.reactive_power_kvar): `None` = no override, fall through
+    // to the `power_factor` baseline; `Some(0.0)` is a *commanded zero* that
+    // forces Q = 0 even over a pf < 1 baseline.
+    q_setpoint_kvar: Option<f64>,
     power_factor: f64,
     inverter_capacity_kva: f64,
 
@@ -493,7 +499,7 @@ impl Battery {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
-            q_setpoint_kvar: 0.0,
+            q_setpoint_kvar: None,
             power_factor: 1.0,
             inverter_capacity_kva: DEFAULT_MAX_CHARGE_KW.max(DEFAULT_MAX_DISCHARGE_KW),
             dr_level: DRLevel::Normal,
@@ -1053,7 +1059,7 @@ impl Battery {
         self.inverter_capacity_kva = c
             .inverter_capacity_kva
             .unwrap_or_else(|| self.max_charge_kw.max(self.max_discharge_kw));
-        self.q_setpoint_kvar = 0.0;
+        self.q_setpoint_kvar = None;
 
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
         self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
@@ -1305,11 +1311,23 @@ impl Equipment for Battery {
         let port_power_kw = actual_power_kw + standby_kw + heater_kw;
 
         // -- Reactive power: control-precedence then baseline pf --
-        let mut reactive_power_kvar = self.q_setpoint_kvar;
-        if reactive_power_kvar == 0.0 && self.power_factor < 1.0 {
-            let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
-            reactive_power_kvar = actual_power_kw * zip.tan_phi();
-        }
+        // A `Some` q_setpoint (including a commanded 0.0) is an absolute
+        // override; only `None` falls through to the power-factor baseline.
+        //
+        // Deliberate physics note: the baseline Q and the kVA clamp below use
+        // the *inverter-side* `actual_power_kw` (AC charge/discharge power
+        // through the inverter), while the electrical-port P adds standby and
+        // cell-heater power on top (`port_power_kw`). Standby electronics and
+        // the resistive heater are not inverter throughput, so port-level
+        // Q/P deviates slightly from tan(acos(pf)) whenever they draw power.
+        let reactive_power_kvar = match self.q_setpoint_kvar {
+            Some(q) => q,
+            None if self.power_factor < 1.0 => {
+                let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+                actual_power_kw * zip.tan_phi()
+            }
+            None => 0.0,
+        };
 
         // kVA clamp: active-power priority — P is never curtailed by Q.
         // |Q| ≤ sqrt(max(0, S² − P²)) where S = inverter_capacity_kva.
@@ -1470,6 +1488,13 @@ impl Equipment for Battery {
         })
     }
 
+    fn checkpoint_version() -> u32 {
+        // v2: BatteryCheckpoint gained the reactive-control fields
+        // `q_setpoint_kvar` (Option<f64>, None = no var override) and
+        // `power_factor`.
+        2
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BatteryCheckpoint {
@@ -1609,7 +1634,7 @@ impl Equipment for Battery {
                             "Battery PowerSetpoint reactive_power_kvar must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_kvar = *q;
+                    self.q_setpoint_kvar = Some(*q);
                 }
             }
             ControlSignal::SOCTarget {
@@ -1719,7 +1744,7 @@ impl Equipment for Battery {
                         "Battery ReactiveSetpoint kvar must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_kvar = *kvar;
+                self.q_setpoint_kvar = Some(*kvar);
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
@@ -1728,7 +1753,7 @@ impl Equipment for Battery {
                     ));
                 }
                 self.power_factor = *power_factor;
-                self.q_setpoint_kvar = 0.0;
+                self.q_setpoint_kvar = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;
@@ -5655,6 +5680,86 @@ mod tests {
         approx_eq(q, 1.5);
     }
 
+    /// A commanded ReactiveSetpoint of exactly 0.0 is an absolute override:
+    /// it must force Q = 0 even though the pf = 0.9 baseline would otherwise
+    /// produce nonzero Q while the battery charges. Regression test for the
+    /// zero-as-unset sentinel bug (q_setpoint is `Option<f64>`; `Some(0.0)`
+    /// is distinct from `None`).
+    #[test]
+    fn reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: Some(10.0),
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Charge at 2 kW so the pf = 0.9 baseline would produce Q > 0.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let baseline_q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            baseline_q > 0.0,
+            "pf=0.9 charging baseline must produce Q>0, got {baseline_q}"
+        );
+
+        // Commanded zero must beat the baseline.
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    }
+
     /// PowerFactorSetpoint updates pf, zeros q_setpoint, and Q follows
     /// the new pf baseline.
     #[test]
@@ -5664,12 +5769,12 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        bat.q_setpoint_kvar = 2.0;
+        bat.q_setpoint_kvar = Some(2.0);
         bat.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
             .unwrap();
 
-        // PowerFactorSetpoint must zero the q_setpoint (PV-style precedence).
-        approx_eq(bat.q_setpoint_kvar, 0.0);
+        // PowerFactorSetpoint must clear the q_setpoint (PV-style precedence).
+        assert_eq!(bat.q_setpoint_kvar, None);
         approx_eq(bat.power_factor, 0.8);
 
         // Force charging via PowerSetpoint so P>0.
@@ -5712,7 +5817,7 @@ mod tests {
         })
         .unwrap();
 
-        approx_eq(bat.q_setpoint_kvar, 0.75);
+        assert_eq!(bat.q_setpoint_kvar, Some(0.75));
 
         let mut ports = PortSlots::default();
         bat.step(&env, Duration::from_secs(300), &mut ports)
@@ -5940,7 +6045,7 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        bat.q_setpoint_kvar = 1.5;
+        bat.q_setpoint_kvar = Some(1.5);
         bat.power_factor = 0.85;
 
         let state = bat.save_state().unwrap();
@@ -5995,7 +6100,7 @@ mod tests {
             .unwrap();
         restored.load_state(&state).unwrap();
 
-        approx_eq(restored.q_setpoint_kvar, 1.5);
+        assert_eq!(restored.q_setpoint_kvar, Some(1.5));
         approx_eq(restored.power_factor, 0.85);
 
         // Double round-trip: bytes identical.

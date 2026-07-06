@@ -691,6 +691,10 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
     cfg
 }
 
+/// Valid field names for the reserved `"zip"` override object, matching the
+/// `ZipLoad` struct fields.
+const ZIP_OVERRIDE_KEYS: &[&str] = &["zp", "ip", "pp", "zq", "iq", "pq", "pf", "v0"];
+
 /// Merge a reserved `"zip"` override object field-wise over the effective
 /// base ZIP for one equipment instance.
 ///
@@ -700,22 +704,25 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
 /// `{"pf": 0.88}` replace only the named fields; all other fields are
 /// inherited from the base. Returns `base` unchanged when there is no
 /// override object.
+///
+/// A malformed override is a hard configuration error at dwelling build
+/// time (matching the `deny_unknown_fields` ethos of typed configs): an
+/// unknown key, a non-numeric value, or a non-object `"zip"` value all
+/// fail loudly instead of being silently dropped.
 fn merge_zip_override(
     base: Option<hares_types::zip::ZipLoad>,
     zip_override: Option<&Value>,
     ochre_class: &str,
     equipment_name: &str,
-) -> Option<hares_types::zip::ZipLoad> {
+) -> Result<Option<hares_types::zip::ZipLoad>, HaresError> {
     let obj = match zip_override {
-        None => return base,
+        None => return Ok(base),
         Some(Value::Object(obj)) => obj,
         Some(other) => {
-            tracing::warn!(
-                equipment = equipment_name,
-                value = %other,
-                "ignoring non-object \"zip\" override (expected an object like {{\"pf\": 0.9}})"
-            );
-            return base;
+            return Err(HaresError::Equipment(format!(
+                "equipment '{equipment_name}': \"zip\" override must be an object \
+                 like {{\"pf\": 0.9}}, got: {other}"
+            )));
         }
     };
     let mut zip = base
@@ -723,13 +730,10 @@ fn merge_zip_override(
         .unwrap_or_else(hares_types::zip::ZipLoad::constant_power);
     for (key, value) in obj {
         let Some(v) = value.as_f64() else {
-            tracing::warn!(
-                equipment = equipment_name,
-                key = %key,
-                value = %value,
-                "ignoring non-numeric field in \"zip\" override"
-            );
-            continue;
+            return Err(HaresError::Equipment(format!(
+                "equipment '{equipment_name}': non-numeric value for \"{key}\" in \
+                 \"zip\" override: {value}"
+            )));
         };
         match key.as_str() {
             "zp" => zip.zp = v,
@@ -741,22 +745,21 @@ fn merge_zip_override(
             "pf" => zip.pf = v,
             "v0" => zip.v0 = v,
             unknown => {
-                tracing::warn!(
-                    equipment = equipment_name,
-                    key = %unknown,
-                    "ignoring unknown field in \"zip\" override \
-                     (expected zp/ip/pp/zq/iq/pq/pf/v0)"
-                );
+                return Err(HaresError::Equipment(format!(
+                    "equipment '{equipment_name}': unknown field \"{unknown}\" in \
+                     \"zip\" override; valid keys: {}",
+                    ZIP_OVERRIDE_KEYS.join(", ")
+                )));
             }
         }
     }
-    Some(zip)
+    Ok(Some(zip))
 }
 
 pub(crate) fn merged_equipment_config(
     spec: &hares_io::EquipmentSpec,
     overrides: &Value,
-) -> EquipmentConfig {
+) -> Result<EquipmentConfig, HaresError> {
     if let Some(typed) = &spec.typed_config
         && let ConfigPayload::Typed {
             type_name,
@@ -776,7 +779,7 @@ pub(crate) fn merged_equipment_config(
             zip_override.as_ref(),
             &typed.ochre_class,
             &spec.name,
-        );
+        )?;
         let display_name = spec
             .instance_name
             .clone()
@@ -792,7 +795,7 @@ pub(crate) fn merged_equipment_config(
         );
         eq_cfg.setpoints_reconciled = typed.setpoints_reconciled.clone();
         eq_cfg.zip = zip;
-        return eq_cfg;
+        return Ok(eq_cfg);
     }
 
     let mut merged = spec.parameters.clone();
@@ -808,7 +811,7 @@ pub(crate) fn merged_equipment_config(
         zip_override.as_ref(),
         &spec.name,
         &spec.name,
-    );
+    )?;
     let merged_spec = hares_io::EquipmentSpec {
         instance_name: spec.instance_name.clone(),
         name: spec.name.clone(),
@@ -820,7 +823,7 @@ pub(crate) fn merged_equipment_config(
         related_hvac_idref: spec.related_hvac_idref.clone(),
         primary_role: spec.primary_role.clone(),
     };
-    equipment_config_from_spec(&merged_spec)
+    Ok(equipment_config_from_spec(&merged_spec))
 }
 
 fn apply_equipment_overrides(base: &mut Map<String, Value>, overrides: &Value, name: &str) {
@@ -1297,7 +1300,8 @@ mod tests {
             }
         });
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let err = merged
             .require_typed::<GasFurnaceConfig>("Gas Furnace")
             .expect_err("unknown override keys must fail");
@@ -1317,7 +1321,8 @@ mod tests {
             }
         });
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let cfg = merged
             .require_typed::<GasFurnaceConfig>("Gas Furnace")
             .expect("known override keys must deserialize");
@@ -1389,7 +1394,8 @@ mod tests {
         let spec = gas_furnace_spec_with_reconciliation(reconciliations);
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
 
         let sr = merged.setpoints_reconciled.as_ref().expect(
             "setpoints_reconciled must propagate from typed config through merged_equipment_config",
@@ -1413,7 +1419,8 @@ mod tests {
         let spec = gas_furnace_spec();
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
 
         assert!(
             merged.setpoints_reconciled.is_none(),
@@ -1442,7 +1449,8 @@ mod tests {
         );
 
         let merged =
-            merged_equipment_config(&spec, &serde_json::Value::Object(serde_json::Map::new()));
+            merged_equipment_config(&spec, &serde_json::Value::Object(serde_json::Map::new()))
+                .expect("merge must succeed");
         assert_eq!(
             merged.zip,
             Some(zip),
@@ -1462,7 +1470,8 @@ mod tests {
         spec.zip_params = Some(base);
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9, "override must beat the toml default");
         // Partial-field merge: every other field inherited from the base.
@@ -1477,6 +1486,64 @@ mod tests {
         assert!((cfg.afue - 0.82).abs() < 1e-12);
     }
 
+    /// An unknown key in the reserved `"zip"` override object is a hard
+    /// configuration error at build time (deny_unknown_fields ethos), not a
+    /// silently dropped warning.
+    #[test]
+    fn zip_override_unknown_key_is_hard_error() {
+        let spec = gas_furnace_spec();
+        let overrides = json!({"Gas Furnace": {"zip": {"fp": 0.9}}});
+
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("unknown \"zip\" override key must fail the build");
+        let msg = err.to_string();
+        assert!(msg.contains("Gas Furnace"), "missing equipment name: {msg}");
+        assert!(msg.contains("fp"), "missing offending key: {msg}");
+        assert!(
+            msg.contains("zp, ip, pp, zq, iq, pq, pf, v0"),
+            "must list the valid keys: {msg}"
+        );
+    }
+
+    /// A non-numeric value in the `"zip"` override object is a hard
+    /// configuration error at build time.
+    #[test]
+    fn zip_override_non_numeric_value_is_hard_error() {
+        let spec = gas_furnace_spec();
+        let overrides = json!({"Gas Furnace": {"zip": {"pf": "high"}}});
+
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("non-numeric \"zip\" override value must fail the build");
+        let msg = err.to_string();
+        assert!(msg.contains("Gas Furnace"), "missing equipment name: {msg}");
+        assert!(msg.contains("non-numeric"), "missing reason: {msg}");
+        assert!(msg.contains("pf"), "missing offending key: {msg}");
+    }
+
+    /// A non-object `"zip"` override value is a hard configuration error.
+    #[test]
+    fn zip_override_non_object_is_hard_error() {
+        let spec = gas_furnace_spec();
+        let overrides = json!({"Gas Furnace": {"zip": 0.9}});
+
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("non-object \"zip\" override must fail the build");
+        let msg = err.to_string();
+        assert!(msg.contains("must be an object"), "missing reason: {msg}");
+    }
+
+    /// The hard error also applies on the raw-equipment merge path.
+    #[test]
+    fn zip_override_unknown_key_is_hard_error_for_raw_equipment() {
+        let spec = raw_ashp_spec();
+        let overrides = json!({"ASHP Heater": {"zip": {"power_factor": 0.9}}});
+
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("unknown \"zip\" override key must fail the raw build too");
+        let msg = err.to_string();
+        assert!(msg.contains("power_factor"), "missing offending key: {msg}");
+    }
+
     #[test]
     fn zip_override_without_spec_zip_params_merges_over_class_defaults() {
         // gas_furnace_spec() has zip_params: None; the override should merge
@@ -1485,7 +1552,8 @@ mod tests {
         let class_row = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9);
         assert_eq!(
@@ -1515,7 +1583,8 @@ mod tests {
         let base = spec.zip_params.expect("toml base");
         let overrides = json!({"ASHP Heater": {"zip": {"pf": 0.9}}});
 
-        let merged = merged_equipment_config(&spec, &overrides);
+        let merged =
+            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         // Sidecar carries the merged value.
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9, "override must beat the toml default");
