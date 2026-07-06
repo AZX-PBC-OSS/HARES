@@ -10,8 +10,8 @@ use chrono::{DateTime, FixedOffset};
 use hares_control::{DispatchTarget, PriorityTier};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
-    ControlSignal, DomainId, DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration,
-    Telemetry, ZoneId,
+    ControlSignal, DomainId, DomainUpdate, EndUse, FluidType, FuelType, HeatTransferDirection,
+    LoopId, PortDeclaration, Telemetry, ZoneId,
 };
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
@@ -144,6 +144,7 @@ pub struct FluidContributionCapture {
     pub delta_flow_kg_s: f64,
     pub supply_temp_c: f64,
     pub return_temp_c: f64,
+    pub direction: Option<HeatTransferDirection>,
 }
 
 /// Snapshot of all port accumulators at a phase boundary.
@@ -167,6 +168,9 @@ pub struct FluidPortCapture {
     pub mean_return_temp_c: f64,
     /// Sum of declared thermal_power_w values from all contributors to this loop.
     pub total_thermal_power_w: f64,
+    /// Whether the equipment writing to this accumulator is a heat source or
+    /// heat sink. `None` when no contribution has been recorded.
+    pub direction: Option<HeatTransferDirection>,
 }
 
 /// Domain solver outputs + envelope component gains.

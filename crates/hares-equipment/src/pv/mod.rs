@@ -1,4 +1,15 @@
 //! Photovoltaic panel equipment model.
+//!
+//! # Reactive-power sign convention (§3.14 of the PF implementation plan)
+//!
+//! PV uses ONE signed bus reactive power `Q` on every channel (port,
+//! [`CoreOutput`], telemetry): **positive = inductive/absorbing vars,
+//! negative = supplying vars**, matching [`CoreFlows::reactive_power_kvar`]
+//! and the house total. A generating PV at pf < 1 *supplies* vars, so its
+//! baseline bus Q is negative (`-|P_gen| · tan(acos(pf))`). A commanded
+//! [`ControlSignal::ReactiveSetpoint`] passes through as-commanded (positive
+//! = absorb). Active power remains `Generation(+|P|)` on [`CoreOutput`] and
+//! negated on the port (generation subtracts from the load accumulator).
 
 mod array_config;
 pub mod config;
@@ -23,6 +34,7 @@ use hares_types::{
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
+    zip::ZipLoad,
 };
 use serde::{Deserialize, Serialize};
 
@@ -206,6 +218,14 @@ pub struct PV {
     inverter_priority: InverterPriority,
     inverter_min_pf: Option<f64>,
     q_setpoint_kvar: f64,
+    /// ZIP carrier for the inverter power-factor used to derive the baseline
+    /// reactive output. Only [`ZipLoad::tan_phi`] is consumed — PV is a
+    /// generator, not a voltage-scaled ZIP load, so the reactive polynomial is
+    /// not applied; the inverter holds the displacement PF. Kept as a
+    /// [`ZipLoad`] so the `tan(acos(pf))` formula is shared with the rest of
+    /// HARES via [`hares_types::zip`] rather than duplicated inline. Updated
+    /// on init and whenever a [`ControlSignal::PowerFactorSetpoint`] arrives.
+    zip_pf: ZipLoad,
     luts_by_surface: HashMap<u32, PvLut>,
     last_ac_power_kw: f64,
     soiling_config: Option<soiling::SoilingConfig>,
@@ -280,6 +300,7 @@ impl PV {
             inverter_priority: InverterPriority::Var,
             inverter_min_pf: Some(0.8),
             q_setpoint_kvar: 0.0,
+            zip_pf: ZipLoad::constant_power(),
             luts_by_surface: HashMap::new(),
             last_ac_power_kw: 0.0,
             soiling_config: None,
@@ -568,11 +589,13 @@ impl PV {
                 } else {
                     q_abs = q_abs.min(inv_cap);
                 }
-                let q_out = if self.q_setpoint_kvar >= 0.0 {
-                    q_abs
-                } else {
-                    -q_abs
-                };
+                // Preserve the sign of the signed bus_q passed in (positive =
+                // absorbing, negative = supplying). The previous code derived
+                // the sign from `self.q_setpoint_kvar`, which broke under the
+                // unified §3.14 convention: baseline generation has
+                // q_setpoint = 0 but bus_q < 0 (supplying), so the old test
+                // `q_setpoint >= 0` flipped the sign back to absorbing.
+                let q_out = if q_kvar >= 0.0 { q_abs } else { -q_abs };
                 let p_max = (inv_cap * inv_cap - q_out * q_out).max(0.0).sqrt();
                 let p_out = p_kw.min(p_max);
                 (p_out, q_out)
@@ -695,6 +718,10 @@ impl PV {
             .power_factor
             .unwrap_or(DEFAULT_POWER_FACTOR)
             .clamp(0.0, 1.0);
+        // Carrier for the baseline displacement PF; tan_phi() is used in step()
+        // to compute the supplying-vars reactive output. pf=1.0 (default) →
+        // tan_phi = 0 → no reactive output.
+        self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
         self.system_losses_fraction = c
             .system_losses_fraction
             .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
@@ -1023,15 +1050,30 @@ impl Equipment for PV {
         }
         let curtailment_kw = (unclipped_ac_kw - total_ac_power_kw).max(0.0);
 
-        // Compute reactive power from Q setpoint or static power factor.
-        let mut reactive_power_kvar = self.q_setpoint_kvar;
-        if reactive_power_kvar == 0.0 && self.power_factor < 1.0 {
-            reactive_power_kvar = total_ac_power_kw * (self.power_factor.acos().tan());
-        }
+        // Compute ONE signed bus reactive power [kVAR] used identically for
+        // the port push, CoreOutput, and telemetry (§3.14 sign convention:
+        // positive = inductive/absorbing vars, negative = supplying vars).
+        //
+        // Control precedence (plan §1): (1) a nonzero `q_setpoint_kvar`
+        //     (from ReactiveSetpoint or PowerSetpoint.reactive_power_kvar)
+        //     is an absolute override, passed through as-commanded — positive
+        //     = absorbing, negative = supplying; (2) else the displacement
+        //     power factor (baseline `PvConfig.power_factor` or the latest
+        //     PowerFactorSetpoint) produces `Q = -|P_gen| · tan(acos(pf))` —
+        //     a generating inverter at pf < 1 *supplies* vars, so bus Q is
+        //     negative; (3) pf = 1.0 (default) → tan_phi = 0 → Q = 0.
+        let bus_q_kvar = if self.q_setpoint_kvar != 0.0 {
+            self.q_setpoint_kvar
+        } else {
+            // `total_ac_power_kw` is the positive generation magnitude; the
+            // negative sign encodes "supplying vars to the bus."
+            -total_ac_power_kw * self.zip_pf.tan_phi()
+        };
 
-        // Apply smart inverter limits (handles clipping and priority).
-        let (final_p_kw, final_q_kvar) =
-            self.apply_inverter_limits(total_ac_power_kw, reactive_power_kvar);
+        // Apply smart inverter limits (handles clipping and priority). The
+        // function receives the signed bus_q and returns a magnitude-clamped
+        // signed q that respects the inverter's apparent-power rating.
+        let (final_p_kw, final_q_kvar) = self.apply_inverter_limits(total_ac_power_kw, bus_q_kvar);
         let inverter_clipping_kw = (total_ac_power_kw - final_p_kw).max(0.0);
 
         // Observer capture: record per-timestep inverter clipping events.
@@ -1063,9 +1105,15 @@ impl Equipment for PV {
             );
         }
 
+        // Port push: active power is negated (generation subtracts from the
+        // load accumulator), but reactive power is pushed signed and
+        // **un-negated** so the port reactive delta equals CoreOutput and
+        // telemetry (positive = absorbing, negative = supplying). The
+        // debug-build `validate_port_core_electrical_consistency` check
+        // requires these three channels to agree exactly.
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: power_kw_to_w(-final_p_kw),
-            reactive_power_kvar: -final_q_kvar,
+            reactive_power_kvar: final_q_kvar,
         })?;
 
         let mean_irradiance_w_m2 = if total_capacity_kw > 0.0 {
@@ -1241,7 +1289,21 @@ impl Equipment for PV {
                         "PV PowerFactorSetpoint must be in (0, 1]".to_string(),
                     ));
                 }
+                // HARES PowerFactorSetpoint keeps the (0, 1] *magnitude*
+                // semantics validated in `hares_types::control_signal`
+                // (`[0, 1]`, further restricted to `(0, 1]` here). The sign of
+                // the resulting reactive power follows the supplying convention
+                // adopted in §3.14 of the implementation plan: a generating PV
+                // at pf < 1 *supplies* vars, so bus Q = -|P| · tan(acos(pf))
+                // (negative). This differs from OCHRE `PV.py:194-196`, which
+                // encodes the gen-P/consume-Q case via a *negative* signed pf.
+                // HARES uses an unsigned PF here and reserves
+                // [`ControlSignal::ReactiveSetpoint`] (positive = absorbing)
+                // for commanding var *absorption*. The validation is not
+                // changed — only the produced sign is now consistent with the
+                // rest of HARES.
                 self.power_factor = *power_factor;
+                self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, *power_factor);
                 self.q_setpoint_kvar = 0.0;
                 Ok(())
             }
@@ -1281,7 +1343,10 @@ fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
             unit: "kVAR".to_string(),
-            description: "Reactive power output derived from configured static power factor"
+            description: "Signed bus reactive power (positive = inductive/absorbing, \
+                negative = supplying). Baseline: -|P|·tan(acos(pf)) at the configured \
+                displacement power factor; override: commanded ReactiveSetpoint /
+                PowerSetpoint.reactive_power_kvar, passed through as-commanded."
                 .to_string(),
         },
         TelemetryField {
@@ -1348,8 +1413,9 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, InverterPriority, PortSlots, SurfaceIrradiance,
-        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, ElectricPower, EnvironmentState, GridState, InverterPriority, PortSlots,
+        SurfaceIrradiance, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        validate_port_core_electrical_consistency,
     };
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
@@ -1990,7 +2056,9 @@ mod tests {
         approx_eq(ports.electrical.generation_power_w, -3000.0);
     }
 
-    /// With power_factor=0.9, reactive power must equal P * tan(acos(0.9)).
+    /// With power_factor=0.9, a *generating* PV supplies vars, so the signed
+    /// bus Q must equal `-|P| · tan(acos(0.9))` (negative) on every channel:
+    /// port == CoreOutput == telemetry.
     #[test]
     fn power_factor_produces_reactive_power() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
@@ -2020,16 +2088,32 @@ mod tests {
 
         let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
         let q_kvar = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
+        let co_q = pv
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("PV REACTIVE cap => CoreOutput Q must be Some");
 
+        // Generating PV at pf<1 supplies vars → bus Q is negative.
         assert!(
-            q_kvar > 0.0,
-            "expected reactive_power_kvar > 0, got {q_kvar}"
+            q_kvar < 0.0,
+            "expected negative reactive_power_kvar (supplying), got {q_kvar}"
         );
-        let expected_q = ac_kw * (0.9_f64.acos().tan());
+        let expected_q = -ac_kw * (0.9_f64.acos().tan());
         assert!(
             (q_kvar - expected_q).abs() < 1e-9,
             "expected q={expected_q}, got {q_kvar}"
         );
+        // Unified convention: telemetry, CoreOutput, and port reactive delta
+        // must all carry the same signed value.
+        approx_eq(q_kvar, co_q);
+        approx_eq(ports.electrical.reactive_power_kvar, q_kvar);
+        // Active power: port generation is negative; CoreOutput is Generation(+|P|).
+        approx_eq(ports.electrical.generation_power_w, -ac_kw * 1000.0);
+        assert!(matches!(
+            pv.core_output().flows.electric_kw,
+            Some(ElectricPower::Generation(_))
+        ));
     }
 
     /// ThinFilm has a smaller gamma than Standard so it loses less power at elevated
@@ -2628,27 +2712,247 @@ mod tests {
         approx_eq(q, 1.5);
     }
 
+    /// PowerFactorSetpoint updates the displacement PF used for the baseline
+    /// supplying-vars computation. A generating PV at the commanded pf < 1
+    /// supplies vars, so bus Q = `-|P| · tan(acos(pf))` (negative). The
+    /// setpoint also zeros any prior ReactiveSetpoint, re-engaging the PF
+    /// baseline path.
     #[test]
     fn power_factor_setpoint_signal_computes_q() {
         let (mut pv, env) = make_inverter_pv(6.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 })
             .unwrap();
+        // PowerFactorSetpoint must clear a prior ReactiveSetpoint so the PF
+        // baseline path runs.
+        assert_eq!(pv.q_setpoint_kvar, 0.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-        let expected_q = p * (0.9_f64.acos().tan());
+        let expected_q = -p * (0.9_f64.acos().tan());
         assert!(
             (q - expected_q).abs() < 1e-6,
-            "q={q}, expected {expected_q}"
+            "q={q}, expected {expected_q} (negative = supplying)"
         );
+        assert!(q < 0.0, "generating PV at pf<1 must supply vars (Q<0)");
+        // Port, CoreOutput, and telemetry agree on the signed value.
+        approx_eq(ports.electrical.reactive_power_kvar, q);
+        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+    }
+
+    /// §3.14 sign-pinning: baseline pf<1 generation produces negative bus Q
+    /// (supplying vars) and the signed value is identical across port,
+    /// CoreOutput, and telemetry. Also exercises the real dwelling-level
+    /// `validate_port_core_electrical_consistency` validator against the
+    /// equipment's own pre/post port snapshots — the same check the dwelling
+    /// step runs in debug builds. This is the equipment-level mirror of the
+    /// dwelling-level PV reactive test (extending the dwelling PV harness with
+    /// a real pf<1 PV + weather/surfaces setup is not cheap; the validator is
+    /// public and called directly here for an equivalent, stronger guarantee).
+    #[test]
+    fn pv_baseline_pf_supplies_vars_and_passes_port_core_validator() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(11);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.system_losses_fraction = Some(0.0);
+        // Large enough that neither active clipping nor the kVA limit binds
+        // (S needed at pf 0.9 is ~5.6 kVA), small enough that the DC-to-AC
+        // ratio (5.0 / 6.0 ≈ 0.83) stays inside the validated [0.8, 2.0].
+        cfg.inverter_capacity_kw = Some(6.0);
+        cfg.power_factor = Some(0.9);
+        let cfg =
+            EquipmentConfig::from_typed("PV Sign".to_string(), "PV".to_string(), cfg).unwrap();
+
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+            1.0,
+        );
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        pv.inverter_min_pf = None; // isolate the PF baseline path from min-pf clamping
+
+        let mut ports = PortSlots::default();
+        let pre = ports.electrical; // Copy snapshot — all zeros before step
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step must succeed");
+
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q_telem = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let q_core = pv
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE cap => CoreOutput Q Some");
+
+        // Generating PV at pf<1 supplies vars → bus Q is negative.
+        assert!(
+            ac_kw > 0.0,
+            "test precondition: PV must be generating, got AC={ac_kw}"
+        );
+        assert!(
+            q_telem < 0.0,
+            "baseline pf<1 must supply vars (Q<0), got {q_telem}"
+        );
+        let expected_q = -ac_kw * (0.9_f64.acos().tan());
+        approx_eq(q_telem, expected_q);
+
+        // Unified convention: port == CoreOutput == telemetry (signed).
+        approx_eq(ports.electrical.reactive_power_kvar, q_telem);
+        approx_eq(q_core, q_telem);
+
+        // Active power: port generation is negative; CoreOutput is Generation(+).
+        approx_eq(ports.electrical.generation_power_w, -ac_kw * 1000.0);
+        assert!(matches!(
+            pv.core_output().flows.electric_kw,
+            Some(ElectricPower::Generation(_))
+        ));
+
+        // The dwelling-level validator must accept the unified push.
+        validate_port_core_electrical_consistency(
+            pv.descriptor(),
+            pv.core_output(),
+            pre,
+            &ports.electrical,
+        )
+        .expect("baseline pf<1 generation must satisfy the port/core consistency validator");
+    }
+
+    /// §3.14: a positive ReactiveSetpoint (absorbing) passes through
+    /// as-commanded on every channel, and survives the consistency validator.
+    #[test]
+    fn pv_reactive_setpoint_positive_passthrough() {
+        let (mut pv, env) = make_inverter_pv(6.0);
+        pv.inverter_min_pf = None;
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        let pre = ports.electrical;
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            q > 0.0,
+            "positive ReactiveSetpoint must absorb (Q>0), got {q}"
+        );
+        approx_eq(q, 1.5);
+        approx_eq(ports.electrical.reactive_power_kvar, q);
+        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        validate_port_core_electrical_consistency(
+            pv.descriptor(),
+            pv.core_output(),
+            pre,
+            &ports.electrical,
+        )
+        .expect("positive ReactiveSetpoint must satisfy the consistency validator");
+    }
+
+    /// §3.14: a negative ReactiveSetpoint (supplying) passes through
+    /// as-commanded on every channel, sign preserved through the inverter's
+    /// Var-priority limiter, and survives the consistency validator.
+    #[test]
+    fn pv_reactive_setpoint_negative_passthrough() {
+        let (mut pv, env) = make_inverter_pv(6.0);
+        pv.inverter_min_pf = None;
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: -1.5 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        let pre = ports.electrical;
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            q < 0.0,
+            "negative ReactiveSetpoint must supply (Q<0), got {q}"
+        );
+        approx_eq(q, -1.5);
+        approx_eq(ports.electrical.reactive_power_kvar, q);
+        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        validate_port_core_electrical_consistency(
+            pv.descriptor(),
+            pv.core_output(),
+            pre,
+            &ports.electrical,
+        )
+        .expect("negative ReactiveSetpoint must satisfy the consistency validator");
+    }
+
+    /// §3.14 control precedence: PowerFactorSetpoint zeros a prior
+    /// ReactiveSetpoint so the PF baseline path re-engages (negative Q for
+    /// generating PV at pf<1).
+    #[test]
+    fn pv_power_factor_setpoint_zeros_q_setpoint() {
+        let (mut pv, env) = make_inverter_pv(6.0);
+        pv.inverter_min_pf = None;
+        // First command an absorbing ReactiveSetpoint.
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+            .unwrap();
+        assert_eq!(pv.q_setpoint_kvar, 1.5);
+        // Then a PowerFactorSetpoint must clear it and re-engage the PF path.
+        pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.85 })
+            .unwrap();
+        assert_eq!(pv.q_setpoint_kvar, 0.0);
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let expected_q = -p * (0.85_f64.acos().tan());
+        approx_eq(q, expected_q);
+        assert!(
+            q < 0.0,
+            "PF baseline after PowerFactorSetpoint must supply vars"
+        );
+    }
+
+    /// §3.14: inverter apparent-power limit clamps reactive magnitude for both
+    /// signs (absorbing and supplying) while preserving the sign. With a large
+    /// |Q| command and small P, |S| = sqrt(P²+Q²) must not exceed the inverter
+    /// kVA rating.
+    #[test]
+    fn pv_inverter_clamps_reactive_both_signs() {
+        for &q_cmd in &[8.0_f64, -8.0_f64] {
+            let (mut pv, env) = make_inverter_pv(4.0);
+            pv.inverter_min_pf = None;
+            pv.inverter_priority = InverterPriority::Var;
+            pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: q_cmd })
+                .unwrap();
+            let mut ports = PortSlots::default();
+            pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+            let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+            let s = (p * p + q * q).sqrt();
+            assert!(
+                s <= 4.0 + 1e-6,
+                "q_cmd={q_cmd}: |S|={s} must respect inverter cap 4.0"
+            );
+            // Sign preserved (|q| reduced from 8.0 toward the cap).
+            assert!(
+                q.signum() == q_cmd.signum(),
+                "q_cmd={q_cmd}: sign must be preserved, got q={q}"
+            );
+            assert!(
+                q.abs() < 8.0,
+                "q_cmd={q_cmd}: |Q|={0} must be clamped below 8.0",
+                q.abs()
+            );
+            // Unified convention still holds.
+            approx_eq(ports.electrical.reactive_power_kvar, q);
+            approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        }
     }
 
     #[test]
     fn inverter_priority_mode_signal_changes_mode() {
         let mut pv = PV::new(config_single());
-        assert_eq!(pv.inverter_priority, InverterPriority::Var);
         pv.apply_control(&ControlSignal::InverterPriorityMode {
             priority: InverterPriority::Watt,
         })

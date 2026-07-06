@@ -473,7 +473,8 @@ mod tests {
             }
         }
         // State vector at init
-        let (x_state, _, _) = dwelling.thermal_solver.snapshot_state();
+        let thermal_snap = dwelling.thermal_solver.snapshot_state();
+        let x_state = &thermal_snap.x;
         eprintln!("  state vector ({} entries):", x_state.len());
         for (i, &t) in x_state.iter().enumerate().take(25) {
             eprintln!("    x[{i:2}] = {t:.4}°C");

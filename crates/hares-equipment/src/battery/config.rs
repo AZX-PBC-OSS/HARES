@@ -73,6 +73,12 @@ pub struct BatteryConfig {
     pub bms_mode: Option<String>,
     pub grid_export_rule: Option<String>,
 
+    // Reactive power / smart-inverter control (VPP / RL use cases).
+    // power_factor defaults to 1.0 (no reactive); inverter_capacity_kva
+    // defaults to max(max_charge_kw, max_discharge_kw) at init time.
+    pub power_factor: Option<f64>,
+    pub inverter_capacity_kva: Option<f64>,
+
     // Actor-level dwell: minimum steps a mode/action must persist before it can change.
     // Defaults to 0 (no dwell enforcement) for backward compatibility.
     #[serde(default)]
@@ -152,6 +158,20 @@ impl BatteryConfig {
                 }
             }
         }
+        if let Some(pf) = self.power_factor {
+            if !pf.is_finite() || pf <= 0.0 || pf > 1.0 {
+                return Err(HaresError::Equipment(
+                    "battery power_factor must be finite and within (0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(kva) = self.inverter_capacity_kva {
+            if !kva.is_finite() || kva <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "battery inverter_capacity_kva must be finite and > 0".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -196,6 +216,8 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         }
     }
@@ -262,6 +284,35 @@ mod tests {
     #[test]
     fn battery_config_validate_passes_for_valid_config() {
         let cfg = minimal_battery_config();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn battery_config_validate_rejects_out_of_range_power_factor() {
+        let mut cfg = minimal_battery_config();
+        cfg.power_factor = Some(1.5);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn battery_config_validate_rejects_zero_power_factor() {
+        let mut cfg = minimal_battery_config();
+        cfg.power_factor = Some(0.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn battery_config_validate_rejects_negative_inverter_capacity() {
+        let mut cfg = minimal_battery_config();
+        cfg.inverter_capacity_kva = Some(-1.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn battery_config_validate_accepts_power_factor_and_inverter_capacity() {
+        let mut cfg = minimal_battery_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_capacity_kva = Some(7.0);
         assert!(cfg.validate().is_ok());
     }
 }

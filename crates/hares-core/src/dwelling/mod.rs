@@ -60,6 +60,8 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::ControlCapabilities;
 #[cfg(test)]
 use hares_types::LoopId;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_types::validate_port_core_electrical_consistency;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, FuelType, GridState, HaresError,
@@ -4726,12 +4728,24 @@ impl Dwelling {
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
+            // Snapshot the shared electrical bus so the post-step delta is
+            // exactly this equipment's contribution (ElectricalAccumulator
+            // is Copy).
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
+                )?;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                validate_port_core_electrical_consistency(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                    pre_electrical,
+                    &self.ports.electrical,
                 )?;
                 step_succeeded[idx] = true;
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -4791,12 +4805,23 @@ impl Dwelling {
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
+            // Snapshot the shared electrical bus so the post-step delta is
+            // exactly this equipment's contribution.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
+                )?;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                validate_port_core_electrical_consistency(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                    pre_electrical,
+                    &self.ports.electrical,
                 )?;
                 step_succeeded[idx] = true;
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -4836,12 +4861,23 @@ impl Dwelling {
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
             self.rollback_ports.copy_into(&self.ports);
+            // Snapshot the shared electrical bus so the post-step delta is
+            // exactly this equipment's contribution.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
+                )?;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                validate_port_core_electrical_consistency(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                    pre_electrical,
+                    &self.ports.electrical,
                 )?;
                 step_succeeded[idx] = true;
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -5117,6 +5153,18 @@ impl Dwelling {
                 return Err(HaresError::InvariantViolation {
                     check_name: "electrical_net_finite".to_string(),
                     value: net_kw,
+                    tolerance: 0.0,
+                });
+            }
+            let net_kvar = self.electrical_solver.net_reactive_kvar();
+            if !net_kvar.is_finite() {
+                tracing::error!(
+                    electrical_net_kvar = net_kvar,
+                    "electrical solver reactive output is non-finite — quarantining dwelling"
+                );
+                return Err(HaresError::InvariantViolation {
+                    check_name: "electrical_net_finite".to_string(),
+                    value: net_kvar,
                     tolerance: 0.0,
                 });
             }
@@ -5911,6 +5959,14 @@ impl Dwelling {
         let port_net = power_w_to_kw(self.ports.electrical.load_power_w) * scale
             + power_w_to_kw(self.ports.electrical.generation_power_w);
         checker.check_electrical(net_kw, &[-port_net])?;
+
+        // Reactive balance: solver net reactive must match port accumulation.
+        // The solver passes slot Q through directly (no voltage scaling), so
+        // the comparison is a simple difference against the port-side signed
+        // reactive sum.
+        let net_kvar = self.electrical_solver.net_reactive_kvar();
+        checker.check_nan_screen(self.clock.current_step(), &[("net_kvar", None, net_kvar)])?;
+        checker.check_reactive(net_kvar, self.ports.electrical.reactive_power_kvar)?;
 
         // Fuel accumulator must not contain electric contributions: electric
         // power routes through ElectricalAccumulator, never through the fuel
@@ -7003,7 +7059,7 @@ mod tests {
                     fuel: FuelType::Electric,
                     stage: ExecutionStage::Independent,
                     control_capabilities: ControlCapabilities::empty(),
-                    core_capabilities: CoreCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
                     telemetry_fields: vec![
                         TelemetryField {
                             name: "active_power_kw".to_string(),
@@ -7066,6 +7122,13 @@ mod tests {
                 active_power_w: self.active_power_kw * 1000.0,
                 reactive_power_kvar: self.reactive_power_kvar,
             })?;
+            // Keep CoreOutput consistent with the port contribution above
+            // (enforced by validate_port_core_electrical_consistency in
+            // debug / check_invariants builds).
+            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
+                self.active_power_kw,
+            )?);
+            self.core_output.flows.reactive_power_kvar = Some(self.reactive_power_kvar);
             Ok(())
         }
 
@@ -7098,7 +7161,8 @@ mod tests {
 
     /// Test equipment that correctly deposits power into ports but
     /// under-reports electric power in `core_output()`, used to verify
-    /// the telemetry consistency check catches the discrepancy.
+    /// that `validate_port_core_electrical_consistency` fails the step on
+    /// the discrepancy.
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     struct UnderReportingEquipment {
         descriptor: EquipmentDescriptor,
@@ -7178,6 +7242,116 @@ mod tests {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.true_power_kw * 1000.0,
                 reactive_power_kvar: 0.0,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    /// Test equipment reproducing the water-heater bug class: the port
+    /// receives a nonzero reactive contribution while `CoreOutput` reports
+    /// `flows.reactive_power_kvar = None`. Active power is consistent, so
+    /// only the reactive check of
+    /// `validate_port_core_electrical_consistency` fires.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    struct ReactiveDivergentEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        active_power_kw: f64,
+        silent_reactive_kvar: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    impl ReactiveDivergentEquipment {
+        fn new(name: &str, active_power_kw: f64, silent_reactive_kvar: f64) -> Self {
+            let mut co = CoreOutput::default();
+            co.flows.electric_kw =
+                Some(hares_types::ElectricPower::consumption(active_power_kw).unwrap());
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(98),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("ReactiveDivergentEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC,
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: co,
+                active_power_kw,
+                silent_reactive_kvar,
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    impl Equipment for ReactiveDivergentEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: self.active_power_kw * 1000.0,
+                reactive_power_kvar: self.silent_reactive_kvar,
             })?;
             Ok(())
         }
@@ -7684,9 +7858,14 @@ mod tests {
         assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
     }
 
+    /// Equipment that reports less electric power in `CoreOutput` than it
+    /// deposits at the electrical port previously only tripped the soft
+    /// `telemetry_consistency_flag`; the divergence now fails the step hard
+    /// via `validate_port_core_electrical_consistency` before telemetry is
+    /// ever assembled.
     #[test]
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn telemetry_consistency_flag_goes_false_when_equipment_under_reports_power() {
+    fn dwelling_step_errors_when_equipment_under_reports_power() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
@@ -7698,12 +7877,43 @@ mod tests {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
-        dwelling.run_timestep(false).expect("dwelling step");
-        let telemetry = dwelling.telemetry();
-
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("under-reporting equipment must fail the step in debug builds");
+        let msg = err.to_string();
         assert!(
-            !telemetry.telemetry_consistency_flag,
-            "consistency check should detect equipment reporting 1.0 kW while depositing 3.0 kW into electrical port"
+            msg.contains("port/core electrical consistency violation")
+                && msg.contains("UnderReporter"),
+            "step error must identify the port/core divergence, got: {msg}"
+        );
+    }
+
+    /// The water-heater bug class: equipment deposits reactive power at the
+    /// electrical port while reporting `flows.reactive_power_kvar = None` in
+    /// `CoreOutput`. The port/core consistency validator must fail the step.
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn dwelling_step_errors_when_port_reactive_diverges_from_core_output() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut eq = ReactiveDivergentEquipment::new("SilentReactive", 2.0, 0.6);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init reactive-divergent equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("silent port reactive contribution must fail the step in debug builds");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("port/core electrical consistency violation")
+                && msg.contains("flows.reactive_power_kvar is None")
+                && msg.contains("SilentReactive"),
+            "step error must identify the silent reactive contribution, got: {msg}"
         );
     }
 
@@ -11693,7 +11903,7 @@ master_seed = 0
                     fuel: FuelType::Electric,
                     stage,
                     control_capabilities: ControlCapabilities::empty(),
-                    core_capabilities: CoreCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC,
                     telemetry_fields: vec![],
                     zone_type: None,
                 },
@@ -11740,6 +11950,12 @@ master_seed = 0
                 active_power_w: self.power_w,
                 reactive_power_kvar: 0.0,
             })?;
+            // Keep CoreOutput consistent with the port contribution above
+            // (enforced by validate_port_core_electrical_consistency in
+            // debug / check_invariants builds).
+            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
+                self.power_w / 1000.0,
+            )?);
             Ok(())
         }
 

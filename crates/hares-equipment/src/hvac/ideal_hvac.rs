@@ -127,6 +127,11 @@ pub struct IdealHvac {
     curves: BiquadraticCurveSet,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly zero, real power
+    /// stays bit-identical. Wired uniformly with the rest of the fleet so the
+    /// §4 cross-equipment consistency check stays uniform.
+    zip: hares_types::zip::ZipLoad,
 }
 
 /// Serializable snapshot of [`IdealHvac`] mutable fields.
@@ -167,7 +172,8 @@ impl IdealHvac {
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
-                | CoreCapabilities::HAS_SETPOINT,
+                | CoreCapabilities::HAS_SETPOINT
+                | CoreCapabilities::REACTIVE,
             telemetry_fields: ideal_hvac_telemetry_fields(),
             zone_type: None,
         };
@@ -204,6 +210,7 @@ impl IdealHvac {
             capacity_min_w: 0.0,
             curves: BiquadraticCurveSet::identity(),
             zone_id_explicit,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -503,6 +510,7 @@ impl Equipment for IdealHvac {
             .effective_setpoints()
             .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
         self.thermostat_fsm.thermostat.validate(env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = ideal_hvac_default_telemetry();
         self.core_output = CoreOutput::default();
         Ok(())
@@ -697,10 +705,14 @@ impl Equipment for IdealHvac {
 
         // Emit electrical port contribution for fan power.
         let fan_kw = fan_power_w / 1000.0;
-        if fan_power_w > 0.0 {
+        // Rule R1: Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
+        // zero. Wired uniformly so the cross-equipment consistency check
+        // (port/CoreOutput/telemetry) stays uniform across the fleet.
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
+        if fan_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -737,6 +749,8 @@ impl Equipment for IdealHvac {
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
         self.telemetry.set(tk::FAN_KW, fan_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         let sp = self.thermostat_fsm.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
@@ -766,7 +780,7 @@ impl Equipment for IdealHvac {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: Some(capacity_w),
                 sensible_cooling_w: if capacity_w < 0.0 {
@@ -965,6 +979,7 @@ fn ideal_hvac_default_telemetry() -> Telemetry {
     telemetry.insert(tk::IDEAL_CAPACITY_DEGRADED, 0.0);
     telemetry.insert(tk::CURRENT_TARGET_C, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::FAN_HEAT_W, 0.0);
     telemetry.insert(tk::HVAC_HEATING_CAPACITY_W, 0.0);
@@ -1014,6 +1029,12 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
             description: "Fan electrical consumption".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf"
+                .to_string(),
         },
         TelemetryField {
             name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
@@ -3386,5 +3407,139 @@ mod tests {
             EndUse::HVAC_COOLING,
             "end_use must still be HVAC_COOLING after deadband step following cooling"
         );
+    }
+
+    /// Reactive-power contract for Ideal HVAC: unity pf (OCHRE Ideal = 1.0) ⇒
+    /// Q exactly zero even while the fan draws real power, REACTIVE declared,
+    /// and port/CoreOutput/telemetry all report Some(0.0). Wired uniformly so
+    /// the cross-equipment consistency check stays uniform across the fleet.
+    #[test]
+    fn ideal_hvac_reactive_power_is_zero_at_unity_pf() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
+            rated_fan_power_w: Some(200.0),
+            rated_eir: Some(1.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "Ideal HVAC must declare REACTIVE"
+        );
+        assert_eq!(eq.zip.pf, 1.0, "Ideal HVAC unity pf");
+        eq.update_control(&env);
+        eq.ideal_capacity_w = 5_000.0;
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            ports.electrical.load_power_w > 0.0,
+            "fan must draw real power"
+        );
+        assert_eq!(
+            ports.electrical.reactive_power_kvar, 0.0,
+            "unity pf ⇒ port Q == 0"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "unity pf ⇒ CoreOutput Q == Some(0.0)"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(hares_types::telemetry_keys::REACTIVE_POWER_KVAR),
+            Some(0.0),
+            "unity pf ⇒ telemetry Q == 0.0"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+    }
+
+    /// Rule R1 regression: the unity pf affects only Q (which is zero either
+    /// way). Twin instances — one with the class pf 1.0, one with a
+    /// constant-power sidecar override (pf 0 sentinel) — must produce
+    /// bit-identical real power at every step and voltage.
+    #[test]
+    fn ideal_hvac_real_power_bit_identical_with_and_without_reactive_zip() {
+        let mk = || {
+            typed_config(crate::IdealHvacConfig {
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                cooling_capacity_w: Some(10_000.0),
+                setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                    heating_setpoint_c: Some(20.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
+                rated_fan_power_w: Some(200.0),
+                rated_eir: Some(1.0),
+                ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+                ..Default::default()
+            })
+        };
+        let config_pf = mk();
+        let mut config_nopf = mk();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = IdealHvac::new(config_pf.clone());
+        let mut eq_nopf = IdealHvac::new(config_nopf.clone());
+        let mut env = env(18.0, 300, 0);
+        eq_pf.init(&config_pf, &env).unwrap();
+        eq_nopf.init(&config_nopf, &env).unwrap();
+
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            env.grid.voltage_pu = *v;
+            eq_pf.update_control(&env);
+            eq_nopf.update_control(&env);
+            // Drive a heating call with nonzero fan power in both twins.
+            eq_pf.ideal_capacity_w = 5_000.0;
+            eq_nopf.ideal_capacity_w = 5_000.0;
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf
+                .step(&env, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                ports_pf.electrical.reactive_power_kvar, 0.0,
+                "unity pf twin must produce zero reactive power"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            env.current_time += ChronoDuration::minutes(1);
+        }
     }
 }

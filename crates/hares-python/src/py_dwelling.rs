@@ -429,6 +429,8 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
         capacity_kwh: battery.capacity_kwh,
         max_charge_kw: battery.max_charge_kw.unwrap_or(5.0),
         max_discharge_kw: battery.max_discharge_kw.unwrap_or(5.0),
+        power_factor: None,
+        inverter_capacity_kva: None,
         n_series: battery.n_series,
         n_parallel: battery.n_parallel,
         ah_cell: None,

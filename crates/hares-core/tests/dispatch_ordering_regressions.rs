@@ -22,8 +22,8 @@ use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots, Telemetry,
-    TelemetryField, telemetry_keys as tk,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 
 // ---------------------------------------------------------------------------
@@ -177,10 +177,17 @@ impl Equipment for StubPowerEquipment {
         &mut self,
         _env: &EnvironmentState,
         _dt: Duration,
-        _ports: &mut PortSlots,
+        ports: &mut PortSlots,
     ) -> Result<(), HaresError> {
         self.curtailment_at_step_time = self.curtailment_fraction;
         let effective_kw = self.base_kw * (1.0 - self.curtailment_fraction);
+        // Deposit the generation on the electrical bus so the CoreOutput
+        // below stays consistent with the port contribution (enforced by
+        // validate_port_core_electrical_consistency in debug builds).
+        ports.accumulate(&PortContribution::Electrical {
+            active_power_w: -effective_kw.max(0.0) * 1000.0,
+            reactive_power_kvar: 0.0,
+        })?;
         // Generation convention: signed_kw will be negative for this source.
         self.core_output = CoreOutput {
             state: CoreState::default(),

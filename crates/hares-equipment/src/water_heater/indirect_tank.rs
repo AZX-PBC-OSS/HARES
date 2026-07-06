@@ -29,8 +29,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
-    WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
 
@@ -91,7 +90,6 @@ pub struct IndirectTank {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
-    zip: WaterHeaterZip,
     target_setpoint_c: f64,
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -174,7 +172,6 @@ impl IndirectTank {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
-            zip: WaterHeaterZip::default(),
             target_setpoint_c: DEFAULT_SETPOINT_C,
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
@@ -292,7 +289,6 @@ impl IndirectTank {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
-        self.zip = WaterHeaterZip::default();
 
         self.target_setpoint_c = self.setpoint_c;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);

@@ -5,7 +5,7 @@
 //! before simulation begins.
 //!
 //! OCHRE defaults mapping (source -> HARES entry):
-//! - `ochre/defaults/ZIP Parameters.csv` -> `defaults/zip_parameters.toml` -> [`ZipParameters`]
+//! - `ochre/defaults/ZIP Parameters.csv` -> `defaults/zip_parameters.toml` -> [`ZipLoad`]
 //! - `ochre/defaults/HVAC Cooling/Biquadratic *.csv` -> `defaults/hvac_cooling/*.toml` -> [`HvacCurveSet`]
 //! - `ochre/defaults/HVAC Heating/Biquadratic *.csv` -> `defaults/hvac_heating/*.toml` -> [`HvacCurveSet`]
 //! - `ochre/defaults/Battery/*` -> `defaults/battery/*.toml`
@@ -22,30 +22,17 @@ use std::path::{Path, PathBuf};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
 use hares_physics::units::power_kw_to_w;
-use serde::Deserialize;
-use thiserror::Error;
-
 /// ZIP load model parameters for voltage-dependent power modelling.
 ///
-/// Real power: `P(V) = P0 * [zp*(V/V0)^2 + ip*(V/V0) + pp]`
-/// Reactive power: `Q(V) = Q0 * [zq*(V/V0)^2 + iq*(V/V0) + pq]`
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ZipParameters {
-    /// Impedance fraction (real power, voltage-squared term).
-    pub zp: f64,
-    /// Current fraction (real power, voltage-linear term).
-    pub ip: f64,
-    /// Power fraction (real power, constant term).
-    pub pp: f64,
-    /// Impedance fraction (reactive power, voltage-squared term).
-    pub zq: f64,
-    /// Current fraction (reactive power, voltage-linear term).
-    pub iq: f64,
-    /// Power fraction (reactive power, constant term).
-    pub pq: f64,
-    /// Power factor.
-    pub pf: f64,
-}
+/// Re-exported from the shared contract crate: `defaults/zip_parameters.toml`
+/// rows deserialize directly into [`ZipLoad`] (field names `zp`/`ip`/`pp`/
+/// `zq`/`iq`/`pq`/`pf` match; `v0` defaults to 1.0). The toml and the in-code
+/// class table [`hares_types::zip::zip_defaults_for_class`] are dual
+/// representations of the same data — a drift test in this module keeps them
+/// in exact agreement.
+pub use hares_types::zip::ZipLoad;
+use serde::Deserialize;
+use thiserror::Error;
 
 /// A named set of biquadratic curves for one HVAC speed variant.
 ///
@@ -381,7 +368,7 @@ impl WaterHeatingDefaults {
 /// Central store for all default parameters loaded from the `defaults/` tree.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultsStore {
-    zip_by_equipment: HashMap<String, ZipParameters>,
+    zip_by_equipment: HashMap<String, ZipLoad>,
     hvac_cooling: HashMap<String, HvacCurveSet>,
     hvac_heating: HashMap<String, HvacCurveSet>,
     hvac_multispeed: Vec<HvacMultispeedParameters>,
@@ -499,7 +486,7 @@ impl DefaultsStore {
     ///
     /// Name matching is canonicalized to lowercase snake case.
     #[must_use]
-    pub fn zip_params(&self, equipment_type: &str) -> Option<&ZipParameters> {
+    pub fn zip_params(&self, equipment_type: &str) -> Option<&ZipLoad> {
         self.zip_by_equipment
             .get(&normalize_equipment_key(equipment_type))
     }
@@ -694,12 +681,12 @@ pub enum DefaultsCategory {
 // Internal loaders
 // ---------------------------------------------------------------------------
 
-fn load_zip_parameters(path: &Path) -> Result<HashMap<String, ZipParameters>, DefaultsError> {
+fn load_zip_parameters(path: &Path) -> Result<HashMap<String, ZipLoad>, DefaultsError> {
     let content = std::fs::read_to_string(path).map_err(|e| DefaultsError::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let table: HashMap<String, ZipParameters> =
+    let table: HashMap<String, ZipLoad> =
         toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -826,6 +813,72 @@ fn load_hvac_curves_dir(dir: &Path) -> Result<HashMap<String, HvacCurveSet>, Def
     Ok(map)
 }
 
+/// OCHRE uses ±100 (°F) as a sentinel for "effectively unbounded" temperature
+/// range in its HVAC heating CSV defaults
+/// (`vendors/OCHRE/ochre/defaults/HVAC Heating/Biquadratic *.csv:23-26`).
+/// The value is in Fahrenheit — OCHRE's internal unit — but HARES operates in
+/// Celsius (SI) internally. A ±100 °C bound has no physical meaning for any
+/// heat pump and would let biquadratic curves extrapolate far outside their
+/// valid domain, producing implausible capacity/EIR predictions. We detect the
+/// sentinel at the I/O boundary and replace it with physically meaningful
+/// Celsius fallback bounds so no Fahrenheit value ever reaches the core.
+const FAHRENHEIT_SENTINEL_MIN: f64 = -100.0;
+const FAHRENHEIT_SENTINEL_MAX: f64 = 100.0;
+
+/// Fallback Celsius temperature bounds used when a Fahrenheit sentinel is
+/// detected or when temperature-bound rows are absent from a CSV. These match
+/// the `get_row_with_default` defaults below and represent a wide but
+/// physically meaningful operating range for residential HVAC equipment.
+const FALLBACK_TWB_BOUNDS: (f64, f64) = (-10.0, 50.0);
+const FALLBACK_TDB_BOUNDS: (f64, f64) = (-50.0, 60.0);
+
+/// Check whether a `(min, max)` bound pair matches the OCHRE ±100 °F sentinel
+/// convention for "unbounded" temperature range.
+fn is_fahrenheit_sentinel(min: f64, max: f64) -> bool {
+    min == FAHRENHEIT_SENTINEL_MIN && max == FAHRENHEIT_SENTINEL_MAX
+}
+
+/// Sanitise a single `(min, max)` temperature bound pair: if it matches the
+/// OCHRE ±100 °F sentinel, replace it with the given Celsius fallback and
+/// return `true` (sentinel detected). Otherwise return the original bounds
+/// unchanged and `false`.
+///
+/// `bound_label` (e.g. `"Twb"`, `"Tdb"`) and `file_path` are used in the
+/// warning so the operator can identify which file and which bound triggered
+/// the replacement.
+fn sanitise_sentinel_bounds(
+    min: f64,
+    max: f64,
+    fallback: (f64, f64),
+    bound_label: &str,
+    file_path: &Path,
+) -> (f64, f64, bool) {
+    if is_fahrenheit_sentinel(min, max) {
+        tracing::warn!(
+            path = %file_path.display(),
+            bound = %bound_label,
+            raw_min = min,
+            raw_max = max,
+            fallback_min = fallback.0,
+            fallback_max = fallback.1,
+            "Fahrenheit sentinel (±100) detected in temperature bounds; \
+             replacing with Celsius fallback",
+        );
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            column = "hvac_sentinel_replaced",
+            path = %file_path.display(),
+            bound = %bound_label,
+            count = 1u32,
+            "Fahrenheit sentinel replaced with Celsius fallback",
+        );
+        (fallback.0, fallback.1, true)
+    } else {
+        (min, max, false)
+    }
+}
+
 /// TOML structure for a single HVAC curve variant.
 #[derive(Debug, Deserialize)]
 struct RawHvacVariant {
@@ -863,29 +916,45 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
     let variants = raw
         .variant
         .into_iter()
-        .map(|v| HvacCurveVariant {
-            name: v.name,
-            cap_t: BiquadraticCurve {
-                coeffs: v.cap_t,
-                x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
-                x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
-                warn_on_clamp: true,
-                output_min: Some(0.0),
-                output_max: None,
-            },
-            cap_ff: v.cap_ff,
-            eir_t: BiquadraticCurve {
-                coeffs: v.eir_t,
-                x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
-                x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
-                warn_on_clamp: true,
-                output_min: None,
-                output_max: None,
-            },
-            eir_ff: v.eir_ff,
-            eir_plr: v.eir_plr,
-            ff_bounds: None,
-            plf_bounds: None,
+        .map(|v| {
+            let (twb_min, twb_max, _) = sanitise_sentinel_bounds(
+                v.twb_bounds[0],
+                v.twb_bounds[1],
+                FALLBACK_TWB_BOUNDS,
+                "Twb",
+                path,
+            );
+            let (tdb_min, tdb_max, _) = sanitise_sentinel_bounds(
+                v.tdb_bounds[0],
+                v.tdb_bounds[1],
+                FALLBACK_TDB_BOUNDS,
+                "Tdb",
+                path,
+            );
+            HvacCurveVariant {
+                name: v.name,
+                cap_t: BiquadraticCurve {
+                    coeffs: v.cap_t,
+                    x1_bounds: (twb_min, twb_max),
+                    x2_bounds: (tdb_min, tdb_max),
+                    warn_on_clamp: true,
+                    output_min: Some(0.0),
+                    output_max: None,
+                },
+                cap_ff: v.cap_ff,
+                eir_t: BiquadraticCurve {
+                    coeffs: v.eir_t,
+                    x1_bounds: (twb_min, twb_max),
+                    x2_bounds: (tdb_min, tdb_max),
+                    warn_on_clamp: true,
+                    output_min: None,
+                    output_max: None,
+                },
+                eir_ff: v.eir_ff,
+                eir_plr: v.eir_plr,
+                ff_bounds: None,
+                plf_bounds: None,
+            }
         })
         .collect();
     Ok(HvacCurveSet { variants })
@@ -961,10 +1030,17 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 get_row("e_cap_t")[i],
                 get_row("f_cap_t")[i],
             ];
-            let twb_min = get_row_with_default("min_Twb", -10.0)[i];
-            let twb_max = get_row_with_default("max_Twb", 50.0)[i];
-            let tdb_min = get_row_with_default("min_Tdb", -50.0)[i];
-            let tdb_max = get_row_with_default("max_Tdb", 60.0)[i];
+            let twb_min = get_row_with_default("min_Twb", FALLBACK_TWB_BOUNDS.0)[i];
+            let twb_max = get_row_with_default("max_Twb", FALLBACK_TWB_BOUNDS.1)[i];
+            let tdb_min = get_row_with_default("min_Tdb", FALLBACK_TDB_BOUNDS.0)[i];
+            let tdb_max = get_row_with_default("max_Tdb", FALLBACK_TDB_BOUNDS.1)[i];
+
+            // Sanitise OCHRE ±100 °F sentinel values at the I/O boundary so
+            // no Fahrenheit value reaches the internal (Celsius) model.
+            let (twb_min, twb_max, _) =
+                sanitise_sentinel_bounds(twb_min, twb_max, FALLBACK_TWB_BOUNDS, "Twb", path);
+            let (tdb_min, tdb_max, _) =
+                sanitise_sentinel_bounds(tdb_min, tdb_max, FALLBACK_TDB_BOUNDS, "Tdb", path);
 
             HvacCurveVariant {
                 name: variant_names[i].clone(),
@@ -2065,6 +2141,47 @@ pf = 1.0
         assert!((std440.panel_area_m2 - 2.1).abs() < f64::EPSILON);
     }
 
+    /// Drift test: `defaults/zip_parameters.toml` and the in-code class table
+    /// `hares_types::zip::zip_defaults_for_class` are dual representations of
+    /// the same data. Every class name must resolve to the same coefficients
+    /// through both, and the toml must contain no orphan rows.
+    #[test]
+    fn zip_parameters_toml_matches_class_table_exactly() {
+        use hares_types::zip::{ZIP_CLASS_NAMES, zip_defaults_for_class};
+
+        let toml_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults")
+            .join("zip_parameters.toml");
+        let table = load_zip_parameters(&toml_path).expect("load zip_parameters.toml");
+
+        let mut covered_keys = std::collections::HashSet::new();
+        for &name in ZIP_CLASS_NAMES {
+            let expected = zip_defaults_for_class(name)
+                .unwrap_or_else(|| panic!("class table missing row for {name:?}"));
+            let key = normalize_equipment_key(name);
+            let actual = table.get(&key).unwrap_or_else(|| {
+                panic!("zip_parameters.toml missing row [{key}] for class {name:?}")
+            });
+            assert_eq!(
+                *actual, expected,
+                "toml row [{key}] diverged from zip_defaults_for_class({name:?})"
+            );
+            covered_keys.insert(key);
+        }
+
+        for key in table.keys() {
+            assert!(
+                covered_keys.contains(key),
+                "zip_parameters.toml row [{key}] has no matching class in \
+                 zip_defaults_for_class — add the class-table row or delete the toml row"
+            );
+        }
+    }
+
     #[test]
     fn zip_params_returns_none_for_missing_equipment() {
         let store = DefaultsStore::empty();
@@ -2239,10 +2356,116 @@ max_plf,1.0\n",
 
         let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
         let v = &set.variants[0];
-        assert_eq!(v.cap_t.x1_bounds, (-10.0, 50.0));
-        assert_eq!(v.cap_t.x2_bounds, (-50.0, 60.0));
+        assert_eq!(v.cap_t.x1_bounds, FALLBACK_TWB_BOUNDS);
+        assert_eq!(v.cap_t.x2_bounds, FALLBACK_TDB_BOUNDS);
         assert_eq!(v.plf_bounds, Some((0.48, 1.0)));
         assert_eq!(v.ff_bounds, None);
+    }
+
+    /// Write a minimal single-variant HVAC CSV with the given temperature
+    /// bound rows. All coefficient rows are identity curves (output 1.0).
+    fn write_minimal_hvac_csv(path: &Path, twb: (f64, f64), tdb: (f64, f64)) {
+        let (twb_min, twb_max) = twb;
+        let (tdb_min, tdb_max) = tdb;
+        std::fs::write(
+            path,
+            format!(
+                "Name,Single_1\n\
+a_eir_t,1.0\n\
+b_eir_t,0.0\n\
+c_eir_t,0.0\n\
+d_eir_t,0.0\n\
+e_eir_t,0.0\n\
+f_eir_t,0.0\n\
+a_eir_ff,1.0\n\
+b_eir_ff,0.0\n\
+c_eir_ff,0.0\n\
+a_eir_plr,1.0\n\
+b_eir_plr,0.0\n\
+c_eir_plr,0.0\n\
+a_cap_t,1.0\n\
+b_cap_t,0.0\n\
+c_cap_t,0.0\n\
+d_cap_t,0.0\n\
+e_cap_t,0.0\n\
+f_cap_t,0.0\n\
+a_cap_ff,1.0\n\
+b_cap_ff,0.0\n\
+c_cap_ff,0.0\n\
+min_Twb,{twb_min}\n\
+max_Twb,{twb_max}\n\
+min_Tdb,{tdb_min}\n\
+max_Tdb,{tdb_max}\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn heating_bounds_sentinel_detected_and_replaced_with_celsius_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("ashp_heater.csv");
+        write_minimal_hvac_csv(&csv_path, (-100.0, 100.0), (-100.0, 100.0));
+
+        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let v = &set.variants[0];
+
+        assert_eq!(
+            v.cap_t.x1_bounds, FALLBACK_TWB_BOUNDS,
+            "sentinel Twb bounds should be replaced with Celsius fallback"
+        );
+        assert_eq!(
+            v.cap_t.x2_bounds, FALLBACK_TDB_BOUNDS,
+            "sentinel Tdb bounds should be replaced with Celsius fallback"
+        );
+        assert_eq!(v.eir_t.x1_bounds, FALLBACK_TWB_BOUNDS);
+        assert_eq!(v.eir_t.x2_bounds, FALLBACK_TDB_BOUNDS);
+    }
+
+    #[test]
+    fn cooling_bounds_not_flagged_as_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("ashp_cooler.csv");
+        write_minimal_hvac_csv(&csv_path, (13.88, 23.88), (18.33, 51.66));
+
+        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let v = &set.variants[0];
+
+        assert_eq!(
+            v.cap_t.x1_bounds,
+            (13.88, 23.88),
+            "physically correct Celsius Twb bounds must be preserved"
+        );
+        assert_eq!(
+            v.cap_t.x2_bounds,
+            (18.33, 51.66),
+            "physically correct Celsius Tdb bounds must be preserved"
+        );
+        assert_eq!(v.eir_t.x1_bounds, (13.88, 23.88));
+        assert_eq!(v.eir_t.x2_bounds, (18.33, 51.66));
+    }
+
+    #[test]
+    fn non_sentinel_negative_bounds_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("cold_climate_heater.csv");
+        write_minimal_hvac_csv(&csv_path, (-20.0, 30.0), (-20.0, 50.0));
+
+        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let v = &set.variants[0];
+
+        assert_eq!(
+            v.cap_t.x1_bounds,
+            (-20.0, 30.0),
+            "genuinely intended negative Celsius bounds must not be replaced"
+        );
+        assert_eq!(
+            v.cap_t.x2_bounds,
+            (-20.0, 50.0),
+            "genuinely intended negative Celsius bounds must not be replaced"
+        );
+        assert_eq!(v.eir_t.x1_bounds, (-20.0, 30.0));
+        assert_eq!(v.eir_t.x2_bounds, (-20.0, 50.0));
     }
 
     #[test]

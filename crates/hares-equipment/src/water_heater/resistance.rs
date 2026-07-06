@@ -20,8 +20,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
-    WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::hvac::helpers::{
     equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
@@ -46,6 +45,7 @@ use super::{
 
 const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE default)
 const DEFAULT_ELEMENT_POWER_W: f64 = 4_500.0;
+const RESISTANCE_WH_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResistanceWhState {
@@ -63,6 +63,7 @@ struct ResistanceWhState {
     lower_element_power_w: f64,
     max_combined_power_w: Option<f64>,
     electric_kw: f64,
+    reactive_power_kvar: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -97,8 +98,9 @@ pub struct ResistanceWH {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
-    // --- ZIP voltage model ---
-    zip: WaterHeaterZip,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
     setpoint_ramp_rate_c_per_s: Option<f64>,
@@ -163,7 +165,9 @@ impl ResistanceWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::REACTIVE
+                    | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
@@ -199,7 +203,7 @@ impl ResistanceWH {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
-            zip: WaterHeaterZip::default(),
+            zip: hares_types::zip::ZipLoad::constant_power(),
             target_setpoint_c: DEFAULT_SETPOINT_C,
             setpoint_ramp_rate_c_per_s: None,
             fixture_delivery_temp_c: 40.6,
@@ -373,7 +377,7 @@ impl ResistanceWH {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
-        self.zip = WaterHeaterZip::default();
+        self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.setpoint_ramp_rate_c_per_s =
             c.max_setpoint_ramp_rate_c_per_min.map(|rate| rate / 60.0);
@@ -404,6 +408,10 @@ impl ResistanceWH {
 }
 
 impl Equipment for ResistanceWH {
+    fn checkpoint_version() -> u32 {
+        RESISTANCE_WH_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -615,8 +623,19 @@ impl Equipment for ResistanceWH {
             .accumulate(draw_volume_l, env.current_time.hour());
 
         let rated_electric_power_w = upper_power_w + lower_power_w;
-        let (electric_power_w, reactive_power_kvar) =
-            self.zip.apply(rated_electric_power_w, env.grid.voltage_pu);
+        // Grid outage (voltage 0): no electric draw — preserves the legacy
+        // ZIP zero-voltage guard bit-for-bit.
+        let electric_power_w = if env.grid.voltage_pu == 0.0 {
+            0.0
+        } else {
+            rated_electric_power_w
+        };
+        // Rule R1: Q from the already-computed real power (never through the
+        // real-power ZIP polynomial). pf = 1.0 (resistive element) yields
+        // exactly 0.0 kVAR.
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.voltage_pu);
         if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: electric_power_w,
@@ -661,6 +680,8 @@ impl Equipment for ResistanceWH {
         self.telemetry
             .set(tk::ELEMENT_KW, power_w_to_kw(electric_power_w));
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -678,7 +699,7 @@ impl Equipment for ResistanceWH {
                 electric_kw: Some(ElectricPower::Consumption(
                     power_w_to_kw(electric_power_w).max(0.0),
                 )),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -726,6 +747,7 @@ impl Equipment for ResistanceWH {
                 lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
                 max_combined_power_w: self.max_combined_power_w,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -769,6 +791,8 @@ impl Equipment for ResistanceWH {
         self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::ELECTRIC_POWER_W, power_kw_to_w(decoded.electric_kw));
+        self.telemetry
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -889,6 +913,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::ELEMENT_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -927,6 +952,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::ELECTRIC_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Total electric draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
@@ -1090,6 +1120,43 @@ mod tests {
         );
     }
 
+    /// Reactive-power contract for the resistive element family:
+    /// class pf = 1.0 → Q is exactly Some(0.0) while drawing power, the
+    /// REACTIVE capability is declared, and port/CoreOutput/telemetry agree.
+    #[test]
+    fn reactive_power_is_some_zero_for_resistive_element() {
+        // Production class name resolves the Electric Resistance WH row.
+        let config = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Electric Resistance Water Heater".to_string(),
+            typed_config(),
+        )
+        .unwrap();
+        let mut eq = ResistanceWH::new(config.clone());
+        let env = env(21.0);
+        eq.init(&config, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "resistance WH must declare REACTIVE"
+        );
+        assert_eq!(eq.zip.pf, 1.0, "class default pf must be unity");
+
+        let mut ports = ports();
+        // Tank starts at 40°C with setpoint 52°C: elements heat during step().
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.electrical.load_power_w > 0.0,
+            "cold tank must draw element power"
+        );
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+    }
+
     fn ports() -> PortSlots {
         PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1163,6 +1230,39 @@ mod tests {
         assert_eq!(restored.upper_element_on, eq.upper_element_on);
         assert_eq!(restored.lower_element_on, eq.lower_element_on);
         assert_eq!(restored.tank.node_temps(), eq.tank.node_temps());
+    }
+
+    /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
+    /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
+    /// of ELECTRIC_KW and other per-step telemetry.
+    #[test]
+    fn state_round_trip_preserves_reactive_power_kvar() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let pre_save = eq
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry present");
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ResistanceWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let post_load = restored
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry restored");
+        assert_eq!(
+            pre_save.to_bits(),
+            post_load.to_bits(),
+            "REACTIVE_POWER_KVAR must be bit-identical after save/load round-trip"
+        );
     }
 
     #[test]

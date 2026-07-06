@@ -450,8 +450,11 @@ fn compute_stack_cooler_heat(
 ) -> f64 {
     let dt = tstack_c - tnom_c;
     let temp_factor = r0 + r1 * dt;
-    let power_factor = 1.0 + r2 * pel_w + r3 * pel_w * pel_w;
-    (temp_factor * power_factor * pel_w).max(0.0)
+    // `fuel_curve_power_factor` is the stack-cooler polynomial's power-scaling
+    // term, NOT the electrical power factor. Renamed to avoid confusion with
+    // reactive-power / PF work elsewhere in the codebase.
+    let fuel_curve_power_factor = 1.0 + r2 * pel_w + r3 * pel_w * pel_w;
+    (temp_factor * fuel_curve_power_factor * pel_w).max(0.0)
 }
 
 /// Resolve the per-stream heat recovery efficiencies from config.
@@ -1463,6 +1466,9 @@ impl Equipment for Generator {
             };
 
         // Write electrical port (negative = generation).
+        // Generator reactive power is held at zero. Detailed synchronous genset
+        // excitation / power-factor control is out of scope for this model; Q=0
+        // keeps parity with OCHRE and avoids inventing unvalidated PF behavior.
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: power_kw_to_w(-output_kw),
             reactive_power_kvar: 0.0,
@@ -4572,7 +4578,7 @@ mod tests {
     fn fuel_cell_stack_heat_r2_coefficient_uses_watt_units() {
         // Regression: verify that r2 and r3 use 1/W and 1/W² (EnergyPlus convention).
         // Before the fix, the function accepted kW causing r2/r3 to be off by 1e3/1e6.
-        // r2=2e-5 (1/W), Pel=~5263 W → r2*Pel = 0.1053 → power_factor = 1.1053
+        // r2=2e-5 (1/W), Pel=~5263 W → r2*Pel = 0.1053 → fuel_curve_power_factor = 1.1053
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -4600,13 +4606,13 @@ mod tests {
 
         let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
         let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
-        // Pel = dc_kw * 1000, power_factor = 1 + r2*Pel = 1 + 2e-5 * Pel
+        // Pel = dc_kw * 1000, fuel_curve_power_factor = 1 + r2*Pel = 1 + 2e-5 * Pel
         let pel_w = dc_kw * 1000.0;
-        let power_factor = 1.0 + 2e-5 * pel_w;
-        let expected_heat_w = 0.20 * power_factor * pel_w;
+        let fuel_curve_power_factor = 1.0 + 2e-5 * pel_w;
+        let expected_heat_w = 0.20 * fuel_curve_power_factor * pel_w;
         assert!(
             (stack_heat_w - expected_heat_w).abs() < 1.0,
-            "r2=2e-5: stack_heat={stack_heat_w} W, expected={expected_heat_w} W (dc={dc_kw} kW, pel={pel_w} W, pf={power_factor})"
+            "r2=2e-5: stack_heat={stack_heat_w} W, expected={expected_heat_w} W (dc={dc_kw} kW, pel={pel_w} W, fuel_curve_pf={fuel_curve_power_factor})"
         );
     }
 

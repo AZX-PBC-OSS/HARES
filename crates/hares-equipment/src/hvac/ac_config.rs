@@ -22,6 +22,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
 pub(super) fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(35);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
     telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
@@ -67,6 +68,12 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total cooling electric power: compressor + fan + crankcase".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging), folded unit pf on total draw"
+                .to_string(),
         },
         TelemetryField {
             name: tk::SENSIBLE_COOLING_W.to_string(),

@@ -193,6 +193,12 @@ struct HeatPumpHeaterCore {
     dr_level: DRLevel,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// folded pf 0.84 on the total unit electric draw (compressor + fan + ER
+    /// backup + pan heater + ground-loop pump). OCHRE lab values are
+    /// whole-unit; per-component PFs are a future refinement hook. Real power
+    /// stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -496,7 +502,8 @@ impl HeatPumpHeaterCore {
                     | CoreCapabilities::THERMAL
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
-                    | CoreCapabilities::HAS_COP,
+                    | CoreCapabilities::HAS_COP
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: heater_telemetry_fields(),
                 zone_type: None,
             },
@@ -622,6 +629,7 @@ impl HeatPumpHeaterCore {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             zone_id_explicit,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -658,6 +666,7 @@ impl HeatPumpHeaterCore {
         self.dr_duty_cycle = 1.0;
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = default_heater_telemetry();
         self.telemetry.set(
             tk::BIQUADRATIC_CURVE_SOURCE,
@@ -1200,10 +1209,16 @@ impl HeatPumpHeaterCore {
             )?;
         }
         let scaled_electric_kw = step.electric_kw * self.hvac.config.space_fraction;
-        if scaled_electric_kw > 0.0 {
+        // Rule R1: Q from the already-computed real power (folded unit pf on
+        // compressor + fan + ER + pan heater + ground-loop pump). OCHRE lab
+        // values are whole-unit; per-component PFs are a future refinement hook.
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(scaled_electric_kw, env.grid.voltage_pu);
+        if scaled_electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(scaled_electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
         let scaled_fuel_w = step.fuel_w * self.hvac.config.space_fraction;
@@ -1268,6 +1283,8 @@ impl HeatPumpHeaterCore {
         // OCHRE HVAC.py:575 defines main_power = total_input_kw - fan_kw.
         let main_power_kw = step.compressor_kw * self.hvac.config.space_fraction;
         self.telemetry.set(tk::ELECTRIC_KW, scaled_electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry
             .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
         self.telemetry
@@ -1427,7 +1444,7 @@ impl HeatPumpHeaterCore {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: core_fuel_w,
                 thermal_output_w: Some(delivered_thermal_w),
                 sensible_cooling_w: None,
@@ -2911,6 +2928,148 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(eq.telemetry().get(tk::DEFROST_ACTIVE), Some(0.0));
+    }
+
+    /// Reactive-power contract for the ASHP heater: folded pf 0.84 on the total
+    /// unit electric draw (compressor + fan + ER + pan heater + pump), Q/P =
+    /// tan(acos(0.84)) at nominal voltage, REACTIVE declared, and
+    /// port/CoreOutput/telemetry agree bit-for-bit. Off ⇒ Q == 0.
+    #[test]
+    fn heating_reactive_power_pf_and_channels_agree() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 10.0, 0.005);
+        eq.init(&cfg, &environment).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "ASHP heater must declare REACTIVE"
+        );
+        assert_eq!(eq.core.zip.pf, 0.84, "class default folded pf");
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "heating call must draw real power");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.84_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos(0.84)): q={q}, expected={expected}"
+        );
+        assert_eq!(
+            eq.core_output()
+                .flows
+                .reactive_power_kvar
+                .expect("Some")
+                .to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .expect("telemetry Q")
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+
+        // Off case: zone in the deadband (23 °C, between heating 21+1 and
+        // cooling 26−1) ⇒ no heating call ⇒ Q == 0.
+        let off_env = env(23.0, 10.0, 0.005);
+        eq.update_control(&off_env);
+        let mut off_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        assert_eq!(
+            off_ports.electrical.reactive_power_kvar, 0.0,
+            "off ⇒ Q == 0"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off ⇒ CoreOutput Q == Some(0.0)"
+        );
+    }
+
+    /// Rule R1 regression: the power factor affects only Q. Twin instances —
+    /// one with the class pf 0.84, one with a constant-power sidecar override
+    /// (pf 0 sentinel) — must produce bit-identical real power at every step
+    /// and voltage.
+    #[test]
+    fn heating_real_power_bit_identical_with_and_without_reactive_zip() {
+        let config_pf = heater_config();
+        let mut config_nopf = config_pf.clone();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = ASHPHeater::new(config_pf.clone());
+        let mut eq_nopf = ASHPHeater::new(config_nopf.clone());
+        let mut environment = env(18.0, 10.0, 0.005);
+        eq_pf.init(&config_pf, &environment).unwrap();
+        eq_nopf.init(&config_nopf, &environment).unwrap();
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            environment.grid.voltage_pu = *v;
+            eq_pf.update_control(&environment);
+            eq_nopf.update_control(&environment);
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf
+                .step(&environment, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&environment, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                eq_pf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                eq_nopf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            environment.current_time += ChronoDuration::minutes(1);
+        }
+        assert!(
+            any_reactive,
+            "the pf 0.84 twin must produce reactive power while heating"
+        );
     }
 
     #[test]

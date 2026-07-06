@@ -31,7 +31,7 @@ use super::hpwh_compressor::{
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::wh_config::HeatPumpWaterHeaterConfig;
-use super::{WaterHeaterZip, hysteresis_call, parse_usize, weighted_average_tank_temp};
+use super::{hysteresis_call, parse_usize, weighted_average_tank_temp};
 use crate::hvac::helpers::{
     equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
 };
@@ -40,6 +40,8 @@ use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
 };
+
+const HPWH_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
@@ -58,6 +60,7 @@ struct HpwhState {
     cop: f64,
     cap_mult: f64,
     electric_kw: f64,
+    reactive_power_kvar: f64,
     compressor_power_w: f64,
     backup_element_power_w: f64,
     zone_heat_extraction_w: f64,
@@ -156,7 +159,11 @@ pub struct HeatPumpWH {
     fluid_type: FluidType,
     mains_temp_c: f64,
     draw_flow_rate_kg_s: f64,
-    zip: WaterHeaterZip,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// blended pf 0.97 (OCHRE lab value) applied to the total electric draw
+    /// (compressor + backup element + fan/parasitic). Real power stays
+    /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -213,7 +220,9 @@ impl HeatPumpWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::REACTIVE
+                    | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
@@ -285,7 +294,7 @@ impl HeatPumpWH {
             fluid_type: FluidType::Water,
             mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
-            zip: WaterHeaterZip::default(),
+            zip: hares_types::zip::ZipLoad::constant_power(),
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -487,7 +496,7 @@ impl HeatPumpWH {
         };
         self.mains_temp_c = super::require_mains_temp_c(env, "Heat Pump Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.zip = WaterHeaterZip::default();
+        self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.compressor_on_since_s = None;
         self.compressor_off_since_s = None;
@@ -506,6 +515,10 @@ impl HeatPumpWH {
 }
 
 impl Equipment for HeatPumpWH {
+    fn checkpoint_version() -> u32 {
+        HPWH_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -760,8 +773,20 @@ impl Equipment for HeatPumpWH {
 
         // OCHRE WaterHeater.py:671: total electric = compressor + ER + fan/parasitic.
         let rated_electric_power_w = compressor_power_w + backup_power_w + fan_parasitic_w;
-        let (electric_power_w, reactive_power_kvar) =
-            self.zip.apply(rated_electric_power_w, env.grid.voltage_pu);
+        // Grid outage (voltage 0): no electric draw — preserves the legacy
+        // ZIP zero-voltage guard bit-for-bit.
+        let electric_power_w = if env.grid.voltage_pu == 0.0 {
+            0.0
+        } else {
+            rated_electric_power_w
+        };
+        // Rule R1: Q from the already-computed real power (never through the
+        // real-power ZIP polynomial). Blended pf 0.97 on the total draw —
+        // OCHRE lab values are whole-unit; per-component PFs are a future
+        // refinement hook.
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.voltage_pu);
 
         if electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -870,6 +895,8 @@ impl Equipment for HeatPumpWH {
         self.telemetry
             .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
         self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+        self.telemetry
             .set(tk::COMPRESSOR_KW, power_w_to_kw(compressor_power_w));
         self.telemetry
             .set(tk::ELEMENT_KW, power_w_to_kw(backup_power_w));
@@ -898,7 +925,7 @@ impl Equipment for HeatPumpWH {
                 electric_kw: Some(ElectricPower::Consumption(
                     power_w_to_kw(electric_power_w).max(0.0),
                 )),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -947,6 +974,7 @@ impl Equipment for HeatPumpWH {
                 cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
                 cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
                 backup_element_power_w: self
                     .telemetry
@@ -1005,6 +1033,8 @@ impl Equipment for HeatPumpWH {
         self.telemetry.insert(tk::COP, decoded.cop);
         self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
         self.telemetry
             .insert(tk::COMPRESSOR_KW, power_w_to_kw(decoded.compressor_power_w));
         self.telemetry.insert(
@@ -1151,6 +1181,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::COP, 0.0);
     telemetry.insert(tk::CAP_MULT, 1.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
     telemetry.insert(tk::ELEMENT_KW, 0.0);
     telemetry.insert(tk::COMPRESSOR_POWER_W, 0.0);
@@ -1185,6 +1216,12 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electrical power draw (compressor + backup + fan + parasitic)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging), blended pf on total draw"
                 .to_string(),
         },
         TelemetryField {
@@ -1576,6 +1613,148 @@ mod tests {
             skin_loss > 0.0,
             "SKIN_LOSS_W must be positive when tank ({} °C) is hotter than ambient (15 °C); got {skin_loss}",
             55.0
+        );
+    }
+
+    /// Reactive-power contract for the HPWH: blended pf 0.97 on the total
+    /// electric draw, Q/P = tan(acos(0.97)) at nominal voltage, REACTIVE
+    /// declared, and port/CoreOutput/telemetry agree bit-for-bit.
+    #[test]
+    fn reactive_power_blended_pf_and_channels_agree() {
+        let config = config();
+        let mut eq = HeatPumpWH::new(config.clone());
+        let env = env(21.0);
+        eq.init(&config, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "HPWH must declare REACTIVE"
+        );
+        assert_eq!(eq.zip.pf, 0.97, "class default blended pf");
+
+        let mut ports = ports();
+        // Tank starts at 40°C with setpoint 52°C: compressor runs in step().
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "cold tank must run the compressor");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.97_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos(0.97)): q={q}, expected={expected}"
+        );
+        assert_eq!(
+            eq.core_output()
+                .flows
+                .reactive_power_kvar
+                .expect("Some")
+                .to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .expect("telemetry Q")
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+    }
+
+    /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
+    /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
+    /// of ELECTRIC_KW and other per-step telemetry.
+    #[test]
+    fn state_round_trip_preserves_reactive_power_kvar() {
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let pre_save = eq
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry present");
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = HeatPumpWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let post_load = restored
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry restored");
+        assert_eq!(
+            pre_save.to_bits(),
+            post_load.to_bits(),
+            "REACTIVE_POWER_KVAR must be bit-identical after save/load round-trip"
+        );
+    }
+
+    /// Rule R1 regression: the power factor affects only Q. Twin instances —
+    /// one with the class pf 0.97, one with a constant-power sidecar
+    /// override (pf 0 sentinel) — must produce bit-identical real power at
+    /// every step and voltage.
+    #[test]
+    fn real_power_bit_identical_with_and_without_reactive_zip() {
+        let config_pf = config();
+        let mut config_nopf = config();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = HeatPumpWH::new(config_pf.clone());
+        let mut eq_nopf = HeatPumpWH::new(config_nopf.clone());
+        let mut env = env(21.0);
+        eq_pf.init(&config_pf, &env).unwrap();
+        eq_nopf.init(&config_nopf, &env).unwrap();
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            env.grid.voltage_pu = *v;
+            let mut ports_pf = ports();
+            let mut ports_nopf = ports();
+            eq_pf
+                .step(&env, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                eq_pf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                eq_nopf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            env.current_time += ChronoDuration::minutes(1);
+        }
+        assert!(
+            any_reactive,
+            "the pf 0.97 twin must produce reactive power while heating"
         );
     }
 

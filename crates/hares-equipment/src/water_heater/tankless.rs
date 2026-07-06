@@ -23,7 +23,6 @@ use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
-use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
 
@@ -31,6 +30,7 @@ const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
 /// Default rated thermal capacity (W). OCHRE uses 20 kW for tankless.
 const DEFAULT_MAX_THERMAL_POWER_W: f64 = 20_000.0;
+const TANKLESS_WH_CHECKPOINT_VERSION: u32 = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TanklessState {
     setpoint_c: f64,
@@ -40,6 +40,7 @@ struct TanklessState {
     thermal_output_w: f64,
     fuel_input_w: f64,
     parasitic_electric_w: f64,
+    reactive_power_kvar: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -71,7 +72,10 @@ pub struct TanklessWH {
     draw_flow_rate_kg_s: f64,
     draw_flow_rate_kg_s_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
-    zip: WaterHeaterZip,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// control electronics at unity power factor by class default (Q exactly
+    /// zero, real power untouched).
+    zip: hares_types::zip::ZipLoad,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -139,7 +143,7 @@ impl TanklessWH {
             draw_flow_rate_kg_s: 0.0,
             draw_flow_rate_kg_s_source: None,
             mains_temp_c_source: None,
-            zip: WaterHeaterZip::default(),
+            zip: hares_types::zip::ZipLoad::constant_power(),
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -257,7 +261,7 @@ impl TanklessWH {
         self.draw_flow_rate_kg_s_source =
             c.draw_flow_rate_source.map(|source| source.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
-        self.zip = WaterHeaterZip::default();
+        self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
@@ -272,6 +276,10 @@ impl TanklessWH {
 }
 
 impl Equipment for TanklessWH {
+    fn checkpoint_version() -> u32 {
+        TANKLESS_WH_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -379,15 +387,27 @@ impl Equipment for TanklessWH {
         let fuel_input_w = thermal_output_w / self.efficiency_factor;
         let mut fuel_w_for_core = None;
         let mut parasitic_electric_w_reported = 0.0_f64;
-        let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
-            let (electric_w, reactive_kvar) = self.zip.apply(fuel_input_w, env.grid.voltage_pu);
+        let (electric_kw_for_core, reactive_kvar_for_core) = if self.fuel_type == FuelType::Electric
+        {
+            // Grid outage (voltage 0): no electric draw — preserves the
+            // legacy ZIP zero-voltage guard bit-for-bit. Rule R1: Q from the
+            // already-computed real power (never through the real-power ZIP
+            // polynomial).
+            let electric_w = if env.grid.voltage_pu == 0.0 {
+                0.0
+            } else {
+                fuel_input_w
+            };
+            let reactive_kvar = self
+                .zip
+                .reactive_kvar(power_w_to_kw(electric_w), env.grid.voltage_pu);
             if electric_w > 0.0 || reactive_kvar != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
                     active_power_w: electric_w,
                     reactive_power_kvar: reactive_kvar,
                 })?;
             }
-            power_w_to_kw(electric_w).max(0.0)
+            (power_w_to_kw(electric_w).max(0.0), reactive_kvar)
         } else {
             if fuel_input_w > 0.0 {
                 ports.accumulate(&PortContribution::Fuel {
@@ -401,14 +421,21 @@ impl Equipment for TanklessWH {
             });
             // Gas ignition controller draws electricity continuously regardless of
             // burner state (OCHRE/ANSI RESNET 301 standby parasitic).
-            let (zip_parasitic_w, parasitic_kvar) =
-                self.zip.apply(self.parasitic_power_w, env.grid.voltage_pu);
+            // Grid outage guard and Rule R1 Q as above.
+            let parasitic_w = if env.grid.voltage_pu == 0.0 {
+                0.0
+            } else {
+                self.parasitic_power_w
+            };
+            let parasitic_kvar = self
+                .zip
+                .reactive_kvar(power_w_to_kw(parasitic_w), env.grid.voltage_pu);
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: zip_parasitic_w,
+                active_power_w: parasitic_w,
                 reactive_power_kvar: parasitic_kvar,
             })?;
-            parasitic_electric_w_reported = zip_parasitic_w.max(0.0);
-            power_w_to_kw(zip_parasitic_w).max(0.0)
+            parasitic_electric_w_reported = parasitic_w.max(0.0);
+            (power_w_to_kw(parasitic_w).max(0.0), parasitic_kvar)
         };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
@@ -416,6 +443,8 @@ impl Equipment for TanklessWH {
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry
             .set(tk::PARASITIC_ELECTRIC_W, parasitic_electric_w_reported);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_kvar_for_core);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
             tk::OPERATING_MODE,
@@ -428,7 +457,7 @@ impl Equipment for TanklessWH {
         let core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_kvar_for_core),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -470,6 +499,7 @@ impl Equipment for TanklessWH {
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
+                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -504,6 +534,8 @@ impl Equipment for TanklessWH {
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
             .insert(tk::PARASITIC_ELECTRIC_W, decoded.parasitic_electric_w);
+        self.telemetry
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -595,7 +627,8 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
 }
 
 fn core_capabilities_for_fuel(fuel_type: FuelType) -> CoreCapabilities {
-    let mut capabilities = CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE;
+    let mut capabilities =
+        CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE | CoreCapabilities::HAS_MODE;
     if fuel_type != FuelType::Electric {
         capabilities |= CoreCapabilities::FUEL;
     }
@@ -608,6 +641,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::PARASITIC_ELECTRIC_W, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
@@ -635,6 +669,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             unit: "W".to_string(),
             description: "Gas ignition controller standby electric draw (gas units only)"
                 .to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
@@ -704,6 +743,52 @@ mod tests {
             time_res: ChronoDuration::seconds(60),
             price_signal: Default::default(),
             electrical: Default::default(),
+        }
+    }
+
+    /// Reactive-power contract for tankless water heaters: control
+    /// electronics at unity power factor (class default) → Q is exactly
+    /// Some(0.0) while drawing power, REACTIVE declared, channels agree.
+    #[test]
+    fn reactive_power_is_some_zero_at_unity_pf() {
+        for fuel in [FuelType::Gas, FuelType::Electric] {
+            let mut typed = typed_config();
+            typed.fuel_type = fuel;
+            if fuel == FuelType::Electric {
+                typed.energy_factor = Some(0.95);
+            }
+            let ochre_class = match fuel {
+                FuelType::Electric => "Tankless Water Heater",
+                _ => "Gas Tankless Water Heater",
+            };
+            let config =
+                EquipmentConfig::from_typed("Tankless".to_string(), ochre_class.to_string(), typed)
+                    .unwrap();
+            let mut eq = TanklessWH::new(config.clone());
+            let env = env();
+            eq.init(&config, &env).unwrap();
+            assert!(
+                eq.descriptor()
+                    .core_capabilities
+                    .contains(hares_types::CoreCapabilities::REACTIVE),
+                "tankless WH must declare REACTIVE"
+            );
+            assert_eq!(
+                eq.zip.pf, 1.0,
+                "class default pf must be unity ({ochre_class})"
+            );
+
+            let mut ports = PortSlots::from_declarations(eq.ports());
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            assert!(
+                ports.electrical.load_power_w > 0.0,
+                "{ochre_class}: burner draw or parasitic controller must draw power"
+            );
+            assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+            assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+            assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+            hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+                .expect("core contract must hold with REACTIVE declared");
         }
     }
 
@@ -880,6 +965,38 @@ mod tests {
             restored.dr_load_fraction < 1.0,
             "dr_load_fraction must be < 1.0 after Critical DR (got {})",
             restored.dr_load_fraction
+        );
+    }
+
+    /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
+    /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
+    /// of PARASITIC_ELECTRIC_W and other per-step telemetry.
+    #[test]
+    fn state_round_trip_preserves_reactive_power_kvar() {
+        let mut eq = TanklessWH::new(config());
+        eq.init(&config(), &env()).unwrap();
+
+        let mut p = PortSlots::default();
+        eq.step(&env(), Duration::from_secs(60), &mut p).unwrap();
+        let pre_save = eq
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry present");
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = TanklessWH::new(config());
+        restored.init(&config(), &env()).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let post_load = restored
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry restored");
+        assert_eq!(
+            pre_save.to_bits(),
+            post_load.to_bits(),
+            "REACTIVE_POWER_KVAR must be bit-identical after save/load round-trip"
         );
     }
 

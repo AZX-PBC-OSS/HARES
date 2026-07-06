@@ -73,6 +73,30 @@ fn csv_temperature_bounds_parsed() {
 }
 
 #[test]
+fn heating_csv_sentinel_bounds_sanitised_to_celsius() {
+    let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
+    let curves = store
+        .hvac_heating_curves("ASHP Heater")
+        .expect("heating curves");
+    let single = &curves.variants[0];
+    // The ASHP Heater CSV contains ±100 (°F sentinel) temperature bounds.
+    // After load-time sanitisation, bounds must be the Celsius fallbacks
+    // (-10, 50) for Twb and (-50, 60) for Tdb — never the raw ±100.
+    assert!(
+        single.cap_t.x1_bounds != (-100.0, 100.0),
+        "sentinel Twb bounds must be replaced, got {:?}",
+        single.cap_t.x1_bounds
+    );
+    assert!(
+        single.cap_t.x2_bounds != (-100.0, 100.0),
+        "sentinel Tdb bounds must be replaced, got {:?}",
+        single.cap_t.x2_bounds
+    );
+    assert_eq!(single.cap_t.x1_bounds, (-10.0, 50.0));
+    assert_eq!(single.cap_t.x2_bounds, (-50.0, 60.0));
+}
+
+#[test]
 fn csv_eir_plr_coefficients_parsed() {
     let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
     let curves = store

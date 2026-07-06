@@ -329,130 +329,6 @@ pub(super) fn parse_usize(raw: Option<f64>) -> Option<usize> {
     Some(value as usize)
 }
 
-/// ZIP load model coefficients for voltage-dependent power scaling.
-///
-/// Implements the OCHRE ZIP model (Equipment.py `run_zip`, lines 200-218):
-/// - `P_actual = P_rated * (z * V² + i * V + p)` where V = v / v0 (per-unit)
-/// - `Q_actual = P_actual * tan(acos(pf)) * (zq * V² + iq * V + pq)`
-///
-/// Default is constant-power load (z=0, i=0, p=1, pf=0).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct WaterHeaterZip {
-    /// Real-power impedance fraction (Z term).
-    pub z: f64,
-    /// Real-power current fraction (I term).
-    pub i: f64,
-    /// Real-power constant-power fraction (P term).
-    pub p: f64,
-    /// Reference voltage for ZIP normalization [per-unit]. Default 1.0.
-    pub v0: f64,
-    /// Reactive-power impedance fraction.
-    pub zq: f64,
-    /// Reactive-power current fraction.
-    pub iq: f64,
-    /// Reactive-power constant fraction.
-    pub pq: f64,
-    /// Power factor magnitude for reactive power calculation.
-    pub pf: f64,
-}
-
-impl Default for WaterHeaterZip {
-    fn default() -> Self {
-        Self {
-            z: 0.0,
-            i: 0.0,
-            p: 1.0,
-            v0: 1.0,
-            zq: 0.0,
-            iq: 0.0,
-            pq: 1.0,
-            pf: 0.0,
-        }
-    }
-}
-
-impl WaterHeaterZip {
-    /// Parse ZIP coefficients from equipment config.
-    ///
-    /// Keys: `zip_z`, `zip_i`, `zip_p`, `zip_zq`, `zip_iq`, `zip_pq`, `zip_pf`.
-    /// Falls back to constant-power defaults (0, 0, 1) if keys are absent.
-    #[cfg(test)]
-    pub(super) fn from_config(
-        config: &crate::EquipmentConfig,
-    ) -> std::result::Result<Self, hares_types::HaresError> {
-        let z = config.get_f64("zip_z").unwrap_or(0.0);
-        let i = config.get_f64("zip_i").unwrap_or(0.0);
-        let p = config.get_f64("zip_p").unwrap_or(1.0);
-        let zq = config.get_f64("zip_zq").unwrap_or(0.0);
-        let iq = config.get_f64("zip_iq").unwrap_or(0.0);
-        let pq = config.get_f64("zip_pq").unwrap_or(1.0);
-        validate_zip_terms(z, i, p, zq, iq, pq)?;
-
-        Ok(Self {
-            z,
-            i,
-            p,
-            v0: config.get_f64("zip_v0").unwrap_or(1.0),
-            zq,
-            iq,
-            pq,
-            pf: config.get_f64("zip_pf").unwrap_or(0.0),
-        })
-    }
-
-    /// Apply ZIP voltage scaling to a rated real power [W].
-    ///
-    /// Returns `(active_power_w, reactive_power_kvar)`.
-    /// Returns `(0.0, 0.0)` when `rated_w` is zero or voltage is zero (grid outage).
-    /// When `pf ≈ 0`, no reactive power is produced — `pf = 0` is the
-    /// default sentinel for "no ZIP reactive coefficients configured."
-    pub(super) fn apply(&self, rated_w: f64, voltage_pu: f64) -> (f64, f64) {
-        if rated_w == 0.0 || voltage_pu == 0.0 {
-            return (0.0, 0.0);
-        }
-        let v_norm = voltage_pu / self.v0;
-        let real_mult = self.z * v_norm * v_norm + self.i * v_norm + self.p;
-        let actual_w = rated_w * real_mult;
-        let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
-        // pf = 0 is the sentinel for "no reactive ZIP configured" — skip
-        // tan(acos(0.0)) which diverges, and produce zero reactive power.
-        // Q = P × tan(acos(pf)) × reactive_base
-        // tan(acos(pf)) converts from power factor to reactive/active power ratio.
-        let reactive_kvar = if self.pf.abs() < 1e-9 {
-            0.0
-        } else {
-            let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
-            actual_w / 1_000.0 * tan_phi * reactive_base
-        };
-        (actual_w, reactive_kvar)
-    }
-}
-
-#[cfg(test)]
-fn validate_zip_terms(
-    z: f64,
-    i: f64,
-    p: f64,
-    zq: f64,
-    iq: f64,
-    pq: f64,
-) -> std::result::Result<(), hares_types::HaresError> {
-    if (z + i + p - 1.0).abs() >= 0.01 {
-        return Err(hares_types::HaresError::Equipment(format!(
-            "ZIP z+i+p must sum to 1.0, got z={z} i={i} p={p} sum={}",
-            z + i + p
-        )));
-    }
-    let has_reactive = zq != 0.0 || iq != 0.0 || pq != 0.0;
-    if has_reactive && (zq + iq + pq - 1.0).abs() >= 0.01 {
-        return Err(hares_types::HaresError::Equipment(format!(
-            "ZIP zq+iq+pq must sum to 1.0, got zq={zq} iq={iq} pq={pq} sum={}",
-            zq + iq + pq
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -462,10 +338,11 @@ mod tests {
     };
 
     use super::{
-        WaterHeaterZip, apply_jacket_r_value, draw_schedule_source, hysteresis_call,
-        mains_temp_schedule_source, resolve_storage_step_inputs,
+        apply_jacket_r_value, draw_schedule_source, hysteresis_call, mains_temp_schedule_source,
+        resolve_storage_step_inputs,
     };
     use crate::EquipmentConfig;
+    use crate::config::resolve_reactive_zip;
 
     /// Document the shared hysteresis floor: at exactly `setpoint - deadband`,
     /// an inactive heater remains off, matching OCHRE's strict boundary.
@@ -695,60 +572,66 @@ mod tests {
     }
 
     #[test]
-    fn zip_invalid_coefficients_produce_error() {
+    fn resolve_reactive_zip_rejects_invalid_reactive_sum() {
+        // Migrated from the deleted WaterHeaterZip::from_config validation:
+        // a reactive coefficient set that does not sum to 1.0 (with a
+        // nonzero pf) must be rejected at init.
         let mut cfg = base_config();
-        cfg.test_extras_mut()
-            .insert("zip_z".to_string(), 0.5.into());
-        cfg.test_extras_mut()
-            .insert("zip_i".to_string(), 0.3.into());
-        cfg.test_extras_mut()
-            .insert("zip_p".to_string(), 0.3.into()); // sum = 1.1, exceeds tolerance
-        let result = WaterHeaterZip::from_config(&cfg);
-        assert!(
-            result.is_err(),
-            "ZIP z+i+p=1.1 must be rejected in release builds"
-        );
+        cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(0.5, 0.3, 0.3, 0.9)); // reactive sum = 1.1
+        let result = resolve_reactive_zip(&cfg);
+        assert!(result.is_err(), "reactive zq+iq+pq=1.1 must be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("z+i+p must sum to 1.0"),
-            "error message should mention z+i+p, got: {err_msg}"
+            err_msg.contains("reactive ZIP coefficients"),
+            "error message should mention the reactive sum, got: {err_msg}"
         );
     }
 
     #[test]
-    fn zip_valid_coefficients_parse_ok() {
+    fn resolve_reactive_zip_forces_constant_real_power() {
+        // Rule R1: whatever the source ZIP says about the real side, water
+        // heaters must never scale their real power through the polynomial.
         let mut cfg = base_config();
-        cfg.test_extras_mut()
-            .insert("zip_z".to_string(), 0.3.into());
-        cfg.test_extras_mut()
-            .insert("zip_i".to_string(), 0.3.into());
-        cfg.test_extras_mut()
-            .insert("zip_p".to_string(), 0.4.into()); // sum = 1.0
-        let zip = WaterHeaterZip::from_config(&cfg).expect("valid ZIP must parse");
-        assert!((zip.z - 0.3).abs() < 1e-12);
-        assert!((zip.i - 0.3).abs() < 1e-12);
-        assert!((zip.p - 0.4).abs() < 1e-12);
+        cfg.zip = Some(hares_types::zip::ZipLoad {
+            zp: 0.825,
+            ip: -0.44,
+            pp: 0.615,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 1.0,
+            pf: 0.97,
+            v0: 1.0,
+        });
+        let zip = resolve_reactive_zip(&cfg).expect("valid reactive side");
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+        assert_eq!(zip.pf, 0.97);
+        for v in [0.9, 1.0, 1.1] {
+            let p_kw = 2.4;
+            assert_eq!(zip.apply(p_kw, v).0.to_bits(), p_kw.to_bits());
+        }
     }
 
     #[test]
-    fn zip_invalid_reactive_coefficients_produce_error() {
+    fn resolve_reactive_zip_falls_back_to_class_defaults() {
+        // base_config() carries no sidecar; "Resistance Water Heater" is not
+        // a class-table name, so the resolver lands on constant power
+        // (pf = 0 sentinel, zero reactive).
+        let cfg = base_config();
+        let zip = resolve_reactive_zip(&cfg).expect("constant power fallback");
+        assert_eq!(zip, hares_types::zip::ZipLoad::constant_power());
+
+        // A production class name resolves the literature row.
         let mut cfg = base_config();
-        // Valid real-power coefficients
-        cfg.test_extras_mut()
-            .insert("zip_z".to_string(), 0.5.into());
-        cfg.test_extras_mut()
-            .insert("zip_i".to_string(), 0.3.into());
-        cfg.test_extras_mut()
-            .insert("zip_p".to_string(), 0.2.into());
-        // Invalid reactive coefficients (sum = 1.1)
-        cfg.test_extras_mut()
-            .insert("zip_zq".to_string(), 0.5.into());
-        cfg.test_extras_mut()
-            .insert("zip_iq".to_string(), 0.3.into());
-        cfg.test_extras_mut()
-            .insert("zip_pq".to_string(), 0.3.into());
-        let result = WaterHeaterZip::from_config(&cfg);
-        assert!(result.is_err(), "ZIP zq+iq+pq=1.1 must be rejected");
+        cfg.ochre_class = "Heat Pump Water Heater".to_string();
+        let zip = resolve_reactive_zip(&cfg).expect("HPWH class row");
+        assert_eq!(zip.pf, 0.97);
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+        let class_row =
+            hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
+        assert_eq!(
+            (zip.zq, zip.iq, zip.pq),
+            (class_row.zq, class_row.iq, class_row.pq)
+        );
     }
 }
 

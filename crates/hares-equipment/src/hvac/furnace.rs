@@ -52,6 +52,9 @@ pub struct ElectricFurnace {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
+    /// Q exactly zero, real power stays bit-identical.
+    zip: hares_types::zip::ZipLoad,
 }
 
 pub struct GasFurnace {
@@ -75,6 +78,9 @@ pub struct GasFurnace {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Rule R1 reactive-only ZIP: blower fan motor pf 0.87;
+    /// Q comes from ZipLoad::reactive_kvar.
+    zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +120,7 @@ impl ElectricFurnace {
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
@@ -139,6 +146,7 @@ impl ElectricFurnace {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -162,6 +170,7 @@ impl Equipment for ElectricFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
@@ -217,10 +226,11 @@ impl Equipment for ElectricFurnace {
         // Heating element power + fan power
         let electric_kw = power_w_to_kw(gross_capacity_w * self.eir) + fan_kw;
 
+        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -255,6 +265,8 @@ impl Equipment for ElectricFurnace {
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
@@ -314,7 +326,7 @@ impl Equipment for ElectricFurnace {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -443,6 +455,7 @@ impl GasFurnace {
                 | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SPEED
@@ -471,6 +484,7 @@ impl GasFurnace {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -494,6 +508,7 @@ impl Equipment for GasFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
@@ -572,10 +587,11 @@ impl Equipment for GasFurnace {
             })?;
         }
 
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
         if fan_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -612,6 +628,8 @@ impl Equipment for GasFurnace {
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
@@ -672,7 +690,7 @@ impl Equipment for GasFurnace {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -802,9 +820,10 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn electric_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(22);
+    let mut telemetry = Telemetry::with_capacity(23);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
@@ -829,9 +848,10 @@ fn electric_furnace_default_telemetry() -> Telemetry {
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(24);
+    let mut telemetry = Telemetry::with_capacity(25);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -904,6 +924,11 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric furnace active power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -994,6 +1019,11 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
             description: "Total electric power draw (fan-only for gas furnace)".to_string(),
         },
         TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
+        },
+        TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Fuel input power derived from delivered capacity and fuel efficiency"
@@ -1082,8 +1112,9 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_physics::constants::W_PER_TON;
     use hares_types::{
-        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState, OperatingMode,
-        PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, CoreCapabilities, DRLevel, EnvironmentState, ExecutionStage, GridState,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
     use super::{ElectricFurnace, GasFurnace};
@@ -1988,5 +2019,238 @@ mod tests {
             ports.thermal[0].sensible_gain_w < 1e-9,
             "GridEmergency must prevent furnace heating"
         );
+    }
+
+    #[test]
+    fn electric_furnace_reactive_power_is_some_zero_at_unity_pf() {
+        let cfg = ef_config(8_000.0, 1.05);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        assert_eq!(eq.zip.pf, 1.0);
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(ports.electrical.load_power_w > 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn electric_furnace_real_power_bit_identical_with_and_without_reactive_zip() {
+        let cfg_pf = ef_config(8_000.0, 1.05);
+        let mut cfg_nopf = ef_config(8_000.0, 1.05);
+        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let env_base = env(18.0);
+        let mut eq_pf = ElectricFurnace::new(cfg_pf.clone());
+        let mut eq_nopf = ElectricFurnace::new(cfg_nopf.clone());
+        eq_pf.init(&cfg_pf, &env_base).unwrap();
+        eq_nopf.init(&cfg_nopf, &env_base).unwrap();
+
+        assert!(
+            eq_pf
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            let mut env_v = env(18.0);
+            env_v.grid.voltage_pu = *v;
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf.update_control(&env_v);
+            eq_nopf.update_control(&env_v);
+            eq_pf
+                .step(&env_v, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged"
+            );
+            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+        }
+    }
+
+    #[test]
+    fn gas_furnace_reactive_power_blended_pf_and_channels_agree() {
+        let config = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.8,
+                capacity_w: 10_000.0,
+                fan_power_w: Some(100.0),
+                zone_id: Some(1),
+                ..GasFurnaceConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GasFurnace::new(config.clone());
+        let env = env(18.0);
+        eq.init(&config, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        let pf = 0.87_f64;
+        assert_eq!(eq.zip.pf, pf);
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let p_kw = ports.electrical.net_active_w() / 1000.0;
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * pf.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos({pf})): {q} vs {expected}"
+        );
+
+        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        assert_eq!(
+            co_q.to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must match port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .unwrap()
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must match port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn gas_furnace_reactive_power_zero_when_off() {
+        let config = EquipmentConfig::from_typed(
+            "GF-off".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.8,
+                capacity_w: 10_000.0,
+                fan_power_w: Some(100.0),
+                zone_id: Some(1),
+                ..GasFurnaceConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GasFurnace::new(config.clone());
+        let env = env(25.0);
+        eq.init(&config, &env).unwrap();
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(ports.electrical.load_power_w, 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off equipment must report Some(0.0)"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_real_power_bit_identical_with_and_without_reactive_zip() {
+        let base_cfg = GasFurnaceConfig {
+            afue: 0.8,
+            capacity_w: 10_000.0,
+            fan_power_w: Some(100.0),
+            zone_id: Some(1),
+            ..GasFurnaceConfig::default()
+        };
+        let cfg_pf = EquipmentConfig::from_typed(
+            "GF-PF".to_string(),
+            "Gas Furnace".to_string(),
+            base_cfg.clone(),
+        )
+        .unwrap();
+        let mut cfg_nopf =
+            EquipmentConfig::from_typed("GF-NOPF".to_string(), "Gas Furnace".to_string(), base_cfg)
+                .unwrap();
+        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let env_base = env(18.0);
+        let mut eq_pf = GasFurnace::new(cfg_pf.clone());
+        let mut eq_nopf = GasFurnace::new(cfg_nopf.clone());
+        eq_pf.init(&cfg_pf, &env_base).unwrap();
+        eq_nopf.init(&cfg_nopf, &env_base).unwrap();
+
+        assert!(
+            eq_pf
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            let mut env_v = env(18.0);
+            env_v.grid.voltage_pu = *v;
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf.update_control(&env_v);
+            eq_nopf.update_control(&env_v);
+            eq_pf
+                .step(&env_v, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+        }
+        assert!(any_reactive, "the pf 0.87 twin must produce reactive power");
     }
 }

@@ -3169,3 +3169,104 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
         power
     );
 }
+
+// ── Reactive power rejection tests ────────────────────────────────
+
+#[test]
+fn ev_power_setpoint_with_reactive_q_rejected() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let err = ev
+        .apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: Some(1.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("EV does not support reactive power control"),
+        "expected reactive rejection, got: {err}"
+    );
+}
+
+#[test]
+fn ev_power_setpoint_with_zero_reactive_q_is_accepted() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.0,
+        reactive_power_kvar: Some(0.0),
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("PowerSetpoint with explicit Q=0 should be accepted");
+}
+
+#[test]
+fn ev_power_setpoint_without_reactive_q_still_works() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("PowerSetpoint without reactive_power_kvar should work as before");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    assert!(
+        (ev.telemetry().get("active_power_kw").unwrap() - 3.0).abs() < 1e-9,
+        "active power setpoint should be respected"
+    );
+    assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    assert!(ev.core_output().flows.reactive_power_kvar.is_none());
+}
+
+#[test]
+fn ev_reactive_setpoint_rejected() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let err = ev
+        .apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("unsupported control signal"),
+        "expected capability rejection, got: {err}"
+    );
+}
+
+#[test]
+fn ev_power_factor_setpoint_rejected() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let err = ev
+        .apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.95 })
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("unsupported control signal"),
+        "expected capability rejection, got: {err}"
+    );
+}

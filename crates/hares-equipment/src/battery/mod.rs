@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::telemetry_keys as tk;
+use hares_types::zip::ZipLoad;
 use hares_types::{
     BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
@@ -274,6 +275,8 @@ struct BatteryCheckpoint {
     dr_level: DRLevel,
     dr_duration_remaining_s: Option<f64>,
     external_power_limit_kw: Option<f64>,
+    q_setpoint_kvar: f64,
+    power_factor: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +379,11 @@ pub struct Battery {
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
 
+    // Reactive power / smart-inverter control
+    q_setpoint_kvar: f64,
+    power_factor: f64,
+    inverter_capacity_kva: f64,
+
     // Demand response state
     dr_level: DRLevel,
     dr_duration_remaining_s: Option<f64>,
@@ -426,8 +434,11 @@ impl Battery {
                 | ControlCapabilities::GRID_CONNECT
                 | ControlCapabilities::SELF_CONSUMPTION
                 | ControlCapabilities::POWER_LIMIT
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::REACTIVE_SETPOINT
+                | ControlCapabilities::POWER_FACTOR_SETPOINT,
             core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: battery_telemetry_fields(),
@@ -482,6 +493,9 @@ impl Battery {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
+            q_setpoint_kvar: 0.0,
+            power_factor: 1.0,
+            inverter_capacity_kva: DEFAULT_MAX_CHARGE_KW.max(DEFAULT_MAX_DISCHARGE_KW),
             dr_level: DRLevel::Normal,
             dr_duration_remaining_s: None,
             external_power_limit_kw: None,
@@ -1035,6 +1049,12 @@ impl Battery {
         }
         self.min_dwell_steps = c.min_dwell_steps;
 
+        self.power_factor = c.power_factor.unwrap_or(1.0);
+        self.inverter_capacity_kva = c
+            .inverter_capacity_kva
+            .unwrap_or_else(|| self.max_charge_kw.max(self.max_discharge_kw));
+        self.q_setpoint_kvar = 0.0;
+
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
         self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
 
@@ -1284,10 +1304,24 @@ impl Equipment for Battery {
         let heater_kw = power_w_to_kw(heater_w);
         let port_power_kw = actual_power_kw + standby_kw + heater_kw;
 
+        // -- Reactive power: control-precedence then baseline pf --
+        let mut reactive_power_kvar = self.q_setpoint_kvar;
+        if reactive_power_kvar == 0.0 && self.power_factor < 1.0 {
+            let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+            reactive_power_kvar = actual_power_kw * zip.tan_phi();
+        }
+
+        // kVA clamp: active-power priority — P is never curtailed by Q.
+        // |Q| ≤ sqrt(max(0, S² − P²)) where S = inverter_capacity_kva.
+        let s_kva = self.inverter_capacity_kva;
+        let p2 = actual_power_kw * actual_power_kw;
+        let q_max = (s_kva * s_kva - p2).max(0.0).sqrt();
+        let clamped_q_kvar = reactive_power_kvar.clamp(-q_max, q_max);
+
         // -- Write electrical port contribution --
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: power_kw_to_w(port_power_kw),
-            reactive_power_kvar: 0.0,
+            reactive_power_kvar: clamped_q_kvar,
         })?;
 
         // -- Optional thermal port: heat from ohmic losses only --
@@ -1383,6 +1417,7 @@ impl Equipment for Battery {
         self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
         self.telemetry
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, clamped_q_kvar);
         self.telemetry.set(
             tk::DR_LEVEL,
             match self.dr_level {
@@ -1396,7 +1431,7 @@ impl Equipment for Battery {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(clamped_q_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1457,6 +1492,8 @@ impl Equipment for Battery {
                 dr_level: self.dr_level,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
                 external_power_limit_kw: self.external_power_limit_kw,
+                q_setpoint_kvar: self.q_setpoint_kvar,
+                power_factor: self.power_factor,
             },
             Self::checkpoint_version(),
             "Battery",
@@ -1492,6 +1529,8 @@ impl Equipment for Battery {
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         self.external_power_limit_kw = cp.external_power_limit_kw;
+        self.q_setpoint_kvar = cp.q_setpoint_kvar;
+        self.power_factor = cp.power_factor;
 
         // Recompute capacity_kwh_nominal from rated capacity and restored SOH.
         let soh = 1.0 - self.degradation.capacity_fade_fraction();
@@ -1531,7 +1570,7 @@ impl Equipment for Battery {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(0.0)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1552,9 +1591,9 @@ impl Equipment for Battery {
         match signal {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
+                reactive_power_kvar,
                 min_soc,
                 max_soc,
-                ..
             } => {
                 if min_soc.is_some() || max_soc.is_some() {
                     return Err(HaresError::Control(
@@ -1564,6 +1603,14 @@ impl Equipment for Battery {
                 self.power_setpoint_kw = Some(*active_power_kw);
                 self.soc_target = None;
                 self.self_consumption_enabled = false;
+                if let Some(q) = reactive_power_kvar {
+                    if !q.is_finite() {
+                        return Err(HaresError::Control(
+                            "Battery PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                        ));
+                    }
+                    self.q_setpoint_kvar = *q;
+                }
             }
             ControlSignal::SOCTarget {
                 target_soc,
@@ -1666,6 +1713,23 @@ impl Equipment for Battery {
             ControlSignal::PowerLimit { max_power_kw, .. } => {
                 self.external_power_limit_kw = Some(*max_power_kw);
             }
+            ControlSignal::ReactiveSetpoint { kvar } => {
+                if !kvar.is_finite() {
+                    return Err(HaresError::Control(
+                        "Battery ReactiveSetpoint kvar must be finite".to_string(),
+                    ));
+                }
+                self.q_setpoint_kvar = *kvar;
+            }
+            ControlSignal::PowerFactorSetpoint { power_factor } => {
+                if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
+                    return Err(HaresError::Control(
+                        "Battery PowerFactorSetpoint must be in (0, 1]".to_string(),
+                    ));
+                }
+                self.power_factor = *power_factor;
+                self.q_setpoint_kvar = 0.0;
+            }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;
                 self.dr_duration_remaining_s = *duration_s;
@@ -1764,6 +1828,7 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::DECLARED_CAPACITY_KWH, f64::NAN);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
+    t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     t
 }
 
@@ -1877,6 +1942,11 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             description: "Declared pack capacity from config".to_string(),
         },
         TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive=absorbing vars, negative=supplying)".to_string(),
+        },
+        TelemetryField {
             name: tk::DR_POWER_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Demand response power scaling factor [0..1]".to_string(),
@@ -1988,6 +2058,8 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         };
         for (k, v) in overrides {
@@ -2059,6 +2131,8 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: bms_mode.as_ref().map(|m| serde_json::to_string(m).unwrap()),
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         };
         EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
@@ -2080,6 +2154,13 @@ mod tests {
         assert!(caps.contains(ControlCapabilities::SOC_TARGET));
         assert!(caps.contains(ControlCapabilities::GRID_CONNECT));
         assert!(caps.contains(ControlCapabilities::SELF_CONSUMPTION));
+        assert!(caps.contains(ControlCapabilities::REACTIVE_SETPOINT));
+        assert!(caps.contains(ControlCapabilities::POWER_FACTOR_SETPOINT));
+        assert!(
+            bat.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
         let field_names: Vec<&str> = bat
             .descriptor()
             .telemetry_fields
@@ -2093,6 +2174,7 @@ mod tests {
         assert!(field_names.contains(&tk::CELL_TEMP_C));
         assert!(field_names.contains(&tk::CYCLE_COUNT));
         assert!(field_names.contains(&tk::CAPACITY_FADE_PCT));
+        assert!(field_names.contains(&tk::REACTIVE_POWER_KVAR));
     }
 
     #[test]
@@ -5312,5 +5394,611 @@ mod tests {
                 "after 100 random steps, SOC bounds must be ordered: min={stored_min}, max={stored_max}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Reactive power / smart-inverter tests
+    // -----------------------------------------------------------------
+
+    fn approx_eq(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-6, "values differ: {a} != {b}");
+    }
+
+    /// Default config (pf=1.0) emits Q == Some(0.0) and real power is
+    /// unchanged from pre-reactive-control behaviour.
+    #[test]
+    fn default_config_emits_zero_reactive_power() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q_co = bat
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE cap implies Some");
+        assert!(
+            q_co.abs() < 1e-9,
+            "default pf=1.0 should give Q≈0, got {q_co}"
+        );
+        let q_telem = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q_telem, 0.0);
+        assert_eq!(
+            bat.descriptor().control_capabilities,
+            ControlCapabilities::POWER_SETPOINT
+                | ControlCapabilities::SOC_TARGET
+                | ControlCapabilities::GRID_CONNECT
+                | ControlCapabilities::SELF_CONSUMPTION
+                | ControlCapabilities::POWER_LIMIT
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::REACTIVE_SETPOINT
+                | ControlCapabilities::POWER_FACTOR_SETPOINT
+        );
+        assert!(
+            bat.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+    }
+
+    /// Charging (P>0) with pf<1 yields baseline Q>0 (absorbing vars).
+    #[test]
+    fn charging_baseline_q_positive_absorbing() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force charging via PowerSetpoint.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(q > 0.0, "charging should yield Q>0 absorbing, got {q}");
+
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(p_kw > 0.0, "expected P>0 charging");
+        let expected_q = p_kw * (0.9_f64.acos().tan());
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q} for P={p_kw}, got {q}"
+        );
+    }
+
+    /// Discharging (P<0) with pf<1 yields baseline Q<0 (supplying vars).
+    #[test]
+    fn discharging_baseline_q_negative_supplying() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.8),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force discharging via PowerSetpoint.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(q < 0.0, "discharging should yield Q<0 supplying, got {q}");
+
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(p_kw < 0.0, "expected P<0 discharging");
+        let expected_q = p_kw * (0.9_f64.acos().tan());
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q}, got {q}"
+        );
+    }
+
+    /// ReactiveSetpoint overrides baseline pf Q.
+    #[test]
+    fn reactive_setpoint_overrides_baseline_q() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: Some(10.0),
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 1.5);
+    }
+
+    /// PowerFactorSetpoint updates pf, zeros q_setpoint, and Q follows
+    /// the new pf baseline.
+    #[test]
+    fn power_factor_setpoint_overrides_and_zeros_q_setpoint() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5), (KEY_STANDBY_POWER_W, 0.0)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.q_setpoint_kvar = 2.0;
+        bat.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
+            .unwrap();
+
+        // PowerFactorSetpoint must zero the q_setpoint (PV-style precedence).
+        approx_eq(bat.q_setpoint_kvar, 0.0);
+        approx_eq(bat.power_factor, 0.8);
+
+        // Force charging via PowerSetpoint so P>0.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let tan_phi = 0.8_f64.acos().tan();
+        let expected_q = p_kw * tan_phi;
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q} (P={p_kw} × tan(acos(0.8))={tan_phi}), got {q}"
+        );
+        assert!(q > 0.0);
+    }
+
+    /// PowerSetpoint with reactive_power_kvar is accepted and applied.
+    #[test]
+    fn power_setpoint_stores_reactive_q() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: Some(0.75),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        approx_eq(bat.q_setpoint_kvar, 0.75);
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.75);
+    }
+
+    /// kVA clamp: when Q is commanded beyond the inverter's capability,
+    /// Q is reduced but P is unchanged (active-power priority).
+    #[test]
+    fn kva_clamp_curtails_reactive_not_active_power() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: Some(5.0),
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: Some(5.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+        // Active-power priority: P is not curtailed by Q, so |Q| ≤ sqrt(S²−P²).
+        let s = bat.inverter_capacity_kva;
+        let q_max = (s * s - p * p).max(0.0).sqrt();
+        assert!(
+            q.abs() <= q_max + 1e-9,
+            "|Q|={} exceeds sqrt(S²−P²)={} with S={s}, P={p}",
+            q.abs(),
+            q_max
+        );
+        // Q should be clamped (much less than the commanded 5.0 kvar).
+        assert!(
+            q.abs() < 5.0 - 1e-9,
+            "Q should be clamped below 5.0, got {q}"
+        );
+        // P must be positive (charging).
+        assert!(p > 0.0, "P must be positive (charging)");
+    }
+
+    /// kVA clamp boundary: P=4 kW, Q=4 kvar, S=5 kVA — Q clamped to 3 kvar.
+    #[test]
+    fn kva_clamp_reduces_q_to_inverter_limit() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: Some(5.0),
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 4.0,
+            reactive_power_kvar: Some(4.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+        assert!(p > 0.0, "P must be positive (charging)");
+        // |Q| must be ≤ sqrt(S²−P²) (active-power priority).
+        let s = bat.inverter_capacity_kva;
+        let q_max = (s * s - p * p).max(0.0).sqrt();
+        assert!(
+            q.abs() <= q_max + 1e-9,
+            "|Q|={} exceeds sqrt(S²−P²)={}",
+            q.abs(),
+            q_max
+        );
+        // Q should be reduced from the commanded 4 kvar.
+        assert!(q.abs() < 4.0 - 1e-9, "Q should be clamped, got {q}");
+    }
+
+    /// Port Q, CoreOutput Q, and telemetry Q are the same signed value.
+    #[test]
+    fn port_core_output_telemetry_reactive_consistent() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.2 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q_co = bat
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE cap → Some");
+        let q_telem = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let q_port = ports.electrical.reactive_power_kvar;
+
+        approx_eq(q_co, q_telem);
+        approx_eq(q_telem, q_port);
+    }
+
+    /// validate_core_contract passes after a step with reactive power.
+    #[test]
+    fn validate_core_contract_passes_with_reactive() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.5 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        hares_types::validate_core_contract(bat.descriptor(), bat.core_output())
+            .expect("core contract should pass with REACTIVE cap + Some(Q)");
+    }
+
+    /// Checkpoint round-trip preserves q_setpoint_kvar and power_factor.
+    #[test]
+    fn checkpoint_preserves_reactive_state() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.q_setpoint_kvar = 1.5;
+        bat.power_factor = 0.85;
+
+        let state = bat.save_state().unwrap();
+        let mut restored = Battery::new(config);
+        restored
+            .init(
+                &EquipmentConfig::from_typed(
+                    "Test Battery".to_string(),
+                    "Battery".to_string(),
+                    BatteryConfig {
+                        equipment_id: None,
+                        zone_id: None,
+                        capacity_kwh: 10.0,
+                        max_charge_kw: 5.0,
+                        max_discharge_kw: 5.0,
+                        n_series: None,
+                        n_parallel: None,
+                        ah_cell: None,
+                        v_cell: None,
+                        cell_resistance_ohm: None,
+                        pack_voltage_v: None,
+                        chemistry: None,
+                        standby_power_w: Some(10.0),
+                        self_discharge_pct_per_day: None,
+                        min_soc: None,
+                        max_soc: None,
+                        initial_soc: Some(0.5),
+                        initial_cell_temp_c: None,
+                        import_limit_w: None,
+                        export_limit_w: None,
+                        heater_power_w: None,
+                        heater_threshold_c: None,
+                        heater_on_discharge: None,
+                        min_discharge_temp_c: None,
+                        full_power_temp_c: None,
+                        min_charge_temp_c: None,
+                        cell_thermal_mass_j_per_k: None,
+                        cell_ua_w_per_k: None,
+                        inverter_efficiency: None,
+                        charge_efficiency: None,
+                        discharge_efficiency: None,
+                        bms_mode: None,
+                        grid_export_rule: None,
+                        power_factor: None,
+                        inverter_capacity_kva: None,
+                        min_dwell_steps: 0,
+                    },
+                )
+                .unwrap(),
+                &env,
+            )
+            .unwrap();
+        restored.load_state(&state).unwrap();
+
+        approx_eq(restored.q_setpoint_kvar, 1.5);
+        approx_eq(restored.power_factor, 0.85);
+
+        // Double round-trip: bytes identical.
+        assert_eq!(state, restored.save_state().unwrap());
     }
 }

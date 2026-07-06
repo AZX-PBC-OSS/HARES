@@ -169,6 +169,18 @@ pub struct EquipmentConfig {
     /// no reconciliation occurred (all setpoint pairs satisfied the gap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setpoints_reconciled: Option<Vec<SetpointReconciliation>>,
+    /// ZIP/power-factor sidecar for this equipment instance.
+    ///
+    /// Carried outside the typed payload so that
+    /// `#[serde(deny_unknown_fields)]` typed config structs never see it.
+    /// Populated from `EquipmentSpec::zip_params` (the
+    /// `defaults/zip_parameters.toml` lookup) and from the reserved `"zip"`
+    /// override object merged field-wise over that base. `None` means "no
+    /// instance-specific ZIP configured"; consumers resolve the effective
+    /// value through [`resolve_zip`], which falls back to the class-table
+    /// defaults and finally to [`hares_types::zip::ZipLoad::constant_power`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zip: Option<hares_types::zip::ZipLoad>,
     /// Zone-to-role map for auto-routing equipment thermal contributions.
     /// Populated by the dwelling at construction time and injected before
     /// `init()`.  Reconstructed every run from the HPXML-derived building
@@ -195,6 +207,7 @@ impl EquipmentConfig {
             ochre_class,
             payload,
             setpoints_reconciled: None,
+            zip: None,
             zone_map: None,
             rng_seed: None,
             #[cfg(test)]
@@ -357,6 +370,7 @@ impl EquipmentConfig {
                 data,
             },
             setpoints_reconciled: None,
+            zip: None,
             zone_map: None,
             rng_seed: None,
             #[cfg(test)]
@@ -372,12 +386,97 @@ impl EquipmentConfig {
             ochre_class,
             payload: ConfigPayload::Raw { data },
             setpoints_reconciled: None,
+            zip: None,
             zone_map: None,
             rng_seed: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
     }
+}
+
+/// Resolve the effective ZIP load model for one equipment instance.
+///
+/// Precedence, highest first:
+/// 1. The [`EquipmentConfig::zip`] sidecar (from `EquipmentSpec::zip_params`
+///    plus any `"zip"` override object merged upstream). This is the single
+///    canonical channel for instance-specific ZIP for raw and typed
+///    equipment alike.
+/// 2. Class-table defaults via
+///    [`hares_types::zip::zip_defaults_for_class`] on
+///    [`EquipmentConfig::ochre_class`].
+/// 3. [`hares_types::zip::ZipLoad::constant_power`] (no reactive power,
+///    real power untouched).
+#[must_use]
+pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ZipLoad {
+    config
+        .zip
+        .or_else(|| hares_types::zip::zip_defaults_for_class(&config.ochre_class))
+        .unwrap_or_else(hares_types::zip::ZipLoad::constant_power)
+}
+
+/// The ZIP polynomial coefficient sums must equal 1.0 so that the model is
+/// a pure redistribution at reference voltage.
+pub(crate) const ZIP_SUM_TARGET: f64 = 1.0;
+/// Tolerance for the coefficient-sum invariant (floating-point roundoff on
+/// literature coefficient sets).
+pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
+
+/// Resolve the Rule R1 reactive-only ZIP model for typed equipment.
+///
+/// The effective ZIP is resolved through [`resolve_zip`] (instance sidecar →
+/// class-table defaults → constant power), then the real-power side is forced
+/// to constant power `(0, 0, 1)`. Typed equipment computes its real electric
+/// power through its own physics and must keep it bit-identical at all
+/// voltages; only the reactive side of the ZIP model is used, via
+/// [`hares_types::zip::ZipLoad::reactive_kvar`] on the already-computed
+/// power (`Q = P · tan(acos(pf)) · (zq·V² + iq·V + pq)`).
+///
+/// Errors when a coefficient-sum invariant is violated (e.g. a bad `"zip"`
+/// config override), so misconfiguration fails at init instead of silently
+/// skewing power. This is the canonical Rule R1 helper for all typed
+/// equipment (HVAC, water heaters, fans, pumps).
+pub(crate) fn resolve_reactive_zip(
+    config: &EquipmentConfig,
+) -> crate::Result<hares_types::zip::ZipLoad> {
+    let zip = hares_types::zip::ZipLoad {
+        zp: 0.0,
+        ip: 0.0,
+        pp: 1.0,
+        ..resolve_zip(config)
+    };
+    validate_zip_sums(&zip, &config.name)?;
+    Ok(zip)
+}
+
+/// Validate the coefficient-sum invariants of a resolved [`ZipLoad`].
+///
+/// The real-power sum `zp + ip + pp` must always be ≈ 1.0. The reactive sum
+/// `zq + iq + pq` must be ≈ 1.0 whenever `pf != 0.0` (with the `pf = 0.0`
+/// sentinel the reactive polynomial is never evaluated, so it is not
+/// constrained). Called at equipment init so a bad `"zip"` override fails
+/// fast with a config error instead of skewing power silently.
+pub(crate) fn validate_zip_sums(
+    zip: &hares_types::zip::ZipLoad,
+    equipment_name: &str,
+) -> crate::Result<()> {
+    let real_sum = zip.zp + zip.ip + zip.pp;
+    if (real_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "{equipment_name}: invalid ZIP coefficients: zp + ip + pp = {real_sum}, \
+             expected {ZIP_SUM_TARGET}"
+        )));
+    }
+    if zip.pf != 0.0 {
+        let reactive_sum = zip.zq + zip.iq + zip.pq;
+        if (reactive_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "{equipment_name}: invalid reactive ZIP coefficients: \
+                 zq + iq + pq = {reactive_sum}, expected {ZIP_SUM_TARGET}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -594,5 +693,133 @@ mod tests {
         assert_eq!(recovered.name, "sensor_a");
         assert_eq!(ec.name, "sensor");
         assert_eq!(ec.ochre_class, "SensorClass");
+    }
+
+    // ── resolve_zip precedence ──────────────────────────────────────────
+
+    use hares_types::zip::{ZipLoad, zip_defaults_for_class};
+
+    fn raw_cfg(class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
+        let data = pairs
+            .iter()
+            .map(|&(k, v)| (k.to_string(), ConfigValue::Float(v)))
+            .collect();
+        EquipmentConfig::raw(class.to_string(), class.to_string(), data)
+    }
+
+    #[test]
+    fn resolve_zip_falls_back_to_constant_power_for_unknown_class() {
+        let cfg = raw_cfg("Totally Unknown Class", &[]);
+        assert_eq!(super::resolve_zip(&cfg), ZipLoad::constant_power());
+    }
+
+    #[test]
+    fn resolve_zip_uses_class_defaults_when_no_sidecar_or_raw_keys() {
+        let cfg = raw_cfg("ASHP Heater", &[]);
+        assert_eq!(
+            super::resolve_zip(&cfg),
+            zip_defaults_for_class("ASHP Heater").expect("class row")
+        );
+    }
+
+    #[test]
+    fn resolve_zip_sidecar_beats_class_defaults() {
+        let mut cfg = raw_cfg("ASHP Heater", &[]);
+        let sidecar = ZipLoad::reactive_only(0.5, 0.62, -0.12, 0.87);
+        cfg.zip = Some(sidecar);
+        assert_eq!(super::resolve_zip(&cfg), sidecar);
+    }
+
+    #[test]
+    fn resolve_zip_ignores_raw_payload_keys_entirely() {
+        // The legacy raw `zip_*` config-key channel is gone: only the sidecar
+        // and the class table feed the resolver.
+        let cfg = raw_cfg("ASHP Heater", &[("zip_pf", 0.5)]);
+        assert_eq!(
+            super::resolve_zip(&cfg),
+            zip_defaults_for_class("ASHP Heater").expect("class row")
+        );
+    }
+
+    // ── validate_zip_sums ───────────────────────────────────────────────
+
+    #[test]
+    fn validate_zip_sums_accepts_all_class_rows() {
+        for name in hares_types::zip::ZIP_CLASS_NAMES {
+            let zip = zip_defaults_for_class(name).expect("row");
+            super::validate_zip_sums(&zip, name).expect("class row must satisfy sum invariants");
+        }
+        super::validate_zip_sums(&ZipLoad::constant_power(), "cp").expect("constant power");
+    }
+
+    #[test]
+    fn validate_zip_sums_rejects_bad_real_sum() {
+        let mut zip = ZipLoad::constant_power();
+        zip.pp = 0.9;
+        let err = super::validate_zip_sums(&zip, "eq").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid ZIP coefficients"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_zip_sums_rejects_bad_reactive_sum_when_pf_nonzero() {
+        let zip = ZipLoad::reactive_only(0.3, 0.3, 0.3, 0.9);
+        let err = super::validate_zip_sums(&zip, "eq").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid reactive ZIP coefficients"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_zip_sums_ignores_reactive_sum_with_pf_zero_sentinel() {
+        // pf = 0 means the reactive polynomial is never evaluated.
+        let zip = ZipLoad::reactive_only(0.3, 0.3, 0.3, 0.0);
+        super::validate_zip_sums(&zip, "eq").expect("pf=0 sentinel skips reactive sum");
+    }
+
+    // ── zip sidecar serde ───────────────────────────────────────────────
+
+    #[test]
+    fn equipment_config_round_trips_with_zip_sidecar() {
+        let mut cfg = raw_cfg("ASHP Heater", &[]);
+        cfg.zip = Some(zip_defaults_for_class("ASHP Heater").expect("class row"));
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            json.contains("\"zip\""),
+            "zip sidecar must serialize: {json}"
+        );
+        let back: EquipmentConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.zip, cfg.zip);
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn equipment_config_without_zip_omits_key_and_round_trips() {
+        let cfg = raw_cfg("ASHP Heater", &[]);
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            !json.contains("\"zip\""),
+            "None sidecar must be skipped: {json}"
+        );
+        let back: EquipmentConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.zip, None);
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn old_serialized_configs_without_zip_key_still_deserialize() {
+        // JSON captured from the pre-sidecar schema: no "zip" key anywhere.
+        let json = r#"{
+            "name": "ASHP Heater",
+            "ochre_class": "ASHP Heater",
+            "payload": {"kind": "raw", "data": {"power_constant_kw": 1.5}}
+        }"#;
+        let cfg: EquipmentConfig = serde_json::from_str(json).expect("legacy deserialize");
+        assert_eq!(cfg.zip, None);
+        assert_eq!(cfg.get_f64("power_constant_kw"), Some(1.5));
     }
 }

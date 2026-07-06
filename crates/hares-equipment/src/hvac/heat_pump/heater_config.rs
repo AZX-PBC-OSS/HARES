@@ -12,6 +12,7 @@ const OPERATING_MODE_CODE_ER_ON: f64 = 5.0;
 pub(super) fn default_heater_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(HEATER_TELEMETRY_CAPACITY);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, OPERATING_MODE_CODE_OFF);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
@@ -71,6 +72,12 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total heater electric power".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging), folded unit pf on total draw"
+                .to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),

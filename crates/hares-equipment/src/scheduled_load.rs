@@ -27,15 +27,6 @@ const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
 const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
 const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
 const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
-pub(crate) const KEY_ZIP_Z: &str = "zip_z";
-pub(crate) const KEY_ZIP_I: &str = "zip_i";
-pub(crate) const KEY_ZIP_P: &str = "zip_p";
-pub(crate) const KEY_ZIP_ZQ: &str = "zip_zq";
-pub(crate) const KEY_ZIP_IQ: &str = "zip_iq";
-pub(crate) const KEY_ZIP_PQ: &str = "zip_pq";
-pub(crate) const KEY_ZIP_PF: &str = "zip_pf";
-// Reserved for configurable reference voltage in the ZIP model.
-pub(crate) const KEY_ZIP_V0: &str = "zip_v0";
 const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
@@ -51,269 +42,6 @@ const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
 const KEY_GAS_CONSTANT: &str = "gas_constant";
-pub(crate) const ZIP_SUM_TARGET: f64 = 1.0;
-pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ZipCoefficients {
-    pub(crate) z: f64,
-    pub(crate) i: f64,
-    pub(crate) p_coeff: f64,
-    pub(crate) v0: f64,
-    pub(crate) zq: f64,
-    pub(crate) iq: f64,
-    pub(crate) pq: f64,
-    pub(crate) pf: f64,
-}
-
-impl ZipCoefficients {
-    /// Apply ZIP voltage-dependent scaling to scheduled power.
-    ///
-    /// Returns `(real_kw, reactive_kvar)`.
-    /// `pf` is a power factor (cos φ); reactive power converts via
-    /// `tan(acos(pf))` to obtain the reactive/active power ratio.
-    /// OCHRE Equipment.py:74 constructs `pf_mult = np.tan(np.arccos(kwargs["pf"]))`.
-    /// When `pf ≈ 0`, no reactive power is produced — `pf = 0` is the
-    /// default sentinel for "no ZIP reactive coefficients configured."
-    pub(crate) fn apply(&self, p_kw: f64, voltage_pu: f64) -> (f64, f64) {
-        let v_norm = voltage_pu / self.v0;
-        let zip_multiplier = self.z * v_norm * v_norm + self.i * v_norm + self.p_coeff;
-        let real_kw = p_kw * zip_multiplier;
-        let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
-        // pf = 0 is the sentinel for "no reactive ZIP configured" — skip
-        // tan(acos(0.0)) which diverges, and produce zero reactive power.
-        let reactive_kvar = if self.pf.abs() < 1e-9 {
-            0.0
-        } else {
-            let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
-            real_kw * tan_phi * reactive_base
-        };
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if (self.pf - 1.0).abs() < 1e-9 {
-            debug_assert!(
-                reactive_kvar.abs() < 1e-9,
-                "pf=1.0 should produce zero reactive power, got {} kVAR",
-                reactive_kvar
-            );
-        }
-        (real_kw, reactive_kvar)
-    }
-}
-
-impl Default for ZipCoefficients {
-    fn default() -> Self {
-        Self {
-            z: 0.0,
-            i: 0.0,
-            p_coeff: 1.0,
-            v0: 1.0,
-            // Default reactive coefficients produce zero reactive power (pf=0).
-            zq: 0.0,
-            iq: 0.0,
-            pq: 1.0,
-            pf: 0.0,
-        }
-    }
-}
-
-/// Look up literature-based ZIP coefficients from the OCHRE parameter table
-/// (`vendors/OCHRE/ochre/defaults/ZIP Parameters.csv`). Returns `None` for
-/// equipment classes not found in the table; callers fall back to `default()`.
-///
-/// Coefficients sourced from:
-/// - Bokhari et al., IEEE Trans. Power Delivery 29(3), 2014
-/// - Hajagos & Danai, IEEE Trans. Power Systems 13(2), 1998
-/// - Lu et al., IEEE PESGM, 2008
-/// - Arif et al., IEEE Trans. Smart Grid, 2013
-pub(crate) fn zip_coefficients_from_class(class_name: &str) -> Option<ZipCoefficients> {
-    // Lighting (Bokhari et al. 2014)
-    const LIGHTING: ZipCoefficients = ZipCoefficients {
-        z: 0.54,
-        i: 0.5,
-        p_coeff: -0.04,
-        v0: 1.0,
-        zq: 0.46,
-        iq: 0.51,
-        pq: 0.03,
-        pf: 1.0,
-    };
-    // Refrigerator (Bokhari et al. 2014)
-    const REFRIGERATOR: ZipCoefficients = ZipCoefficients {
-        z: 5.03,
-        i: -8.48,
-        p_coeff: 4.45,
-        v0: 1.0,
-        zq: 17.44,
-        iq: -28.62,
-        pq: 12.18,
-        pf: 0.8,
-    };
-    // MELs — miscellaneous electrical loads
-    const MELS: ZipCoefficients = ZipCoefficients {
-        z: 0.361_47,
-        i: -0.085_83,
-        p_coeff: 0.724_36,
-        v0: 1.0,
-        zq: 8.399_85,
-        iq: -14.167_7,
-        pq: 6.767_85,
-        pf: 0.8,
-    };
-    // Pumps (Hajagos & Danai 1998); identical values shared with HVAC_HEAT_PUMP — updating
-    // one requires updating the other.
-    const PUMPS: ZipCoefficients = ZipCoefficients {
-        z: 0.72,
-        i: -0.98,
-        p_coeff: 1.26,
-        v0: 1.0,
-        zq: 14.78,
-        iq: -23.71,
-        pq: 9.93,
-        pf: 0.84,
-    };
-    // Resistance heater / baseboard (Bokhari et al. 2014)
-    const RESISTANCE: ZipCoefficients = ZipCoefficients {
-        z: 0.92,
-        i: 0.1,
-        p_coeff: -0.02,
-        v0: 1.0,
-        zq: 0.15,
-        iq: 0.86,
-        pq: -0.01,
-        pf: 1.0,
-    };
-    // Fan coefficients from OCHRE `fans` row (no primary literature reference;
-    // fan ZIP calibration is an open item in the CSV).
-    const FAN: ZipCoefficients = ZipCoefficients {
-        z: 0.26,
-        i: 0.9,
-        p_coeff: -0.16,
-        v0: 1.0,
-        zq: 0.5,
-        iq: 0.62,
-        pq: -0.12,
-        pf: 0.87,
-    };
-    // HVAC heat pump / air conditioner (Hajagos & Danai 1998 — same source as PUMPS;
-    // values are identical; updating one requires updating the other).
-    const HVAC_HEAT_PUMP: ZipCoefficients = ZipCoefficients {
-        z: 0.72,
-        i: -0.98,
-        p_coeff: 1.26,
-        v0: 1.0,
-        zq: 14.78,
-        iq: -23.71,
-        pq: 9.93,
-        pf: 0.84,
-    };
-    const HVAC_COOLING: ZipCoefficients = ZipCoefficients {
-        z: 1.6,
-        i: -2.69,
-        p_coeff: 2.09,
-        v0: 1.0,
-        zq: 12.53,
-        iq: -21.11,
-        pq: 9.58,
-        pf: 0.96,
-    };
-    // Appliances
-    const CLOTHES_WASHER: ZipCoefficients = ZipCoefficients {
-        z: 0.05,
-        i: 0.31,
-        p_coeff: 0.64,
-        v0: 1.0,
-        zq: -0.56,
-        iq: 2.2,
-        pq: -0.64,
-        pf: 0.65,
-    };
-    const CLOTHES_DRYER: ZipCoefficients = ZipCoefficients {
-        z: 1.0,
-        i: 0.0,
-        p_coeff: 0.0,
-        v0: 1.0,
-        zq: 1.0,
-        iq: 0.0,
-        pq: 0.0,
-        pf: 0.99,
-    };
-    const DISHWASHER: ZipCoefficients = ZipCoefficients {
-        z: 1.0,
-        i: 0.0,
-        p_coeff: 0.0,
-        v0: 1.0,
-        zq: 0.0,
-        iq: 0.0,
-        pq: 1.0,
-        pf: 0.99,
-    };
-    const RANGE: ZipCoefficients = ZipCoefficients {
-        z: 1.0,
-        i: 0.0,
-        p_coeff: 0.0,
-        v0: 1.0,
-        zq: 1.0,
-        iq: 0.0,
-        pq: 0.0,
-        pf: 1.0,
-    };
-    // Electric Resistance Water Heater — constant impedance (OCHRE CSV row 17)
-    const RESISTANCE_WATER_HEATER: ZipCoefficients = ZipCoefficients {
-        z: 1.0,
-        i: 0.0,
-        p_coeff: 0.0,
-        v0: 1.0,
-        zq: 1.0,
-        iq: 0.0,
-        pq: 0.0,
-        pf: 1.0,
-    };
-    // Ideal loads
-    const IDEAL: ZipCoefficients = ZipCoefficients {
-        z: 0.0,
-        i: 0.0,
-        p_coeff: 1.0,
-        v0: 1.0,
-        zq: 0.0,
-        iq: 0.0,
-        pq: 1.0,
-        pf: 1.0,
-    };
-    const HPWH: ZipCoefficients = ZipCoefficients {
-        z: 0.825,
-        i: -0.44,
-        p_coeff: 0.615,
-        v0: 1.0,
-        zq: 7.465,
-        iq: -11.425,
-        pq: 4.96,
-        pf: 0.97,
-    };
-
-    match class_name {
-        "Lighting" | "Indoor Lighting" => Some(LIGHTING),
-        "Exterior Lighting" => Some(LIGHTING),
-        "Garage Lighting" => Some(LIGHTING),
-        "Basement Lighting" => Some(LIGHTING),
-        "Refrigerator" => Some(REFRIGERATOR),
-        "Freezer" => Some(REFRIGERATOR),
-        "MELs" | "Basement MELs" => Some(MELS),
-        "Well Pump" | "Pool Pump" | "Spa Pump" => Some(PUMPS),
-        "Pool Heater" | "Spa Heater" => Some(RESISTANCE),
-        "Ceiling Fan" | "Ventilation Fan" => Some(FAN),
-        "Clothes Washer" => Some(CLOTHES_WASHER),
-        "Clothes Dryer" => Some(CLOTHES_DRYER),
-        "Dishwasher" => Some(DISHWASHER),
-        "Range" | "Cooking Range" => Some(RANGE),
-        "ASHP Heater" | "MSHP Heater" => Some(HVAC_HEAT_PUMP),
-        "Electric Baseboard" | "Electric Furnace" | "Electric Boiler" => Some(RESISTANCE),
-        "Air Conditioner" | "ASHP Cooler" | "MSHP Cooler" | "Room AC" => Some(HVAC_COOLING),
-        "Ideal Cooler" | "Ideal Heater" => Some(IDEAL),
-        "Electric Resistance Water Heater" => Some(RESISTANCE_WATER_HEATER),
-        "Heat Pump Water Heater" => Some(HPWH),
-        _ => None,
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 enum GasScheduleUnit {
@@ -366,7 +94,10 @@ pub struct ScheduledLoad {
     sensible_gain_fraction: f64,
     radiant_gain_fraction: f64,
     latent_gain_fraction: f64,
-    zip: ZipCoefficients,
+    /// Full ZIP model (real + reactive) resolved via
+    /// [`crate::config::resolve_zip`]; scheduled loads keep the full
+    /// voltage-dependent real-power polynomial (OCHRE parity).
+    zip: hares_types::zip::ZipLoad,
     /// Per-month scale factors [0..11] applied after load_fraction.
     // OCHRE ScheduledLoad.py:38-41: month_multipliers zeros schedule in specified months.
     // Used for seasonal equipment like ceiling fans (zero in winter months).
@@ -467,7 +198,8 @@ impl ScheduledLoad {
             sensible_gain_fraction: 0.0,
             radiant_gain_fraction: 0.0,
             latent_gain_fraction: 0.0,
-            zip: zip_coefficients_from_class(equipment_type).unwrap_or_default(),
+            zip: hares_types::zip::zip_defaults_for_class(equipment_type)
+                .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
             month_multipliers: None,
             last_non_zero_power_kw: 0.0,
             last_non_zero_gas_w: 0.0,
@@ -630,15 +362,15 @@ impl ScheduledLoad {
                 self.radiant_gain_fraction, self.sensible_gain_fraction
             )));
         }
-        let zip_base = self.zip;
-        self.zip = parse_zip_coefficients(config, zip_base)?;
+        self.zip = crate::config::resolve_zip(config);
+        crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
         #[cfg(feature = "observe")]
         tracing::debug!(
             equipment_type = %self.descriptor.equipment_type,
             instance = %self.descriptor.name,
-            z = self.zip.z,
-            i = self.zip.i,
-            p_coeff = self.zip.p_coeff,
+            zp = self.zip.zp,
+            ip = self.zip.ip,
+            pp = self.zip.pp,
             zq = self.zip.zq,
             iq = self.zip.iq,
             pq = self.zip.pq,
@@ -670,10 +402,9 @@ impl ScheduledLoad {
         if self.gas_source.is_some() && is_schedule_source_zero(&self.power_source) {
             self.descriptor.fuel = FuelType::Gas;
         }
-        let reactive_supported = self.zip.pf != 0.0
-            || config.get_f64(KEY_ZIP_ZQ).is_some()
-            || config.get_f64(KEY_ZIP_IQ).is_some()
-            || config.get_f64(KEY_ZIP_PQ).is_some();
+        // pf = 0.0 is the "no reactive ZIP configured" sentinel; any nonzero
+        // pf (including 1.0, which yields Q = 0 exactly) declares REACTIVE.
+        let reactive_supported = self.zip.pf != 0.0;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
             | if reactive_supported {
                 CoreCapabilities::REACTIVE
@@ -730,15 +461,16 @@ impl Equipment for ScheduledLoad {
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            let real_sum = self.zip.z + self.zip.i + self.zip.p_coeff;
+            use crate::config::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
+            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
             assert!(
                 (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
                 "ScheduledLoad '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (z={}, i={}, p_coeff={}, sum={})",
+                 (zp={}, ip={}, pp={}, sum={})",
                 self.descriptor.name,
-                self.zip.z,
-                self.zip.i,
-                self.zip.p_coeff,
+                self.zip.zp,
+                self.zip.ip,
+                self.zip.pp,
                 real_sum,
             );
             if self.zip.pf != 0.0 {
@@ -889,11 +621,7 @@ impl Equipment for ScheduledLoad {
 
         #[cfg(feature = "observe")]
         {
-            let tan_phi = if self.zip.pf.abs() < 1e-9 {
-                0.0
-            } else {
-                self.zip.pf.clamp(-1.0, 1.0).acos().tan()
-            };
+            let tan_phi = self.zip.tan_phi();
             tracing::debug!(
                 scheduled_load_reactive_kvar = reactive_power_kvar,
                 scheduled_load_real_kw = electric_power_kw,
@@ -1298,60 +1026,6 @@ fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
     ]
 }
 
-/// Resolve ZIP coefficients by merging type-specific defaults with user-supplied
-/// config key overrides. Each config key (`zip_z`, `zip_i`, ...) overrides the
-/// corresponding field in `base` only when explicitly present in the config map.
-pub(crate) fn parse_zip_coefficients(
-    config: &EquipmentConfig,
-    base: ZipCoefficients,
-) -> crate::Result<ZipCoefficients> {
-    let z = config.get_f64(KEY_ZIP_Z).unwrap_or(base.z);
-    let i = config.get_f64(KEY_ZIP_I).unwrap_or(base.i);
-    let p_coeff = config.get_f64(KEY_ZIP_P).unwrap_or(base.p_coeff);
-    // v0 defaults to 1.0 pu (no normalisation); override to calibrate ZIP at a
-    // non-nominal voltage, e.g. 0.95 pu for ANSI Range A lower boundary.
-    let v0 = config.get_f64(KEY_ZIP_V0).unwrap_or(base.v0);
-    let zq = config.get_f64(KEY_ZIP_ZQ).unwrap_or(base.zq);
-    let iq = config.get_f64(KEY_ZIP_IQ).unwrap_or(base.iq);
-    let pq = config.get_f64(KEY_ZIP_PQ).unwrap_or(base.pq);
-    let pf = config.get_f64(KEY_ZIP_PF).unwrap_or(base.pf);
-
-    let zip = ZipCoefficients {
-        z,
-        i,
-        p_coeff,
-        v0,
-        zq,
-        iq,
-        pq,
-        pf,
-    };
-
-    let sum = zip.z + zip.i + zip.p_coeff;
-    if (sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
-        return Err(HaresError::Equipment(format!(
-            "invalid ZIP coefficients: z + i + p = {sum}, expected {ZIP_SUM_TARGET}"
-        )));
-    }
-    // Validate reactive sum when reactive power is active (pf != 0) and any
-    // reactive coefficient was explicitly set by the user. When pf != 0 but no
-    // explicit reactive keys are present, the type-specific defaults are trusted
-    // (they are sourced from literature and validated by the per-step invariant check).
-    if pf != 0.0
-        && (config.get_f64(KEY_ZIP_ZQ).is_some()
-            || config.get_f64(KEY_ZIP_IQ).is_some()
-            || config.get_f64(KEY_ZIP_PQ).is_some())
-    {
-        let reactive_sum = zip.zq + zip.iq + zip.pq;
-        if (reactive_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
-            return Err(HaresError::Equipment(format!(
-                "invalid reactive ZIP coefficients: zq + iq + pq = {reactive_sum}, expected {ZIP_SUM_TARGET}"
-            )));
-        }
-    }
-    Ok(zip)
-}
-
 fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<ScheduleSource> {
     let source = config
         .get_str(KEY_POWER_SCHEDULE_SOURCE)
@@ -1610,12 +1284,13 @@ mod tests {
 
     use hares_types::telemetry_keys as tk;
 
+    use hares_types::zip::ZipLoad;
+
     use super::{
         GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
         KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
         KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
-        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
-        KEY_ZIP_Z, ScheduledLoad, ZipCoefficients,
+        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, ScheduledLoad,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
@@ -1702,19 +1377,26 @@ mod tests {
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
 
+    /// A ZIP sidecar with the given real-power polynomial, no reactive
+    /// component (pf = 0 sentinel), and unity reactive base.
+    fn real_only_zip(zp: f64, ip: f64, pp: f64) -> ZipLoad {
+        ZipLoad {
+            zp,
+            ip,
+            pp,
+            ..ZipLoad::constant_power()
+        }
+    }
+
     #[test]
     fn init_rejects_invalid_zip_sum() {
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[1.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (KEY_ZIP_Z, 0.2.into()),
-                (KEY_ZIP_I, 0.2.into()),
-                (KEY_ZIP_P, 0.2.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(real_only_zip(0.2, 0.2, 0.2)); // sum = 0.6
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(err.to_string().contains("invalid ZIP coefficients"));
@@ -1722,17 +1404,13 @@ mod tests {
 
     #[test]
     fn zip_voltage_uses_env_grid_voltage() {
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[2.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (KEY_ZIP_Z, 0.2.into()),
-                (KEY_ZIP_I, 0.3.into()),
-                (KEY_ZIP_P, 0.5.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(real_only_zip(0.2, 0.3, 0.5));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.95;
@@ -2427,18 +2105,16 @@ mod tests {
     #[test]
     fn zip_v0_normalizes_voltage() {
         // With v0=1.0, v=0.95: v_norm=0.95. With v0=0.95, v=0.95: v_norm=1.0 → pure P load.
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[2.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (KEY_ZIP_Z, 0.2.into()),
-                (KEY_ZIP_I, 0.3.into()),
-                (KEY_ZIP_P, 0.5.into()),
-                (KEY_ZIP_V0, 0.95.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad {
+            v0: 0.95,
+            ..real_only_zip(0.2, 0.3, 0.5)
+        });
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.95;
@@ -2494,18 +2170,13 @@ mod tests {
     fn reactive_zip_coefficients_produce_correct_kvar() {
         // zq=0, iq=0, pq=1 → reactive_base = 1.0 at any voltage.
         // pf=0.8 → tan(acos(0.8)) = 0.75; reactive = real_kw * 0.75 * 1.0.
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[2.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (super::KEY_ZIP_ZQ, 0.0.into()),
-                (super::KEY_ZIP_IQ, 0.0.into()),
-                (super::KEY_ZIP_PQ, 1.0.into()),
-                (super::KEY_ZIP_PF, 0.8.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.8));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
@@ -2541,22 +2212,14 @@ mod tests {
     fn reactive_zip_voltage_sensitivity() {
         // zq=1, iq=0, pq=0 → reactive_base = v_norm².
         // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive = real_kw * 0.4843 * v_norm².
-        // Explicit pure-P real ZIP (z=0, i=0, p=1) keeps real_kw independent of voltage.
-        let config = config_with_extras(
+        // Pure-P real ZIP (zp=0, ip=0, pp=1) keeps real_kw independent of voltage.
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[1.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (super::KEY_ZIP_ZQ, 1.0.into()),
-                (super::KEY_ZIP_IQ, 0.0.into()),
-                (super::KEY_ZIP_PQ, 0.0.into()),
-                (super::KEY_ZIP_PF, 0.9.into()),
-                (KEY_ZIP_Z, 0.0.into()),
-                (KEY_ZIP_I, 0.0.into()),
-                (KEY_ZIP_P, 1.0.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad::reactive_only(1.0, 0.0, 0.0, 0.9));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.9;
@@ -2580,18 +2243,13 @@ mod tests {
         // pf=1.0 → tan(acos(1.0)) = 0.0 → reactive power must be zero.
         // Regression: before the fix, pf was treated as a raw multiplier,
         // so pf=1.0 produced reactive = real * 1.0 instead of 0.0.
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[5.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (super::KEY_ZIP_ZQ, 0.0.into()),
-                (super::KEY_ZIP_IQ, 0.0.into()),
-                (super::KEY_ZIP_PQ, 1.0.into()),
-                (super::KEY_ZIP_PF, 1.0.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, 1.0));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
@@ -2606,59 +2264,10 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_load_zip_matches_water_heater_reactive_formula() {
-        // Verify that ZipCoefficients::apply uses tan(acos(pf)) matching
-        // the correct formula used by water_heater WaterHeaterZip::apply.
-        let zip = ZipCoefficients {
-            z: 0.1,
-            i: 0.3,
-            p_coeff: 0.6,
-            v0: 1.0,
-            zq: 0.2,
-            iq: 0.3,
-            pq: 0.5,
-            pf: 0.65,
-        };
-        let p_kw = 3.0;
-        let voltage_pu = 0.95;
-        let (real_kw, reactive_kvar) = zip.apply(p_kw, voltage_pu);
-
-        // Compute expected values from the water heater formula:
-        // v_norm = voltage_pu / v0
-        // real_kw_expected = p_kw * (z * v_norm² + i * v_norm + p_coeff)
-        // reactive_base = zq * v_norm² + iq * v_norm + pq
-        // tan_phi = tan(acos(pf))
-        // reactive_kvar_expected = real_kw_expected * tan_phi * reactive_base
-        let v_norm = voltage_pu / zip.v0;
-        let expected_real = p_kw * (zip.z * v_norm * v_norm + zip.i * v_norm + zip.p_coeff);
-        let expected_base = zip.zq * v_norm * v_norm + zip.iq * v_norm + zip.pq;
-        let tan_phi = zip.pf.clamp(-1.0, 1.0).acos().tan();
-        let expected_reactive = expected_real * tan_phi * expected_base;
-
-        assert!(
-            (real_kw - expected_real).abs() < 1e-12,
-            "real_kw mismatch: got {real_kw}, expected {expected_real}"
-        );
-        assert!(
-            (reactive_kvar - expected_reactive).abs() < 1e-12,
-            "reactive_kvar mismatch: got {reactive_kvar}, expected {expected_reactive}"
-        );
-    }
-
-    #[test]
     fn pf_0_99_produces_correct_reactive_power_ratio() {
         // Regression: before the fix, pf=0.99 produced reactive ≈ 0.99× real
         // (a 7× overestimate). The correct ratio is tan(acos(0.99)) ≈ 0.1425.
-        let zip = ZipCoefficients {
-            z: 0.0,
-            i: 0.0,
-            p_coeff: 1.0,
-            v0: 1.0,
-            zq: 0.0,
-            iq: 0.0,
-            pq: 1.0,
-            pf: 0.99,
-        };
+        let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.99);
         let p_kw = 4.0;
         let (_real_kw, reactive_kvar) = zip.apply(p_kw, 1.0);
         let tan_phi = 0.99_f64.clamp(-1.0, 1.0).acos().tan();
@@ -2679,10 +2288,10 @@ mod tests {
     fn pf_1_0_produces_zero_reactive_at_any_voltage() {
         // pf=1.0 → tan(acos(1.0)) = 0.0 → reactive zero regardless of voltage.
         for voltage_pu in [0.8, 0.9, 0.95, 1.0, 1.05] {
-            let zip = ZipCoefficients {
-                z: 0.2,
-                i: 0.3,
-                p_coeff: 0.5,
+            let zip = ZipLoad {
+                zp: 0.2,
+                ip: 0.3,
+                pp: 0.5,
                 v0: 1.0,
                 zq: 0.15,
                 iq: 0.35,
@@ -2699,23 +2308,96 @@ mod tests {
 
     #[test]
     fn reactive_zip_invalid_sum_is_rejected() {
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[1.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (super::KEY_ZIP_ZQ, 0.3.into()),
-                (super::KEY_ZIP_IQ, 0.3.into()),
-                (super::KEY_ZIP_PQ, 0.3.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad::reactive_only(0.3, 0.3, 0.3, 0.9)); // reactive sum = 0.9
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
             err.to_string().contains("reactive ZIP coefficients"),
             "expected reactive ZIP validation error, got: {err}"
         );
+    }
+
+    /// Bit-identity regression for the ZIP migration: stepping a
+    /// ScheduledLoad through the canonical `resolve_zip` path must produce
+    /// (P, Q) bit-identical to the legacy `ZipCoefficients::apply`
+    /// arithmetic, whose table constants are pinned literally here.
+    #[test]
+    fn migrated_zip_path_is_bit_identical_to_legacy_class_table() {
+        // (class, z, i, p, zq, iq, pq, pf) rows copied verbatim from the
+        // deleted `zip_coefficients_from_class` table.
+        let legacy_rows: &[(&str, [f64; 7])] = &[
+            ("Lighting", [0.54, 0.5, -0.04, 0.46, 0.51, 0.03, 1.0]),
+            (
+                "Refrigerator",
+                [5.03, -8.48, 4.45, 17.44, -28.62, 12.18, 0.8],
+            ),
+            (
+                "MELs",
+                [
+                    0.361_47, -0.085_83, 0.724_36, 8.399_85, -14.167_7, 6.767_85, 0.8,
+                ],
+            ),
+            ("Well Pump", [0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84]),
+            ("Ceiling Fan", [0.26, 0.9, -0.16, 0.5, 0.62, -0.12, 0.87]),
+        ];
+        let schedule_kw = 2.375;
+        for (class, row) in legacy_rows {
+            for voltage_pu in [0.9, 1.0, 1.1] {
+                let config = config_with_extras(
+                    "s",
+                    class,
+                    &[schedule_kw],
+                    &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
+                );
+                let mut eq =
+                    ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Other");
+                let mut env = base_env();
+                env.grid.voltage_pu = voltage_pu;
+                eq.init(&config, &env).unwrap();
+
+                let mut ports = PortSlots {
+                    thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+                    ..PortSlots::default()
+                };
+                eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+
+                // Legacy ZipCoefficients::apply arithmetic, expression for
+                // expression (scheduled_load.rs pre-migration).
+                let [z, i, p_coeff, zq, iq, pq, pf] = *row;
+                let v_norm = voltage_pu / 1.0;
+                let zip_multiplier = z * v_norm * v_norm + i * v_norm + p_coeff;
+                let expected_real_kw = schedule_kw * zip_multiplier;
+                let reactive_base = zq * v_norm * v_norm + iq * v_norm + pq;
+                let expected_reactive = if pf.abs() < 1e-9 {
+                    0.0
+                } else {
+                    let tan_phi = pf.clamp(-1.0, 1.0).acos().tan();
+                    expected_real_kw * tan_phi * reactive_base
+                };
+                let expected_active_w = hares_physics::units::power_kw_to_w(expected_real_kw);
+
+                assert_eq!(
+                    ports.electrical.load_power_w.to_bits(),
+                    expected_active_w.to_bits(),
+                    "{class} at v={voltage_pu}: active power diverged from legacy \
+                     ({} vs {expected_active_w})",
+                    ports.electrical.load_power_w
+                );
+                assert_eq!(
+                    ports.electrical.reactive_power_kvar.to_bits(),
+                    expected_reactive.to_bits(),
+                    "{class} at v={voltage_pu}: reactive power diverged from legacy \
+                     ({} vs {expected_reactive})",
+                    ports.electrical.reactive_power_kvar
+                );
+            }
+        }
     }
 
     #[test]
@@ -2945,18 +2627,13 @@ mod tests {
         // Iq=0.8 (pure current reactive term), pq=0.2, zq=0, pf=0.9 at nominal voltage v=1.0.
         // reactive_base = zq*v² + iq*v + pq = 0.0 + 0.8*1.0 + 0.2 = 1.0
         // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive_kvar = real_kw * 0.4843 * reactive_base
-        let config = config_with_extras(
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[2.0],
-            &[
-                (super::KEY_ZIP_ZQ, 0.0.into()),
-                (super::KEY_ZIP_IQ, 0.8.into()),
-                (super::KEY_ZIP_PQ, 0.2.into()),
-                (super::KEY_ZIP_PF, 0.9.into()),
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(ZipLoad::reactive_only(0.0, 0.8, 0.2, 0.9));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
@@ -3066,18 +2743,14 @@ mod tests {
     // --- Type-specific ZIP coefficient default tests (T-0006) ---
 
     #[test]
-    fn user_zip_z_overrides_type_specific_default() {
-        let config = config_with_extras(
+    fn zip_sidecar_overrides_type_specific_default() {
+        let mut config = config_with_extras(
             "s",
             "Lighting",
             &[2.0],
-            &[
-                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
-                (KEY_ZIP_Z, 0.3.into()),
-                (KEY_ZIP_I, 0.3.into()),
-                (KEY_ZIP_P, 0.4.into()),
-            ],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
+        config.zip = Some(real_only_zip(0.3, 0.3, 0.4));
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.95;
@@ -3092,24 +2765,18 @@ mod tests {
         let expected_w = 2000.0 * expected_multiplier;
         assert!(
             (ports.electrical.net_active_w() - expected_w).abs() < 10.0,
-            "user override z=0.3,i=0.3,p=0.4 should override type-specific Lighting defaults"
+            "sidecar zp=0.3,ip=0.3,pp=0.4 should override type-specific Lighting defaults"
         );
-        assert_eq!(eq.zip.z, 0.3);
-        assert_eq!(eq.zip.i, 0.3);
-        assert_eq!(eq.zip.p_coeff, 0.4);
+        assert_eq!(eq.zip.zp, 0.3);
+        assert_eq!(eq.zip.ip, 0.3);
+        assert_eq!(eq.zip.pp, 0.4);
     }
 
     #[test]
     fn unrecognized_class_falls_back_to_zip_default() {
         let config = config_with_schedule("s", "TV", &[1.0]);
         let eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::PLUG_LOADS, "TV");
-        assert_eq!(eq.zip.z, 0.0);
-        assert_eq!(eq.zip.i, 0.0);
-        assert_eq!(eq.zip.p_coeff, 1.0);
-        assert_eq!(eq.zip.pf, 0.0);
-        assert_eq!(eq.zip.zq, 0.0);
-        assert_eq!(eq.zip.iq, 0.0);
-        assert_eq!(eq.zip.pq, 1.0);
+        assert_eq!(eq.zip, ZipLoad::constant_power());
     }
 
     #[test]

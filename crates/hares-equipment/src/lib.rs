@@ -72,7 +72,9 @@ pub enum ActorSeed {
 }
 
 pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
-pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation};
+pub use config::{
+    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation, resolve_zip,
+};
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
 pub use generator::GeneratorConfig;

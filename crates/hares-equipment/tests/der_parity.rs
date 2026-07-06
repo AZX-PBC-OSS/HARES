@@ -125,6 +125,8 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         },
     )

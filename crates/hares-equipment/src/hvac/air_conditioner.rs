@@ -114,6 +114,12 @@ pub(super) struct CoolingCore {
     dr_level: DRLevel,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// folded pf 0.96 on the total unit electric draw (compressor + fan +
+    /// crankcase). OCHRE lab values are whole-unit; per-component PFs are a
+    /// future refinement hook. Real power stays bit-identical; Q comes from
+    /// `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -492,7 +498,8 @@ impl CoolingCore {
                     | CoreCapabilities::THERMAL
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
-                    | CoreCapabilities::HAS_COP,
+                    | CoreCapabilities::HAS_COP
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
@@ -537,6 +544,7 @@ impl CoolingCore {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             zone_id_explicit,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -771,6 +779,7 @@ impl CoolingCore {
         self.crankcase_heater_on = false;
         self.crankcase_heater_kw = 0.0;
         self.last_cooling_rtf = 0.0;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         Ok(())
@@ -992,10 +1001,14 @@ impl CoolingCore {
 
         let electric_kw =
             (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.config.space_fraction;
-        if electric_kw > 0.0 {
+        // Rule R1: Q from the already-computed real power (folded unit pf on
+        // compressor + fan + crankcase). OCHRE lab values are whole-unit;
+        // per-component PFs are a future refinement hook.
+        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
+        if electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -1007,6 +1020,8 @@ impl CoolingCore {
         let gross_cooling_w = sensible_cooling_w + latent_cooling_w;
         let duct_loss_w = gross_cooling_w * (1.0 - dse);
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry
             .set(tk::SENSIBLE_COOLING_W, sensible_cooling_w * dse);
         self.telemetry
@@ -1128,7 +1143,7 @@ impl CoolingCore {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: Some(
                     -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse,
@@ -2890,6 +2905,153 @@ mod tests {
             ports.thermal[0].sensible_gain_w < 0.0,
             "cooling thermal port must remove sensible heat, got {}",
             ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    /// Reactive-power contract for the central AC: folded pf 0.96 on the total
+    /// unit electric draw (compressor + fan + crankcase), Q/P = tan(acos(0.96))
+    /// at nominal voltage, REACTIVE declared, and port/CoreOutput/telemetry
+    /// agree bit-for-bit. Off ⇒ Q == 0.
+    #[test]
+    fn cooling_reactive_power_pf_and_channels_agree() {
+        let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+        let environment = env(30.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "central AC must declare REACTIVE"
+        );
+        assert_eq!(eq.core.zip.pf, 0.96, "class default folded pf");
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "cooling call must draw real power");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.96_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
+        );
+        assert_eq!(
+            eq.core_output()
+                .flows
+                .reactive_power_kvar
+                .expect("Some")
+                .to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .expect("telemetry Q")
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+
+        // Off case: zone in the deadband (21 °C, between heating 18+1 and
+        // cooling 24−1) ⇒ no cooling call, no crankcase (warm OAT) ⇒ Q == 0.
+        let off_env = env(21.0, 0.009, 18.0, 20.0);
+        eq.update_control(&off_env);
+        let mut off_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        assert_eq!(
+            off_ports.electrical.reactive_power_kvar, 0.0,
+            "off ⇒ Q == 0"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off ⇒ CoreOutput Q == Some(0.0)"
+        );
+    }
+
+    /// Rule R1 regression: the power factor affects only Q. Twin instances —
+    /// one with the class pf 0.96, one with a constant-power sidecar override
+    /// (pf 0 sentinel) — must produce bit-identical real power at every step
+    /// and voltage.
+    #[test]
+    fn cooling_real_power_bit_identical_with_and_without_reactive_zip() {
+        let config_pf = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+        let mut config_nopf = config_pf.clone();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = AirConditioner::new(config_pf.clone());
+        let mut eq_nopf = AirConditioner::new(config_nopf.clone());
+        let mut environment = env(30.0, 0.010, 18.0, 35.0);
+        eq_pf.init(&config_pf, &environment).unwrap();
+        eq_nopf.init(&config_nopf, &environment).unwrap();
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            environment.grid.voltage_pu = *v;
+            eq_pf.update_control(&environment);
+            eq_nopf.update_control(&environment);
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf
+                .step(&environment, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&environment, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                eq_pf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                eq_nopf
+                    .telemetry()
+                    .get(tk::ELECTRIC_KW)
+                    .expect("kW")
+                    .to_bits(),
+                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            environment.current_time += ChronoDuration::minutes(1);
+        }
+        assert!(
+            any_reactive,
+            "the pf 0.96 twin must produce reactive power while cooling"
         );
     }
 

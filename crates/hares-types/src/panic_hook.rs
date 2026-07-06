@@ -254,11 +254,27 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
 mod tests {
     use super::*;
     use std::panic::{self, AssertUnwindSafe};
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes tests that install or inspect the process-global panic hook.
+    ///
+    /// The panic hook is process-wide, so running multiple hook tests in parallel
+    /// causes them to observe or overwrite each other's hook state. This mutex keeps
+    /// those tests mutually exclusive. It is poison-tolerant: if a previous test
+    /// panicked while holding the lock, we recover the guard so the suite can continue.
+    static HOOK_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn hook_test_lock() -> MutexGuard<'static, ()> {
+        HOOK_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     // --- unit: hook capture and restore ---
 
     #[test]
     fn hook_captures_file_and_line_for_panic_macro() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -286,6 +302,7 @@ mod tests {
 
     #[test]
     fn hook_captures_file_and_line_for_assert_failure() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -310,6 +327,7 @@ mod tests {
 
     #[test]
     fn hook_is_restored_after_guard_drops() {
+        let _lock = hook_test_lock();
         // Record the state before we install
         let before = panic::take_hook();
         panic::set_hook(before); // put it back
@@ -324,6 +342,7 @@ mod tests {
 
     #[test]
     fn guard_constructs_cleanly_in_child_thread() {
+        let _lock = hook_test_lock();
         // Run in a child thread to isolate from other test hooks.
         let outcome = std::thread::spawn(PanicHookGuard::new).join();
         assert!(
@@ -334,6 +353,7 @@ mod tests {
 
     #[test]
     fn panic_payload_still_readable_when_hook_not_installed() {
+        let _lock = hook_test_lock();
         // Simulate a panic *without* the hook installed.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             panic!("raw message without hook");
@@ -356,6 +376,7 @@ mod tests {
 
     #[test]
     fn owned_string_payload_is_handled() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             panic!("{}", "owned string result");
@@ -370,6 +391,7 @@ mod tests {
 
     #[test]
     fn hook_works_across_multiple_panics_in_sequence() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         // First panic
@@ -387,6 +409,7 @@ mod tests {
 
     #[test]
     fn take_panic_info_clears_after_read() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         // Trigger a panic
@@ -400,6 +423,7 @@ mod tests {
 
     #[test]
     fn thread_local_isolation_each_thread_has_own_panic_info() {
+        let _lock = hook_test_lock();
         let t1 = std::thread::spawn(|| {
             let _guard = PanicHookGuard::new();
             let r = panic::catch_unwind(AssertUnwindSafe(|| panic!("t1 panic")));
@@ -421,6 +445,7 @@ mod tests {
 
     #[test]
     fn hook_captures_file_and_line_for_unwrap_on_none() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(
@@ -449,6 +474,7 @@ mod tests {
 
     #[test]
     fn hook_captures_file_and_line_for_expect_on_err() {
+        let _lock = hook_test_lock();
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(

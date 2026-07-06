@@ -40,6 +40,7 @@ pub struct StepDiagnostics {
     pub thermal_gains_w: Vec<(ZoneId, f64)>,
     pub thermal_latent_w: Vec<(ZoneId, f64)>,
     pub electrical_net_kw: f64,
+    pub electrical_net_kvar: f64,
     pub equipment: Vec<EquipmentDiag>,
     /// Per-equipment sensible gain contributions to each zone.
     pub equipment_sensible_w: Vec<(String, ZoneId, f64)>,
@@ -81,6 +82,7 @@ pub struct EquipmentDiag {
     pub zone_id: Option<ZoneId>,
     pub mode: f64,
     pub electric_kw: f64,
+    pub reactive_kvar: f64,
     pub sensible_gain_w: f64,
 }
 
@@ -97,6 +99,7 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
         cols.push(format!("zone{}_latent_gain_w", i + 1));
     }
     cols.push("electrical_net_kw".to_string());
+    cols.push("electrical_net_kvar".to_string());
     cols.push("port_radiant_w".to_string());
     cols.push("port_convective_w".to_string());
     cols.push("window_solar_w".to_string());
@@ -165,6 +168,11 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
     }
     vals.push(if d.electrical_net_kw.is_finite() {
         format!("{:.4}", d.electrical_net_kw)
+    } else {
+        String::new()
+    });
+    vals.push(if d.electrical_net_kvar.is_finite() {
+        format!("{:.4}", d.electrical_net_kvar)
     } else {
         String::new()
     });
@@ -327,6 +335,7 @@ pub fn capture(
         .collect();
     let outdoor_temp_c = env.weather.outdoor_temp_c;
     let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
+    let electrical_net_kvar = ports.electrical.reactive_power_kvar;
 
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
@@ -373,6 +382,14 @@ pub fn capture(
                 step = step,
                 field = "electrical_net_kw",
                 value = electrical_net_kw,
+                "NaN/Inf in diagnostic capture input"
+            );
+        }
+        if !electrical_net_kvar.is_finite() {
+            tracing::error!(
+                step = step,
+                field = "electrical_net_kvar",
+                value = electrical_net_kvar,
                 "NaN/Inf in diagnostic capture input"
             );
         }
@@ -436,6 +453,7 @@ pub fn capture(
         thermal_gains_w,
         thermal_latent_w,
         electrical_net_kw,
+        electrical_net_kvar,
         equipment: Vec::new(),
         equipment_sensible_w: Vec::new(),
         envelope,
@@ -1012,6 +1030,7 @@ mod tests {
             "zone1_thermal_gain_w",
             "zone1_latent_gain_w",
             "electrical_net_kw",
+            "electrical_net_kvar",
             "port_radiant_w",
             "port_convective_w",
             "window_solar_w",
@@ -1076,6 +1095,7 @@ mod tests {
             thermal_gains_w: vec![],  // missing — should default to 0.0
             thermal_latent_w: vec![], // missing
             electrical_net_kw: 0.5,
+            electrical_net_kvar: 0.1,
             equipment: vec![],
             equipment_sensible_w: vec![],
             envelope: None, // nullable envelope
@@ -1127,7 +1147,13 @@ mod tests {
             electrical: hares_types::ElectricalSummary::default(),
         };
 
-        let ports = PortSlots::default();
+        let mut ports = PortSlots::default();
+        ports
+            .accumulate(&hares_types::PortContribution::Electrical {
+                active_power_w: 1000.0,
+                reactive_power_kvar: 0.5,
+            })
+            .unwrap();
         let diag = capture(1, &env, &ports, None);
 
         assert_eq!(diag.step, 1);
@@ -1135,5 +1161,6 @@ mod tests {
         assert_eq!(diag.zone_temps_c.len(), 1);
         assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
         assert!((diag.zone_temps_c[0].1 - 18.0).abs() < 1e-9);
+        assert!((diag.electrical_net_kvar - 0.5).abs() < 1e-9);
     }
 }

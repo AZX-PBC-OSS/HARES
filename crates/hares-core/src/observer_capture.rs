@@ -137,6 +137,7 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
                 delta_flow_kg_s: delta_flow,
                 supply_temp_c,
                 return_temp_c,
+                direction: a.direction,
             })
         })
         .collect();
@@ -185,6 +186,7 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
             mean_supply_temp_c: f.mean_supply_temp_c,
             mean_return_temp_c: f.mean_return_temp_c,
             total_thermal_power_w: f.total_thermal_power_w,
+            direction: f.direction,
         })
         .collect();
 
@@ -251,8 +253,8 @@ pub(crate) fn capture_custom_solvers(solvers: &[Box<dyn DomainSolver>]) -> Custo
 mod tests {
     use super::*;
     use hares_types::{
-        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, LoopId,
-        PortSlots, ThermalAccumulator, ZoneId,
+        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType,
+        HeatTransferDirection, LoopId, PortSlots, ThermalAccumulator, ZoneId,
     };
 
     fn approx_eq(left: f64, right: f64) {
@@ -397,6 +399,7 @@ mod tests {
                 mean_supply_temp_c: 40.0,
                 mean_return_temp_c: 30.0,
                 total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
             }],
             ..Default::default()
         };
@@ -412,6 +415,7 @@ mod tests {
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 35.0,
                 total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
             }],
             ..Default::default()
         };
@@ -436,6 +440,7 @@ mod tests {
                 mean_supply_temp_c: 50.0,
                 mean_return_temp_c: 40.0,
                 total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
             }],
             ..Default::default()
         };
@@ -596,6 +601,51 @@ mod tests {
         assert_eq!(capture.solvers[0].state, vec![1.0, 2.0, 3.0]);
         assert_eq!(capture.solvers[1].domain_id, DomainId(99));
         assert!(capture.solvers[1].state.is_empty());
+    }
+
+    #[test]
+    fn diff_ports_reactive_emitting_equipment_shows_q_in_contribution() {
+        let before = PortSlots {
+            electrical: ElectricalAccumulator {
+                load_power_w: 5000.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let after = PortSlots {
+            electrical: ElectricalAccumulator {
+                load_power_w: 5000.0,
+                reactive_power_kvar: 3.23,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let contrib = diff_ports(&before, &after);
+        approx_eq(contrib.electrical_load_kw, 0.0);
+        approx_eq(contrib.electrical_gen_kw, 0.0);
+        approx_eq(contrib.electrical_reactive_kvar, 3.23);
+    }
+
+    #[test]
+    fn diff_ports_reactive_supplying_equipment_shows_negative_q() {
+        let before = PortSlots {
+            electrical: ElectricalAccumulator {
+                generation_power_w: -2000.0,
+                reactive_power_kvar: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let after = PortSlots {
+            electrical: ElectricalAccumulator {
+                generation_power_w: -2000.0,
+                reactive_power_kvar: -1.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let contrib = diff_ports(&before, &after);
+        approx_eq(contrib.electrical_reactive_kvar, -1.5);
     }
 
     #[test]

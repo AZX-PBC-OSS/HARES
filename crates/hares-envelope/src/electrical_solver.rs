@@ -30,7 +30,7 @@ const VOLTAGE_PU_MIN: f64 = 0.9;
 const VOLTAGE_PU_MAX: f64 = 1.1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZipCoefficients {
+pub struct SolverZipCoefficients {
     pub z: f64,
     pub i: f64,
     pub p: f64,
@@ -48,7 +48,7 @@ pub enum ElectricalSolverError {
 
 pub type Result<T> = std::result::Result<T, ElectricalSolverError>;
 
-impl ZipCoefficients {
+impl SolverZipCoefficients {
     pub fn new(z: f64, i: f64, p: f64) -> Result<Self> {
         if z < 0.0 || i < 0.0 || p < 0.0 {
             return Err(ElectricalSolverError::NegativeZipCoefficient { z, i, p });
@@ -63,14 +63,14 @@ impl ZipCoefficients {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElectricalSolverConfig {
-    pub zip: ZipCoefficients,
+    pub zip: SolverZipCoefficients,
     pub nominal_voltage_pu: f64,
 }
 
 impl Default for ElectricalSolverConfig {
     fn default() -> Self {
         Self {
-            zip: ZipCoefficients {
+            zip: SolverZipCoefficients {
                 z: 0.0,
                 i: 0.0,
                 p: 1.0,
@@ -202,7 +202,9 @@ mod tests {
         ZoneState,
     };
 
-    use crate::electrical_solver::{ElectricalSolver, ElectricalSolverConfig, ZipCoefficients};
+    use crate::electrical_solver::{
+        ElectricalSolver, ElectricalSolverConfig, SolverZipCoefficients,
+    };
 
     fn env_with_voltage(v: f64) -> EnvironmentState {
         EnvironmentState {
@@ -284,7 +286,7 @@ mod tests {
 
     #[test]
     fn zip_correction_matches_reference_formula() {
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn generation_is_not_zip_scaled() {
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -364,7 +366,7 @@ mod tests {
         // With the default (raw) comparison, this would produce a false-positive
         // residual of p_load * (scale - 1). The corrected comparison adjusts
         // port-side loads by the same scale factor.
-        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let zip = SolverZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -398,7 +400,7 @@ mod tests {
         // Regression test: runs the solver with a non-default ZIP config at
         // non-nominal voltage, then verifies the corrected invariant check
         // (ZIP-adjusted port vs ZIP-adjusted grid) produces a near-zero residual.
-        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let zip = SolverZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -441,7 +443,7 @@ mod tests {
         // IEEE T-PWRS 8(2):472-482
         // General residential ZIP: Z=0.2, I=0.2, P=0.6
         // At V=0.95 pu: scale = 0.2*0.9025 + 0.2*0.95 + 0.6 = 0.97050
-        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let zip = SolverZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -471,7 +473,7 @@ mod tests {
         // with Z=0.5, I=0.3, P=0.2, V=0.95
         // scale = 0.5*0.9025 + 0.3*0.95 + 0.2 = 0.93625
         // 10kW load → 9.3625 kW adjusted, plus -3kW generation
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -504,9 +506,9 @@ mod tests {
 
     #[test]
     fn zip_coefficients_validate_sum_and_sign() {
-        let bad_sum = ZipCoefficients::new(0.5, 0.3, 0.3);
+        let bad_sum = SolverZipCoefficients::new(0.5, 0.3, 0.3);
         assert!(bad_sum.is_err());
-        let bad_sign = ZipCoefficients::new(-0.1, 0.6, 0.5);
+        let bad_sign = SolverZipCoefficients::new(-0.1, 0.6, 0.5);
         assert!(bad_sign.is_err());
     }
 
@@ -514,7 +516,7 @@ mod tests {
     fn zip_load_scale_matches_inline_formula() {
         // Verify the public method returns the same value as the inline
         // computation in resolve().
-        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let zip = SolverZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
         let solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -535,7 +537,7 @@ mod tests {
     }
 
     /// Helper: run solver with given voltage and ZIP config, return net_active_kw.
-    fn run_with_voltage(zip: ZipCoefficients, voltage_pu: f64, load_w: f64) -> f64 {
+    fn run_with_voltage(zip: SolverZipCoefficients, voltage_pu: f64, load_w: f64) -> f64 {
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,
@@ -556,7 +558,7 @@ mod tests {
     #[test]
     fn test_voltage_clamping() {
         // ZIP: Z=0.5, I=0.3, P=0.2 — voltage-sensitive so clamping is visible.
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let load_w = 10000.0;
 
         // V=0.5 (below range) → clamped to 0.9.
@@ -583,7 +585,7 @@ mod tests {
         // the load corresponding to the clamped lower bound, not the raw
         // V=0 result. With Z=0.5, I=0.3, P=0.2, V=0 raw gives scale=0.2
         // (2 kW for a 10 kW load), which dramatically understates demand.
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let load_w = 10000.0;
 
         let result_zero = run_with_voltage(zip, 0.0, load_w);
@@ -606,7 +608,7 @@ mod tests {
         // Ensures the invariant checker and observer (which call
         // zip_load_scale directly) get the same scale as resolve()
         // when facing out-of-range voltages.
-        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
             nominal_voltage_pu: 1.0,

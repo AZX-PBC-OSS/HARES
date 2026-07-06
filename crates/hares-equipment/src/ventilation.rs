@@ -18,6 +18,7 @@ use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
 use hares_physics::units::power_w_to_kw;
+use hares_types::zip::ZipLoad;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -267,6 +268,9 @@ pub struct Ventilation {
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
     core_output: CoreOutput,
+    /// Rule R1 reactive-only ZIP: real power stays bit-identical;
+    /// Q comes from ZipLoad::reactive_kvar. Ventilation fan pf 0.87.
+    zip: ZipLoad,
 
     ventilation_type: VentilationType,
     zone_id: ZoneId,
@@ -346,7 +350,9 @@ impl Ventilation {
             control_capabilities: ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE
                 | ControlCapabilities::LOAD_FRACTION,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
+                | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
             zone_type: None,
         };
@@ -361,6 +367,7 @@ impl Ventilation {
             ports,
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
+            zip: ZipLoad::constant_power(),
             ventilation_type,
             zone_id,
             // Default type is HRV (balanced): pre-init split is 25 W / 25 W.
@@ -422,6 +429,7 @@ impl Ventilation {
     fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let c = config.require_typed::<VentilationConfig>("Ventilation")?;
         c.validate()?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.ventilation_type = parse_ventilation_type(c.ventilation_type.as_deref())?;
         self.descriptor.equipment_type = Cow::Borrowed(match self.ventilation_type {
@@ -545,6 +553,7 @@ impl Equipment for Ventilation {
 
         if !is_running {
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
             self.telemetry.set(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
@@ -556,7 +565,7 @@ impl Equipment for Ventilation {
             self.core_output = CoreOutput {
                 flows: CoreFlows {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: None,
+                    reactive_power_kvar: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -578,6 +587,7 @@ impl Equipment for Ventilation {
 
         if effective_flow_rate_m3_s <= 0.0 {
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
             self.telemetry.set(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
@@ -589,7 +599,7 @@ impl Equipment for Ventilation {
             self.core_output = CoreOutput {
                 flows: CoreFlows {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: None,
+                    reactive_power_kvar: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -680,11 +690,12 @@ impl Equipment for Ventilation {
 
         // Fan electrical power [kW]
         let fan_kw = power_w_to_kw(effective_fan_power_w);
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: effective_fan_power_w,
-            reactive_power_kvar: 0.0,
+            reactive_power_kvar,
         })?;
 
         // Ventilation thermal load is handled by the envelope solver's
@@ -693,6 +704,8 @@ impl Equipment for Ventilation {
 
         // Telemetry
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::FAN_POWER_W, effective_fan_power_w);
         self.telemetry
             .set(tk::VENT_SUPPLY_FAN_POWER_W, effective_supply_fan_power_w);
@@ -708,7 +721,7 @@ impl Equipment for Ventilation {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -774,7 +787,7 @@ impl Equipment for Ventilation {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -827,8 +840,9 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(8);
+    let mut t = Telemetry::with_capacity(9);
     t.insert(tk::ELECTRIC_KW, 0.0);
+    t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     t.insert(tk::FAN_POWER_W, 0.0);
     t.insert(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
     t.insert(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
@@ -845,6 +859,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electrical power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::FAN_POWER_W.to_string(),
@@ -1921,6 +1940,172 @@ mod tests {
         assert!(
             has_thermal_port_for_zone_5,
             "ventilation ports should include thermal port for resolved ZoneId(5)"
+        );
+    }
+
+    #[test]
+    fn reactive_power_blended_pf_and_channels_agree() {
+        let cfg = hrv_config();
+        let mut eq = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        eq.init(&cfg, &e).expect("init");
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        let pf = 0.87_f64;
+        assert_eq!(eq.zip.pf, pf);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let p_kw = ports.electrical.net_active_w() / 1000.0;
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * pf.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos({pf})): {q} vs {expected}"
+        );
+
+        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        assert_eq!(
+            co_q.to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must match port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .unwrap()
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must match port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn reactive_power_zero_when_off() {
+        let cfg = hrv_config();
+        let mut eq = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        eq.init(&cfg, &e).expect("init");
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .expect("mode override off");
+
+        let mut ports = PortSlots::default();
+        eq.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off equipment must report Some(0.0)"
+        );
+    }
+
+    #[test]
+    fn real_power_bit_identical_with_and_without_reactive_zip() {
+        let cfg_pf = hrv_config();
+        let mut cfg_nopf = hrv_config();
+        cfg_nopf.zip = Some(ZipLoad::constant_power());
+
+        let e = env(5.0, 20.0);
+        let mut eq_pf = Ventilation::new(cfg_pf.clone());
+        let mut eq_nopf = Ventilation::new(cfg_nopf.clone());
+        eq_pf.init(&cfg_pf, &e).expect("init pf");
+        eq_nopf.init(&cfg_nopf, &e).expect("init no-pf");
+
+        assert!(
+            eq_pf
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            let mut env_v = env(5.0, 20.0);
+            env_v.grid.voltage_pu = *v;
+            let mut ports_pf = PortSlots::default();
+            let mut ports_nopf = PortSlots::default();
+            eq_pf
+                .step(&env_v, Duration::from_secs(300), &mut ports_pf)
+                .expect("step pf");
+            eq_nopf
+                .step(&env_v, Duration::from_secs(300), &mut ports_nopf)
+                .expect("step no-pf");
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "no-pf twin must produce zero Q"
+            );
+        }
+        assert!(any_reactive, "the pf 0.87 twin must produce reactive power");
+    }
+
+    #[test]
+    fn ventilation_and_scheduled_load_fan_same_reactive_power() {
+        let e = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 5.0,
+                outdoor_humidity_ratio: 0.003,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC")
+                .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::TimeDelta::minutes(5),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+
+        let cfg = hrv_config();
+        let mut vent = Ventilation::new(cfg.clone());
+        vent.init(&cfg, &e).expect("init vent");
+
+        let mut ports_vent = PortSlots::default();
+        vent.step(&e, Duration::from_secs(300), &mut ports_vent)
+            .expect("step vent");
+
+        let p_vent = ports_vent.electrical.net_active_w() / 1000.0;
+        let q_vent = ports_vent.electrical.reactive_power_kvar;
+
+        let pf = 0.87_f64;
+        let expected_q = p_vent * pf.acos().tan();
+        assert!(
+            (q_vent - expected_q).abs() < 1e-9,
+            "ventilation Q/P must equal tan(acos({pf}))"
         );
     }
 }

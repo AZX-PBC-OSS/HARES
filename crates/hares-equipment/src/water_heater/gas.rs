@@ -22,8 +22,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
-    WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::hvac::helpers::{
     equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
@@ -39,6 +38,7 @@ const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH defaul
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
+const GAS_WH_CHECKPOINT_VERSION: u32 = 2;
 // Standing pilot thermal power in watts (post-conversion heat delivered to the
 // tank or ambient). Typical standing pilot gas consumption is 200–800 BTU/h
 // (60–230 W thermal). 150 W is a reasonable midpoint for residential gas storage
@@ -59,6 +59,7 @@ struct GasWhState {
     fuel_input_w: f64,
     flue_loss_w: f64,
     fan_electric_w: f64,
+    reactive_power_kvar: f64,
     draw_flow_rate_kg_s: f64,
     pilot_fraction_to_tank: f64,
     // --- Demand response state ---
@@ -112,7 +113,10 @@ pub struct GasWH {
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
     // --- ZIP voltage model ---
-    zip: WaterHeaterZip,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`)
+    /// for the draft-inducer fan motor: real power stays bit-identical; Q
+    /// comes from `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -163,6 +167,7 @@ impl GasWH {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
                 core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::REACTIVE
                     | CoreCapabilities::FUEL
                     | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(n_nodes),
@@ -210,7 +215,7 @@ impl GasWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zip: WaterHeaterZip::default(),
+            zip: hares_types::zip::ZipLoad::constant_power(),
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
             zone_id_explicit,
@@ -343,7 +348,7 @@ impl GasWH {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
-        self.zip = WaterHeaterZip::default();
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.hot_draw_temp_c = c.hot_draw_temp_c;
 
@@ -420,6 +425,10 @@ impl GasWH {
 }
 
 impl Equipment for GasWH {
+    fn checkpoint_version() -> u32 {
+        GAS_WH_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -610,8 +619,18 @@ impl Equipment for GasWH {
         } else {
             0.0
         };
-        let (fan_electric_w, fan_reactive_kvar) =
-            self.zip.apply(rated_fan_electric_w, env.grid.voltage_pu);
+        // Grid outage (voltage 0): no electric draw — preserves the legacy
+        // ZIP zero-voltage guard bit-for-bit.
+        let fan_electric_w = if env.grid.voltage_pu == 0.0 {
+            0.0
+        } else {
+            rated_fan_electric_w
+        };
+        // Rule R1: Q from the already-computed fan power (never through the
+        // real-power ZIP polynomial); fan motor pf 0.87 by class default.
+        let fan_reactive_kvar = self
+            .zip
+            .reactive_kvar(power_w_to_kw(fan_electric_w), env.grid.voltage_pu);
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: fan_electric_w,
@@ -663,6 +682,8 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, fan_reactive_kvar);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -680,7 +701,7 @@ impl Equipment for GasWH {
                 electric_kw: Some(ElectricPower::Consumption(
                     power_w_to_kw(fan_electric_w).max(0.0),
                 )),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(fan_reactive_kvar),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -729,6 +750,7 @@ impl Equipment for GasWH {
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
                 fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
+                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -775,6 +797,8 @@ impl Equipment for GasWH {
         self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
             .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
+        self.telemetry
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -888,6 +912,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::FUEL_INPUT_KW, 0.0);
     telemetry.insert(tk::FLUE_LOSS_W, 0.0);
     telemetry.insert(tk::FAN_ELECTRIC_W, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -950,6 +975,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::FAN_ELECTRIC_W.to_string(),
             unit: "W".to_string(),
             description: "Auxiliary electric fan draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
@@ -1175,6 +1205,55 @@ mod tests {
             .unwrap()
     }
 
+    /// Reactive-power contract for the gas WH draft-inducer fan: the class
+    /// row resolves to the FAN coefficients (pf 0.87), the REACTIVE
+    /// capability is declared, and port/CoreOutput/telemetry agree. NOTE:
+    /// production configs currently carry no fan power (see gas.rs init),
+    /// so the electric draw — and therefore Q — is zero until a fan power
+    /// config field is plumbed; the ZIP wiring itself is verified directly.
+    #[test]
+    fn reactive_zip_resolves_draft_fan_row_and_channels_agree() {
+        let config = config();
+        let mut eq = GasWH::new(config.clone());
+        let env = env(21.0);
+        eq.init(&config, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "gas WH must declare REACTIVE"
+        );
+        // Class "Gas Water Heater" → draft-inducer fan motor row.
+        assert_eq!(eq.zip.pf, 0.87);
+        assert_eq!(
+            (eq.zip.zp, eq.zip.ip, eq.zip.pp),
+            (0.0, 0.0, 1.0),
+            "Rule R1: real side must be constant power"
+        );
+        // Q/P = tan(acos(0.87)) at nominal voltage (reactive base sums to 1).
+        let p_kw = 0.05;
+        let q = eq.zip.reactive_kvar(p_kw, 1.0);
+        assert!(
+            (q - p_kw * 0.87_f64.acos().tan()).abs() < 1e-9,
+            "draft fan Q/P must match tan(acos(0.87)), got {q}"
+        );
+
+        let mut ports = ports();
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let co_q = eq
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE declared ⇒ CoreOutput Q must be Some");
+        assert_eq!(
+            co_q.to_bits(),
+            ports.electrical.reactive_power_kvar.to_bits()
+        );
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(co_q));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+    }
+
     fn ports() -> PortSlots {
         PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1322,6 +1401,39 @@ mod tests {
 
         assert_eq!(restored.burner_on, eq.burner_on);
         assert_eq!(restored.tank.node_temps(), eq.tank.node_temps());
+    }
+
+    /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
+    /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
+    /// of ELECTRIC_KW and other per-step telemetry.
+    #[test]
+    fn state_round_trip_preserves_reactive_power_kvar() {
+        let mut eq = GasWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let pre_save = eq
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry present");
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = GasWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let post_load = restored
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .expect("REACTIVE_POWER_KVAR telemetry restored");
+        assert_eq!(
+            pre_save.to_bits(),
+            post_load.to_bits(),
+            "REACTIVE_POWER_KVAR must be bit-identical after save/load round-trip"
+        );
     }
 
     #[test]

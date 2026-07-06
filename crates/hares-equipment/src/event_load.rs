@@ -18,15 +18,15 @@ use serde::{Deserialize, Serialize};
 
 use hares_physics::units::power_kw_to_w;
 
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use crate::config::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use crate::scheduled_load::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
-use crate::scheduled_load::{ZipCoefficients, parse_zip_coefficients, zip_coefficients_from_class};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
+use hares_types::zip::ZipLoad;
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
@@ -182,7 +182,10 @@ pub struct EventBasedLoad {
     /// Length of the schedule for wrapping.
     schedule_len: usize,
 
-    zip: Option<ZipCoefficients>,
+    /// Full ZIP model (real + reactive) resolved via
+    /// [`crate::config::resolve_zip`]. `ZipLoad::constant_power()` (the
+    /// pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ZipLoad,
 }
 
 /// Multi-phase wet appliance cycle with stochastic starts.
@@ -224,7 +227,10 @@ pub struct WetAppliance {
     /// Length of the schedule for wrapping.
     schedule_len: usize,
 
-    zip: Option<ZipCoefficients>,
+    /// Full ZIP model (real + reactive) resolved via
+    /// [`crate::config::resolve_zip`]. `ZipLoad::constant_power()` (the
+    /// pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ZipLoad,
 }
 
 impl EventBasedLoad {
@@ -276,7 +282,7 @@ impl EventBasedLoad {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
-            zip: None,
+            zip: ZipLoad::constant_power(),
         }
     }
 
@@ -372,28 +378,28 @@ impl EventBasedLoad {
         voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(zip) = &self.zip {
-            let real_sum = zip.z + zip.i + zip.p_coeff;
+        {
+            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
             assert!(
                 (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
                 "EventBasedLoad '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (z={}, i={}, p_coeff={}, sum={})",
+                 (zp={}, ip={}, pp={}, sum={})",
                 self.descriptor.name,
-                zip.z,
-                zip.i,
-                zip.p_coeff,
+                self.zip.zp,
+                self.zip.ip,
+                self.zip.pp,
                 real_sum,
             );
-            if zip.pf != 0.0 {
-                let reactive_sum = zip.zq + zip.iq + zip.pq;
+            if self.zip.pf != 0.0 {
+                let reactive_sum = self.zip.zq + self.zip.iq + self.zip.pq;
                 assert!(
                     (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
                     "EventBasedLoad '{}': ZIP reactive coefficients do not sum to 1.0 \
                      (zq={}, iq={}, pq={}, sum={})",
                     self.descriptor.name,
-                    zip.zq,
-                    zip.iq,
-                    zip.pq,
+                    self.zip.zq,
+                    self.zip.iq,
+                    self.zip.pq,
                     reactive_sum,
                 );
             }
@@ -428,11 +434,7 @@ impl EventBasedLoad {
         let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
 
         let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
-            if let Some(zip) = &self.zip {
-                zip.apply(raw_electric_kw, voltage_pu)
-            } else {
-                (raw_electric_kw, 0.0)
-            }
+            self.zip.apply(raw_electric_kw, voltage_pu)
         } else {
             (0.0, 0.0)
         };
@@ -577,35 +579,31 @@ impl Equipment for EventBasedLoad {
             )));
         }
 
-        // Resolve ZIP coefficients from per-type defaults with user overrides.
+        // Resolve the canonical ZIP model (sidecar -> class defaults ->
+        // constant power) and validate the coefficient-sum invariants.
         let class_name = config.ochre_class.as_str();
-        self.zip = match zip_coefficients_from_class(class_name) {
-            Some(base) => {
-                let resolved = parse_zip_coefficients(config, base)?;
-                #[cfg(feature = "observe")]
-                tracing::debug!(
-                    equipment_type = class_name,
-                    instance = %self.descriptor.name,
-                    z = resolved.z,
-                    i = resolved.i,
-                    p_coeff = resolved.p_coeff,
-                    zq = resolved.zq,
-                    iq = resolved.iq,
-                    pq = resolved.pq,
-                    pf = resolved.pf,
-                    "resolved ZIP coefficients",
-                );
-                Some(resolved)
-            }
-            None => {
-                tracing::warn!(
-                    equipment_type = class_name,
-                    instance = %self.descriptor.name,
-                    "no type-specific ZIP coefficients; reactive power will be zero",
-                );
-                None
-            }
-        };
+        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+            tracing::warn!(
+                equipment_type = class_name,
+                instance = %self.descriptor.name,
+                "no type-specific ZIP coefficients; reactive power will be zero",
+            );
+        }
+        self.zip = crate::config::resolve_zip(config);
+        crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = class_name,
+            instance = %self.descriptor.name,
+            zp = self.zip.zp,
+            ip = self.zip.ip,
+            pp = self.zip.pp,
+            zq = self.zip.zq,
+            iq = self.zip.iq,
+            pq = self.zip.pq,
+            pf = self.zip.pf,
+            "resolved ZIP coefficients",
+        );
 
         self.month_multipliers = parse_month_multipliers(config);
 
@@ -616,7 +614,10 @@ impl Equipment for EventBasedLoad {
         };
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
-            | if self.zip.is_some() {
+            | if self.zip.pf != 0.0 {
+                // pf = 0.0 is the "no reactive ZIP configured" sentinel; any
+                // nonzero pf (including 1.0, which yields Q = 0 exactly)
+                // declares REACTIVE.
                 CoreCapabilities::REACTIVE
             } else {
                 CoreCapabilities::empty()
@@ -937,7 +938,7 @@ impl WetAppliance {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
-            zip: None,
+            zip: ZipLoad::constant_power(),
         }
     }
 
@@ -1024,28 +1025,28 @@ impl WetAppliance {
         voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(zip) = &self.zip {
-            let real_sum = zip.z + zip.i + zip.p_coeff;
+        {
+            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
             assert!(
                 (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
                 "WetAppliance '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (z={}, i={}, p_coeff={}, sum={})",
+                 (zp={}, ip={}, pp={}, sum={})",
                 self.descriptor.name,
-                zip.z,
-                zip.i,
-                zip.p_coeff,
+                self.zip.zp,
+                self.zip.ip,
+                self.zip.pp,
                 real_sum,
             );
-            if zip.pf != 0.0 {
-                let reactive_sum = zip.zq + zip.iq + zip.pq;
+            if self.zip.pf != 0.0 {
+                let reactive_sum = self.zip.zq + self.zip.iq + self.zip.pq;
                 assert!(
                     (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
                     "WetAppliance '{}': ZIP reactive coefficients do not sum to 1.0 \
                      (zq={}, iq={}, pq={}, sum={})",
                     self.descriptor.name,
-                    zip.zq,
-                    zip.iq,
-                    zip.pq,
+                    self.zip.zq,
+                    self.zip.iq,
+                    self.zip.pq,
                     reactive_sum,
                 );
             }
@@ -1075,11 +1076,7 @@ impl WetAppliance {
         let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
 
         let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
-            if let Some(zip) = &self.zip {
-                zip.apply(raw_electric_kw, voltage_pu)
-            } else {
-                (raw_electric_kw, 0.0)
-            }
+            self.zip.apply(raw_electric_kw, voltage_pu)
         } else {
             (0.0, 0.0)
         };
@@ -1234,35 +1231,31 @@ impl Equipment for WetAppliance {
             )));
         }
 
-        // Resolve ZIP coefficients from per-type defaults with user overrides.
+        // Resolve the canonical ZIP model (sidecar -> class defaults ->
+        // constant power) and validate the coefficient-sum invariants.
         let class_name = config.ochre_class.as_str();
-        self.zip = match zip_coefficients_from_class(class_name) {
-            Some(base) => {
-                let resolved = parse_zip_coefficients(config, base)?;
-                #[cfg(feature = "observe")]
-                tracing::debug!(
-                    equipment_type = class_name,
-                    instance = %self.descriptor.name,
-                    z = resolved.z,
-                    i = resolved.i,
-                    p_coeff = resolved.p_coeff,
-                    zq = resolved.zq,
-                    iq = resolved.iq,
-                    pq = resolved.pq,
-                    pf = resolved.pf,
-                    "resolved ZIP coefficients",
-                );
-                Some(resolved)
-            }
-            None => {
-                tracing::warn!(
-                    equipment_type = class_name,
-                    instance = %self.descriptor.name,
-                    "no type-specific ZIP coefficients; reactive power will be zero",
-                );
-                None
-            }
-        };
+        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+            tracing::warn!(
+                equipment_type = class_name,
+                instance = %self.descriptor.name,
+                "no type-specific ZIP coefficients; reactive power will be zero",
+            );
+        }
+        self.zip = crate::config::resolve_zip(config);
+        crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = class_name,
+            instance = %self.descriptor.name,
+            zp = self.zip.zp,
+            ip = self.zip.ip,
+            pp = self.zip.pp,
+            zq = self.zip.zq,
+            iq = self.zip.iq,
+            pq = self.zip.pq,
+            pf = self.zip.pf,
+            "resolved ZIP coefficients",
+        );
 
         self.month_multipliers = parse_month_multipliers(config);
 
@@ -1273,7 +1266,10 @@ impl Equipment for WetAppliance {
         };
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
-            | if self.zip.is_some() {
+            | if self.zip.pf != 0.0 {
+                // pf = 0.0 is the "no reactive ZIP configured" sentinel; any
+                // nonzero pf (including 1.0, which yields Q = 0 exactly)
+                // declares REACTIVE.
                 CoreCapabilities::REACTIVE
             } else {
                 CoreCapabilities::empty()
@@ -1960,7 +1956,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use super::{EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule};
+    use super::{EventBasedLoad, WetAppliance, ZipLoad, map_ochre_pdf_to_cycle_schedule};
 
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
@@ -3685,7 +3681,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         assert!(
-            eq.zip.is_some(),
+            eq.zip.pf != 0.0,
             "EventBasedLoad 'Clothes Washer' should have type-specific ZIP coefficients"
         );
 
@@ -3738,7 +3734,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         assert!(
-            eq.zip.is_some(),
+            eq.zip.pf != 0.0,
             "WetAppliance 'Clothes Washer' should have type-specific ZIP coefficients"
         );
 
@@ -3776,8 +3772,9 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
-        assert!(
-            eq.zip.is_none(),
+        assert_eq!(
+            eq.zip,
+            ZipLoad::constant_power(),
             "EventBasedLoad 'EventBasedLoad' should have no type-specific ZIP coefficients"
         );
 
@@ -3848,7 +3845,7 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env_nominal).unwrap();
         assert!(
-            eq.zip.is_some(),
+            eq.zip.pf != 0.0,
             "Clothes Washer must have ZIP coefficients"
         );
 
@@ -3898,7 +3895,7 @@ mod tests {
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         eq.init(&config, &env_nominal).unwrap();
         assert!(
-            eq.zip.is_some(),
+            eq.zip.pf != 0.0,
             "Clothes Washer WetAppliance must have ZIP coefficients"
         );
 

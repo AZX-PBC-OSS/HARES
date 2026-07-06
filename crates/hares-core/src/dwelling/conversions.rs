@@ -668,27 +668,89 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
         if let Some(ref instance_name) = spec.instance_name {
             cfg.name = instance_name.clone();
         }
+        // Typed payloads are #[serde(deny_unknown_fields)], so ZIP parameters
+        // travel in the sidecar instead of the payload. Prefer the spec's
+        // zip_params (the defaults/zip_parameters.toml lookup); keep any
+        // sidecar already present on the typed config when the spec carries
+        // none.
+        cfg.zip = spec.zip_params.or(cfg.zip);
         return cfg;
     }
 
-    let mut raw_config: HashMap<String, ConfigValue> = spec
+    let raw_config: HashMap<String, ConfigValue> = spec
         .parameters
         .iter()
         .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
         .collect();
-    if let Some(zip) = &spec.zip_params {
-        raw_config.insert("zip_z".to_string(), ConfigValue::Float(zip.zp));
-        raw_config.insert("zip_i".to_string(), ConfigValue::Float(zip.ip));
-        raw_config.insert("zip_p".to_string(), ConfigValue::Float(zip.pp));
-        raw_config.insert("zip_v0".to_string(), ConfigValue::Float(1.0));
-        raw_config.insert("zip_zq".to_string(), ConfigValue::Float(zip.zq));
-        raw_config.insert("zip_iq".to_string(), ConfigValue::Float(zip.iq));
-        raw_config.insert("zip_pq".to_string(), ConfigValue::Float(zip.pq));
-        raw_config.insert("zip_pf".to_string(), ConfigValue::Float(zip.pf));
-    }
 
     let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name).clone();
-    EquipmentConfig::raw(display_name, spec.name.clone(), raw_config)
+    let mut cfg = EquipmentConfig::raw(display_name, spec.name.clone(), raw_config);
+    // ZIP parameters travel exclusively in the sidecar for raw and typed
+    // equipment alike; `hares_equipment::resolve_zip` is the single consumer.
+    cfg.zip = spec.zip_params;
+    cfg
+}
+
+/// Merge a reserved `"zip"` override object field-wise over the effective
+/// base ZIP for one equipment instance.
+///
+/// The base is, in precedence order: `base` (the spec's `zip_params` /
+/// pre-existing sidecar), else the class-table defaults for `ochre_class`,
+/// else `ZipLoad::constant_power()`. Partial overrides such as
+/// `{"pf": 0.88}` replace only the named fields; all other fields are
+/// inherited from the base. Returns `base` unchanged when there is no
+/// override object.
+fn merge_zip_override(
+    base: Option<hares_types::zip::ZipLoad>,
+    zip_override: Option<&Value>,
+    ochre_class: &str,
+    equipment_name: &str,
+) -> Option<hares_types::zip::ZipLoad> {
+    let obj = match zip_override {
+        None => return base,
+        Some(Value::Object(obj)) => obj,
+        Some(other) => {
+            tracing::warn!(
+                equipment = equipment_name,
+                value = %other,
+                "ignoring non-object \"zip\" override (expected an object like {{\"pf\": 0.9}})"
+            );
+            return base;
+        }
+    };
+    let mut zip = base
+        .or_else(|| hares_types::zip::zip_defaults_for_class(ochre_class))
+        .unwrap_or_else(hares_types::zip::ZipLoad::constant_power);
+    for (key, value) in obj {
+        let Some(v) = value.as_f64() else {
+            tracing::warn!(
+                equipment = equipment_name,
+                key = %key,
+                value = %value,
+                "ignoring non-numeric field in \"zip\" override"
+            );
+            continue;
+        };
+        match key.as_str() {
+            "zp" => zip.zp = v,
+            "ip" => zip.ip = v,
+            "pp" => zip.pp = v,
+            "zq" => zip.zq = v,
+            "iq" => zip.iq = v,
+            "pq" => zip.pq = v,
+            "pf" => zip.pf = v,
+            "v0" => zip.v0 = v,
+            unknown => {
+                tracing::warn!(
+                    equipment = equipment_name,
+                    key = %unknown,
+                    "ignoring unknown field in \"zip\" override \
+                     (expected zp/ip/pp/zq/iq/pq/pf/v0)"
+                );
+            }
+        }
+    }
+    Some(zip)
 }
 
 pub(crate) fn merged_equipment_config(
@@ -705,6 +767,16 @@ pub(crate) fn merged_equipment_config(
     {
         let mut merged = base.clone();
         apply_equipment_overrides(&mut merged, overrides, &spec.name);
+        // Peel the reserved "zip" override object out of the merged map
+        // before typed deserialization so #[serde(deny_unknown_fields)]
+        // payloads never see it; it is merged field-wise into the sidecar.
+        let zip_override = merged.remove("zip");
+        let zip = merge_zip_override(
+            spec.zip_params.or(typed.zip),
+            zip_override.as_ref(),
+            &typed.ochre_class,
+            &spec.name,
+        );
         let display_name = spec
             .instance_name
             .clone()
@@ -719,17 +791,30 @@ pub(crate) fn merged_equipment_config(
             },
         );
         eq_cfg.setpoints_reconciled = typed.setpoints_reconciled.clone();
+        eq_cfg.zip = zip;
         return eq_cfg;
     }
 
     let mut merged = spec.parameters.clone();
     apply_equipment_overrides(&mut merged, overrides, &spec.name);
+    // Raw equipment honor the reserved "zip" override object too, for
+    // consistency with typed equipment: it is merged field-wise over the
+    // spec's zip_params base and folded back into `zip_params`, which
+    // `equipment_config_from_spec` stores in the sidecar (the only ZIP
+    // channel).
+    let zip_override = merged.remove("zip");
+    let zip_params = merge_zip_override(
+        spec.zip_params,
+        zip_override.as_ref(),
+        &spec.name,
+        &spec.name,
+    );
     let merged_spec = hares_io::EquipmentSpec {
         instance_name: spec.instance_name.clone(),
         name: spec.name.clone(),
         fuel_type: spec.fuel_type,
         parameters: merged,
-        zip_params: spec.zip_params.clone(),
+        zip_params,
         typed_config: spec.typed_config.clone(),
         system_id: spec.system_id.clone(),
         related_hvac_idref: spec.related_hvac_idref.clone(),
@@ -918,8 +1003,9 @@ mod tests {
 
     use super::{
         building_to_boundary_inputs, building_to_zone_inputs, chrono_to_std_duration,
-        duration_to_u32_secs, find_zone_idx, mass_multiplier_for_zone, merged_equipment_config,
-        resolve_exterior, zone_has_furniture_boundaries, zone_type_to_label,
+        duration_to_u32_secs, equipment_config_from_spec, find_zone_idx, mass_multiplier_for_zone,
+        merged_equipment_config, resolve_exterior, zone_has_furniture_boundaries,
+        zone_type_to_label,
     };
     use hares_types::HaresError;
 
@@ -1332,6 +1418,136 @@ mod tests {
         assert!(
             merged.setpoints_reconciled.is_none(),
             "setpoints_reconciled must be None when typed config has None"
+        );
+    }
+
+    // ── ZIP sidecar plumbing (config root fix) ─────────────────────────
+
+    /// Regression: typed specs previously DROPPED `EquipmentSpec::zip_params`
+    /// — the typed early-return in `equipment_config_from_spec` and the typed
+    /// branch of `merged_equipment_config` never copied it, so typed HVAC/WH
+    /// equipment never received ZIP/PF parameters (only the raw branch
+    /// injected `zip_*` keys).
+    #[test]
+    fn regression_typed_spec_zip_params_reach_equipment_config_sidecar() {
+        let mut spec = gas_furnace_spec();
+        let zip = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        spec.zip_params = Some(zip);
+
+        let cfg = equipment_config_from_spec(&spec);
+        assert_eq!(
+            cfg.zip,
+            Some(zip),
+            "typed early-return must carry zip_params into the sidecar"
+        );
+
+        let merged =
+            merged_equipment_config(&spec, &serde_json::Value::Object(serde_json::Map::new()));
+        assert_eq!(
+            merged.zip,
+            Some(zip),
+            "typed merged branch must carry zip_params into the sidecar"
+        );
+        // The sidecar travels outside the #[serde(deny_unknown_fields)]
+        // payload, which must still deserialize cleanly.
+        merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("typed payload must stay intact");
+    }
+
+    #[test]
+    fn zip_override_beats_defaults_for_typed_equipment_field_wise() {
+        let mut spec = gas_furnace_spec();
+        let base = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        spec.zip_params = Some(base);
+        let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
+
+        let merged = merged_equipment_config(&spec, &overrides);
+        let zip = merged.zip.expect("zip sidecar must be populated");
+        assert_eq!(zip.pf, 0.9, "override must beat the toml default");
+        // Partial-field merge: every other field inherited from the base.
+        assert_eq!((zip.zp, zip.ip, zip.pp), (base.zp, base.ip, base.pp));
+        assert_eq!((zip.zq, zip.iq, zip.pq), (base.zq, base.iq, base.pq));
+        assert_eq!(zip.v0, base.v0);
+        // The reserved "zip" key must be peeled before typed
+        // deserialization so deny_unknown_fields never sees it.
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("\"zip\" override must not reach the typed payload");
+        assert!((cfg.afue - 0.82).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zip_override_without_spec_zip_params_merges_over_class_defaults() {
+        // gas_furnace_spec() has zip_params: None; the override should merge
+        // over the class-table defaults for "Gas Furnace" (blower fan row).
+        let spec = gas_furnace_spec();
+        let class_row = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
+
+        let merged = merged_equipment_config(&spec, &overrides);
+        let zip = merged.zip.expect("zip sidecar must be populated");
+        assert_eq!(zip.pf, 0.9);
+        assert_eq!(
+            (zip.zq, zip.iq, zip.pq),
+            (class_row.zq, class_row.iq, class_row.pq),
+            "unset fields must inherit the class-table defaults"
+        );
+    }
+
+    fn raw_ashp_spec() -> hares_io::EquipmentSpec {
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: serde_json::Map::new(),
+            zip_params: hares_types::zip::zip_defaults_for_class("ASHP Heater"),
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    #[test]
+    fn zip_override_beats_defaults_for_raw_equipment_field_wise() {
+        let spec = raw_ashp_spec();
+        let base = spec.zip_params.expect("toml base");
+        let overrides = json!({"ASHP Heater": {"zip": {"pf": 0.9}}});
+
+        let merged = merged_equipment_config(&spec, &overrides);
+        // Sidecar carries the merged value.
+        let zip = merged.zip.expect("zip sidecar must be populated");
+        assert_eq!(zip.pf, 0.9, "override must beat the toml default");
+        assert_eq!((zip.zq, zip.iq, zip.pq), (base.zq, base.iq, base.pq));
+        // The reserved "zip" key must not leak into the raw parameter map.
+        assert!(
+            !merged.raw_data().expect("raw payload").contains_key("zip"),
+            "reserved \"zip\" key must be peeled from raw parameters"
+        );
+        // End-to-end through the resolver.
+        let resolved = hares_equipment::resolve_zip(&merged);
+        assert_eq!(resolved.pf, 0.9);
+        assert_eq!(resolved.zq, base.zq);
+    }
+
+    /// Raw equipment receive ZIP exclusively through the sidecar — the
+    /// legacy raw `zip_*` config-key injection is gone.
+    #[test]
+    fn raw_equipment_gets_zip_through_sidecar_only() {
+        let spec = raw_ashp_spec();
+        let base = spec.zip_params.expect("toml base");
+
+        let cfg = equipment_config_from_spec(&spec);
+        // The sidecar is the single ZIP channel.
+        assert_eq!(cfg.zip, Some(base));
+        assert_eq!(hares_equipment::resolve_zip(&cfg), base);
+        // No legacy zip_* keys anywhere in the raw payload.
+        let raw = cfg.raw_data().expect("raw payload");
+        assert!(
+            raw.keys().all(|k| !k.starts_with("zip")),
+            "raw payload must carry no zip_* keys, got: {:?}",
+            raw.keys().collect::<Vec<_>>()
         );
     }
 

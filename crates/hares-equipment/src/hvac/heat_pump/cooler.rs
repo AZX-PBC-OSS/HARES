@@ -78,7 +78,8 @@ impl HpCooler {
                     | CoreCapabilities::THERMAL
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
-                    | CoreCapabilities::HAS_COP,
+                    | CoreCapabilities::HAS_COP
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
                 zone_type: None,
             },
@@ -195,7 +196,17 @@ impl HpCooler {
             min_oat_compressor_cooling_c: Some(hp_cfg.min_oat_cooling_c),
         };
 
-        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
+        let mut cfg = EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        )?;
+        // Propagate the instance ZIP/power-factor sidecar so overrides on the
+        // original HP cooler config (e.g. a pf-0 sentinel for Rule R1 twin
+        // tests, or a user "zip" override) reach the inner AirConditioner that
+        // resolves its ZIP through the mapped "Air Conditioner" config.
+        cfg.zip = source.zip;
+        Ok(cfg)
     }
 }
 
@@ -297,12 +308,18 @@ pub struct GshpCooler {
     inner: AirConditioner,
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
+    core_output: CoreOutput,
     pump_loop_depth_m: f64,
     pump_pipe_diameter_m: f64,
     pump_flow_rate_m3_per_s: f64,
     pump_efficiency: f64,
     pump_motor_efficiency: f64,
     pump_system_head_loss_m: f64,
+    /// Rule R1 reactive-only ZIP for the ground-loop pump contribution
+    /// (resolved from the original GSHP Cooler config, pf 0.96). The
+    /// compressor/fan/crankcase reactive comes from the inner
+    /// [`AirConditioner`]; this folds the pump into the unit-total pf.
+    zip: hares_types::zip::ZipLoad,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
 }
@@ -346,18 +363,21 @@ impl GshpCooler {
                     | CoreCapabilities::THERMAL
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
-                    | CoreCapabilities::HAS_COP,
+                    | CoreCapabilities::HAS_COP
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
                 zone_type: None,
             },
             ports: inner.ports().to_vec(),
             inner,
+            core_output: CoreOutput::default(),
             pump_loop_depth_m: 60.0,
             pump_pipe_diameter_m: 0.025,
             pump_flow_rate_m3_per_s: 0.00019,
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
+            zip: hares_types::zip::ZipLoad::constant_power(),
             zone_id_explicit,
         }
     }
@@ -436,7 +456,17 @@ impl GshpCooler {
             min_oat_compressor_cooling_c: None,
         };
 
-        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
+        let mut cfg = EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        )?;
+        // Propagate the instance ZIP/power-factor sidecar so overrides on the
+        // original HP cooler config (e.g. a pf-0 sentinel for Rule R1 twin
+        // tests, or a user "zip" override) reach the inner AirConditioner that
+        // resolves its ZIP through the mapped "Air Conditioner" config.
+        cfg.zip = source.zip;
+        Ok(cfg)
     }
 
     /// Return the cooling coil's runtime fraction from the most recent step.
@@ -552,6 +582,7 @@ impl Equipment for GshpCooler {
             )),
         };
 
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         Ok(())
     }
 
@@ -597,15 +628,44 @@ impl Equipment for GshpCooler {
             0.0
         };
 
-        if pump_kw > 0.0 {
+        // Fold the ground-loop pump into the unit-total reactive power (pf 0.96
+        // on compressor + fan + crankcase + pump). The inner AirConditioner
+        // already pushed the compressor/fan/crankcase reactive and reported it
+        // in its CoreOutput; the pump contribution is folded on top so the
+        // port and CoreOutput stay consistent.
+        let pump_q = self.zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
+        if pump_kw > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(pump_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar: pump_q,
             })?;
         }
 
         // Publish pump power in telemetry.
         self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+
+        // Rebuild the CoreOutput so it includes the pump's active and reactive
+        // contribution (the inner CoreOutput covers only compressor + fan +
+        // crankcase). This keeps port and CoreOutput consistent — the
+        // debug-build validator would otherwise flag the pump delta.
+        let inner_co = self.inner.core_output().clone();
+        let inner_kw = match inner_co.flows.electric_kw {
+            Some(hares_types::ElectricPower::Consumption(kw)) => kw,
+            Some(hares_types::ElectricPower::Bidirectional(kw)) => kw,
+            _ => 0.0,
+        };
+        let inner_q = inner_co.flows.reactive_power_kvar.unwrap_or(0.0);
+        let total_kw = inner_kw + pump_kw;
+        let total_q = inner_q + pump_q;
+        // Fold the pump into the unit-total telemetry so port, CoreOutput, and
+        // telemetry agree on both active and reactive power.
+        self.inner.set_telemetry(tk::ELECTRIC_KW, total_kw);
+        self.inner.set_telemetry(tk::REACTIVE_POWER_KVAR, total_q);
+        let mut combined = inner_co;
+        combined.flows.electric_kw =
+            Some(hares_types::ElectricPower::Consumption(total_kw.max(0.0)));
+        combined.flows.reactive_power_kvar = Some(total_q);
+        self.core_output = combined;
 
         Ok(())
     }
@@ -615,7 +675,7 @@ impl Equipment for GshpCooler {
     }
 
     fn core_output(&self) -> &CoreOutput {
-        self.inner.core_output()
+        &self.core_output
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -643,12 +703,18 @@ pub struct WshpCooler {
     inner: AirConditioner,
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
+    core_output: CoreOutput,
     pump_loop_depth_m: f64,
     pump_pipe_diameter_m: f64,
     pump_flow_rate_m3_per_s: f64,
     pump_efficiency: f64,
     pump_motor_efficiency: f64,
     pump_system_head_loss_m: f64,
+    /// Rule R1 reactive-only ZIP for the water-loop pump contribution
+    /// (resolved from the original WSHP Cooler config, pf 0.96). The
+    /// compressor/fan/crankcase reactive comes from the inner
+    /// [`AirConditioner`]; this folds the pump into the unit-total pf.
+    zip: hares_types::zip::ZipLoad,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
 }
@@ -687,18 +753,21 @@ impl WshpCooler {
                     | CoreCapabilities::THERMAL
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
-                    | CoreCapabilities::HAS_COP,
+                    | CoreCapabilities::HAS_COP
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
                 zone_type: None,
             },
             ports: inner.ports().to_vec(),
             inner,
+            core_output: CoreOutput::default(),
             pump_loop_depth_m: 60.0,
             pump_pipe_diameter_m: 0.025,
             pump_flow_rate_m3_per_s: 0.00019,
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
+            zip: hares_types::zip::ZipLoad::constant_power(),
             zone_id_explicit,
         }
     }
@@ -775,7 +844,17 @@ impl WshpCooler {
             min_oat_compressor_cooling_c: None,
         };
 
-        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
+        let mut cfg = EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        )?;
+        // Propagate the instance ZIP/power-factor sidecar so overrides on the
+        // original HP cooler config (e.g. a pf-0 sentinel for Rule R1 twin
+        // tests, or a user "zip" override) reach the inner AirConditioner that
+        // resolves its ZIP through the mapped "Air Conditioner" config.
+        cfg.zip = source.zip;
+        Ok(cfg)
     }
 
     pub fn last_cooling_rtf(&self) -> f64 {
@@ -838,6 +917,7 @@ impl Equipment for WshpCooler {
             self.inner.core.source_temp = SourceTemperature::Constant(ewt);
         }
 
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         Ok(())
     }
 
@@ -867,14 +947,38 @@ impl Equipment for WshpCooler {
             0.0
         };
 
-        if pump_kw > 0.0 {
+        // Fold the water-loop pump into the unit-total reactive power (pf 0.96
+        // on compressor + fan + crankcase + pump). See GshpCooler::step for
+        // the full rationale.
+        let pump_q = self.zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
+        if pump_kw > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(pump_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar: pump_q,
             })?;
         }
 
         self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+
+        // Rebuild the CoreOutput so it includes the pump's active and reactive
+        // contribution (the inner CoreOutput covers only compressor + fan +
+        // crankcase). This keeps port and CoreOutput consistent.
+        let inner_co = self.inner.core_output().clone();
+        let inner_kw = match inner_co.flows.electric_kw {
+            Some(hares_types::ElectricPower::Consumption(kw)) => kw,
+            Some(hares_types::ElectricPower::Bidirectional(kw)) => kw,
+            _ => 0.0,
+        };
+        let inner_q = inner_co.flows.reactive_power_kvar.unwrap_or(0.0);
+        let total_kw = inner_kw + pump_kw;
+        let total_q = inner_q + pump_q;
+        self.inner.set_telemetry(tk::ELECTRIC_KW, total_kw);
+        self.inner.set_telemetry(tk::REACTIVE_POWER_KVAR, total_q);
+        let mut combined = inner_co;
+        combined.flows.electric_kw =
+            Some(hares_types::ElectricPower::Consumption(total_kw.max(0.0)));
+        combined.flows.reactive_power_kvar = Some(total_q);
+        self.core_output = combined;
 
         Ok(())
     }
@@ -884,7 +988,7 @@ impl Equipment for WshpCooler {
     }
 
     fn core_output(&self) -> &CoreOutput {
-        self.inner.core_output()
+        &self.core_output
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1736,6 +1840,226 @@ mod tests {
             (ports.electrical.net_active_w() - 50.0).abs() < 1.0,
             "crankcase heater (50 W) should be active at 5 °C OAT even when compressor is locked out, got {}",
             ports.electrical.net_active_w()
+        );
+    }
+
+    /// Reactive-power contract for the ASHP cooler (delegated to the inner
+    /// AirConditioner): folded pf 0.96 on compressor + fan + crankcase, Q/P =
+    /// tan(acos(0.96)), REACTIVE declared, port/CoreOutput/telemetry agree.
+    /// Off ⇒ Q == 0.
+    #[test]
+    fn ashp_cooler_reactive_power_pf_and_channels_agree() {
+        let cfg = base_config();
+        let mut eq = HpCooler::ashp_cooler(cfg.clone());
+        let env = cooling_env(28.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: None,
+        })
+        .unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "ASHP cooler must declare REACTIVE"
+        );
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "cooling call must draw real power");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.96_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
+        );
+        assert_eq!(
+            eq.core_output()
+                .flows
+                .reactive_power_kvar
+                .expect("Some")
+                .to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(hares_types::telemetry_keys::REACTIVE_POWER_KVAR)
+                .expect("telemetry Q")
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+
+        // Off case: zone in deadband (21 °C) ⇒ no cooling call ⇒ Q == 0.
+        let off_env = cooling_env(21.0, 20.0);
+        eq.update_control(&off_env);
+        let mut off_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        assert_eq!(
+            off_ports.electrical.reactive_power_kvar, 0.0,
+            "off ⇒ Q == 0"
+        );
+    }
+
+    /// Reactive-power contract for the GSHP cooler: the ground-loop pump is
+    /// folded into the unit-total pf 0.96 (compressor + fan + crankcase + pump),
+    /// so Q/P == tan(acos(0.96)) on the TOTAL port active power, and
+    /// port/CoreOutput/telemetry all agree on the combined value.
+    #[test]
+    fn gshp_cooler_reactive_power_folds_pump_into_unit_total() {
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_cooler".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GshpCooler::new(cfg.clone());
+        let env = cooling_env(28.0, 10.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: None,
+        })
+        .unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "GSHP cooler must declare REACTIVE"
+        );
+        assert_eq!(eq.zip.pf, 0.96, "GSHP Cooler class default pf");
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "GSHP cooling call must draw real power");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.96_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "folded unit Q/P must equal tan(acos(0.96)): q={q}, expected={expected}, p={p_kw}"
+        );
+        // Port, CoreOutput, and telemetry must all carry the combined value.
+        let co_q = eq
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("CoreOutput Q Some");
+        assert_eq!(
+            co_q.to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        let tel_q = eq
+            .telemetry()
+            .get(hares_types::telemetry_keys::REACTIVE_POWER_KVAR)
+            .expect("telemetry Q");
+        assert_eq!(
+            tel_q.to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        // CoreOutput active must also include the pump (folded unit total).
+        let co_kw = match eq.core_output().flows.electric_kw {
+            Some(hares_types::ElectricPower::Consumption(kw)) => kw,
+            other => panic!("expected Consumption, got {other:?}"),
+        };
+        assert!(
+            (co_kw - p_kw).abs() < 1e-9,
+            "CoreOutput active must equal port active (pump folded in): co={co_kw} port={p_kw}"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+    }
+
+    /// Rule R1 regression for the ASHP cooler: twin instances — one with the
+    /// class pf 0.96, one with a constant-power sidecar override — must produce
+    /// bit-identical real power at every step and voltage.
+    #[test]
+    fn ashp_cooler_real_power_bit_identical_with_and_without_reactive_zip() {
+        let config_pf = base_config();
+        let mut config_nopf = config_pf.clone();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = HpCooler::ashp_cooler(config_pf.clone());
+        let mut eq_nopf = HpCooler::ashp_cooler(config_nopf.clone());
+        let mut env = cooling_env(28.0, 35.0);
+        eq_pf.init(&config_pf, &env).unwrap();
+        eq_nopf.init(&config_nopf, &env).unwrap();
+        for eq in [&mut eq_pf, &mut eq_nopf] {
+            eq.apply_control(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(18.0),
+                cooling_setpoint_c: Some(24.0),
+                deadband_c: None,
+            })
+            .unwrap();
+        }
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            env.grid.voltage_pu = *v;
+            eq_pf.update_control(&env);
+            eq_nopf.update_control(&env);
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf
+                .step(&env, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            env.current_time += ChronoDuration::minutes(1);
+        }
+        assert!(
+            any_reactive,
+            "the pf 0.96 twin must produce reactive power while cooling"
         );
     }
 }

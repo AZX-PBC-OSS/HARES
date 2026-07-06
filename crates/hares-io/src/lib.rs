@@ -21,7 +21,7 @@ pub mod weather;
 pub use config::{ConfigError, OutputFormat, RotationPolicy, SimulationConfig};
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
-    HvacCurveSet, HvacCurveVariant, PvPanelDefaults, ZipParameters,
+    HvacCurveSet, HvacCurveVariant, PvPanelDefaults, ZipLoad,
 };
 pub use draw_profile::{
     DistributionSystem, FixtureEfficiency, ansi_resnet_daily_hot_water_l,

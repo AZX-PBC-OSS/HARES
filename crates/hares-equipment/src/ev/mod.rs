@@ -799,6 +799,11 @@ impl Equipment for Ev {
                 self.away_charge_actual_kw = 0.0;
 
                 if is_v2l_discharge || self.active_power_kw > 0.0 {
+                    // EV chargers use a power-factor-corrected (PFC) AC/DC rectifier.
+                    // The resulting reactive power is negligible (Q ≈ 0) and, crucially,
+                    // lets downstream calibrators distinguish inductive motor loads (pumps,
+                    // HVAC) from EVs by their reactive signature. We therefore keep the
+                    // electrical port purely real and do not expose REACTIVE capability.
                     ports.accumulate(&PortContribution::Electrical {
                         active_power_w: power_kw_to_w(self.active_power_kw),
                         reactive_power_kvar: 0.0,
@@ -1014,10 +1019,17 @@ impl Equipment for Ev {
         match signal {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
+                reactive_power_kvar,
                 min_soc,
                 max_soc,
-                ..
             } => {
+                if let Some(q) = reactive_power_kvar {
+                    if *q != 0.0 {
+                        return Err(HaresError::Control(
+                            "EV does not support reactive power control".to_string(),
+                        ));
+                    }
+                }
                 if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
                         "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),

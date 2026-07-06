@@ -106,6 +106,48 @@ impl InvariantChecker {
         Ok(())
     }
 
+    /// Verifies reactive power balance across the bus.
+    ///
+    /// The check asserts:
+    /// `|Q_solver − Q_ports| < max(0.001, 1e-6 · gross_reactive_flux)` [kvar]
+    ///
+    /// Unlike active power, reactive power is accumulated as one signed sum
+    /// (no load/gen split).  The gross reactive flux is therefore
+    /// `max(|q_solver|, |q_ports|)` — the larger of the two magnitudes
+    /// dominates floating-point error and avoids an abs-sum that would
+    /// double-count the same physical quantity.
+    pub fn check_reactive(&self, q_solver: f64, q_ports: f64) -> Result<(), HaresError> {
+        if !q_solver.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "reactive_balance".to_string(),
+                value: q_solver,
+                tolerance: 0.0,
+            });
+        }
+        if !q_ports.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "reactive_balance".to_string(),
+                value: q_ports,
+                tolerance: 0.0,
+            });
+        }
+        let residual = (q_solver - q_ports).abs();
+        // Gross reactive flux: max(|solver|, |ports|).  The two sides
+        // represent the same signed bus quantity, so an abs-sum would be
+        // ~2× the true gross flux.  max() is the defensible single-sided
+        // floor that still scales with system size.
+        let gross_flux = f64::max(q_solver.abs(), q_ports.abs());
+        let tolerance = f64::max(0.001, 1e-6 * gross_flux);
+        if residual >= tolerance {
+            return Err(HaresError::InvariantViolation {
+                check_name: "reactive_balance".to_string(),
+                value: residual,
+                tolerance,
+            });
+        }
+        Ok(())
+    }
+
     /// Verifies electrical power balance across the bus.
     ///
     /// The check asserts:
@@ -577,6 +619,10 @@ impl InvariantChecker {
         Ok(())
     }
 
+    pub fn check_reactive(&self, _: f64, _: f64) -> Result<(), HaresError> {
+        Ok(())
+    }
+
     pub fn check_electrical(&self, _: f64, _: &[f64]) -> Result<(), HaresError> {
         Ok(())
     }
@@ -788,6 +834,104 @@ mod tests {
         // Residual of 0.0005 kW is under floor and should pass.
         let result = checker().check_electrical(0.0, &[0.0005]);
         assert!(result.is_ok());
+    }
+
+    // ── reactive_balance ──────────────────────────────────────────────────────
+
+    #[test]
+    fn reactive_balance_passes_when_balanced() {
+        let result = checker().check_reactive(1.5, 1.5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reactive_balance_fails_when_imbalanced() {
+        let result = checker().check_reactive(2.0, 1.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "reactive_balance"
+        ));
+    }
+
+    #[test]
+    fn reactive_balance_with_negative_q_values() {
+        // Signed Q: negative = supplying vars (PV/battery).  Both sides agree.
+        let result = checker().check_reactive(-3.0, -3.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reactive_balance_fails_with_solver_negative_ports_positive() {
+        // Divergent signs: solver says -3 kvar (supplying), ports say +3 kvar
+        // (absorbing).  Residual = 6 kvar > tolerance.
+        let result = checker().check_reactive(-3.0, 3.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "reactive_balance"
+        ));
+    }
+
+    #[test]
+    fn reactive_balance_tolerance_scales_with_system_size() {
+        // 10,000 kvar system: gross_flux = 10000 → tol ≈ max(0.001, 1e-6*10000) = 0.01 kvar.
+        // 0.005 kvar residual < 0.01 → passes.
+        let result = checker().check_reactive(10000.0, 9999.995);
+        assert!(
+            result.is_ok(),
+            "0.005 kvar residual should pass for 10,000 kvar system (tolerance ≈ 0.01 kvar)"
+        );
+    }
+
+    #[test]
+    fn reactive_balance_fails_when_residual_exceeds_scaled_tolerance() {
+        // Same 10,000 kvar system → tol ≈ 0.01 kvar. 0.02 kvar residual exceeds it.
+        let result = checker().check_reactive(10000.0, 9999.98);
+        assert!(
+            result.is_err(),
+            "0.02 kvar residual should fail for 10,000 kvar system (tolerance ≈ 0.01 kvar)"
+        );
+    }
+
+    #[test]
+    fn reactive_balance_catches_small_residual_on_tiny_system() {
+        // 0.05 kvar system: tolerance floor = 0.001 kvar. 0.002 > floor → fail.
+        let result = checker().check_reactive(0.052, 0.05);
+        assert!(
+            result.is_err(),
+            "0.002 kvar residual should fail for 0.05 kvar system (tolerance floor = 0.001 kvar)"
+        );
+    }
+
+    #[test]
+    fn reactive_balance_floor_tolerance_works_near_zero() {
+        let result = checker().check_reactive(0.0, 0.0005);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reactive_balance_fails_on_nan_solver() {
+        let result = checker().check_reactive(f64::NAN, 1.5);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "reactive_balance"
+        ));
+    }
+
+    #[test]
+    fn reactive_balance_fails_on_nan_ports() {
+        let result = checker().check_reactive(1.5, f64::NAN);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "reactive_balance"
+        ));
     }
 
     // ── moisture_balance ──────────────────────────────────────────────────────

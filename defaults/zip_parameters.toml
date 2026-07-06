@@ -107,6 +107,15 @@ iq = 0.0
 pq = 1.0
 pf = 1.0
 
+[ideal_hvac]
+zp = 0.0
+ip = 0.0
+pp = 1.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 1.0
+
 [electric_resistance_water_heater]
 zp = 1.0
 ip = 0.0
@@ -224,6 +233,26 @@ iq = 0.62
 pq = -0.12
 pf = 0.87
 
+# HRV/ERV ventilation recovery units — same fan-motor class as Ventilation Fan
+# (pf 0.87); HARES extension, no dedicated OCHRE ZIP Parameters.csv row.
+[hrv]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
+[erv]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
 [pool_heater]
 zp = 0.92
 ip = 0.10
@@ -277,3 +306,170 @@ zq = 12.53
 iq = -21.11
 pq = 9.58
 pf = 0.96
+
+# ---------------------------------------------------------------------------
+# The rows below keep this file in exact agreement with the in-code class
+# table `hares_types::zip::zip_defaults_for_class` (a drift test in
+# hares-io::defaults enforces bidirectional equality). Alias rows repeat the
+# values of their canonical row; HARES-extension rows are not in the OCHRE
+# ZIP Parameters.csv and carry a one-line justification mirroring zip.rs.
+# ---------------------------------------------------------------------------
+
+# Alias of [lighting] (Bokhari et al. 2014).
+[indoor_lighting]
+zp = 0.54
+ip = 0.50
+pp = -0.04
+zq = 0.46
+iq = 0.51
+pq = 0.03
+pf = 1.0
+
+# Alias of [lighting] (Bokhari et al. 2014).
+[garage_lighting]
+zp = 0.54
+ip = 0.50
+pp = -0.04
+zq = 0.46
+iq = 0.51
+pq = 0.03
+pf = 1.0
+
+# Alias of [lighting] (Bokhari et al. 2014).
+[basement_lighting]
+zp = 0.54
+ip = 0.50
+pp = -0.04
+zq = 0.46
+iq = 0.51
+pq = 0.03
+pf = 1.0
+
+# Alias of [mels].
+[basement_mels]
+zp = 0.36147
+ip = -0.08583
+pp = 0.72436
+zq = 8.39985
+iq = -14.1677
+pq = 6.76785
+pf = 0.80
+
+# HARES extension: HPXML "Plug Loads" are the same miscellaneous electrical
+# load population OCHRE labels "MELs" — values from [mels].
+[plug_loads]
+zp = 0.36147
+ip = -0.08583
+pp = 0.72436
+zq = 8.39985
+iq = -14.1677
+pq = 6.76785
+pf = 0.80
+
+# Alias of [range].
+[cooking_range]
+zp = 1.0
+ip = 0.0
+pp = 0.0
+zq = 1.0
+iq = 0.0
+pq = 0.0
+pf = 1.0
+
+# HARES extension: ground-source heat pump heating is the same compressor
+# motor class as air-source heat pumps (pf 0.84) — values from [ashp_heater].
+[gshp_heater]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+# HARES extension: water-source heat pump heating is the same compressor
+# motor class as air-source heat pumps (pf 0.84) — values from [ashp_heater].
+[wshp_heater]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+# HARES extension: ground-source cooling is the same compressor motor class
+# as air-source cooling equipment (pf 0.96) — values from [ashp_cooler].
+[gshp_cooler]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+# HARES extension: water-source cooling is the same compressor motor class
+# as air-source cooling equipment (pf 0.96) — values from [ashp_cooler].
+[wshp_cooler]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+# HARES extension: a gas furnace's electric draw is its blower fan motor
+# (pf 0.87) — values from [ventilation_fan].
+[gas_furnace]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
+# HARES extension: a gas boiler's electric draw is its circulation pump motor
+# (pf 0.84) — values from [well_pump].
+[gas_boiler]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+# HARES extension: a gas water heater's electric draw is its draft-inducer
+# fan motor (pf 0.87) — values from [ventilation_fan].
+[gas_water_heater]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
+# HARES extension: tankless water-heater electric draw is control
+# electronics / electronic ignition — near-unity power factor, constant
+# power (no OCHRE row; no voltage-sensitivity data).
+[tankless_water_heater]
+zp = 0.0
+ip = 0.0
+pp = 1.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 1.0
+
+[gas_tankless_water_heater]
+zp = 0.0
+ip = 0.0
+pp = 1.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 1.0

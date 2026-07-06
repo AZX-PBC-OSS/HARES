@@ -10,7 +10,7 @@ use super::data_patches::HpxmlDataPatches;
 
 use super::building::Building;
 
-use crate::defaults::{DefaultsStore, ZipParameters};
+use crate::defaults::{DefaultsStore, ZipLoad};
 
 use super::resolve_der::{resolve_batteries, resolve_ev, resolve_generators, resolve_pv};
 use super::resolve_hvac::resolve_hvac;
@@ -26,7 +26,7 @@ pub struct EquipmentSpec {
     pub instance_name: Option<String>,
     pub fuel_type: FuelType,
     pub parameters: Map<String, Value>,
-    pub zip_params: Option<ZipParameters>,
+    pub zip_params: Option<ZipLoad>,
     /// Typed config, populated for equipment types that have been migrated.
     /// When present, consumers should prefer this over raw `parameters`.
     pub typed_config: Option<hares_equipment::EquipmentConfig>,

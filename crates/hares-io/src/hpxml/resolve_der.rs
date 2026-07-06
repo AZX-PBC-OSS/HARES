@@ -162,6 +162,8 @@ pub(super) fn resolve_batteries(
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         };
         let mut spec = build_typed_spec("Battery".to_string(), FuelType::Electric, cfg, defaults)?;

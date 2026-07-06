@@ -48,6 +48,9 @@ pub struct ElectricBaseboard {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
+    /// Q exactly zero, real power stays bit-identical.
+    zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,6 +85,7 @@ impl ElectricBaseboard {
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
@@ -106,6 +110,7 @@ impl ElectricBaseboard {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -129,6 +134,7 @@ impl Equipment for ElectricBaseboard {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.hvac.config.duct_dse = 1.0;
         self.hvac.config.duct_zone_id = None;
         self.hvac.config.basement_heat_frac = 0.0;
@@ -168,7 +174,7 @@ impl Equipment for ElectricBaseboard {
 
     fn step(
         &mut self,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
@@ -176,11 +182,12 @@ impl Equipment for ElectricBaseboard {
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
         let electric_kw = power_w_to_kw(thermal_output_w * self.eir);
+        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -192,6 +199,8 @@ impl Equipment for ElectricBaseboard {
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
@@ -200,7 +209,7 @@ impl Equipment for ElectricBaseboard {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -302,8 +311,9 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(5);
+    let mut telemetry = Telemetry::with_capacity(6);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
@@ -317,6 +327,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric baseboard active power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -347,8 +362,9 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState, OperatingMode,
-        PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ControlSignal, CoreCapabilities, DRLevel, EnvironmentState, ExecutionStage, GridState,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
     use super::ElectricBaseboard;
@@ -653,5 +669,80 @@ mod tests {
             ports.thermal[0].sensible_gain_w < 1e-9,
             "GridEmergency must prevent heating"
         );
+    }
+
+    #[test]
+    fn electric_baseboard_reactive_power_is_some_zero_at_unity_pf() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        assert_eq!(eq.zip.pf, 1.0);
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(ports.electrical.load_power_w > 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn electric_baseboard_real_power_bit_identical_with_and_without_reactive_zip() {
+        let cfg_pf = config(3_000.0);
+        let mut cfg_nopf = config(3_000.0);
+        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let env_base = env(18.0);
+        let mut eq_pf = ElectricBaseboard::new(cfg_pf.clone());
+        let mut eq_nopf = ElectricBaseboard::new(cfg_nopf.clone());
+        eq_pf.init(&cfg_pf, &env_base).unwrap();
+        eq_nopf.init(&cfg_nopf, &env_base).unwrap();
+
+        assert!(
+            eq_pf
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            let mut env_v = env(18.0);
+            env_v.grid.voltage_pu = *v;
+            let mut ports_pf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_nopf = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq_pf.update_control(&env_v);
+            eq_nopf.update_control(&env_v);
+            eq_pf
+                .step(&env_v, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged"
+            );
+            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+        }
     }
 }

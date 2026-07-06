@@ -361,6 +361,8 @@ fn lifecycle_battery() {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
             min_dwell_steps: 0,
         },
     );
@@ -515,20 +517,17 @@ fn scheduled_load_writes_positive_thermal_gain_to_port() {
 #[test]
 fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured() {
     let registry = EquipmentRegistry::new();
-    let cfg = config_mixed(
+    let mut cfg = config_mixed(
         "Reactive Plug Loads",
         "Plug Loads",
         &[
             ("zone_id", 1.0),
             ("sensible_gain_fraction", 0.0),
             ("power_constant_kw", 1.5),
-            ("zip_zq", 0.2),
-            ("zip_iq", 0.3),
-            ("zip_pq", 0.5),
-            ("zip_pf", 0.9),
         ],
         &[("power_schedule_source", "constant")],
     );
+    cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(0.2, 0.3, 0.5, 0.9));
 
     let mut eq = registry
         .create("Plug Loads", cfg.clone())
@@ -1052,6 +1051,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 discharge_efficiency: None,
                 bms_mode: None,
                 grid_export_rule: None,
+                power_factor: None,
+                inverter_capacity_kva: None,
                 min_dwell_steps: 0,
             },
         ),

@@ -9,6 +9,7 @@ use std::fmt;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+use crate::ports::ElectricalAccumulator;
 use crate::{ControlCapabilities, DayFilter, HaresError, ZoneId};
 
 /// Stable equipment instance identifier.
@@ -1210,6 +1211,126 @@ pub fn validate_core_contract(
         caps,
         details.join("; "),
     )))
+}
+
+/// Tolerance for [`validate_port_core_electrical_consistency`]: ~1e-6
+/// relative for large magnitudes, 1e-6 absolute near zero. Wide enough to
+/// absorb kW<->W round-trip float error, tight enough to catch sign flips,
+/// unit mistakes, and dropped contributions.
+const PORT_CORE_ELECTRICAL_TOL: f64 = 1e-6;
+
+/// True when `expected` and `actual` differ by more than the combined
+/// absolute/relative tolerance [`PORT_CORE_ELECTRICAL_TOL`]. A non-finite
+/// difference (NaN/Inf leaking through the port or CoreOutput) is always a
+/// mismatch.
+fn port_core_mismatch(expected: f64, actual: f64) -> bool {
+    let diff = (expected - actual).abs();
+    !diff.is_finite() || diff > PORT_CORE_ELECTRICAL_TOL * expected.abs().max(actual.abs()).max(1.0)
+}
+
+/// Validates that the electrical port contributions an equipment deposited
+/// during one `step()` agree with the [`CoreOutput`] it reported for that
+/// same step.
+///
+/// `pre` is a snapshot of the shared bus accumulator taken immediately
+/// before the equipment stepped ([`ElectricalAccumulator`] is `Copy`);
+/// `post` is the accumulator after the step, so the deltas are exactly this
+/// equipment's contribution.
+///
+/// Checks (tolerance ~1e-6, relative for large magnitudes):
+/// - `flows.electric_kw == Some(Consumption(kw))` requires a port load delta
+///   of `kw * 1000` W and a zero generation delta;
+/// - `Some(Generation(kw))` requires a port generation delta of `-kw * 1000`
+///   W and a zero load delta (catches sign-flipped generation);
+/// - `Some(Bidirectional(kw))` requires a net active delta of `kw * 1000` W
+///   (positive = consuming, negative = generating, per [`ElectricPower`]);
+/// - `None` requires zero active-power contribution;
+/// - the reactive port delta must equal
+///   `flows.reactive_power_kvar.unwrap_or(0.0)` (signed, positive =
+///   inductive/absorbing): equipment reporting `None` must contribute
+///   exactly zero reactive power at the port.
+pub fn validate_port_core_electrical_consistency(
+    desc: &EquipmentDescriptor,
+    co: &CoreOutput,
+    pre: ElectricalAccumulator,
+    post: &ElectricalAccumulator,
+) -> Result<(), HaresError> {
+    let load_delta_w = post.load_power_w - pre.load_power_w;
+    let generation_delta_w = post.generation_power_w - pre.generation_power_w;
+    let reactive_delta_kvar = post.reactive_power_kvar - pre.reactive_power_kvar;
+
+    let fail = |detail: String| -> Result<(), HaresError> {
+        Err(HaresError::Equipment(format!(
+            "port/core electrical consistency violation for '{}': {detail} \
+             (port deltas this step: load {load_delta_w} W, generation \
+             {generation_delta_w} W, reactive {reactive_delta_kvar} kvar)",
+            desc.name,
+        )))
+    };
+
+    match co.flows.electric_kw {
+        None => {
+            if port_core_mismatch(0.0, load_delta_w) || port_core_mismatch(0.0, generation_delta_w)
+            {
+                return fail(
+                    "flows.electric_kw is None but the electrical port received an \
+                     active-power contribution"
+                        .to_string(),
+                );
+            }
+        }
+        Some(ElectricPower::Consumption(kw)) => {
+            let expected_w = kw * 1000.0;
+            if port_core_mismatch(expected_w, load_delta_w) {
+                return fail(format!(
+                    "flows.electric_kw is Consumption({kw} kW) but the port load delta \
+                     is {load_delta_w} W (expected {expected_w} W)"
+                ));
+            }
+            if port_core_mismatch(0.0, generation_delta_w) {
+                return fail(format!(
+                    "flows.electric_kw is Consumption({kw} kW) but the port received a \
+                     generation contribution of {generation_delta_w} W (expected 0 W)"
+                ));
+            }
+        }
+        Some(ElectricPower::Generation(kw)) => {
+            let expected_w = -kw * 1000.0;
+            if port_core_mismatch(expected_w, generation_delta_w) {
+                return fail(format!(
+                    "flows.electric_kw is Generation({kw} kW) but the port generation \
+                     delta is {generation_delta_w} W (expected {expected_w} W)"
+                ));
+            }
+            if port_core_mismatch(0.0, load_delta_w) {
+                return fail(format!(
+                    "flows.electric_kw is Generation({kw} kW) but the port received a \
+                     load contribution of {load_delta_w} W (expected 0 W)"
+                ));
+            }
+        }
+        Some(ElectricPower::Bidirectional(kw)) => {
+            let expected_w = kw * 1000.0;
+            let net_delta_w = load_delta_w + generation_delta_w;
+            if port_core_mismatch(expected_w, net_delta_w) {
+                return fail(format!(
+                    "flows.electric_kw is Bidirectional({kw} kW) but the net port \
+                     active delta is {net_delta_w} W (expected {expected_w} W)"
+                ));
+            }
+        }
+    }
+
+    let expected_q_kvar = co.flows.reactive_power_kvar.unwrap_or(0.0);
+    if port_core_mismatch(expected_q_kvar, reactive_delta_kvar) {
+        return fail(format!(
+            "flows.reactive_power_kvar is {:?} but the port reactive delta is \
+             {reactive_delta_kvar} kvar (expected {expected_q_kvar} kvar)",
+            co.flows.reactive_power_kvar,
+        ));
+    }
+
+    Ok(())
 }
 
 bitflags! {
@@ -2690,6 +2811,178 @@ mod tests {
                 .contains("flows.reactive_power_kvar requires flows.electric_kw"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Minimal electric-equipment descriptor for port/core consistency tests.
+    fn consistency_test_descriptor(name: &str) -> EquipmentDescriptor {
+        EquipmentDescriptor {
+            id: EquipmentId(9),
+            name: name.to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC,
+            telemetry_fields: vec![],
+            zone_type: None,
+        }
+    }
+
+    // The struct update is only "needless" without the `observe` feature,
+    // which adds a contribution-count field to ElectricalAccumulator.
+    #[allow(clippy::needless_update)]
+    fn accumulator(load_w: f64, generation_w: f64, reactive_kvar: f64) -> ElectricalAccumulator {
+        ElectricalAccumulator {
+            load_power_w: load_w,
+            generation_power_w: generation_w,
+            reactive_power_kvar: reactive_kvar,
+            ..Default::default()
+        }
+    }
+
+    fn electric_core_output(electric_kw: ElectricPower, reactive_kvar: Option<f64>) -> CoreOutput {
+        CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(electric_kw),
+                reactive_power_kvar: reactive_kvar,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn port_core_consistency_accepts_agreeing_consumption_and_reactive() {
+        let desc = consistency_test_descriptor("Agreeing Load");
+        let co = electric_core_output(ElectricPower::Consumption(2.5), Some(0.75));
+        // Pre-existing bus state from earlier equipment must not matter.
+        let pre = accumulator(1200.0, -400.0, -0.1);
+        let post = accumulator(1200.0 + 2500.0, -400.0, -0.1 + 0.75);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+    }
+
+    #[test]
+    fn port_core_consistency_accepts_agreeing_generation() {
+        let desc = consistency_test_descriptor("Agreeing Source");
+        let co = electric_core_output(ElectricPower::Generation(3.0), Some(-0.5));
+        let pre = accumulator(500.0, 0.0, 0.2);
+        let post = accumulator(500.0, -3000.0, 0.2 - 0.5);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+    }
+
+    #[test]
+    fn port_core_consistency_accepts_bidirectional_both_signs() {
+        let desc = consistency_test_descriptor("Battery");
+        // Charging: positive kW lands in the load accumulator.
+        let co = electric_core_output(ElectricPower::Bidirectional(4.0), None);
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(4000.0, 0.0, 0.0);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+        // Discharging: negative kW lands in the generation accumulator.
+        let co = electric_core_output(ElectricPower::Bidirectional(-4.0), None);
+        let post = accumulator(0.0, -4000.0, 0.0);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+    }
+
+    #[test]
+    fn port_core_consistency_rejects_none_reactive_with_nonzero_port_reactive() {
+        // The water-heater bug class: equipment pushes reactive power at the
+        // port while reporting flows.reactive_power_kvar = None.
+        let desc = consistency_test_descriptor("Divergent Water Heater");
+        let co = electric_core_output(ElectricPower::Consumption(4.5), None);
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(4500.0, 0.0, 1.1);
+        let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
+            .expect_err("nonzero port reactive with None CoreOutput must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("flows.reactive_power_kvar is None"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("Divergent Water Heater"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn port_core_consistency_rejects_reactive_value_disagreement() {
+        let desc = consistency_test_descriptor("Sign-Flipped Q");
+        // PV-style bug: CoreOutput reports +Q while the port received -Q.
+        let co = electric_core_output(ElectricPower::Generation(3.0), Some(0.9));
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(0.0, -3000.0, -0.9);
+        let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
+            .expect_err("sign-flipped reactive must error");
+        assert!(
+            err.to_string().contains("port reactive delta"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn port_core_consistency_rejects_sign_flipped_generation() {
+        let desc = consistency_test_descriptor("Backwards PV");
+        let co = electric_core_output(ElectricPower::Generation(2.0), None);
+        // Bug: generation pushed with positive sign, so it landed in the load
+        // accumulator instead of the generation accumulator.
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(2000.0, 0.0, 0.0);
+        let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
+            .expect_err("sign-flipped generation must error");
+        assert!(
+            err.to_string().contains("Generation(2 kW)"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn port_core_consistency_rejects_consumption_missing_from_port() {
+        let desc = consistency_test_descriptor("Ghost Load");
+        let co = electric_core_output(ElectricPower::Consumption(1.5), None);
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(0.0, 0.0, 0.0);
+        assert!(
+            validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_err(),
+            "CoreOutput consumption with no port contribution must error"
+        );
+    }
+
+    #[test]
+    fn port_core_consistency_rejects_port_contribution_without_core_electric() {
+        let desc = consistency_test_descriptor("Undeclared Load");
+        let co = CoreOutput::default();
+        let pre = accumulator(0.0, 0.0, 0.0);
+        let post = accumulator(300.0, 0.0, 0.0);
+        let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
+            .expect_err("port contribution with electric_kw None must error");
+        assert!(
+            err.to_string().contains("flows.electric_kw is None"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn port_core_consistency_tolerance_boundary() {
+        let desc = consistency_test_descriptor("Tolerance Probe");
+        let pre = accumulator(0.0, 0.0, 0.0);
+
+        // 10 kW load: tolerance is 1e-6 relative -> 0.01 W. A 0.005 W skew
+        // passes; a 0.05 W skew fails.
+        let co = electric_core_output(ElectricPower::Consumption(10.0), None);
+        let post = accumulator(10_000.0 + 0.005, 0.0, 0.0);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+        let post = accumulator(10_000.0 + 0.05, 0.0, 0.0);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_err());
+
+        // Reactive near zero: tolerance floor is 1e-6 absolute.
+        let co = electric_core_output(ElectricPower::Consumption(10.0), Some(0.0));
+        let post = accumulator(10_000.0, 0.0, 5e-7);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
+        let post = accumulator(10_000.0, 0.0, 5e-6);
+        assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_err());
     }
 
     #[test]

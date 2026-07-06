@@ -97,6 +97,9 @@ pub struct ElectricBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
+    /// Q exactly zero, real power stays bit-identical.
+    zip: hares_types::zip::ZipLoad,
 }
 
 pub struct GasBoiler {
@@ -128,6 +131,9 @@ pub struct GasBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Rule R1 reactive-only ZIP: circulation pump/aux pf 0.84;
+    /// Q comes from ZipLoad::reactive_kvar.
+    zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -168,6 +174,7 @@ impl ElectricBoiler {
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
@@ -196,6 +203,7 @@ impl ElectricBoiler {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -219,6 +227,7 @@ impl Equipment for ElectricBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
@@ -288,10 +297,11 @@ impl Equipment for ElectricBoiler {
             return_temp_c
         };
 
+        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -316,6 +326,8 @@ impl Equipment for ElectricBoiler {
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
@@ -329,7 +341,7 @@ impl Equipment for ElectricBoiler {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -455,6 +467,7 @@ impl GasBoiler {
                 | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
@@ -491,6 +504,7 @@ impl GasBoiler {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -543,6 +557,7 @@ impl Equipment for GasBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
@@ -646,10 +661,11 @@ impl Equipment for GasBoiler {
                 consumption_w: fuel_input_w,
             })?;
         }
+        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
         if thermal_output_w > 0.0 {
@@ -689,6 +705,8 @@ impl Equipment for GasBoiler {
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
@@ -705,7 +723,7 @@ impl Equipment for GasBoiler {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -842,8 +860,9 @@ fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
+    let mut telemetry = Telemetry::with_capacity(9);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
@@ -855,8 +874,9 @@ fn electric_boiler_default_telemetry() -> Telemetry {
 }
 
 fn gas_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(11);
+    let mut telemetry = Telemetry::with_capacity(12);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::JACKET_LOSS_W, 0.0);
@@ -891,6 +911,11 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric boiler active power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -929,6 +954,11 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Gas boiler auxiliary electrical draw (pump/fan)".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging)".to_string(),
         },
         TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
@@ -982,9 +1012,9 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DRLevel, DomainUpdate, EnvironmentState, ExecutionStage, FLUID,
-        FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, CoreCapabilities, DRLevel, DomainUpdate, EnvironmentState, ExecutionStage,
+        FLUID, FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId, OperatingMode,
+        PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{
@@ -1878,6 +1908,145 @@ mod tests {
         assert!(
             ports.thermal[0].sensible_gain_w < 1e-9,
             "GridEmergency must prevent boiler heating"
+        );
+    }
+
+    #[test]
+    fn electric_boiler_reactive_power_is_some_zero_at_unity_pf() {
+        let cfg = eb_config(8_000.0, 1.05);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        assert_eq!(eq.zip.pf, 1.0);
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(ports.electrical.load_power_w > 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn gas_boiler_reactive_power_blended_pf_and_channels_agree() {
+        let config = gb_config(20_000.0, 0.8);
+        let mut eq = GasBoiler::new(config.clone());
+        let mut env = env(18.0);
+        eq.init(&config, &env).unwrap();
+        eq.pump_kw = 0.1;
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+        env.custom_domains.push(DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        });
+
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        let pf = 0.84_f64;
+        assert_eq!(eq.zip.pf, pf);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let p_kw = ports.electrical.net_active_w() / 1000.0;
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * pf.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos({pf})): {q} vs {expected}"
+        );
+
+        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        assert_eq!(
+            co_q.to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must match port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .unwrap()
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must match port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn gas_boiler_reactive_power_zero_when_off() {
+        let config = gb_config(20_000.0, 0.8);
+        let mut eq = GasBoiler::new(config.clone());
+        let mut env = env(25.0);
+        eq.init(&config, &env).unwrap();
+        env.custom_domains.push(DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        });
+
+        eq.update_control(&env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(ports.electrical.load_power_w, 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off equipment must report Some(0.0)"
         );
     }
 }

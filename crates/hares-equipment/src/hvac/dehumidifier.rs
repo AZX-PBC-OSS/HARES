@@ -122,6 +122,10 @@ pub struct Dehumidifier {
     plf_min: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// compressor pf 0.96 on the total electric draw. Real power stays
+    /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    zip: hares_types::zip::ZipLoad,
 }
 
 impl Dehumidifier {
@@ -139,7 +143,9 @@ impl Dehumidifier {
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::HUMIDITY_SETPOINT
                     | ControlCapabilities::MODE_OVERRIDE,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
@@ -182,6 +188,7 @@ impl Dehumidifier {
             part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
             plf_min: DEFAULT_PLF_MIN,
             zone_id_explicit,
+            zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -472,6 +479,7 @@ impl Equipment for Dehumidifier {
         self.is_on = false;
         self.mode_override = None;
         self.accumulated_water_removal_l = 0.0;
+        self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         self.write_step_telemetry(PerformanceSnapshot {
@@ -518,10 +526,15 @@ impl Equipment for Dehumidifier {
             rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
-        if snapshot.electric_power_w > 0.0 {
+        // Rule R1: Q from the already-computed real power (compressor pf 0.96).
+        let reactive_power_kvar = self.zip.reactive_kvar(
+            power_w_to_kw(snapshot.electric_power_w),
+            env.grid.voltage_pu,
+        );
+        if snapshot.electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: snapshot.electric_power_w,
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
         if snapshot.sensible_gain_w != 0.0 || snapshot.latent_removal_w != 0.0 {
@@ -547,10 +560,12 @@ impl Equipment for Dehumidifier {
         self.accumulated_water_removal_l += water_removed_l.max(0.0);
         let electric_kw = power_w_to_kw(snapshot.electric_power_w).max(0.0);
         self.write_step_telemetry(snapshot);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -717,6 +732,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::LATENT_REMOVAL_W, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::MOISTURE_MASS_FLOW_KG_S, 0.0);
@@ -752,6 +768,12 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electric draw (kW, for dwelling power aggregation)".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive = inductive/lagging), compressor pf 0.96"
+                .to_string(),
         },
         TelemetryField {
             name: tk::LATENT_REMOVAL_W.to_string(),
@@ -1604,6 +1626,121 @@ mod tests {
         assert!(
             !dehu.zone_id_explicit(),
             "init() with absent zone_id must set zone_id_explicit = false"
+        );
+    }
+
+    /// Reactive-power contract for the dehumidifier: compressor pf 0.96, Q/P =
+    /// tan(acos(0.96)) at nominal voltage, REACTIVE declared, and
+    /// port/CoreOutput/telemetry agree bit-for-bit. Off ⇒ Q == 0.
+    #[test]
+    fn dehumidifier_reactive_power_pf_and_channels_agree() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        let environment = env(0.60);
+        eq.init(&cfg, &environment).unwrap();
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::REACTIVE),
+            "dehumidifier must declare REACTIVE"
+        );
+        assert_eq!(eq.zip.pf, 0.96, "class default pf");
+        eq.update_control(&environment);
+        let mut slots = ports();
+        eq.step(&environment, Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let p_kw = slots.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "dehumidifier must draw real power when running");
+        let q = slots.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.96_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
+        );
+        assert_eq!(
+            eq.core_output()
+                .flows
+                .reactive_power_kvar
+                .expect("Some")
+                .to_bits(),
+            q.to_bits(),
+            "CoreOutput Q must equal port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .expect("telemetry Q")
+                .to_bits(),
+            q.to_bits(),
+            "telemetry Q must equal port Q"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("core contract must hold with REACTIVE declared");
+
+        // Off case: RH below target ⇒ dehumidifier off ⇒ Q == 0.
+        let off_env = env(0.40);
+        eq.update_control(&off_env);
+        let mut off_ports = ports();
+        eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        assert_eq!(
+            off_ports.electrical.reactive_power_kvar, 0.0,
+            "off ⇒ Q == 0"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "off ⇒ CoreOutput Q == Some(0.0)"
+        );
+    }
+
+    /// Rule R1 regression: the power factor affects only Q. Twin instances —
+    /// one with the class pf 0.96, one with a constant-power sidecar override
+    /// (pf 0 sentinel) — must produce bit-identical real power at every step
+    /// and voltage.
+    #[test]
+    fn dehumidifier_real_power_bit_identical_with_and_without_reactive_zip() {
+        let config_pf = config();
+        let mut config_nopf = config_pf.clone();
+        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+
+        let mut eq_pf = Dehumidifier::new(config_pf.clone());
+        let mut eq_nopf = Dehumidifier::new(config_nopf.clone());
+        let mut environment = env(0.60);
+        eq_pf.init(&config_pf, &environment).unwrap();
+        eq_nopf.init(&config_nopf, &environment).unwrap();
+
+        let mut any_reactive = false;
+        for (i, v) in [1.0, 0.95, 1.05, 1.0, 0.9, 1.1].iter().enumerate() {
+            environment.grid.voltage_pu = *v;
+            eq_pf.update_control(&environment);
+            eq_nopf.update_control(&environment);
+            let mut ports_pf = ports();
+            let mut ports_nopf = ports();
+            eq_pf
+                .step(&environment, Duration::from_secs(60), &mut ports_pf)
+                .unwrap();
+            eq_nopf
+                .step(&environment, Duration::from_secs(60), &mut ports_nopf)
+                .unwrap();
+            assert_eq!(
+                ports_pf.electrical.load_power_w.to_bits(),
+                ports_nopf.electrical.load_power_w.to_bits(),
+                "step {i} (v={v}): real power diverged between pf and no-pf twins"
+            );
+            assert_eq!(
+                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                "pf-0 twin must produce zero reactive power"
+            );
+            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+                any_reactive = true;
+            }
+            environment.current_time += ChronoDuration::minutes(1);
+        }
+        assert!(
+            any_reactive,
+            "the pf 0.96 twin must produce reactive power while running"
         );
     }
 }

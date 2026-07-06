@@ -16,6 +16,7 @@ pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod zip;
 pub mod zone_map;
 
 pub use control_signal::*;

@@ -466,6 +466,8 @@ fn sample_battery_config() -> BatteryConfig {
         discharge_efficiency: Some(0.94),
         bms_mode: None,
         grid_export_rule: None,
+        power_factor: None,
+        inverter_capacity_kva: None,
         min_dwell_steps: 0,
     }
 }

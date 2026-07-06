@@ -15,7 +15,7 @@ pub use boundary_rc::{
     ZoneInput, assemble_building_rc, derive_zone_capacitances, parallel_path_conductivity,
 };
 pub use electrical_solver::{
-    ElectricalSolver, ElectricalSolverConfig, ElectricalSolverError, ZipCoefficients,
+    ElectricalSolver, ElectricalSolverConfig, ElectricalSolverError, SolverZipCoefficients,
 };
 pub use fluid_solver::{FluidSolver, FluidSolverConfig};
 pub use humidity_solver::{HumiditySolver, HumiditySolverConfig};
