@@ -123,6 +123,7 @@ graph LR
 ```
 
 - **Electrical**: `active_power_kw = actual_power + standby_kw (5W) + heater_kw`. Reactive per [power-factor.md](./power-factor.md): control-precedence then baseline pf, kVA-clamped
+- **Deliberate physics — inverter-side vs port-side P**: the baseline reactive power and the kVA clamp use the *inverter-side* `actual_power_kw` (AC charge/discharge power through the inverter), while the electrical-port P additionally includes standby electronics and the cell heater. Standby and heater draws are not inverter throughput, so whenever they are nonzero the *port-level* ratio Q/P deviates slightly from `tan(acos(pf))`. This is intentional, not drift — the inverter holds the displacement power factor only on the power it converts
 - **Thermal**: only I^2R ohmic losses to zone (heater energy enters cell thermal mass first, couples via UA; no double-counting)
 - **Category**: `ThermalCategory::InternalGain`
 

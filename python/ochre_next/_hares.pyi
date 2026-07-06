@@ -2452,4 +2452,6 @@ def batch_step(
     dwellings: list[Dwelling],
     actions: list[list[float]],
     observation_fields: list[str],
+    action_layout: list[tuple[str, str]],
+    signal_type_by_equipment: dict[str, str],
 ) -> list[dict[str, Any]]: ...

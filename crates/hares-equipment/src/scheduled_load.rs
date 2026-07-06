@@ -461,31 +461,7 @@ impl Equipment for ScheduledLoad {
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            use crate::config::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
-            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
-            assert!(
-                (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                "ScheduledLoad '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (zp={}, ip={}, pp={}, sum={})",
-                self.descriptor.name,
-                self.zip.zp,
-                self.zip.ip,
-                self.zip.pp,
-                real_sum,
-            );
-            if self.zip.pf != 0.0 {
-                let reactive_sum = self.zip.zq + self.zip.iq + self.zip.pq;
-                assert!(
-                    (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                    "ScheduledLoad '{}': ZIP reactive coefficients do not sum to 1.0 \
-                     (zq={}, iq={}, pq={}, sum={})",
-                    self.descriptor.name,
-                    self.zip.zq,
-                    self.zip.iq,
-                    self.zip.pq,
-                    reactive_sum,
-                );
-            }
+            crate::config::debug_assert_zip_sums(&self.zip, "ScheduledLoad", &self.descriptor.name);
             // Verify that the assigned zone (if any) exists in the current
             // environment state. A missing zone indicates a stale ZoneId from
             // a misconfigured ZoneMap.

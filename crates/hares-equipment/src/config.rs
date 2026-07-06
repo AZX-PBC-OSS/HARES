@@ -463,8 +463,9 @@ pub(crate) fn validate_zip_sums(
     let real_sum = zip.zp + zip.ip + zip.pp;
     if (real_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
         return Err(hares_types::HaresError::Equipment(format!(
-            "{equipment_name}: invalid ZIP coefficients: zp + ip + pp = {real_sum}, \
-             expected {ZIP_SUM_TARGET}"
+            "{equipment_name}: invalid ZIP coefficients: zp + ip + pp = {real_sum} \
+             (zp={}, ip={}, pp={}), expected {ZIP_SUM_TARGET}",
+            zip.zp, zip.ip, zip.pp
         )));
     }
     if zip.pf != 0.0 {
@@ -472,11 +473,29 @@ pub(crate) fn validate_zip_sums(
         if (reactive_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
             return Err(hares_types::HaresError::Equipment(format!(
                 "{equipment_name}: invalid reactive ZIP coefficients: \
-                 zq + iq + pq = {reactive_sum}, expected {ZIP_SUM_TARGET}"
+                 zq + iq + pq = {reactive_sum} (zq={}, iq={}, pq={}), \
+                 expected {ZIP_SUM_TARGET}",
+                zip.zq, zip.iq, zip.pq
             )));
         }
     }
     Ok(())
+}
+
+/// Debug-build twin of [`validate_zip_sums`]: panics with the validation
+/// error message when the coefficient-sum invariant is violated at step
+/// time. Shared by the full-ZIP consumers (ScheduledLoad, EventBasedLoad,
+/// WetAppliance) so the per-step invariant lives in exactly one place;
+/// typed equipment validates once at init via [`resolve_reactive_zip`].
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub(crate) fn debug_assert_zip_sums(
+    zip: &hares_types::zip::ZipLoad,
+    kind: &str,
+    equipment_name: &str,
+) {
+    if let Err(err) = validate_zip_sums(zip, &format!("{kind} '{equipment_name}'")) {
+        panic!("{err}");
+    }
 }
 
 #[cfg(test)]

@@ -381,6 +381,12 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// `ControlSignal`s, applies them to each dwelling's equipment, then
 /// releases the GIL so Rayon threads can step dwellings in true parallel.
 /// The GIL is only re-acquired afterwards for Python dict construction.
+///
+/// Each result's `info` dict always carries `"warning_count"` (float), the
+/// number of warnings the dwelling accumulated during the step (e.g. control
+/// signals rejected at dispatch time). When non-zero, `"warnings"`
+/// (list of str) holds the drained messages; they are consumed here, so a
+/// subsequent `Dwelling.take_warnings()` will not return them again.
 #[pyfunction(name = "batch_step")]
 #[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment))]
 pub fn batch_step_py(
@@ -465,6 +471,16 @@ pub fn batch_step_py(
                         ))
                     }
                 };
+                // Drain warnings accumulated during this step (e.g. control
+                // signals rejected at dispatch time) so RL loops see them in
+                // `info` without a separate `take_warnings()` poll. A fatally
+                // poisoned dwelling yields no warnings; the error path below
+                // already reports the fatal state.
+                let warnings = dwelling
+                    .acquire_string()
+                    .map(|mut guard| guard.take_warnings())
+                    .unwrap_or_default();
+                info.insert("warning_count".to_string(), warnings.len() as f64);
                 match step_result {
                     Ok(step) => {
                         let (obs, obs_err) =
@@ -487,6 +503,7 @@ pub fn batch_step_py(
                             truncated: false,
                             info,
                             error_msg: obs_err,
+                            warnings,
                         }
                     }
                     Err(e) => {
@@ -502,6 +519,7 @@ pub fn batch_step_py(
                             truncated: false,
                             info,
                             error_msg: Some(e),
+                            warnings,
                         }
                     }
                 }
@@ -523,6 +541,9 @@ pub fn batch_step_py(
         }
         if let Some(ref msg) = item.error_msg {
             info_dict.set_item("error_msg", msg)?;
+        }
+        if !item.warnings.is_empty() {
+            info_dict.set_item("warnings", &item.warnings)?;
         }
         d.set_item("info", info_dict)?;
         out.push(d.unbind().into());

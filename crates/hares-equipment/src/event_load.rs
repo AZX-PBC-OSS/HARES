@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use hares_physics::units::power_kw_to_w;
 
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
-use crate::config::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
@@ -378,32 +377,7 @@ impl EventBasedLoad {
         voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
-            assert!(
-                (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                "EventBasedLoad '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (zp={}, ip={}, pp={}, sum={})",
-                self.descriptor.name,
-                self.zip.zp,
-                self.zip.ip,
-                self.zip.pp,
-                real_sum,
-            );
-            if self.zip.pf != 0.0 {
-                let reactive_sum = self.zip.zq + self.zip.iq + self.zip.pq;
-                assert!(
-                    (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                    "EventBasedLoad '{}': ZIP reactive coefficients do not sum to 1.0 \
-                     (zq={}, iq={}, pq={}, sum={})",
-                    self.descriptor.name,
-                    self.zip.zq,
-                    self.zip.iq,
-                    self.zip.pq,
-                    reactive_sum,
-                );
-            }
-        }
+        crate::config::debug_assert_zip_sums(&self.zip, "EventBasedLoad", &self.descriptor.name);
 
         let active_now = self.phase == EventPhase::Active;
         // PowerSetpoint overrides the configured active_power_kw for this step,
@@ -1025,32 +999,7 @@ impl WetAppliance {
         voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let real_sum = self.zip.zp + self.zip.ip + self.zip.pp;
-            assert!(
-                (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                "WetAppliance '{}': ZIP real-power coefficients do not sum to 1.0 \
-                 (zp={}, ip={}, pp={}, sum={})",
-                self.descriptor.name,
-                self.zip.zp,
-                self.zip.ip,
-                self.zip.pp,
-                real_sum,
-            );
-            if self.zip.pf != 0.0 {
-                let reactive_sum = self.zip.zq + self.zip.iq + self.zip.pq;
-                assert!(
-                    (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
-                    "WetAppliance '{}': ZIP reactive coefficients do not sum to 1.0 \
-                     (zq={}, iq={}, pq={}, sum={})",
-                    self.descriptor.name,
-                    self.zip.zq,
-                    self.zip.iq,
-                    self.zip.pq,
-                    reactive_sum,
-                );
-            }
-        }
+        crate::config::debug_assert_zip_sums(&self.zip, "WetAppliance", &self.descriptor.name);
 
         let active_power_kw = if self.active {
             // In deterministic mode, use extracted event power directly.

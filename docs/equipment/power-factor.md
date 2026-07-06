@@ -63,7 +63,7 @@ The same signed value is pushed to **three channels per equipment** with **no ne
 2. **CoreOutput** (`CoreFlows.reactive_power_kvar`)
 3. **Telemetry** (`REACTIVE_POWER_KVAR` key)
 
-A debug-build validator `validate_port_core_electrical_consistency` at `crates/hares-types/src/equipment.rs:1252-1334` asserts these three channels agree on every equipment step. It fires in all timber phases (`dwelling/mod.rs:4744, 4820, 4876`).
+A debug-build validator `validate_port_core_electrical_consistency` (`crates/hares-types/src/equipment.rs:1252`) asserts these three channels agree on every equipment step. It fires in all three equipment dispatch phases of the dwelling step (search `crates/hares-core/src/dwelling/mod.rs` for `validate_port_core_electrical_consistency`; line numbers shift too often to cite).
 
 **Generation implications:** A generating PV at pf < 1 *supplies* vars, producing a negative bus Q. The PV module computes one signed bus Q and uses it identically for port, CoreOutput, and telemetry with no additional negation (`pv/mod.rs:1053-1117`).
 
@@ -77,6 +77,7 @@ Every class name and coefficient set below is verified in `crates/hares-types/sr
 | Refrigerator, Freezer | 0.80 | 17.44 | −28.62 | 12.18 | Bokhari et al. 2014 |
 | MELs, Basement MELs | 0.80 | 8.40 | −14.17 | 6.77 | Bokhari et al. 2014 |
 | Plug Loads | 0.80 | 8.40 | −14.17 | 6.77 | HARES extension: same population as MELs |
+| TV | 0.80 | 8.40 | −14.17 | 6.77 | HARES extension: split-out plug load (HPXML PlugLoadType="TV other"); MELs row — no TV-specific row in OCHRE CSV |
 | Well/Pool/Spa Pump | 0.84 | 14.78 | −23.71 | 9.93 | Hajagos & Danai 1998 |
 | Pool/Spa Heater | 1.0 | 0.15 | 0.86 | −0.01 | Same as RESISTANCE |
 | Ceiling/Ventilation Fan | 0.87 | 0.50 | 0.62 | −0.12 | OCHRE `fans` row |
@@ -139,12 +140,23 @@ For typed equipment, `resolve_reactive_zip()` additionally forces real-power coe
 
 ### Rust TOML Example
 
+`ConfigPayload` is internally tagged with `kind` (`"raw"` or `"typed"`); typed
+payloads carry `type_name`, `version`, and the config object in `data`
+(`crates/hares-equipment/src/config.rs:137-151`). The ZIP sidecar
+(`EquipmentConfig.zip`) travels outside the payload:
+
 ```toml
 [[equipment]]
 name = "ASHP Heater"
 ochre_class = "ASHP Heater"
-payload.type = "AirSourceHeatPump"
-# ... typed config fields ...
+
+[equipment.payload]
+kind = "typed"
+type_name = "ASHP Heater"  # EquipmentTypedConfig::equipment_type_name()
+version = 1                # EquipmentTypedConfig::schema_version()
+
+[equipment.payload.data]
+# ... typed HeatPumpHeaterConfig fields ...
 
 [equipment.zip]
 zp = 0.0
@@ -177,13 +189,13 @@ The `"zip"` key is reserved in the override system — it is peeled out of the m
 
 For equipment that supports reactive control (PV, battery, EV):
 
-1. **`q_setpoint_kvar`** (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`): absolute override, passed through as-commanded. Positive = absorbing vars, negative = supplying vars.
-2. **PowerFactorSetpoint-updated `power_factor`**: sets the displacement power factor and zeros `q_setpoint_kvar`, so future steps use the updated pf for baseline computation.
+1. **`q_setpoint_kvar`** (`Option<f64>`, from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`): absolute override, passed through as-commanded. Positive = absorbing vars, negative = supplying vars. A commanded `0.0` is a real override (`Some(0.0)`) that forces Q = 0 over any pf < 1 baseline — `None` means "no override", not zero.
+2. **PowerFactorSetpoint-updated `power_factor`**: sets the displacement power factor and clears `q_setpoint_kvar` to `None`, so future steps use the updated pf for baseline computation.
 3. **Baseline ZIP `pf`** (from config sidecar → class defaults → 1.0): static pf producing `Q = P · tan(acos(pf))` at reference voltage.
 
-On PV (generator at pf < 1), the baseline path produces negative Q (supplying vars): `bus_q_kvar = -|P_gen| · tan(acos(pf))` (`pv/mod.rs:1070`).
+On PV (generator at pf < 1), the baseline path produces negative Q (supplying vars): `bus_q_kvar = -|P_gen| · tan(acos(pf))` (see the `bus_q_kvar` computation in `pv/mod.rs`).
 
-On battery and EV, reactive power is clamped to respect the inverter's apparent-power rating: `|Q| ≤ sqrt(max(0, S² − P²))` with active-power priority — real power is never curtailed to make room for reactive (`battery/mod.rs:1314-1319`, `ev/mod.rs:654-663`).
+On battery and EV, reactive power is clamped to respect the inverter's apparent-power rating: `|Q| ≤ sqrt(max(0, S² − P²))` with active-power priority — real power is never curtailed to make room for reactive (the kVA clamp in `battery/mod.rs` `step()` and `ev/mod.rs` `compute_reactive_kvar()`).
 
 ## Per-Equipment Reactive Behaviour
 
@@ -209,7 +221,7 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 - kVA clamp with active-power priority: real power is never reduced for reactive
 - Config fields in `EvConfig`: `power_factor` (default 1.0 for PFC unity bit-identical baseline), `charger_capacity_kva` (default `max(max_charging_power_kw, v2g_max_discharge_kw, v2l_max_discharge_kw)`)
 - Charging EV at pf < 1 produces positive Q (absorbing vars); V2G/V2L discharge at pf < 1 produces negative Q (supplying vars — baseline sign follows P)
-- Checkpoint version 2 persists `q_setpoint_kvar` and `power_factor`; `reactive_power_kvar` resets to 0.0 on load (recomputed on next step)
+- Checkpoint version 3 persists `q_setpoint_kvar` (`Option<f64>`) and `power_factor`; `reactive_power_kvar` resets to 0.0 on load (recomputed on next step)
 
 ### Generator
 
@@ -238,7 +250,7 @@ These are deliberate, documented improvements over OCHRE:
 | Item | OCHRE behaviour | HARES behaviour |
 |------|-----------------|-----------------|
 | Coefficient wiring at off-nominal V | Cross-wires real/reactive arrays (`Equipment.py:211-214`) | Real coefficients → P, reactive coefficients → Q (physically correct) |
-| Voltage bypass at V=V0 | Skips ZIP polynomial at nominal voltage | Always evaluates ZIP (ScheduleLoad byte-identity preserved) |
+| Voltage bypass at V=V0 | Skips ZIP polynomial at nominal voltage | Always evaluates ZIP (ScheduledLoad byte-identity preserved) |
 | Signed power factor on PV | Uses negative signed pf for gen-P/consume-Q case (`PV.py:194-196`) | Uses unsigned pf magnitude (0,1], sign is inherent in generation direction |
 | Power factor setpoint on PV | Not uniform across ports | Unified sign: one signed bus Q on port/CoreOutput/telemetry |
 | HPWH per-component PF | Single blended PF 0.97 | Same (documented; per-component split is future work) |
@@ -249,7 +261,7 @@ These are documented as potential enhancements, not currently implemented:
 
 - **Load-dependent PF**: compressors do not maintain constant pf across the full load range; a PLR-dependent pf curve would improve accuracy at part load
 - **Per-speed PF in multi-speed heat pumps**: each compressor speed stage could carry its own pf
-- **HPWH per-component PF splitting**: separate pf values for compressor and backup element instead of a blended value
+- **Per-component PF splitting for blended units** (HPWH and heat pump heaters): separate pf values for compressor, fan, and resistive backup instead of one folded value. Until this lands, resistive ER-backup power inside a blended HP heater is assigned the compressor pf (0.84) and produces phantom kvar during backup events — see the caveat in [hvac.md](./hvac.md#reactive-power)
 - **PV-style priority modes on battery**: Watt/Var/Cpf inverter priority modes (currently only active-power priority clamping is implemented)
 - **Typed equipment real-power ZIP**: allowing real-power voltage sensitivity on typed equipment where it is justified by physics (currently Rule R1 blocks this by design, guaranteeing bit-identical real power)
 

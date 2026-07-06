@@ -149,7 +149,13 @@ impl ZipLoad {
     ///
     /// `Q = p_kw * tan(acos(pf)) * (zq * V² + iq * V + pq)` with
     /// `V = voltage_pu / v0`. Zero when `pf` is the `0.0` sentinel.
+    /// Returns `0.0` when `p_kw` is zero or voltage is zero (grid outage),
+    /// matching the guard in [`ZipLoad::apply`] — de-energized equipment
+    /// draws no vars.
     pub fn reactive_kvar(&self, p_kw: f64, voltage_pu: f64) -> f64 {
+        if p_kw == 0.0 || voltage_pu == 0.0 {
+            return 0.0;
+        }
         let v_norm = voltage_pu / self.v0;
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
         p_kw * self.tan_phi() * reactive_base
@@ -171,6 +177,7 @@ pub const ZIP_CLASS_NAMES: &[&str] = &[
     "MELs",
     "Basement MELs",
     "Plug Loads",
+    "TV",
     "Well Pump",
     "Pool Pump",
     "Spa Pump",
@@ -225,6 +232,12 @@ pub const ZIP_CLASS_NAMES: &[&str] = &[
 /// - Hajagos & Danai, IEEE Trans. Power Systems 13(2), 1998
 /// - Lu et al., IEEE PESGM, 2008
 /// - Arif et al., IEEE Trans. Smart Grid, 2013
+///
+/// Maintenance invariant: every match arm below MUST also be listed in
+/// [`ZIP_CLASS_NAMES`] — the completeness test in this module and the
+/// toml drift test in hares-io iterate that list, so an arm missing from
+/// it is invisible to both tests (and vice versa: names in the list
+/// without an arm fail the completeness test).
 pub fn zip_defaults_for_class(class_name: &str) -> Option<ZipLoad> {
     // Lighting (Bokhari et al. 2014)
     const LIGHTING: ZipLoad = ZipLoad {
@@ -415,6 +428,14 @@ pub fn zip_defaults_for_class(class_name: &str) -> Option<ZipLoad> {
         // HARES extension: HPXML "Plug Loads" are the same miscellaneous
         // electrical load population OCHRE labels "MELs".
         "Plug Loads" => Some(MELS),
+        // HARES extension: HPXML PlugLoadType="TV other" is split out of the
+        // plug-load population as its own "TV" equipment (resolve_loads.rs).
+        // Neither the OCHRE ZIP Parameters.csv nor a verifiable Bokhari et
+        // al. 2014 row provides TV-specific coefficients, so it inherits the
+        // MELs electronics row (pf 0.80) it was split from — without this
+        // arm a continuously drawing TV would silently fall back to
+        // constant_power() and emit Q ≡ 0.
+        "TV" => Some(MELS),
         "Well Pump" | "Pool Pump" | "Spa Pump" => Some(PUMPS),
         "Pool Heater" | "Spa Heater" => Some(RESISTANCE),
         "Ceiling Fan" | "Ventilation Fan" => Some(FAN),
@@ -629,12 +650,30 @@ mod tests {
     }
 
     #[test]
+    fn reactive_kvar_guards_zero_power_and_zero_voltage() {
+        // Matches the guard in apply(): de-energized equipment draws no
+        // vars, even though the reactive polynomial at v=0 reduces to a
+        // nonzero pq term.
+        let zip = zip_defaults_for_class("ASHP Heater").expect("row");
+        assert_eq!(zip.reactive_kvar(2.5, 0.0), 0.0);
+        assert_eq!(zip.reactive_kvar(0.0, 1.0), 0.0);
+        assert_eq!(zip.reactive_kvar(0.0, 0.0), 0.0);
+        // apply() and reactive_kvar() agree at v=0.
+        assert_eq!(zip.apply(2.5, 0.0).1, zip.reactive_kvar(2.5, 0.0));
+    }
+
+    #[test]
     fn hares_extension_rows_map_to_expected_coefficient_sets() {
         // Plug Loads → MELs values.
         assert_eq!(
             zip_defaults_for_class("Plug Loads"),
             zip_defaults_for_class("MELs")
         );
+        // TV (HPXML PlugLoadType="TV other", split out of plug loads) →
+        // MELs electronics row; a TV must never fall to constant_power
+        // (Q ≡ 0 despite continuous draw).
+        assert_eq!(zip_defaults_for_class("TV"), zip_defaults_for_class("MELs"));
+        assert_eq!(zip_defaults_for_class("TV").expect("row").pf, 0.8);
         // Dehumidifier → HVAC cooling values.
         assert_eq!(
             zip_defaults_for_class("Dehumidifier"),

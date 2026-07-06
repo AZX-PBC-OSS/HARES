@@ -366,6 +366,19 @@ iq = -14.1677
 pq = 6.76785
 pf = 0.80
 
+# HARES extension: HPXML PlugLoadType="TV other" is split out of the plug-load
+# population as its own "TV" equipment. Neither the OCHRE ZIP Parameters.csv
+# nor a verifiable Bokhari et al. 2014 row provides TV-specific coefficients,
+# so it inherits the MELs electronics row ([mels], pf 0.80) it was split from.
+[tv]
+zp = 0.36147
+ip = -0.08583
+pp = 0.72436
+zq = 8.39985
+iq = -14.1677
+pq = 6.76785
+pf = 0.80
+
 # Alias of [range].
 [cooking_range]
 zp = 1.0

@@ -28,6 +28,7 @@ pub use building::{
 pub use data_patches::HpxmlDataPatches;
 pub(crate) use equipment::build_spec;
 pub use equipment::{EquipmentSpec, build_typed_spec, nested_update, resolve_equipment};
+pub(crate) use resolve_loads::MICROWAVE_DEFAULT_ANNUAL_KWH;
 pub use resolve_water_heater::{extract_bedroom_count, rebuild_wh_typed_config};
 pub use validation::{ValidationReport, ValidationWarning};
 

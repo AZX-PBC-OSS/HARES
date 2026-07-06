@@ -311,7 +311,7 @@ Extended fields (populated when available):
 
 When per-equipment or total reactive power doesn't match expectations:
 
-1. **Check per-equipment Q telemetry** at verbosity ≥5: each equipment with `REACTIVE` capability emits `{name} Reactive Power (kVAR)`. Row zero means either the equipment is off, has `pf=1.0`, or has the pf=0 sentinel (no reactive configured).
+1. **Check per-equipment Q telemetry** at verbosity ≥5: every equipment gets a `{name} Reactive Power (kVAR)` column (regardless of fuel type — gas equipment with electric parasitics emits Q too); equipment with `REACTIVE` capability populates it from `CoreFlows::reactive_power_kvar`, others read 0.0. Row zero means either the equipment is off, has `pf=1.0`, has the pf=0 sentinel (no reactive configured), or lacks `REACTIVE` capability.
 2. **Inspect observer contribution diff**: `EquipmentContribution.electrical_reactive_kvar` shows what each equipment contributed to the reactive port accumulator in its `step()`. The sum of contributions must match the port accumulator delta.
 3. **Check reactive_balance residual**: if `reactive_balance` is failing in debug builds, the invariant error reports `q_solver`, `q_ports`, residual, and tolerance. A non-zero residual with balanced active power typically means one equipment is pushing reactive power but not declaring `REACTIVE` capability, or a sign inversion between port and CoreOutput.
 4. **Verify ZIP/PF config resolution**: for each equipment, trace the config chain: `EquipmentConfig.zip` sidecar → `zip_defaults_for_class(&ochre_class)` → `constant_power()`. If `ochre_class` is a variant not in the class table (e.g. a misspelled HPXML class name), the fallback is `constant_power()` with pf=0 sentinel → Q=0 silently.

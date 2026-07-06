@@ -6,6 +6,9 @@ mod conversions;
 mod loop_allocator;
 mod solver_builder;
 mod synthetic;
+mod warnings;
+
+pub use warnings::WarningLog;
 
 pub use blueprint::DwellingBlueprint;
 pub use conversions::{
@@ -784,7 +787,7 @@ impl ControlDispatcher {
         self.seen_targets.clear();
     }
 
-    fn dispatch_into(&mut self, equipment: &mut [Box<dyn Equipment>], warnings: &mut Vec<String>) {
+    fn dispatch_into(&mut self, equipment: &mut [Box<dyn Equipment>], warnings: &mut WarningLog) {
         self.drain_tiers(equipment, warnings, |_, _, _, _| {});
     }
 
@@ -792,7 +795,7 @@ impl ControlDispatcher {
     fn dispatch_into_observed(
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
-        warnings: &mut Vec<String>,
+        warnings: &mut WarningLog,
     ) -> DispatchCapture {
         let mut same_tier_conflicts = Vec::new();
         for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
@@ -854,7 +857,7 @@ impl ControlDispatcher {
     fn drain_tiers(
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
-        warnings: &mut Vec<String>,
+        warnings: &mut WarningLog,
         mut on_signal: impl FnMut(&DispatchRequest, bool, bool, bool),
     ) {
         // NOTE: `seen_targets` is deliberately NOT cleared here. The per-step
@@ -1024,7 +1027,7 @@ impl ControlDispatcher {
 fn route_request(
     request: &DispatchRequest,
     equipment: &mut [Box<dyn Equipment>],
-    warnings: &mut Vec<String>,
+    warnings: &mut WarningLog,
 ) -> bool {
     match &request.target {
         DispatchTarget::ByName(name) => {
@@ -1067,7 +1070,7 @@ fn route_request(
 fn apply_to_matching(
     equipment: &mut [Box<dyn Equipment>],
     signal: &hares_types::ControlSignal,
-    warnings: &mut Vec<String>,
+    warnings: &mut WarningLog,
     matches: impl Fn(&dyn Equipment) -> bool,
 ) -> bool {
     let mut delivered = false;
@@ -1299,7 +1302,9 @@ pub struct Dwelling {
     rollback_ports: PortSlots,
     pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
-    pub warnings: Vec<String>,
+    /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
+    /// overflow counted) — see [`Dwelling::take_warnings`].
+    pub warnings: WarningLog,
     /// Per-equipment HPXML setpoint reconciliation records, keyed by instance name.
     /// Populated during `from_config()` / `from_preparsed()` from the typed configs
     /// attached to each `EquipmentSpec`.
@@ -1747,7 +1752,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
-    let mut warnings = Vec::new();
+    let mut warnings = WarningLog::new();
 
     // ── WH typed_config debug assertion ─────────────────────────────────
     // WH specs with autosize_water_heater = true will have typed_config = None
@@ -3656,9 +3661,11 @@ impl Dwelling {
         true
     }
 
-    /// Drains and returns warning messages accumulated since the previous call.
+    /// Drains and returns warning messages accumulated since the previous
+    /// call. The buffer is bounded ([`WarningLog::CAPACITY`]); if messages
+    /// were dropped since the last drain, the final entry reports how many.
     pub fn take_warnings(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.warnings)
+        self.warnings.take()
     }
 
     #[cfg(feature = "profiling")]
@@ -8309,7 +8316,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let equipment: &mut [Box<dyn Equipment>] = &mut [];
         dispatcher.dispatch_into(equipment, &mut warnings);
 
@@ -8343,7 +8350,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8398,7 +8405,7 @@ occupancy = 1.0
             priority: PriorityTier::Safety,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8422,7 +8429,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8447,7 +8454,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8472,7 +8479,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8498,7 +8505,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8525,7 +8532,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8552,7 +8559,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -8757,7 +8764,7 @@ occupancy = 1.0
         for req in requests {
             dispatcher.queue(req);
         }
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
@@ -8971,7 +8978,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut delivered_count = 0u32;
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
         dispatcher.begin_step();
@@ -9019,7 +9026,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9057,7 +9064,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9084,7 +9091,7 @@ occupancy = 1.0
             });
         }
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9120,7 +9127,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9165,7 +9172,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9206,7 +9213,7 @@ occupancy = 1.0
             priority: PriorityTier::UserOverride,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9251,7 +9258,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9291,7 +9298,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9330,7 +9337,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9375,7 +9382,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9424,7 +9431,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery), Box::new(heater)];
         let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
 
@@ -9460,7 +9467,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> =
             vec![Box::new(eq1), Box::new(eq2), Box::new(eq3)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
@@ -9496,7 +9503,7 @@ occupancy = 1.0
             priority: PriorityTier::Grid,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(ev), Box::new(battery)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
@@ -9525,7 +9532,7 @@ occupancy = 1.0
 
         let mut dispatcher = ControlDispatcher::default();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
 
         // Begin the step (reset cross-pass ledger).
         dispatcher.begin_step();
@@ -9586,7 +9593,7 @@ occupancy = 1.0
 
         let mut dispatcher = ControlDispatcher::default();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
 
         // Queue by end-use first, then by name. Both Schedule-tier.
         dispatcher.queue(DispatchRequest {
@@ -9641,7 +9648,7 @@ occupancy = 1.0
         let mut dispatcher = ControlDispatcher::default();
         let mut equipment: Vec<Box<dyn Equipment>> =
             vec![Box::new(battery1), Box::new(battery2), Box::new(ev)];
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
 
         dispatcher.begin_step();
 
@@ -9739,7 +9746,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         // First dispatch
@@ -9846,7 +9853,7 @@ occupancy = 1.0
         for req in requests {
             dispatcher.queue(req);
         }
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         // Grid priority (0W) should overwrite Schedule priority (5000W)
@@ -9887,7 +9894,7 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
 
-        let mut warnings = Vec::new();
+        let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 

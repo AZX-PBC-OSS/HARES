@@ -714,7 +714,7 @@ fn merge_zip_override(
     zip_override: Option<&Value>,
     ochre_class: &str,
     equipment_name: &str,
-) -> Result<Option<hares_types::zip::ZipLoad>, HaresError> {
+) -> Result<Option<hares_types::zip::ZipLoad>> {
     let obj = match zip_override {
         None => return Ok(base),
         Some(Value::Object(obj)) => obj,
@@ -759,7 +759,7 @@ fn merge_zip_override(
 pub(crate) fn merged_equipment_config(
     spec: &hares_io::EquipmentSpec,
     overrides: &Value,
-) -> Result<EquipmentConfig, HaresError> {
+) -> Result<EquipmentConfig> {
     if let Some(typed) = &spec.typed_config
         && let ConfigPayload::Typed {
             type_name,
@@ -1300,8 +1300,7 @@ mod tests {
             }
         });
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let err = merged
             .require_typed::<GasFurnaceConfig>("Gas Furnace")
             .expect_err("unknown override keys must fail");
@@ -1321,8 +1320,7 @@ mod tests {
             }
         });
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let cfg = merged
             .require_typed::<GasFurnaceConfig>("Gas Furnace")
             .expect("known override keys must deserialize");
@@ -1394,8 +1392,7 @@ mod tests {
         let spec = gas_furnace_spec_with_reconciliation(reconciliations);
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
 
         let sr = merged.setpoints_reconciled.as_ref().expect(
             "setpoints_reconciled must propagate from typed config through merged_equipment_config",
@@ -1419,8 +1416,7 @@ mod tests {
         let spec = gas_furnace_spec();
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
 
         assert!(
             merged.setpoints_reconciled.is_none(),
@@ -1470,8 +1466,7 @@ mod tests {
         spec.zip_params = Some(base);
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9, "override must beat the toml default");
         // Partial-field merge: every other field inherited from the base.
@@ -1552,8 +1547,7 @@ mod tests {
         let class_row = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9);
         assert_eq!(
@@ -1583,8 +1577,7 @@ mod tests {
         let base = spec.zip_params.expect("toml base");
         let overrides = json!({"ASHP Heater": {"zip": {"pf": 0.9}}});
 
-        let merged =
-            merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
         // Sidecar carries the merged value.
         let zip = merged.zip.expect("zip sidecar must be populated");
         assert_eq!(zip.pf, 0.9, "override must beat the toml default");

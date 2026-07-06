@@ -84,20 +84,18 @@ dwelling.set_price_signal(signal)                  // stored for controller acce
 | `POWER_FACTOR_SETPOINT` | `PowerFactorSetpoint` |
 | `INVERTER_PRIORITY_MODE` | `InverterPriorityMode` |
 | `PROTOCOL_NATIVE` | `ProtocolNative` |
-| `REACTIVE_SETPOINT` | `ReactiveSetpoint` |
-| `POWER_FACTOR_SETPOINT` | `PowerFactorSetpoint` |
 
 Equipment declares capabilities at initialization. `apply_control()` validates the signal's required capability before dispatching to `apply_control_unchecked()`. Rejection is binary: supported (continues) or unsupported (returns Err).
 
 ### Reactive Control Signals
 
-Three signals control reactive power on capable equipment (PV and battery; see [power-factor.md](power-factor.md) for the full model):
+Three signals control reactive power on capable equipment (PV, battery, and EV; see [power-factor.md](power-factor.md) for the full model):
 
 | Signal | Semantics | Accepts On |
 |--------|-----------|------------|
 | `ReactiveSetpoint { kvar }` | Direct var setpoint. Positive = absorbing (inductive), negative = supplying (capacitive). Passed through as-commanded with no sign flip. | PV, Battery, EV |
-| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in (0, 1]. Zeros the `q_setpoint_kvar` so future steps use the updated pf for baseline reactive computation. | PV, Battery, EV |
-| `PowerSetpoint.reactive_power_kvar: Some(q)` | Var command embedded in the power setpoint. If q != 0, treated as a `ReactiveSetpoint` override. | PV, Battery, EV |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in (0, 1]. Clears the `q_setpoint_kvar` override (to `None`) so future steps use the updated pf for baseline reactive computation. | PV, Battery, EV |
+| `PowerSetpoint.reactive_power_kvar: Some(q)` | Var command embedded in the power setpoint; any `Some(q)` — including `Some(0.0)` — arms the same absolute override as `ReactiveSetpoint` (a commanded zero forces Q = 0 over a pf < 1 baseline). `None` leaves the reactive state untouched. | PV, Battery, EV |
 
 **EV accepts all three reactive control paths** with the same smart-inverter var-control semantics as the battery: q_setpoint > PowerFactorSetpoint > baseline precedence, kVA clamp with active-power priority, signed Q on port/CoreOutput/telemetry. The EV is an inverter-coupled DER (V2G/V2L) where IEEE 1547-2018 / SAE J3072 require reactive capability. Default `power_factor=1.0` (PFC unity baseline) produces Q=0, preserving bit-identical real power for pre-reactive simulations. See [ev.md](ev.md) for config fields and [power-factor.md](power-factor.md) for the full reactive model.
 

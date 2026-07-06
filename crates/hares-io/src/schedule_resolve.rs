@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::normalize_draw_profile;
-use crate::hpxml::build_spec;
+use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
 
 // HERS Reference Home default thermostat setpoints (ASHRAE 90.2).
@@ -1322,9 +1322,6 @@ fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
 fn normalize_schedule_col_name(name: &str) -> String {
     normalize_ascii(name).replace([' ', '-'], "_")
 }
-
-// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy.
-const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 
 /// Auto-create EquipmentSpecs for CSV columns that have COLUMN_MAPPINGS entries
 /// but no corresponding spec from HPXML parsing (e.g. microwave, which is a

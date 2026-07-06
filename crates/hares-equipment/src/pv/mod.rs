@@ -2140,8 +2140,7 @@ mod tests {
         cfg.equipment_id = Some(2);
         cfg.inverter_efficiency = Some(1.0);
         cfg.power_factor = Some(0.9);
-        let cfg =
-            EquipmentConfig::from_typed("PV Q0".to_string(), "PV".to_string(), cfg).unwrap();
+        let cfg = EquipmentConfig::from_typed("PV Q0".to_string(), "PV".to_string(), cfg).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -2170,10 +2169,7 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         approx_eq(pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap(), 0.0);
-        approx_eq(
-            pv.core_output().flows.reactive_power_kvar.unwrap(),
-            0.0,
-        );
+        approx_eq(pv.core_output().flows.reactive_power_kvar.unwrap(), 0.0);
         approx_eq(ports.electrical.reactive_power_kvar, 0.0);
     }
 
@@ -2189,8 +2185,7 @@ mod tests {
             let mut cfg = base_pv_typed_config();
             cfg.power_factor = Some(bad_pf);
             let cfg =
-                EquipmentConfig::from_typed("PV badpf".to_string(), "PV".to_string(), cfg)
-                    .unwrap();
+                EquipmentConfig::from_typed("PV badpf".to_string(), "PV".to_string(), cfg).unwrap();
             let env = env_with_surfaces(
                 vec![SurfaceIrradiance {
                     surface_id: sid,

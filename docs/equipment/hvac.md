@@ -83,7 +83,9 @@ graph LR
 
 ### Reactive Power
 
-All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Heater PF is 0.84 (lagging); cooler PF is 0.96. GSHP/WSHP heaters and coolers use the same PF as their air-source counterparts (identical compressor motor class). Reactive power follows Rule R1: `Q = P · tan(acos(pf)) · reactive_base(V)` computed from the already-computed real power — real power remains bit-identical at all voltages. The PF is a whole-unit value (compressor + fan + crankcase on one electrical port); compressor PF is physics, not a control surface.
+All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Heater PF is 0.84 (lagging); cooler PF is 0.96. GSHP/WSHP heaters and coolers use the same PF as their air-source counterparts (identical compressor motor class). Reactive power follows Rule R1: `Q = P · tan(acos(pf)) · reactive_base(V)` computed from the already-computed real power — real power remains bit-identical at all voltages. The heater PF is a whole-unit value applied to the *entire blended electric draw on the single electrical port*: compressor + indoor/outdoor fan + electric-resistance (ER) backup + crankcase/pan heater + (for GSHP/WSHP) loop pump. Compressor PF is physics, not a control surface.
+
+**Caveat — ER-backup phantom kvar**: because the 0.84 PF is folded over the whole blend, the resistive ER backup element (true pf ≈ 1.0, Q ≈ 0) is also assigned pf 0.84 while it runs. During ER-backup events this produces phantom reactive power of `P_ER · tan(acos(0.84)) ≈ 0.646 · P_ER` — up to ~6.5 kvar on a 10 kW ER element — that a real installation would not draw. This persists until the per-component PF split lands; see the "Per-component PF splitting for blended units" extension hook in [power-factor.md](./power-factor.md#extension-hooks-future-work).
 
 All typed HVAC equipment is covered by the class-defaults table in [power-factor.md](./power-factor.md).
 

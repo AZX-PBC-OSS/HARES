@@ -38,7 +38,7 @@ const DRYER_ELECTRIC_SENSIBLE_GAIN: f64 = 0.90;
 const BTU_PER_KWH: f64 = 3412.0;
 
 /// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy (kWh).
-const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
+pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 
 /// Resolve a bedroom count for appliance energy calculations.
 ///
