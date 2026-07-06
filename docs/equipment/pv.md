@@ -101,7 +101,7 @@ PV supports full reactive control with unified sign convention per [power-factor
 **Control precedence** (highest first):
 
 1. `q_setpoint_kvar` (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`) — absolute override
-2. PowerFactorSetpoint-updated `power_factor` — zeroes `q_setpoint`, future steps use updated pf
+2. PowerFactorSetpoint-updated `power_factor` — clears the `q_setpoint` override (`None`), future steps use updated pf
 3. Baseline `PvConfig.power_factor` (default 1.0) — `Q = -|P_gen| · tan(acos(pf))` (generating PV at pf < 1 supplies vars to the bus, making bus Q negative)
 
 **Sign convention**: The default pf=1.0 path produces Q=0 (unchanged from pre-PF behaviour). At pf < 1, the baseline produces negative bus Q because a generating inverter supplies vars. The `ReactiveSetpoint` passes through as-commanded with no sign flip.
@@ -113,7 +113,7 @@ PV supports full reactive control with unified sign convention per [power-factor
 | Signal | Effect |
 |--------|--------|
 | `ReactiveSetpoint { kvar }` | Sets Q directly, bypasses PF calculation. Positive = absorbing |
-| `PowerFactorSetpoint { power_factor }` | Updates `self.power_factor`, zeroes `q_setpoint_kvar`. Produces `Q = -\|P_gen\| · tan(acos(pf))` |
+| `PowerFactorSetpoint { power_factor }` | Updates `self.power_factor`, clears `q_setpoint_kvar` (`None`). Produces `Q = -\|P_gen\| · tan(acos(pf))` |
 | `PowerSetpoint.reactive_power_kvar` | Sets `q_setpoint_kvar` as absolute override |
 | `InverterPriorityMode` | Switches Watt/Var/Constant PF priority |
 

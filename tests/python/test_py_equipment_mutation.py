@@ -575,9 +575,6 @@ class TestBatteryConfigParams:
 
 
 class TestCheckpointRoundTrip:
-    @pytest.mark.xfail(
-        reason="checkpoint deserialization does not yet support dynamically added equipment"
-    )
     def test_added_equipment_persists_through_checkpoint(self):
         from ochre_next import Battery
 

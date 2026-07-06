@@ -773,9 +773,6 @@ class TestEquipmentMutationRoundTrip:
         result = dw.step()
         assert "timestamp" in result
 
-    @pytest.mark.xfail(
-        reason="checkpoint deserialization does not yet support dynamically added equipment"
-    )
     def test_lut_persists_through_checkpoint(self):
         from ochre_next import Battery
 

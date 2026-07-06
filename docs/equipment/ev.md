@@ -99,7 +99,7 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 |--------|-----------|
 | `PowerSetpoint.reactive_power_kvar: Some(q)` | Sets absolute var override (finite values accepted) |
 | `ReactiveSetpoint { kvar }` | Direct var setpoint, positive = absorbing |
-| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in `(0, 1]`, zeros `q_setpoint_kvar` |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in `(0, 1]`, clears the `q_setpoint_kvar` override (`None`) |
 
 **Config fields**:
 | Field | Default | Meaning |
@@ -115,7 +115,7 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 
 **Sign convention**: positive = inductive/absorbing vars, negative = capacitive/supplying vars. The same signed value is written to port, CoreOutput, and telemetry (`REACTIVE_POWER_KVAR` key) with no negation.
 
-**Checkpoint**: `q_setpoint_kvar` and `power_factor` are persisted in the EV checkpoint (version 2), so reactive state survives save/load. On load, `reactive_power_kvar` resets to 0.0 (recomputed on next step).
+**Checkpoint**: `q_setpoint_kvar` (`Option<f64>` — `None` = no override, `Some(0.0)` = commanded zero) and `power_factor` are persisted in the EV checkpoint (version 3), so reactive state survives save/load. On load, `reactive_power_kvar` resets to 0.0 (recomputed on next step).
 
 **Default runs are bit-identical**: with `power_factor=1.0` (default), `compute_reactive_kvar` returns 0.0 — pre-existing simulations produce identical real power, energy, and thermal results.
 
