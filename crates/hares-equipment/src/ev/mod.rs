@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset, Timelike};
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
+use hares_types::zip::ZipLoad;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
     CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower,
@@ -140,6 +141,16 @@ pub struct Ev {
     soc_target: Option<f64>,
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
+
+    // Reactive power / smart-inverter control (V2G/V2L inverter-coupled DER,
+    // IEEE 1547-2018 / SAE J3072 require reactive capability).
+    q_setpoint_kvar: f64,
+    power_factor: f64,
+    charger_capacity_kva: f64,
+    /// Reactive power emitted on the last step [kVAR] — same signed value on
+    /// port, CoreOutput, and telemetry. Positive = absorbing, negative =
+    /// supplying.
+    reactive_power_kvar: f64,
 }
 
 impl Ev {
@@ -160,8 +171,11 @@ impl Ev {
                 | ControlCapabilities::EV_DRIVE
                 | ControlCapabilities::EV_AWAY_CHARGE
                 | ControlCapabilities::EV_SET_READY_BY
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::REACTIVE_SETPOINT
+                | ControlCapabilities::POWER_FACTOR_SETPOINT,
             core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
@@ -271,6 +285,14 @@ impl Ev {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
+            q_setpoint_kvar: 0.0,
+            power_factor: config.get_f64(KEY_POWER_FACTOR).unwrap_or(1.0),
+            charger_capacity_kva: config.get_f64(KEY_CHARGER_CAPACITY_KVA).unwrap_or_else(|| {
+                rated_power_kw
+                    .max(config.get_f64(KEY_V2G_MAX_DISCHARGE_KW).unwrap_or(0.0))
+                    .max(config.get_f64(KEY_V2L_MAX_DISCHARGE_KW).unwrap_or(0.0))
+            }),
+            reactive_power_kvar: 0.0,
             degradation: crate::battery::degradation::DegradationState::default(),
             rainflow: crate::battery::degradation::RainflowCounter::default(),
             ocv_table: OcvTable::for_chemistry(chemistry),
@@ -357,6 +379,14 @@ impl Ev {
         self.ready_soc = c.ready_soc.unwrap_or(self.soc_max);
         self.power_limit_kw = c.power_limit_kw;
 
+        self.power_factor = c.power_factor.unwrap_or(1.0);
+        self.charger_capacity_kva = c.charger_capacity_kva.unwrap_or_else(|| {
+            self.rated_power_kw
+                .max(self.v2g_max_discharge_kw)
+                .max(self.v2l_max_discharge_kw)
+        });
+        self.q_setpoint_kvar = 0.0;
+
         self.connection_state = c
             .initial_connection_state
             .as_deref()
@@ -402,6 +432,7 @@ impl Ev {
         self.soc_target = None;
         self.soc_target_min = None;
         self.soc_target_max = None;
+        self.reactive_power_kvar = 0.0;
         self.telemetry = default_telemetry(self.charging_level);
         self.core_output = CoreOutput::default();
         self.write_telemetry();
@@ -606,6 +637,32 @@ impl Ev {
         }
     }
 
+    /// Compute reactive power [kVAR] for the given grid-side active power.
+    ///
+    /// Precedence (mirrors battery/mod.rs exactly):
+    /// 1. `q_setpoint_kvar` (from `ReactiveSetpoint` or
+    ///    `PowerSetpoint.reactive_power_kvar`) — absolute override, passes
+    ///    through as-commanded.
+    /// 2. Else `power_factor` baseline: `Q = P · tan(acos(pf))` via
+    ///    `ZipLoad::reactive_only` (no inline formula). Baseline sign follows
+    ///    var flow: charging P>0 → Q>0 absorbing; V2G/V2L discharge P<0 →
+    ///    Q<0 supplying.
+    ///
+    /// kVA clamp: `|Q| ≤ sqrt(max(0, S² − P²))` with
+    /// `S = charger_capacity_kva` — active-power priority (P never
+    /// curtailed by Q).
+    fn compute_reactive_kvar(&self, active_power_kw: f64) -> f64 {
+        let mut q = self.q_setpoint_kvar;
+        if q == 0.0 && self.power_factor < 1.0 {
+            let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+            q = active_power_kw * zip.tan_phi();
+        }
+        let s = self.charger_capacity_kva;
+        let p2 = active_power_kw * active_power_kw;
+        let q_max = (s * s - p2).max(0.0).sqrt();
+        q.clamp(-q_max, q_max)
+    }
+
     fn write_telemetry(&mut self) {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry
@@ -648,6 +705,8 @@ impl Ev {
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
         self.telemetry
             .set(tk::DR_LEVEL, dr_level_code(self.dr_level));
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, self.reactive_power_kvar);
 
         #[cfg(feature = "observe")]
         tracing::debug!(
@@ -798,17 +857,17 @@ impl Equipment for Ev {
 
                 self.away_charge_actual_kw = 0.0;
 
-                if is_v2l_discharge || self.active_power_kw > 0.0 {
-                    // EV chargers use a power-factor-corrected (PFC) AC/DC rectifier.
-                    // The resulting reactive power is negligible (Q ≈ 0) and, crucially,
-                    // lets downstream calibrators distinguish inductive motor loads (pumps,
-                    // HVAC) from EVs by their reactive signature. We therefore keep the
-                    // electrical port purely real and do not expose REACTIVE capability.
-                    ports.accumulate(&PortContribution::Electrical {
-                        active_power_w: power_kw_to_w(self.active_power_kw),
-                        reactive_power_kvar: 0.0,
-                    })?;
-                }
+                // Reactive power: smart-inverter var control (IEEE 1547-2018 /
+                // SAE J3072). The EV is an inverter-coupled DER when V2G/V2L
+                // capable; reactive Q is computed from the grid-side active
+                // power with the same precedence/clamp as the battery.
+                let q_kvar = self.compute_reactive_kvar(self.active_power_kw);
+                self.reactive_power_kvar = q_kvar;
+
+                ports.accumulate(&PortContribution::Electrical {
+                    active_power_w: power_kw_to_w(self.active_power_kw),
+                    reactive_power_kvar: q_kvar,
+                })?;
 
                 self.apply_soc_and_thermal(dt, charger_kw, heater_kw, is_v2l_discharge, ambient_c);
             }
@@ -816,21 +875,26 @@ impl Equipment for Ev {
                 let (charger_kw, heater_kw, _is_v2l_discharge) =
                     self.run_charging_physics(env, dt, self.away_charger_power_kw);
 
-                // Away charging: no V2L/V2G, no port contribution
+                // Away charging: no V2L/V2G, no residential port contribution.
+                // The away charger is off-site from the residential grid — no
+                // reactive contribution to the dwelling's electrical port.
                 self.v2l_active = false;
                 self.v2l_power_kw = 0.0;
                 self.active_power_kw = 0.0;
+                self.reactive_power_kvar = 0.0;
                 self.away_charge_actual_kw = charger_kw;
 
                 self.apply_soc_and_thermal(dt, charger_kw, heater_kw, false, ambient_c);
             }
             EvConnectionState::Disconnected => {
-                // Thermal drift only, calendar degradation, zero power
+                // Thermal drift only, calendar degradation, zero power.
+                // Contactor open — no grid connection, Q must be 0.
                 self.active_power_kw = 0.0;
                 self.away_charge_actual_kw = 0.0;
                 self.heater_active = false;
                 self.v2l_active = false;
                 self.v2l_power_kw = 0.0;
+                self.reactive_power_kvar = 0.0;
 
                 let dt_s = dt.as_secs_f64();
                 let q_loss_w = self.ua_w_per_k * (self.battery_temp_c - ambient_c);
@@ -850,7 +914,7 @@ impl Equipment for Ev {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
-                reactive_power_kvar: None,
+                reactive_power_kvar: Some(self.reactive_power_kvar),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -918,6 +982,8 @@ impl Equipment for Ev {
                 degradation: self.degradation.clone(),
                 rainflow: self.rainflow.clone(),
                 last_daily_update_day: self.last_daily_update_day,
+                q_setpoint_kvar: self.q_setpoint_kvar,
+                power_factor: self.power_factor,
             },
             Self::checkpoint_version(),
             "Ev",
@@ -958,9 +1024,12 @@ impl Equipment for Ev {
         self.degradation = cp.degradation;
         self.rainflow = cp.rainflow;
         self.last_daily_update_day = cp.last_daily_update_day;
+        self.q_setpoint_kvar = cp.q_setpoint_kvar;
+        self.power_factor = cp.power_factor;
 
         self.v2l_active = false;
         self.v2l_power_kw = 0.0;
+        self.reactive_power_kvar = 0.0;
 
         self.write_telemetry();
         self.core_output = {
@@ -974,7 +1043,7 @@ impl Equipment for Ev {
             CoreOutput {
                 flows: CoreFlows {
                     electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
-                    reactive_power_kvar: None,
+                    reactive_power_kvar: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -990,6 +1059,10 @@ impl Equipment for Ev {
             }
         };
         Ok(())
+    }
+
+    fn checkpoint_version() -> u32 {
+        2
     }
 
     fn validate_signal(&self, signal: &hares_types::ControlSignal) -> crate::Result<()> {
@@ -1024,11 +1097,12 @@ impl Equipment for Ev {
                 max_soc,
             } => {
                 if let Some(q) = reactive_power_kvar {
-                    if *q != 0.0 {
+                    if !q.is_finite() {
                         return Err(HaresError::Control(
-                            "EV does not support reactive power control".to_string(),
+                            "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
                         ));
                     }
+                    self.q_setpoint_kvar = *q;
                 }
                 if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
@@ -1050,6 +1124,23 @@ impl Equipment for Ev {
                 self.soc_target = Some((*target_soc).clamp(0.0, 1.0));
                 self.soc_target_min = *min_soc;
                 self.soc_target_max = *max_soc;
+            }
+            ControlSignal::ReactiveSetpoint { kvar } => {
+                if !kvar.is_finite() {
+                    return Err(HaresError::Control(
+                        "EV ReactiveSetpoint kvar must be finite".to_string(),
+                    ));
+                }
+                self.q_setpoint_kvar = *kvar;
+            }
+            ControlSignal::PowerFactorSetpoint { power_factor } => {
+                if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
+                    return Err(HaresError::Control(
+                        "EV PowerFactorSetpoint must be in (0, 1]".to_string(),
+                    ));
+                }
+                self.power_factor = *power_factor;
+                self.q_setpoint_kvar = 0.0;
             }
             ControlSignal::EvPlugIn { state } => {
                 // Validate transitions: no direct home<->away

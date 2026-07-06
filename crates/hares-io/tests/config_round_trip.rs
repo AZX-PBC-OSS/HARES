@@ -503,6 +503,8 @@ fn sample_ev_config() -> EvConfig {
         plug_in_policy: None,
         power_limit_kw: Some(11.5),
         initial_connection_state: None,
+        power_factor: None,
+        charger_capacity_kva: None,
     }
 }
 

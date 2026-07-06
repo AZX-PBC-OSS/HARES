@@ -40,6 +40,7 @@ currently wired into `Dwelling::check_invariants`.
 | `unconditioned_zone_temperature_bounds` | T_unconditioned ∈ [−50, 120] °C, finite | —                                  | Yes    | Yes    |
 | `tank_temperature_bounds` | T_tank ∈ [0, 100] °C, finite                       | —                                  | Yes    | Yes    |
 | `soc_bounds`              | SoC ∈ [0, 1], accumulated error < 0.001            | —                                  | No     | Yes (warn-only) |
+| `reactive_balance`        | \|Q_solver − Q_ports\| < tol                         | max(0.001, 1e-6 × max(\|Q_solver\|, \|Q_ports\|)) kvar | Yes    | Yes    |
 
 **Thermal tolerance** uses gross flux (sum of absolute values of all gain terms)
 for the relative component, not net sum — a balanced system with large opposed
@@ -56,9 +57,10 @@ These fire every timestep after solver resolution but before port zeroing:
 |-------------------------------------|---------------------------|----------------------------------------------------------------|
 | `timestep_dt`                       | `InvariantViolation`      | dt > 0 and finite                                              |
 | `zone_temperature_bounds`           | `InvariantViolation`      | Conditioned zone temps within [−50, 80] °C; unconditioned within [−50, 120] °C |
-| `electrical_net_finite`             | `InvariantViolation`      | `electrical_solver.net_active_kw()` is finite (always-on; fires in all builds) |
+| `electrical_net_finite`             | `InvariantViolation`      | `electrical_solver.net_active_kw()` and `electrical_solver.net_reactive_kvar()` are finite (always-on; fires in all builds) |
 | `zone_temperature_nan`              | `InvariantViolation`      | All zone temperatures are finite — NaN propagates silently through output recording and control (always-on; fires in all builds) |
 | `electrical_balance`                | `InvariantViolation`      | Solver net matches port accumulation: \|solver + ports\| < max(0.001, 1e-6 × gross_flux) kW |
+| `reactive_balance`                  | `InvariantViolation`      | Solver reactive net matches port accumulation: \|q_solver − q_ports\| < max(0.001, 1e-6 × gross_reactive_flux) kvar |
 | `thermal_balance`                   | `InvariantViolation`      | Full-system energy conservation: external (B_d·u) + coupling (h) = stored (C·ΔT/dt) + envelope conduction ((A_d−I)·x) |
 | `humidity_payload_finite`           | `InvariantViolation`      | Every value in humidity domain payload is finite               |
 | `moisture_balance`                  | `InvariantViolation`      | Moisture mass conservation: independently-tracked sources/sinks match solver output |
@@ -67,6 +69,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | `fuel_observer_coverage`            | `InvariantViolation`      | All non-zero fuel accumulator slots have observer coverage     |
 | `hvac_power_non_negative`           | `NegativeDeliveredEnergy` | HVAC heating ≥ 0 W, cooling ≤ 0 W (signed convention)         |
 | `hvac_accumulator`                  | `NegativeDeliveredEnergy` | Per-zone cumulative heating/cooling sign-consistency           |
+| `port_core_electrical_consistency`  | `Equipment`               | Per-equipment port reactive delta == CoreOutput flows.reactive_power_kvar.unwrap_or(0.0) (debug-build, gates #[cfg(any(debug_assertions, feature = "check_invariants"))]); catches sign errors, missing REACTIVE cap, and port-vs-CoreOutput drifts |
 | `nan_screen`                        | `NanDetected`             | Key float values screened for NaN before residual computation |
 
 ### Error Reporting
@@ -96,7 +99,16 @@ HaresError::NanDetected {
 }
 ```
 
-**`HaresError::NegativeDeliveredEnergy`** — used by `hvac_power_non_negative` and `hvac_accumulator`:
+**`HaresError::Equipment`** — used by `port_core_electrical_consistency`:
+
+```rust
+HaresError::Equipment(
+    "port/core electrical consistency violation for '<name>': <detail> \
+     (port deltas this step: load <W> W, generation <W> W, reactive <kvar> kvar)"
+)
+```
+
+**`HaresError::NegativeDeliveredEnergy`** — used by `hvac_power_non_negative` and `hvac_accumulator`: 
 
 ```rust
 HaresError::NegativeDeliveredEnergy {
@@ -108,9 +120,9 @@ HaresError::NegativeDeliveredEnergy {
 ```
 
 A caller that pattern-matches only on `HaresError::InvariantViolation` will
-silently miss violations from `nan_screen`, `hvac_power_non_negative`, and
-`hvac_accumulator`. All three variants halt the dwelling simulation — no
-silent corruption.
+silently miss violations from `Equipment` (port/core consistency), `nan_screen`,
+`hvac_power_non_negative`, and `hvac_accumulator`. All four variants halt the
+dwelling simulation — no silent corruption.
 
 ### Ordering Contract
 
@@ -245,13 +257,13 @@ timestep via `hares-core/src/diagnostics.rs`.
 
 ### Columns
 
-Per-timestep: `step`, `timestamp_s`, `outdoor_temp_c`, `electrical_net_kw`
+Per-timestep: `step`, `timestamp_s`, `outdoor_temp_c`, `electrical_net_kw`, `electrical_net_kvar`
 
 Per-zone (repeated for each zone): `zoneN_temp_c`, `zoneN_thermal_gain_w`,
 `zoneN_latent_gain_w`
 
 Extended fields (populated when available):
-- Per-equipment: name, mode, electric_kw, sensible_gain_w
+- Per-equipment: name, mode, electric_kw, reactive_kvar, sensible_gain_w
 - Envelope breakdown: window_solar, opaque_solar_lwr, interior_lwr,
   infiltration_by_zone, internal_gain, port_convective
 
@@ -294,6 +306,17 @@ Extended fields (populated when available):
 2. Enable observer to capture the failing timestep
 3. For `electrical_balance`: sum all equipment `electrical_load_kw` +
    `electrical_gen_kw` contributions and compare with solver net
+
+### Reactive Power / Power Factor Wrong
+
+When per-equipment or total reactive power doesn't match expectations:
+
+1. **Check per-equipment Q telemetry** at verbosity ≥5: each equipment with `REACTIVE` capability emits `{name} Reactive Power (kVAR)`. Row zero means either the equipment is off, has `pf=1.0`, or has the pf=0 sentinel (no reactive configured).
+2. **Inspect observer contribution diff**: `EquipmentContribution.electrical_reactive_kvar` shows what each equipment contributed to the reactive port accumulator in its `step()`. The sum of contributions must match the port accumulator delta.
+3. **Check reactive_balance residual**: if `reactive_balance` is failing in debug builds, the invariant error reports `q_solver`, `q_ports`, residual, and tolerance. A non-zero residual with balanced active power typically means one equipment is pushing reactive power but not declaring `REACTIVE` capability, or a sign inversion between port and CoreOutput.
+4. **Verify ZIP/PF config resolution**: for each equipment, trace the config chain: `EquipmentConfig.zip` sidecar → `zip_defaults_for_class(&ochre_class)` → `constant_power()`. If `ochre_class` is a variant not in the class table (e.g. a misspelled HPXML class name), the fallback is `constant_power()` with pf=0 sentinel → Q=0 silently.
+5. **Check PF value**: the `Power Factor (-)` column (verbosity ≥5) is derived as `|P| / sqrt(P² + Q²)` — if it's 1.0 but Q is non-zero, the column derivation or sign handling may be wrong.
+6. **Inspect diagnostic CSV** (verbosity ≥4): `electrical_net_kvar` (total reactive from solver) and per-equipment `reactive_kvar` fields show the reactive power flow at each timestep.
 
 ### Humidity Drift
 
@@ -361,9 +384,10 @@ For per-equipment columns in recorder output (`Dwelling::record_step`):
 
 | File | Purpose |
 |------|---------|
-| `hares-core/src/invariants.rs` | InvariantChecker — conservation law checks |
+| `hares-core/src/invariants.rs` | InvariantChecker — conservation law checks (incl. `check_reactive`) |
 | `hares-core/src/observer.rs` | Observer types and ObserverBuffer |
-| `hares-core/src/observer_capture.rs` | Capture functions and port diffing |
-| `hares-core/src/diagnostics.rs` | Diagnostic CSV output |
-| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_invariants |
+| `hares-core/src/observer_capture.rs` | Capture functions and port diffing (per-equipment reactive delta) |
+| `hares-core/src/diagnostics.rs` | Diagnostic CSV output (incl. `electrical_net_kvar`, per-equipment `reactive_kvar`) |
+| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_invariants, validate_port_core_electrical_consistency calls |
 | `hares-envelope/src/thermal_solver/config.rs` | EnvelopeComponentGains |
+| `crates/hares-types/src/equipment.rs` | `validate_port_core_electrical_consistency` — port/CoreOutput reactive consistency validator |

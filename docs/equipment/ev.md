@@ -90,3 +90,20 @@ graph LR
 
 - **Electrical only**: `active_power_kw` (positive = load, negative = generation), `reactive_power_kvar = 0`
 - No thermal or fuel ports
+
+### Reactive Power
+
+EV reactive power is held at zero for all operating modes. The onboard charger is a PFC (power-factor-correction) rectifier, so Q ≈ 0 is physically realistic. Q=0 is also load-bearing for the calibrator's pump-vs-EV reactive signature gate.
+
+**Control rejection** — all reactive control signals on EV raise errors (no silent drops):
+
+| Signal | Behaviour |
+|--------|-----------|
+| `PowerSetpoint.reactive_power_kvar: Some(q)` with `q ≠ 0` | `Err(Control("EV does not support reactive power control"))` |
+| `PowerSetpoint.reactive_power_kvar: Some(0.0)` | Accepted (no-op) |
+| `ReactiveSetpoint` | Rejected via catch-all `Err` |
+| `PowerFactorSetpoint` | Rejected via catch-all `Err` |
+
+The EV does not declare `REACTIVE` core capability; `CoreOutput.flows.reactive_power_kvar` is always `None`.
+
+For background on why and how other equipment handles reactive power, see [power-factor.md](./power-factor.md).

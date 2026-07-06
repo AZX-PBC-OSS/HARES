@@ -974,10 +974,19 @@ impl ControlDispatcher {
                             self.seen_targets.push((by_name, tier_idx));
 
                             if let Err(err) = eq.apply_control(&request.signal) {
-                                warnings.push(format!(
-                                    "control apply failed for '{}' : {err}",
-                                    eq_name
-                                ));
+                                let msg = format!("control apply failed for '{}' : {err}", eq_name);
+                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                                {
+                                    tracing::error!(
+                                        equipment = eq_name.as_str(),
+                                        signal = ?request.signal,
+                                        error = %err,
+                                        "control dispatch rejected a signal — \
+                                         this is silent in release builds (warning only) \
+                                         but surfaced here in debug/invariant builds"
+                                    );
+                                }
+                                warnings.push(msg);
                             } else {
                                 any_delivered = true;
                             }
@@ -1060,10 +1069,22 @@ fn apply_to_matching(
         if matches(&**eq) {
             delivered = true;
             if let Err(err) = eq.apply_control(signal) {
-                warnings.push(format!(
+                let msg = format!(
                     "control apply failed for '{}' : {err}",
                     eq.descriptor().name
-                ));
+                );
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    tracing::error!(
+                        equipment = eq.descriptor().name.as_str(),
+                        signal = ?signal,
+                        error = %err,
+                        "control dispatch rejected a signal — \
+                         this is silent in release builds (warning only) \
+                         but surfaced here in debug/invariant builds"
+                    );
+                }
+                warnings.push(msg);
             }
         }
     }

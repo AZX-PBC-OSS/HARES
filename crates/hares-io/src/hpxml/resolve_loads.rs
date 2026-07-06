@@ -701,6 +701,8 @@ pub(super) fn resolve_scheduled_loads(
                             plug_in_policy: None,
                             power_limit_kw: None,
                             initial_connection_state: None,
+                            power_factor: None,
+                            charger_capacity_kva: None,
                         };
                         specs.push(build_typed_spec(
                             "Electric Vehicle".to_string(),

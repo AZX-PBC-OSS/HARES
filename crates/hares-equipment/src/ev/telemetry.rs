@@ -5,7 +5,7 @@ use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAU
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
-    let mut t = Telemetry::with_capacity(16);
+    let mut t = Telemetry::with_capacity(17);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
@@ -21,6 +21,7 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
+    t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     t
 }
 
@@ -104,6 +105,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             description:
                 "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
                     .to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive=absorbing vars, negative=supplying)".to_string(),
         },
     ]
 }

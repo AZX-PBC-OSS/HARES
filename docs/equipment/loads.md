@@ -12,12 +12,14 @@ Deterministic power consumption driven by time-indexed schedules (CSV columns or
 
 - Power schedule (electrical) + optional gas schedule
 - Monthly multipliers for seasonal variation (e.g., ceiling fans off in winter)
-- ZIP voltage-dependent load model:
+- ZIP voltage-dependent load model (full ZIP with byte-identical arithmetic per [power-factor.md](./power-factor.md)):
   ```
-  P = P_base * (z*v^2 + i*v + p_coeff)
-  Q = P * pf * (zq*v^2 + iq*v + pq)
+  P = P_base * (zp·V² + ip·V + pp)    where V = voltage_pu / v0
+  Q = P_actual * tan(acos(pf)) * (zq·V² + iq·V + pq)
   ```
-  Default: constant-power (z=0, i=0, p=1.0)
+  Default: constant-power (zp=0, ip=0, pp=1.0, pf=0 sentinel → Q=0). Non-zero pf and reactive coefficients from class table when available.
+
+- ScheduledLoad with `ochre_class = "Ventilation Fan"` or `"Ceiling Fan"` now produces the same reactive power as the typed `ventilation.rs` model (both use PF 0.87 from the FAN class — the previous inconsistency is resolved)
 
 ### Zone Thermal Routing
 

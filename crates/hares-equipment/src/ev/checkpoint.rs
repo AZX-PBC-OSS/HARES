@@ -30,4 +30,6 @@ pub(super) struct EvCheckpoint {
     pub(super) degradation: crate::battery::degradation::DegradationState,
     pub(super) rainflow: crate::battery::degradation::RainflowCounter,
     pub(super) last_daily_update_day: i32,
+    pub(super) q_setpoint_kvar: f64,
+    pub(super) power_factor: f64,
 }

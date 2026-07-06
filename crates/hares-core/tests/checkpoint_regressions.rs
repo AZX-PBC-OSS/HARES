@@ -370,6 +370,8 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
             plug_in_policy: None,
             power_limit_kw: None,
             initial_connection_state: None,
+            power_factor: None,
+            charger_capacity_kva: None,
         },
     )
     .unwrap();

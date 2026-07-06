@@ -402,6 +402,8 @@ pub enum DefaultsError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("missing critical row '{row_name}' in {path}")]
+    MissingRow { path: PathBuf, row_name: String },
 }
 
 impl DefaultsStore {
@@ -799,19 +801,62 @@ fn load_hvac_curves_dir(dir: &Path) -> Result<HashMap<String, HvacCurveSet>, Def
                 let curve_set = load_hvac_curve_file(&path)?;
                 map.insert(stem, curve_set);
             }
-            Some("csv") => match load_hvac_csv_file(&path) {
-                Ok(curve_set) => {
-                    map.insert(stem, curve_set);
-                }
-                Err(err) => {
-                    tracing::warn!(path = %path.display(), %err, "failed to parse HVAC CSV");
-                }
-            },
+            Some("csv") => {
+                let curve_set = load_hvac_csv_file(&path)?;
+                map.insert(stem, curve_set);
+            }
             _ => {}
         }
     }
     Ok(map)
 }
+
+/// Row names that must be present in every HVAC biquadratic CSV file for the
+/// curve set to be physically valid. These are the biquadratic and quadratic
+/// coefficient rows that define the equipment's capacity and EIR performance
+/// curves. If any of these rows is absent — e.g. due to a typo like
+/// `a_eirr_t` instead of `a_eir_t` — the loader returns
+/// [`DefaultsError::MissingRow`] rather than silently substituting zeros,
+/// because an all-zero coefficient set produces physically impossible results
+/// (e.g. EIR = 0 → zero electricity consumption).
+///
+/// Non-critical rows (temperature bounds, flow-fraction bounds, PLF bounds)
+/// have documented fallback values and are not in this list; their absence
+/// emits a `tracing::warn!` but does not fail the load.
+const CRITICAL_HVAC_ROWS: &[&str] = &[
+    // EIR-temperature biquadratic coefficients [a, b, c, d, e, f]
+    "a_eir_t",
+    "b_eir_t",
+    "c_eir_t",
+    "d_eir_t",
+    "e_eir_t",
+    "f_eir_t",
+    // EIR-flow-fraction quadratic coefficients [a, b, c]
+    "a_eir_ff",
+    "b_eir_ff",
+    "c_eir_ff",
+    // EIR-part-load-ratio quadratic coefficients [a, b, c]
+    "a_eir_plr",
+    "b_eir_plr",
+    "c_eir_plr",
+    // Capacity-temperature biquadratic coefficients [a, b, c, d, e, f]
+    "a_cap_t",
+    "b_cap_t",
+    "c_cap_t",
+    "d_cap_t",
+    "e_cap_t",
+    "f_cap_t",
+    // Capacity-flow-fraction quadratic coefficients [a, b, c]
+    "a_cap_ff",
+    "b_cap_ff",
+    "c_cap_ff",
+];
+
+/// Non-critical row names that have documented fallback values. Their absence
+/// emits a `tracing::warn!` but does not fail the load.
+const NON_CRITICAL_HVAC_ROWS: &[&str] = &[
+    "min_Twb", "max_Twb", "min_Tdb", "max_Tdb", "min_ff", "max_ff", "min_plf", "max_plf",
+];
 
 /// OCHRE uses ±100 (°F) as a sentinel for "effectively unbounded" temperature
 /// range in its HVAC heating CSV defaults
@@ -984,18 +1029,91 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
     let n_variants = variant_names.len();
 
     // Read all rows into a map: row_name → Vec<f64> (one per variant).
+    // Each cell that is missing or fails to parse emits a `tracing::warn!`
+    // with the row name, column index, and raw value, then falls back to 0.0.
+    // The total count of zero-fallback events is recorded for observability.
     let mut data: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut zero_fallback_count = 0u32;
     for result in rdr.records() {
         let record = result.map_err(|e| DefaultsError::MalformedToml {
             path: path.to_path_buf(),
             reason: e.to_string(),
         })?;
         let row_name = record.get(0).unwrap_or("").to_string();
-        let values: Vec<f64> = (1..=n_variants)
-            .map(|i| record.get(i).unwrap_or("0").parse::<f64>().unwrap_or(0.0))
-            .collect();
+        let mut values = Vec::with_capacity(n_variants);
+        for i in 1..=n_variants {
+            match record.get(i) {
+                None => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        row = %row_name,
+                        column = i,
+                        "missing column in HVAC CSV row; using 0.0 fallback",
+                    );
+                    zero_fallback_count += 1;
+                    values.push(0.0);
+                }
+                Some(raw) => match raw.parse::<f64>() {
+                    Ok(v) => values.push(v),
+                    Err(_) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            row = %row_name,
+                            column = i,
+                            raw_value = raw,
+                            "unparseable value in HVAC CSV row; using 0.0 fallback",
+                        );
+                        zero_fallback_count += 1;
+                        values.push(0.0);
+                    }
+                },
+            }
+        }
         data.insert(row_name, values);
     }
+
+    // Fail the entire file load if any critical coefficient row is absent.
+    // A missing critical row (e.g. `a_eir_t` misspelled as `a_eirr_t`) would
+    // silently produce all-zero coefficients, yielding physically impossible
+    // results like EIR = 0 (zero electricity consumption).
+    for &name in CRITICAL_HVAC_ROWS {
+        if !data.contains_key(name) {
+            return Err(DefaultsError::MissingRow {
+                path: path.to_path_buf(),
+                row_name: name.to_string(),
+            });
+        }
+    }
+
+    // Warn on missing non-critical rows that have documented fallback values.
+    for &name in NON_CRITICAL_HVAC_ROWS {
+        if !data.contains_key(name) {
+            tracing::warn!(
+                path = %path.display(),
+                row = %name,
+                "non-critical row missing in HVAC CSV; using fallback values",
+            );
+        }
+    }
+
+    // Observer capture: record the total zero-fallback count for this file
+    // so monitoring can alert on data-quality regressions in shipped CSVs.
+    #[cfg(feature = "observe")]
+    if zero_fallback_count > 0 {
+        tracing::info!(
+            target: "observe",
+            column = "hvac_csv_zero_fallback",
+            path = %path.display(),
+            count = zero_fallback_count,
+            "zero-fallback events during HVAC CSV load",
+        );
+    }
+    // Why: zero_fallback_count is only read by the observe feature path;
+    // without that feature the count is accumulated but never consumed.
+    // The count tracking is always compiled to keep the parsing logic
+    // cfg-free, so we explicitly discard the value when observe is off.
+    #[cfg(not(feature = "observe"))]
+    let _ = zero_fallback_count;
 
     let get_row = |name: &str| -> Vec<f64> {
         data.get(name)
@@ -1103,7 +1221,7 @@ fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>
     })?;
 
     let mut rows = Vec::new();
-    for rec in rdr.deserialize::<HashMap<String, String>>() {
+    for (row_idx, rec) in rdr.deserialize::<HashMap<String, String>>().enumerate() {
         let record = rec.map_err(|e| DefaultsError::MalformedToml {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -1114,6 +1232,11 @@ fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         if hvac_name.is_empty() {
+            tracing::warn!(
+                path = %path.display(),
+                record = row_idx + 1,
+                "skipping multispeed CSV row with missing or empty 'HVAC Name' column",
+            );
             continue;
         }
 
@@ -2466,6 +2589,236 @@ max_Tdb,{tdb_max}\n",
         );
         assert_eq!(v.eir_t.x1_bounds, (-20.0, 30.0));
         assert_eq!(v.eir_t.x2_bounds, (-20.0, 50.0));
+    }
+
+    // ── Silent zero-fallback regression tests (T-0395) ──────────────────
+
+    /// Write a complete single-variant HVAC CSV with all critical rows and
+    /// explicit temperature bounds. Coefficient values are distinct non-zero
+    /// values so that a zero-fallback is immediately detectable.
+    fn write_complete_hvac_csv(path: &Path) {
+        std::fs::write(
+            path,
+            "Name,Single_1\n\
+             a_eir_t,-0.30428\n\
+             b_eir_t,0.11805\n\
+             c_eir_t,-0.00342\n\
+             d_eir_t,-0.00626\n\
+             e_eir_t,0.0007\n\
+             f_eir_t,-0.00047\n\
+             a_eir_ff,1.32299905\n\
+             b_eir_ff,-0.477711207\n\
+             c_eir_ff,0.154712157\n\
+             a_eir_plr,0.93\n\
+             b_eir_plr,0.07\n\
+             c_eir_plr,0.0\n\
+             a_cap_t,1.5509\n\
+             b_cap_t,-0.07505\n\
+             c_cap_t,0.0031\n\
+             d_cap_t,0.0024\n\
+             e_cap_t,-0.00005\n\
+             f_cap_t,-0.00043\n\
+             a_cap_ff,0.718605468\n\
+             b_cap_ff,0.41009989\n\
+             c_cap_ff,-0.128705457\n\
+             min_Twb,13.88\n\
+             max_Twb,23.88\n\
+             min_Tdb,18.33\n\
+             max_Tdb,51.66\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_critical_row_fails_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("bad.csv");
+        write_complete_hvac_csv(&csv_path);
+
+        // Remove the `a_eir_t` line to simulate a typo (e.g. `a_eirr_t`).
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let modified = content
+            .lines()
+            .filter(|line| !line.starts_with("a_eir_t,"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&csv_path, modified).unwrap();
+
+        let result = load_hvac_csv_file(&csv_path);
+        assert!(
+            matches!(
+                &result,
+                Err(DefaultsError::MissingRow { row_name, .. }) if row_name == "a_eir_t"
+            ),
+            "missing a_eir_t row must return MissingRow error, got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn critical_row_missing_propagates_through_load_hvac_curves_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let hvac_dir = dir.path().join("hvac_cooling");
+        std::fs::create_dir(&hvac_dir).unwrap();
+        let csv_path = hvac_dir.join("bad.csv");
+        write_complete_hvac_csv(&csv_path);
+
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let modified = content
+            .lines()
+            .filter(|line| !line.starts_with("a_eir_t,"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&csv_path, modified).unwrap();
+
+        let result = load_hvac_curves_dir(&hvac_dir);
+        assert!(
+            matches!(
+                &result,
+                Err(DefaultsError::MissingRow { row_name, .. }) if row_name == "a_eir_t"
+            ),
+            "missing a_eir_t row must propagate as MissingRow error through load_hvac_curves_dir, got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn missing_noncritical_row_loads_with_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("no_bounds.csv");
+        write_complete_hvac_csv(&csv_path);
+
+        // Strip the four temperature-bound rows (non-critical).
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let modified = content
+            .lines()
+            .filter(|line| {
+                !line.starts_with("min_Twb,")
+                    && !line.starts_with("max_Twb,")
+                    && !line.starts_with("min_Tdb,")
+                    && !line.starts_with("max_Tdb,")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&csv_path, modified).unwrap();
+
+        let set = load_hvac_csv_file(&csv_path).expect("non-critical rows missing must still load");
+        let v = &set.variants[0];
+
+        // Fallback bounds must be applied when temperature rows are absent.
+        assert_eq!(v.cap_t.x1_bounds, FALLBACK_TWB_BOUNDS);
+        assert_eq!(v.cap_t.x2_bounds, FALLBACK_TDB_BOUNDS);
+        assert_eq!(v.eir_t.x1_bounds, FALLBACK_TWB_BOUNDS);
+        assert_eq!(v.eir_t.x2_bounds, FALLBACK_TDB_BOUNDS);
+    }
+
+    #[test]
+    fn unparseable_value_produces_zero_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("bad_value.csv");
+        write_complete_hvac_csv(&csv_path);
+
+        // Replace the `a_eir_t` value with an unparseable string.
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let modified = content.replace("a_eir_t,-0.30428", "a_eir_t,abc");
+        std::fs::write(&csv_path, modified).unwrap();
+
+        let set = load_hvac_csv_file(&csv_path).expect("unparseable value must not fail the load");
+        let v = &set.variants[0];
+
+        // The unparseable cell must fall back to 0.0 while the rest of the
+        // row's coefficients are parsed correctly.
+        assert!(
+            (v.eir_t.coeffs[0] - 0.0).abs() < f64::EPSILON,
+            "unparseable a_eir_t must be 0.0, got {}",
+            v.eir_t.coeffs[0],
+        );
+        assert!(
+            (v.eir_t.coeffs[1] - 0.11805).abs() < 1e-10,
+            "b_eir_t must still be parsed correctly, got {}",
+            v.eir_t.coeffs[1],
+        );
+    }
+
+    #[test]
+    fn well_formed_csv_produces_correct_coefficients() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("good.csv");
+        write_complete_hvac_csv(&csv_path);
+
+        let set = load_hvac_csv_file(&csv_path).expect("well-formed CSV must load");
+        let v = &set.variants[0];
+
+        // Every coefficient must match the CSV exactly — if any zero-fallback
+        // had occurred, the coefficient would be 0.0 instead.
+        assert!((v.eir_t.coeffs[0] - (-0.30428)).abs() < 1e-10);
+        assert!((v.eir_t.coeffs[1] - 0.11805).abs() < 1e-10);
+        assert!((v.eir_t.coeffs[2] - (-0.00342)).abs() < 1e-10);
+        assert!((v.eir_t.coeffs[3] - (-0.00626)).abs() < 1e-10);
+        assert!((v.eir_t.coeffs[4] - 0.0007).abs() < 1e-10);
+        assert!((v.eir_t.coeffs[5] - (-0.00047)).abs() < 1e-10);
+
+        assert!((v.cap_t.coeffs[0] - 1.5509).abs() < 1e-10);
+        assert!((v.cap_t.coeffs[1] - (-0.07505)).abs() < 1e-10);
+        assert!((v.cap_t.coeffs[2] - 0.0031).abs() < 1e-10);
+
+        assert!((v.cap_ff[0] - 0.718605468).abs() < 1e-10);
+        assert!((v.eir_ff[0] - 1.32299905).abs() < 1e-10);
+        assert!((v.eir_plr[0] - 0.93).abs() < 1e-10);
+
+        // Temperature bounds must be preserved exactly.
+        assert_eq!(v.cap_t.x1_bounds, (13.88, 23.88));
+        assert_eq!(v.cap_t.x2_bounds, (18.33, 51.66));
+    }
+
+    #[test]
+    fn all_shipped_hvac_csvs_load_successfully() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+
+        let csv_dirs = [
+            defaults_dir.join("hvac_cooling"),
+            defaults_dir.join("hvac_heating"),
+        ];
+
+        for dir in &csv_dirs {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.extension().is_none_or(|ext| ext != "csv") {
+                    continue;
+                }
+
+                let set = load_hvac_csv_file(&path).unwrap_or_else(|e| {
+                    panic!(
+                        "shipped HVAC CSV {} must load successfully: {e}",
+                        path.display()
+                    )
+                });
+
+                // Each variant must have non-zero leading coefficients for
+                // both the EIR and capacity biquadratic curves. A zero value
+                // here would indicate a parse failure or missing row that
+                // silently fell back to 0.0.
+                for v in &set.variants {
+                    assert!(
+                        v.eir_t.coeffs[0] != 0.0,
+                        "{}: variant {} has a_eir_t = 0 (zero-fallback suspected)",
+                        path.display(),
+                        v.name,
+                    );
+                    assert!(
+                        v.cap_t.coeffs[0] != 0.0,
+                        "{}: variant {} has a_cap_t = 0 (zero-fallback suspected)",
+                        path.display(),
+                        v.name,
+                    );
+                }
+            }
+        }
     }
 
     #[test]

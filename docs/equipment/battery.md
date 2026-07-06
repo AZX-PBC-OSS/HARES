@@ -24,6 +24,7 @@ V_terminal = V_oc/2 + sqrt((V_oc/2)^2 + P_dc * R)
 - When discriminant < 0, power clamped to `P_max = V_oc^2 / (4R)`
 - Pack resistance: `R_pack = (R_cell * n_series) / n_parallel` (default R_cell = 0.005 ohm)
 - Inverter efficiency: 0.97 default (applied to AC-DC conversion both directions)
+- **Reactive control**: supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` per [power-factor.md](./power-factor.md). kVA clamp with active-power priority: `|Q| ≤ sqrt(max(0, S² − P²))`. Config fields: `power_factor` (default 1.0), `inverter_capacity_kva` (default `max(max_charge_kw, max_discharge_kw)`)
 
 ## SOC Tracking
 
@@ -104,9 +105,7 @@ graph TD
 | `SelfConsumption` | Charge from PV surplus, discharge to offset load. `solar_only_charging` flag prevents grid charging |
 | `GridConnect` | Enable/disable grid power flow |
 
-**Capabilities declared**: `POWER_SETPOINT | SOC_TARGET | GRID_CONNECT | SELF_CONSUMPTION`
-
-**Not yet implemented**: `POWER_LIMIT`, `DEMAND_RESPONSE` (type system supports them, battery does not declare the capabilities)
+**Capabilities declared**: `POWER_SETPOINT | SOC_TARGET | GRID_CONNECT | SELF_CONSUMPTION | POWER_LIMIT | DEMAND_RESPONSE | REACTIVE_SETPOINT | POWER_FACTOR_SETPOINT`
 
 ### Import/Export Limits
 
@@ -123,7 +122,7 @@ graph LR
     BAT -->|"ohmic_loss_w only"| TH["Thermal Port<br/>(Zone, if configured)"]
 ```
 
-- **Electrical**: `active_power_kw = actual_power + standby_kw (5W) + heater_kw`. Reactive = 0
+- **Electrical**: `active_power_kw = actual_power + standby_kw (5W) + heater_kw`. Reactive per [power-factor.md](./power-factor.md): control-precedence then baseline pf, kVA-clamped
 - **Thermal**: only I^2R ohmic losses to zone (heater energy enters cell thermal mass first, couples via UA; no double-counting)
 - **Category**: `ThermalCategory::InternalGain`
 
@@ -140,3 +139,4 @@ graph LR
 | `discharge_derate` | 0-1 | Temperature derating factor |
 | `cycle_count` | - | Equivalent full cycles (rainflow) |
 | `capacity_fade_pct` | 0-1 | Capacity degradation fraction |
+| `reactive_power_kvar` | kvar | Signed bus reactive power (positive = absorbing) |

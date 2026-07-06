@@ -524,6 +524,8 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         initial_connection_state: ev
             .initial_connection_state
             .map(|state| EvConnectionState::from(state).to_string()),
+        power_factor: None,
+        charger_capacity_kva: None,
     };
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }
@@ -1073,6 +1075,8 @@ impl PyDwelling {
                 plug_in_policy: None,
                 power_limit_kw: None,
                 initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
             },
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;

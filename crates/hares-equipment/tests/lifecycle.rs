@@ -1108,6 +1108,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 plug_in_policy: None,
                 power_limit_kw: None,
                 initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
             },
         ),
         "Scheduled EV" => config_mixed(

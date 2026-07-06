@@ -40,6 +40,8 @@ pub(crate) const KEY_FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
 pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
 pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
 pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
+pub(super) const KEY_POWER_FACTOR: &str = "power_factor";
+pub(super) const KEY_CHARGER_CAPACITY_KVA: &str = "charger_capacity_kva";
 
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
 pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;
@@ -214,6 +216,15 @@ pub struct EvConfig {
     pub power_limit_kw: Option<f64>,
     /// Initial connection state string.
     pub initial_connection_state: Option<String>,
+    /// Power factor magnitude for the charger/inverter front-end.
+    /// Defaults to 1.0 (unity — EV onboard chargers have PFC front-ends at
+    /// ~0.99+; default runs bit-identical to pre-reactive behaviour).
+    pub power_factor: Option<f64>,
+    /// Charger/inverter AC apparent-power rating [kVA]. Used as the kVA
+    /// clamp for reactive power (active-power priority: P never curtailed).
+    /// Defaults to `max(max_charging_power_kw, v2g_max_discharge_kw,
+    /// v2l_max_discharge_kw)` at init time.
+    pub charger_capacity_kva: Option<f64>,
 }
 
 impl EquipmentTypedConfig for EvConfig {
@@ -314,6 +325,20 @@ impl EvConfig {
                         "EV {name} must be finite and >= 0"
                     )));
                 }
+            }
+        }
+        if let Some(pf) = self.power_factor {
+            if !pf.is_finite() || pf <= 0.0 || pf > 1.0 {
+                return Err(HaresError::Equipment(
+                    "EV power_factor must be finite and within (0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(kva) = self.charger_capacity_kva {
+            if !kva.is_finite() || kva <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV charger_capacity_kva must be finite and > 0".to_string(),
+                ));
             }
         }
         Ok(())

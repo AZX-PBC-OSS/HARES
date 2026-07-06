@@ -79,13 +79,19 @@ graph LR
 
 - Heater: `ThermalCategory::HvacHeating`, applies `duct_dse` and `space_fraction`
 - Cooler: negative sensible + latent via SHR split, `ThermalCategory::HvacCooling`
-- Electrical: compressor + fan + ER backup + crankcase + pan heater (MSHP)
+- Electrical: compressor + fan + ER backup + crankcase + pan heater (MSHP), plus reactive power per [power-factor](./power-factor.md)
+
+### Reactive Power
+
+All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Heater PF is 0.84 (lagging); cooler PF is 0.96. GSHP/WSHP heaters and coolers use the same PF as their air-source counterparts (identical compressor motor class). Reactive power follows Rule R1: `Q = P · tan(acos(pf)) · reactive_base(V)` computed from the already-computed real power — real power remains bit-identical at all voltages. The PF is a whole-unit value (compressor + fan + crankcase on one electrical port); compressor PF is physics, not a control surface.
+
+All typed HVAC equipment is covered by the class-defaults table in [power-factor.md](./power-factor.md).
 
 ### Control & Telemetry
 
 **Capabilities**: `THERMAL_SETPOINT | DUTY_CYCLE | LOAD_FRACTION | POWER_LIMIT | MODE_OVERRIDE | DEMAND_RESPONSE`
 
-**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `speed_index`, `defrost_active`, `cop`, `runtime_fraction`, `sensible_cooling_w`, `latent_cooling_w`, `shr`
+**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `speed_index`, `defrost_active`, `cop`, `runtime_fraction`, `sensible_cooling_w`, `latent_cooling_w`, `shr`, `reactive_power_kvar`
 
 ---
 
@@ -104,6 +110,7 @@ graph LR
 - Gas: `thermal_output = fuel_input * AFUE` (flue losses implicit in AFUE)
 - Electric: `thermal_output = electrical_input * efficiency`
 - Fan power proportional to heating duty
+- **Reactive power**: Gas furnace blower fan PF 0.87 (FAN class in [power-factor.md](./power-factor.md)); electric furnace element PF 1.0 (Q=Some(0.0) — resistive)
 
 ### Port Interactions
 
@@ -111,7 +118,7 @@ graph LR
 graph LR
     F["Furnace"]
     F -->|"capacity × duty × duct_dse"| TH["Thermal Port<br/>(Zone)"]
-    F -->|"rated × EIR × duty"| EL["Electrical Port"]
+    F -->|"rated × EIR × duty + reactive"| EL["Electrical Port"]
     F -->|"gas consumption"| FU["Fuel Port<br/>(Gas only)"]
 ```
 
@@ -136,10 +143,12 @@ graph LR
 ### Port Interactions
 
 - **Hydronic loop**: supply/return temperatures, mass flow rate, FluidType (Water/Glycol)
-- **Electrical**: pump power
+- **Electrical**: pump power plus reactive per [power-factor.md](./power-factor.md)
 - **Thermal**: parasitic losses to zone
 
-**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `supply_temp_c`, `return_temp_c`
+**Reactive power**: Gas boiler circulation pump PF 0.84 (PUMPS class); electric boiler element PF 1.0 (Q=Some(0.0) — resistive).
+
+**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `supply_temp_c`, `return_temp_c`, `reactive_power_kvar`
 
 ---
 
@@ -170,9 +179,11 @@ At part load, condensate re-evaporates on off-cycles:
 ### Port Interactions
 
 - **Thermal**: negative sensible (cooling) + latent, both with `duct_dse`
-- **Electrical**: compressor + fan + crankcase heater
+- **Electrical**: compressor + fan + crankcase heater, plus reactive power per [power-factor.md](./power-factor.md)
 
-**Telemetry**: `electric_kw`, `sensible_cooling_w`, `latent_cooling_w`, `shr`, `cop`, `runtime_fraction`
+**Reactive power**: PF 0.96 (HVAC_COOLING class). Whole-unit value (compressor + fan + crankcase on one electrical port). Same PF across Central AC, Room AC, ASHP/MSHP/GSHP/WSHP cooler.
+
+**Telemetry**: `electric_kw`, `sensible_cooling_w`, `latent_cooling_w`, `shr`, `cop`, `runtime_fraction`, `reactive_power_kvar`
 
 ---
 
@@ -217,7 +228,9 @@ Minimum cycle time prevents rapid cycling via `last_mode_switch_at` timestamp.
 - Sensible: dehumidifier heats zone (motor/fan dissipation + latent recovery)
 - Net: dehumidification + heat input (cooling system may be needed to offset)
 
-**Telemetry**: `water_removal_l_day`, `electric_power_w`, `latent_removal_w`
+**Telemetry**: `water_removal_l_day`, `electric_power_w`, `latent_removal_w`, `reactive_power_kvar`
+
+**Reactive power**: PF 0.96 (HVAC_COOLING class — compressor behaves like a cooling compressor per [power-factor.md](./power-factor.md)).
 
 ---
 
@@ -227,7 +240,9 @@ Minimum cycle time prevents rapid cycling via `last_mode_switch_at` timestamp.
 
 Simple resistive heating: efficiency = 1.0, no capacity curves, no duct losses (`duct_dse = 1.0` always). Direct zone heating with `space_fraction` for multi-zone splits.
 
-**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`
+**Reactive power**: PF 1.0 (RESISTANCE class), Q=Some(0.0) — pure resistive element per [power-factor.md](./power-factor.md).
+
+**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `reactive_power_kvar`
 
 ---
 

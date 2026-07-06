@@ -18,6 +18,8 @@ Three load-dependent efficiency curves:
 
 Clamped to 0.001 minimum to prevent division by zero.
 
+> **Note on "power_factor" in generator.rs:453**: The local variable `fuel_curve_power_factor` in `compute_stack_cooler_heat()` is the stack-cooler polynomial's power-scaling term for the fuel cell thermal model, NOT the electrical power factor. It has nothing to do with reactive power or the ZIP/PF system documented in [power-factor.md](./power-factor.md).
+
 ## Energy Balance
 
 ```
@@ -60,7 +62,7 @@ graph LR
     GEN -->|"CHP hot water"| FL["Fluid Port<br/>(if eta_thermal > 0)"]
 ```
 
-- **Electrical**: negative = generation
+- **Electrical**: negative = generation. Reactive power is held at zero — detailed synchronous genset excitation and power-factor control is out of scope for this model. See [power-factor.md](./power-factor.md).
 - **Fuel**: consumption in watts (FuelType::Gas)
 - **Thermal**: waste heat to zone. With CHP fluid loop: only flue loss to zone, thermal recovery to fluid. Without loop: all waste heat to zone
 - **CHP Fluid**: water loop at 70C supply / 60C return, 0.1 kg/s default

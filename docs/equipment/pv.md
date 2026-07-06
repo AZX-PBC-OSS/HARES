@@ -94,9 +94,32 @@ Min power factor enforcement (default 0.8) in Watt and Var modes: `|Q| <= |P| * 
 
 Order of application: sum arrays -> curtailment % -> absolute limit -> reactive power -> inverter limits
 
+## Reactive Power
+
+PV supports full reactive control with unified sign convention per [power-factor.md](./power-factor.md): one signed bus Q used identically on port, CoreOutput, and telemetry (positive = absorbing vars, negative = supplying vars). A debug-build validator asserts all three channels agree on every step.
+
+**Control precedence** (highest first):
+
+1. `q_setpoint_kvar` (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`) — absolute override
+2. PowerFactorSetpoint-updated `power_factor` — zeroes `q_setpoint`, future steps use updated pf
+3. Baseline `PvConfig.power_factor` (default 1.0) — `Q = -|P_gen| · tan(acos(pf))` (generating PV at pf < 1 supplies vars to the bus, making bus Q negative)
+
+**Sign convention**: The default pf=1.0 path produces Q=0 (unchanged from pre-PF behaviour). At pf < 1, the baseline produces negative bus Q because a generating inverter supplies vars. The `ReactiveSetpoint` passes through as-commanded with no sign flip.
+
+**Inverter limits**: Apparent-power rating caps |Q| via inverter priority modes (Watt/Var/Constant PF). Min power factor enforcement (default 0.8).
+
+### Control Signals (Reactive)
+
+| Signal | Effect |
+|--------|--------|
+| `ReactiveSetpoint { kvar }` | Sets Q directly, bypasses PF calculation. Positive = absorbing |
+| `PowerFactorSetpoint { power_factor }` | Updates `self.power_factor`, zeroes `q_setpoint_kvar`. Produces `Q = -\|P_gen\| · tan(acos(pf))` |
+| `PowerSetpoint.reactive_power_kvar` | Sets `q_setpoint_kvar` as absolute override |
+| `InverterPriorityMode` | Switches Watt/Var/Constant PF priority |
+
 ## Port Interactions
 
-- **Electrical**: `active_power_kw = -final_p_kw` (generation = negative), `reactive_power_kvar = -final_q_kvar`
+- **Electrical**: `active_power_kw = -final_p_kw` (generation = negative), `reactive_power_kvar = final_q_kvar` (signed, un-negated — matches CoreOutput and telemetry)
 - No thermal or fuel ports
 
 ## Telemetry
@@ -105,7 +128,7 @@ Order of application: sum arrays -> curtailment % -> absolute limit -> reactive 
 |-------|-------------|
 | `dc_power_kw` | Total DC before inverter/curtailment |
 | `ac_power_kw` | Final AC output after all limits |
-| `reactive_power_kvar` | Output reactive power |
+| `reactive_power_kvar` | Signed bus reactive power (positive = absorbing, negative = supplying). Same value on port, CoreOutput, and telemetry |
 | `cell_temp_c` | Capacity-weighted mean cell temperature |
 | `irradiance_w_m2` | Capacity-weighted mean POA irradiance |
 | `curtailment_kw` | Power curtailed by PowerLimit |

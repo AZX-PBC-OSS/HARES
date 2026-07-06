@@ -180,6 +180,8 @@ fn l1_ev_config(
             plug_in_policy: None,
             power_limit_kw: None,
             initial_connection_state: None,
+            power_factor: None,
+            charger_capacity_kva: None,
         },
     )
     .unwrap()

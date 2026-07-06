@@ -84,8 +84,22 @@ dwelling.set_price_signal(signal)                  // stored for controller acce
 | `POWER_FACTOR_SETPOINT` | `PowerFactorSetpoint` |
 | `INVERTER_PRIORITY_MODE` | `InverterPriorityMode` |
 | `PROTOCOL_NATIVE` | `ProtocolNative` |
+| `REACTIVE_SETPOINT` | `ReactiveSetpoint` |
+| `POWER_FACTOR_SETPOINT` | `PowerFactorSetpoint` |
 
 Equipment declares capabilities at initialization. `apply_control()` validates the signal's required capability before dispatching to `apply_control_unchecked()`. Rejection is binary: supported (continues) or unsupported (returns Err).
+
+### Reactive Control Signals
+
+Three signals control reactive power on capable equipment (PV and battery; see [power-factor.md](power-factor.md) for the full model):
+
+| Signal | Semantics | Accepts On |
+|--------|-----------|------------|
+| `ReactiveSetpoint { kvar }` | Direct var setpoint. Positive = absorbing (inductive), negative = supplying (capacitive). Passed through as-commanded with no sign flip. | PV, Battery |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in (0, 1]. Zeros the `q_setpoint_kvar` so future steps use the updated pf for baseline reactive computation. | PV, Battery |
+| `PowerSetpoint.reactive_power_kvar: Some(q)` | Var command embedded in the power setpoint. If q != 0, treated as a `ReactiveSetpoint` override. | PV, Battery |
+
+**EV explicitly rejects all three reactive control paths.** `PowerSetpoint` with `reactive_power_kvar: Some(q)` where `q != 0` returns `Err(Control("EV does not support reactive power control"))`. `ReactiveSetpoint` and `PowerFactorSetpoint` are rejected via the catch-all arm in EV's `apply_control_unchecked()`. The EV does not declare `REACTIVE_SETPOINT` or `POWER_FACTOR_SETPOINT` capabilities. Q ≈ 0 is physically correct for the PFC rectifier and load-bearing for the calibrator's pump-vs-EV reactive signature gate.
 
 ## OpenADR 3.0 Compatibility
 
@@ -174,7 +188,7 @@ SOC grouping: all three present -> `(target, min, max)`; only min+max -> `target
 
 When no external signals are sent:
 - **HVAC**: thermostat FSM evaluates zone_temp vs setpoint +/- deadband from config/schedule
-- **Battery**: idles (no charge/discharge), respects hardware min/max SOC
+- **Battery**: idles (no charge/discharge), respects hardware min/max SOC. At idle with `power_factor=1.0` (default), produces zero reactive power. Accepts `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` for var control even while idle
 - **Water Heater**: internal thermostat with configured deadband
 - **PV**: generates at full capacity with configured inverter settings
 - **EV**: charges per availability schedule and archetype

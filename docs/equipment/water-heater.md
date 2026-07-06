@@ -48,6 +48,21 @@ graph LR
 - Unmet load tracked when outlet < fixture setpoint
 - Outlet temperature snapshotted pre-step to prevent same-step heat inflation
 
+## Reactive Power
+
+All water heater types carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Per-family power factors are defined in the class-defaults table in [power-factor.md](./power-factor.md). The pre-existing port-vs-CoreOutput inconsistency (port had Q from ZIP but CoreOutput was `None`) is fixed — all three channels agree. Reactive power follows Rule R1: `Q = P · tan(acos(pf)) · reactive_base(V)` computed from the already-computed real power.
+
+| WH Type | PF | Notes |
+|---------|----|-------|
+| Heat Pump WH | 0.97 | Blended on total (compressor + backup + fan) |
+| Electric Resistance WH | 1.0 | Pure resistive, Q=Some(0.0) |
+| Gas WH | 0.87 | Draft-inducer fan motor |
+| Tankless / Gas Tankless | 1.0 | Control electronics only, Q=Some(0.0) |
+
+Checkpoint version 2 on all WH types — `REACTIVE_POWER_KVAR` telemetry persists across save/load round-trips.
+
+---
+
 ## Electric Resistance Water Heater
 
 **Source**: `water_heater/resistance.rs`

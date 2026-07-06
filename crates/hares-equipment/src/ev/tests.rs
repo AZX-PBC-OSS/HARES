@@ -149,6 +149,8 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             plug_in_policy: get_str(&[KEY_PLUG_IN_POLICY]),
             power_limit_kw: get_f64(&[KEY_POWER_LIMIT_KW]),
             initial_connection_state: get_str(&[KEY_INITIAL_CONNECTION_STATE]),
+            power_factor: get_f64(&[KEY_POWER_FACTOR]),
+            charger_capacity_kva: get_f64(&[KEY_CHARGER_CAPACITY_KVA]),
         },
     )
     .unwrap()
@@ -2790,6 +2792,8 @@ fn minimal_ev_config() -> EvConfig {
         plug_in_policy: None,
         power_limit_kw: None,
         initial_connection_state: None,
+        power_factor: None,
+        charger_capacity_kva: None,
     }
 }
 
@@ -3170,103 +3174,432 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
     );
 }
 
-// ── Reactive power rejection tests ────────────────────────────────
+// ── Reactive power / smart-inverter acceptance tests ──────────────
+//
+// The EV is an inverter-coupled DER (V2G/V2L). IEEE 1547-2018 / SAE J3072
+// require reactive capability. These tests mirror the battery's 11-test
+// pattern in battery/mod.rs exactly.
 
+fn approx_eq(a: f64, b: f64) {
+    assert!((a - b).abs() < 1e-6, "values differ: {a} != {b}");
+}
+
+/// Default config (pf=1.0) emits Q == Some(0.0) and real power is
+/// unchanged from pre-reactive-control behaviour (bit-identical).
 #[test]
-fn ev_power_setpoint_with_reactive_q_rejected() {
+fn ev_default_config_emits_zero_reactive_power() {
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let err = ev
-        .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
-            reactive_power_kvar: Some(1.0),
-            min_soc: None,
-            max_soc: None,
-        })
-        .unwrap_err();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
+    let q_co = ev
+        .core_output()
+        .flows
+        .reactive_power_kvar
+        .expect("REACTIVE cap implies Some");
     assert!(
-        err.to_string()
-            .contains("EV does not support reactive power control"),
-        "expected reactive rejection, got: {err}"
+        q_co.abs() < 1e-9,
+        "default pf=1.0 should give Q≈0, got {q_co}"
+    );
+    let q_telem = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q_telem, 0.0);
+    assert_eq!(
+        ev.descriptor().control_capabilities,
+        ControlCapabilities::POWER_SETPOINT
+            | ControlCapabilities::SOC_TARGET
+            | ControlCapabilities::POWER_LIMIT
+            | ControlCapabilities::EV_PLUG_IN
+            | ControlCapabilities::EV_DRIVE
+            | ControlCapabilities::EV_AWAY_CHARGE
+            | ControlCapabilities::EV_SET_READY_BY
+            | ControlCapabilities::DEMAND_RESPONSE
+            | ControlCapabilities::REACTIVE_SETPOINT
+            | ControlCapabilities::POWER_FACTOR_SETPOINT
+    );
+    assert!(
+        ev.descriptor()
+            .core_capabilities
+            .contains(CoreCapabilities::REACTIVE)
     );
 }
 
+/// Default config real power is bit-identical to a config with pf=1.0
+/// explicitly set (Rule R1: Q-only ZIP never touches real power).
 #[test]
-fn ev_power_setpoint_with_zero_reactive_q_is_accepted() {
-    let config = ev_config(base_raw());
-    let mut ev = Ev::new(config.clone());
-    let env = sample_env();
-    ev.init(&config, &env).unwrap();
+fn ev_default_real_power_bit_identical_to_pf_one() {
+    let config_default = ev_config(base_raw());
+    let mut raw_pf1 = base_raw();
+    raw_pf1.insert(KEY_POWER_FACTOR.to_string(), 1.0.into());
+    let config_pf1 = ev_config(raw_pf1);
 
-    ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
-        reactive_power_kvar: Some(0.0),
-        min_soc: None,
-        max_soc: None,
-    })
-    .expect("PowerSetpoint with explicit Q=0 should be accepted");
+    let env = sample_env();
+    let mut ev_default = Ev::new(config_default.clone());
+    ev_default.init(&config_default, &env).unwrap();
+    let mut ev_pf1 = Ev::new(config_pf1.clone());
+    ev_pf1.init(&config_pf1, &env).unwrap();
+
+    let mut p_default = PortSlots::default();
+    let mut p_pf1 = PortSlots::default();
+    ev_default
+        .step(&env, Duration::minutes(60), &mut p_default)
+        .unwrap();
+    ev_pf1
+        .step(&env, Duration::minutes(60), &mut p_pf1)
+        .unwrap();
+
+    let p_def = ev_default.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let p_pf1 = ev_pf1.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    assert!(
+        (p_def - p_pf1).abs() < 1e-12,
+        "real power must be bit-identical: default={p_def}, pf=1.0={p_pf1}"
+    );
 }
 
+/// ReactiveSetpoint overrides baseline pf Q.
 #[test]
-fn ev_power_setpoint_without_reactive_q_still_works() {
+fn ev_reactive_setpoint_overrides_baseline_q() {
+    let mut raw = base_raw();
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q, 1.5);
+}
+
+/// PowerFactorSetpoint updates pf, zeros q_setpoint, and Q follows
+/// the new pf baseline while charging.
+#[test]
+fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
+    ev.q_setpoint_kvar = 2.0;
+    ev.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
+        .unwrap();
+
+    approx_eq(ev.q_setpoint_kvar, 0.0);
+    approx_eq(ev.power_factor, 0.8);
+
+    // Force charging via PowerSetpoint so P>0.
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 3.0,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
     })
-    .expect("PowerSetpoint without reactive_power_kvar should work as before");
+    .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    let p_kw = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let tan_phi = 0.8_f64.acos().tan();
+    let expected_q = p_kw * tan_phi;
     assert!(
-        (ev.telemetry().get("active_power_kw").unwrap() - 3.0).abs() < 1e-9,
-        "active power setpoint should be respected"
+        (q - expected_q).abs() < 1e-9,
+        "expected Q={expected_q} (P={p_kw} × tan(acos(0.8))={tan_phi}), got {q}"
     );
-    assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-    assert!(ev.core_output().flows.reactive_power_kvar.is_none());
+    assert!(q > 0.0, "charging should yield Q>0 absorbing");
 }
 
+/// PowerSetpoint with reactive_power_kvar is accepted and applied.
 #[test]
-fn ev_reactive_setpoint_rejected() {
+fn ev_power_setpoint_stores_reactive_q() {
+    let mut raw = base_raw();
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.0,
+        reactive_power_kvar: Some(0.75),
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    approx_eq(ev.q_setpoint_kvar, 0.75);
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q, 0.75);
+}
+
+/// kVA clamp: when Q is commanded beyond the charger's capability,
+/// Q is reduced but P is unchanged (active-power priority).
+#[test]
+fn ev_kva_clamp_curtails_reactive_not_active_power() {
+    let mut raw = base_raw();
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.6,
+        reactive_power_kvar: Some(5.0),
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let p = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+    let s = ev.charger_capacity_kva;
+    let q_max = (s * s - p * p).max(0.0).sqrt();
+    assert!(
+        q.abs() <= q_max + 1e-9,
+        "|Q|={} exceeds sqrt(S²−P²)={} with S={s}, P={p}",
+        q.abs(),
+        q_max
+    );
+    assert!(
+        q.abs() < 5.0 - 1e-9,
+        "Q should be clamped below 5.0, got {q}"
+    );
+    assert!(p > 0.0, "P must be positive (charging)");
+}
+
+/// kVA clamp boundary: P and Q commanded so that S²−P² limits Q.
+#[test]
+fn ev_kva_clamp_reduces_q_to_charger_limit() {
+    let mut raw = base_raw();
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.6,
+        reactive_power_kvar: Some(4.0),
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let p = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+    assert!(p > 0.0, "P must be positive (charging)");
+    let s = ev.charger_capacity_kva;
+    let q_max = (s * s - p * p).max(0.0).sqrt();
+    assert!(
+        q.abs() <= q_max + 1e-9,
+        "|Q|={} exceeds sqrt(S²−P²)={}",
+        q.abs(),
+        q_max
+    );
+    assert!(q.abs() < 4.0 - 1e-9, "Q should be clamped, got {q}");
+}
+
+/// Charging (P>0) with pf<1 yields baseline Q>0 (absorbing vars);
+/// V2G discharge (P<0) yields baseline Q<0 (supplying vars).
+#[test]
+fn ev_charging_vs_v2g_discharge_signs() {
+    let mut raw = base_raw();
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+
+    // Charging
+    let mut ev_charge = Ev::new(config.clone());
+    let env = sample_env();
+    ev_charge.init(&config, &env).unwrap();
+    ev_charge
+        .apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    ev_charge
+        .step(&env, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let q_charge = ev_charge.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    let p_charge = ev_charge.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    assert!(p_charge > 0.0, "charging P>0");
+    assert!(
+        q_charge > 0.0,
+        "charging should yield Q>0 absorbing, got {q_charge}"
+    );
+    let expected_q = p_charge * (0.9_f64.acos().tan());
+    assert!(
+        (q_charge - expected_q).abs() < 1e-9,
+        "expected Q={expected_q}, got {q_charge}"
+    );
+
+    // V2G discharge
+    let mut ev_discharge = Ev::new(config.clone());
+    ev_discharge.init(&config, &env).unwrap();
+    ev_discharge
+        .apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    ev_discharge
+        .step(&env, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let q_discharge = ev_discharge
+        .telemetry()
+        .get(tk::REACTIVE_POWER_KVAR)
+        .unwrap();
+    let p_discharge = ev_discharge.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    assert!(p_discharge < 0.0, "discharging P<0");
+    assert!(
+        q_discharge < 0.0,
+        "V2G discharge should yield Q<0 supplying, got {q_discharge}"
+    );
+    let expected_q = p_discharge * (0.9_f64.acos().tan());
+    assert!(
+        (q_discharge - expected_q).abs() < 1e-9,
+        "expected Q={expected_q}, got {q_discharge}"
+    );
+}
+
+/// Port Q, CoreOutput Q, and telemetry Q are the same signed value.
+#[test]
+fn ev_port_core_output_telemetry_reactive_consistent() {
+    let mut raw = base_raw();
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.2 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let q_co = ev
+        .core_output()
+        .flows
+        .reactive_power_kvar
+        .expect("REACTIVE cap → Some");
+    let q_telem = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    let q_port = ports.electrical.reactive_power_kvar;
+
+    approx_eq(q_co, q_telem);
+    approx_eq(q_telem, q_port);
+}
+
+/// validate_core_contract passes after a step with reactive power.
+#[test]
+fn ev_validate_core_contract_passes_with_reactive() {
+    let mut raw = base_raw();
+    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.5 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    hares_types::validate_core_contract(ev.descriptor(), ev.core_output())
+        .expect("core contract should pass with REACTIVE cap + Some(Q)");
+}
+
+/// Checkpoint round-trip preserves q_setpoint_kvar and power_factor.
+#[test]
+fn ev_checkpoint_preserves_reactive_state() {
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let err = ev
-        .apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
-        .unwrap_err();
+    ev.q_setpoint_kvar = 1.5;
+    ev.power_factor = 0.85;
 
-    assert!(
-        err.to_string().contains("unsupported control signal"),
-        "expected capability rejection, got: {err}"
-    );
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    approx_eq(restored.q_setpoint_kvar, 1.5);
+    approx_eq(restored.power_factor, 0.85);
+
+    // Double round-trip: bytes identical.
+    assert_eq!(state, restored.save_state().unwrap());
 }
 
+/// Unplugged (Disconnected) → Q = 0 and CoreOutput Some(0.0).
 #[test]
-fn ev_power_factor_setpoint_rejected() {
+fn ev_unplugged_produces_zero_reactive() {
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let err = ev
-        .apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.95 })
-        .unwrap_err();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
 
-    assert!(
-        err.to_string().contains("unsupported control signal"),
-        "expected capability rejection, got: {err}"
-    );
+    // Even with a q_setpoint commanded, Q must be 0 when unplugged
+    // (contactor open — no grid connection).
+    ev.q_setpoint_kvar = 2.0;
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    let q_telem = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q_telem, 0.0);
+    let q_co = ev
+        .core_output()
+        .flows
+        .reactive_power_kvar
+        .expect("REACTIVE cap → Some even when 0");
+    approx_eq(q_co, 0.0);
+    approx_eq(ports.electrical.reactive_power_kvar, 0.0);
 }
