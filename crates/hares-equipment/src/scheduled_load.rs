@@ -2168,7 +2168,36 @@ mod tests {
 
     #[test]
     fn reactive_zip_default_produces_zero_kvar() {
-        // "TV" has no type-specific ZIP defaults, so pf=0.0, reactive_power=0.
+        // A class with no ZIP defaults falls back to constant_power()
+        // (pf=0.0 sentinel), so reactive_power=0. "TV" used to be the
+        // example here, but it now has a class-table row (MELs values), so
+        // use a name that is genuinely absent from the table.
+        let config = config_with_extras(
+            "s",
+            "Custom Bench Load",
+            &[3.0],
+            &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
+        );
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::PLUG_LOADS,
+            "Custom Bench Load",
+        );
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    }
+
+    #[test]
+    fn tv_class_defaults_produce_nonzero_reactive() {
+        // "TV" (HPXML PlugLoadType="TV other", split out of plug loads) has
+        // a class-table row inheriting the MELs values (pf 0.8), so a
+        // running TV must emit reactive power — regression test for the
+        // gap where TV fell to constant_power() and Q ≡ 0 despite a
+        // continuous draw.
         let config = config_with_extras(
             "s",
             "TV",
@@ -2181,7 +2210,14 @@ mod tests {
 
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        // At nominal voltage the MELs reactive base sums to ~1, so
+        // Q ≈ P · tan(acos(0.8)).
+        let expected = 3.0 * 0.8_f64.acos().tan();
+        assert!(
+            (ports.electrical.reactive_power_kvar - expected).abs() < 1e-9,
+            "TV reactive = {}, expected ≈ {expected}",
+            ports.electrical.reactive_power_kvar
+        );
     }
 
     #[test]
@@ -2637,9 +2673,15 @@ mod tests {
 
     #[test]
     fn reactive_power_telemetry_zero_without_zip() {
-        // "TV" has no type-specific ZIP defaults, so pf=0.0, reactive power is always zero.
-        let config = config_with_schedule("s", "TV", &[5.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::PLUG_LOADS, "TV");
+        // A class absent from the ZIP table falls back to constant_power()
+        // (pf=0.0 sentinel), so reactive power is always zero. ("TV" used to
+        // be the example, but it now has a class-table row.)
+        let config = config_with_schedule("s", "Custom Bench Load", &[5.0]);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::PLUG_LOADS,
+            "Custom Bench Load",
+        );
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -2750,8 +2792,12 @@ mod tests {
 
     #[test]
     fn unrecognized_class_falls_back_to_zip_default() {
-        let config = config_with_schedule("s", "TV", &[1.0]);
-        let eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::PLUG_LOADS, "TV");
+        let config = config_with_schedule("s", "Custom Bench Load", &[1.0]);
+        let eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::PLUG_LOADS,
+            "Custom Bench Load",
+        );
         assert_eq!(eq.zip, ZipLoad::constant_power());
     }
 
@@ -2759,7 +2805,7 @@ mod tests {
     fn type_specific_zip_produces_voltage_dependent_load() {
         // Lighting defaults: z=0.54, i=0.5, p_coeff=-0.04, pf=1.0
         // At 0.9 pu: multiplier = 0.54*0.81 + 0.5*0.9 + (-0.04) = 0.8474
-        // Default (TV): multiplier = 0*0.81 + 0*0.9 + 1.0 = 1.0
+        // Default (unrecognized class): multiplier = 0*0.81 + 0*0.9 + 1.0 = 1.0
         let lighting_config = config_with_schedule("s", "Lighting", &[1.0]);
         let mut lighting_eq = ScheduledLoad::new(
             lighting_config.clone(),
@@ -2769,13 +2815,16 @@ mod tests {
         let mut env = base_env();
         lighting_eq.init(&lighting_config, &env).unwrap();
 
-        let tv_config = config_with_schedule("s", "TV", &[1.0]);
-        let mut tv_eq =
-            ScheduledLoad::new(tv_config.clone(), hares_types::EndUse::PLUG_LOADS, "TV");
-        // TV requires explicit sensible gain fraction
+        let tv_config = config_with_schedule("s", "Custom Bench Load", &[1.0]);
+        let mut tv_eq = ScheduledLoad::new(
+            tv_config.clone(),
+            hares_types::EndUse::PLUG_LOADS,
+            "Custom Bench Load",
+        );
+        // Requires explicit sensible gain fraction
         let tv_config_full = config_with_extras(
             "s",
-            "TV",
+            "Custom Bench Load",
             &[1.0],
             &[(KEY_SENSIBLE_GAIN_FRACTION, 0.0.into())],
         );
@@ -2796,7 +2845,7 @@ mod tests {
         );
         assert!(
             (ports_tv.electrical.net_active_w() - 1000.0).abs() < 10.0,
-            "at nominal voltage TV (default) should produce 1.0 kW"
+            "at nominal voltage the constant-power default should produce 1.0 kW"
         );
 
         // At 0.9 pu: Lighting produces less (voltage-sensitive), TV stays the same
@@ -2820,7 +2869,7 @@ mod tests {
         );
         assert!(
             (tv_w - 1000.0).abs() < 10.0,
-            "TV (default) at 0.9 pu: should still be 1.0 kW, got {tv_w}"
+            "constant-power default at 0.9 pu: should still be 1.0 kW, got {tv_w}"
         );
         assert!(
             lighting_w < tv_w,

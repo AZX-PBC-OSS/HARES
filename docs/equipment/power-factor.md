@@ -185,6 +185,8 @@ overrides = {
 
 The `"zip"` key is reserved in the override system — it is peeled out of the merged JSON map so that `#[serde(deny_unknown_fields)]` typed config structs never see it, then merged field-wise over `EquipmentSpec.zip_params`.
 
+A malformed `"zip"` override is a hard configuration error at dwelling build time (matching the `deny_unknown_fields` ethos): an unknown key (`{"zip": {"fp": 0.9}}`), a non-numeric value, or a non-object value all fail loudly, listing the valid keys `zp/ip/pp/zq/iq/pq/pf/v0`.
+
 ## Control Precedence
 
 For equipment that supports reactive control (PV, battery, EV):
