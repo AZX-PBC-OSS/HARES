@@ -336,7 +336,10 @@ impl GasWH {
                 _ => DEFAULT_PILOT_POWER_W,
             })
             .max(0.0);
-        self.fan_power_w = 0.0;
+        // Draft-inducer / power-vent blower draw while the burner fires.
+        // Default 0 W (atmospheric-vent unit, no blower) preserves existing
+        // simulations unchanged unless a value is configured explicitly.
+        self.fan_power_w = c.fan_power_w.unwrap_or(0.0).max(0.0);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
@@ -619,8 +622,13 @@ impl Equipment for GasWH {
         } else {
             0.0
         };
-        // Grid outage (voltage 0): no electric draw — preserves the legacy
-        // ZIP zero-voltage guard bit-for-bit.
+        // Grid outage (voltage 0): the draft fan has no supply power. The gas
+        // burner and standing pilot keep firing (fuel-side heat is
+        // unaffected), but the electrical parasitic disappears. Modelling
+        // simplification: a real power-vent unit would lock out its burner
+        // without draft-fan proving; HARES keeps the burner firing so gas
+        // water heating remains available in islanded scenarios (matches
+        // OCHRE, which treats EF < 0.7 gas WHs as grid-independent).
         let fan_electric_w = if env.grid.voltage_pu == 0.0 {
             0.0
         } else {
@@ -1131,6 +1139,7 @@ mod tests {
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,
+                fan_power_w: None,
             },
         )
         .unwrap()
@@ -1158,6 +1167,10 @@ mod tests {
                     typed.pilot_power_w = Some(*x)
                 }
                 ("pilot_power_w", None) => typed.pilot_power_w = None,
+                ("fan_power_w", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.fan_power_w = Some(*x)
+                }
+                ("fan_power_w", None) => typed.fan_power_w = None,
                 ("flue_loss_fraction", Some(crate::config::ConfigValue::Float(x))) => {
                     typed.flue_loss_fraction = Some(*x)
                 }
@@ -1207,10 +1220,11 @@ mod tests {
 
     /// Reactive-power contract for the gas WH draft-inducer fan: the class
     /// row resolves to the FAN coefficients (pf 0.87), the REACTIVE
-    /// capability is declared, and port/CoreOutput/telemetry agree. NOTE:
-    /// production configs currently carry no fan power (see gas.rs init),
-    /// so the electric draw — and therefore Q — is zero until a fan power
-    /// config field is plumbed; the ZIP wiring itself is verified directly.
+    /// capability is declared, and port/CoreOutput/telemetry agree. This
+    /// config carries no `fan_power_w`, so the electric draw — and therefore
+    /// Q — is zero; the ZIP wiring itself is verified directly. See
+    /// `fan_power_config_drives_real_and_reactive_draw` for the configured
+    /// path.
     #[test]
     fn reactive_zip_resolves_draft_fan_row_and_channels_agree() {
         let config = config();
@@ -1252,6 +1266,94 @@ mod tests {
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(co_q));
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
             .expect("core contract must hold with REACTIVE declared");
+    }
+
+    /// A configured `fan_power_w` drives the draft-inducer real draw and its
+    /// Rule R1 reactive power while the burner fires, without adding any heat
+    /// to the tank (the blower parasitic is vented): a twin without fan power
+    /// must produce bit-identical tank temperatures and fuel input.
+    #[test]
+    fn fan_power_config_drives_real_and_reactive_draw() {
+        let fan_w = 65.0;
+        let cfg_fan = config_with_extras(&[("fan_power_w", Some(fan_w.into()))]);
+        let cfg_nofan = config();
+        let env = env(21.0);
+        let mut eq_fan = GasWH::new(cfg_fan.clone());
+        let mut eq_nofan = GasWH::new(cfg_nofan.clone());
+        eq_fan.init(&cfg_fan, &env).unwrap();
+        eq_nofan.init(&cfg_nofan, &env).unwrap();
+
+        let mut p_fan = ports();
+        let mut p_nofan = ports();
+        eq_fan
+            .step(&env, Duration::from_secs(60), &mut p_fan)
+            .unwrap();
+        eq_nofan
+            .step(&env, Duration::from_secs(60), &mut p_nofan)
+            .unwrap();
+
+        // Tank starts at 40 °C with a 52 °C setpoint: the burner fires.
+        assert!(
+            eq_fan.telemetry().get(tk::BURNER_POWER_W).unwrap() > 0.0,
+            "burner must fire for this scenario"
+        );
+        assert_eq!(eq_fan.telemetry().get(tk::FAN_ELECTRIC_W), Some(fan_w));
+        assert_eq!(p_fan.electrical.load_power_w, fan_w);
+        // Q = P·tan(acos(0.87)) at nominal voltage (fan-motor class row).
+        let expected_q = (fan_w / 1000.0) * 0.87_f64.acos().tan();
+        assert!(
+            (p_fan.electrical.reactive_power_kvar - expected_q).abs() < 1e-12,
+            "fan reactive power must follow pf 0.87, got {}",
+            p_fan.electrical.reactive_power_kvar
+        );
+
+        // The fan is a vented parasitic: no effect on tank heat or fuel.
+        assert_eq!(p_nofan.electrical.load_power_w, 0.0);
+        assert_eq!(
+            eq_fan.telemetry().get(tk::FUEL_INPUT_W).unwrap().to_bits(),
+            eq_nofan
+                .telemetry()
+                .get(tk::FUEL_INPUT_W)
+                .unwrap()
+                .to_bits(),
+        );
+        for (a, b) in eq_fan
+            .tank
+            .node_temps()
+            .iter()
+            .zip(eq_nofan.tank.node_temps())
+        {
+            assert_eq!(a.to_bits(), b.to_bits(), "fan power must not heat the tank");
+        }
+    }
+
+    /// Grid outage: the gas burner keeps firing (fuel-side heat is
+    /// unaffected) but the draft-inducer fan loses supply power — zero
+    /// electric and reactive draw until the grid is restored.
+    #[test]
+    fn grid_outage_drops_fan_draw_but_burner_keeps_firing() {
+        let cfg = config_with_extras(&[("fan_power_w", Some(65.0.into()))]);
+        let mut eq = GasWH::new(cfg.clone());
+        let mut env = env(21.0);
+        eq.init(&cfg, &env).unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        let mut p = ports();
+        eq.step(&env, Duration::from_secs(60), &mut p).unwrap();
+        assert!(
+            eq.telemetry().get(tk::BURNER_POWER_W).unwrap() > 0.0,
+            "gas burner must keep firing during an outage"
+        );
+        assert!(p.fuel.get(hares_types::FuelType::Gas) > 0.0);
+        assert_eq!(eq.telemetry().get(tk::FAN_ELECTRIC_W), Some(0.0));
+        assert_eq!(p.electrical.load_power_w, 0.0);
+        assert_eq!(p.electrical.reactive_power_kvar, 0.0);
+
+        // Restoration: the fan draw returns with the firing burner.
+        env.grid.voltage_pu = 1.0;
+        let mut p = ports();
+        eq.step(&env, Duration::from_secs(60), &mut p).unwrap();
+        assert_eq!(p.electrical.load_power_w, 65.0);
     }
 
     fn ports() -> PortSlots {
@@ -1747,6 +1849,7 @@ mod tests {
             "GWH".to_string(),
             "Gas Water Heater".to_string(),
             crate::GasWaterHeaterConfig {
+                fan_power_w: None,
                 equipment_id: None,
                 zone_id: Some(1),
                 loop_id: Some(1),
@@ -1803,6 +1906,7 @@ mod tests {
             "GWH".to_string(),
             "Gas Water Heater".to_string(),
             crate::GasWaterHeaterConfig {
+                fan_power_w: None,
                 equipment_id: None,
                 zone_id: Some(1),
                 loop_id: Some(1),

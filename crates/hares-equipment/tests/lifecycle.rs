@@ -837,6 +837,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
         "Gas Water Heater" => typed_alias_config(
             class,
             GasWaterHeaterConfig {
+                fan_power_w: None,
                 equipment_id: None,
                 zone_id: Some(1),
                 loop_id: None,

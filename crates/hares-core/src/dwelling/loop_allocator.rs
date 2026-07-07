@@ -233,6 +233,7 @@ mod tests {
             typed_spec(
                 "Gas Water Heater",
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     loop_id: None,
                     fuel_type: FuelType::Gas,
                     equipment_id: None,
@@ -350,6 +351,7 @@ mod tests {
             typed_spec(
                 "Gas Water Heater",
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     loop_id: None,
                     fuel_type: FuelType::Gas,
                     equipment_id: None,
@@ -580,6 +582,7 @@ mod tests {
             typed_spec(
                 "Gas Water Heater",
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     loop_id: None,
                     fuel_type: FuelType::Gas,
                     equipment_id: None,

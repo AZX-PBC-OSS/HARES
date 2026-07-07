@@ -414,11 +414,14 @@ class TestZipPfOverride:
     def test_zip_pf_override_changes_q_leaves_p_identical(self):
         from ochre_next import Dwelling
 
+        # July afternoon so the AC compressor actually runs (a pf override
+        # retargets the compressor component; the resistive crankcase heater
+        # that runs on cold winter standby emits Q == 0 regardless of pf).
         common = dict(
             hpxml=HPXML,
             schedule=SCHEDULE,
             weather=WEATHER,
-            start_time="2019-01-01T00:00:00",
+            start_time="2019-07-01T14:00:00",
             duration_s=3600,
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
@@ -429,15 +432,25 @@ class TestZipPfOverride:
         # Baseline: no override.
         dw_base = Dwelling.from_hpxml(**common)
         dw_base.initialize()
-        dw_base.step()
 
-        # Override: change Air Conditioner pf from default 0.96 → 0.9.
+        # Override: change Air Conditioner compressor pf from 0.96 → 0.9.
         dw_ov = Dwelling.from_hpxml(
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
             **common,
         )
         dw_ov.initialize()
-        dw_ov.step()
+
+        # Step until the compressor draws power (thermostat may take a few
+        # minutes to call for cooling from the initialized zone state).
+        compressor_kw = 0.0
+        for _ in range(60):
+            dw_base.step()
+            dw_ov.step()
+            tel = _equipment_telemetry(dw_base, "Air Conditioner")
+            compressor_kw = tel.get("compressor_kw", 0.0)
+            if compressor_kw > 0.0:
+                break
+        assert compressor_kw > 0.0, "AC compressor must run in a July afternoon hour"
 
         co_base = _equipment_core_output(dw_base, "Air Conditioner")
         co_ov = _equipment_core_output(dw_ov, "Air Conditioner")
@@ -456,25 +469,33 @@ class TestZipPfOverride:
             f"Q must change with pf override, got baseline={q_base} override={q_ov}"
         )
 
-        # Verify the Q values match the expected tan(acos(pf)) relationship.
-        if p_base != 0.0:
-            expected_q_base = p_base * math.tan(math.acos(0.96))
-            expected_q_ov = p_base * math.tan(math.acos(0.9))
-            assert math.isclose(q_base, expected_q_base, rel_tol=1e-6), (
-                f"Baseline Q={q_base} ≠ P*tan(acos(0.96))={expected_q_base}"
-            )
-            assert math.isclose(q_ov, expected_q_ov, rel_tol=1e-6), (
-                f"Override Q={q_ov} ≠ P*tan(acos(0.9))={expected_q_ov}"
-            )
+        # Per-component model: Q = comp*tan(acos(pf_comp)) + fan*tan(acos(0.87)).
+        # The override changes only the compressor arm.
+        tel = _equipment_telemetry(dw_base, "Air Conditioner")
+        fan_kw = tel.get("fan_kw", 0.0)
+        fan_q = fan_kw * math.tan(math.acos(0.87))
+        expected_q_base = compressor_kw * math.tan(math.acos(0.96)) + fan_q
+        expected_q_ov = compressor_kw * math.tan(math.acos(0.9)) + fan_q
+        assert math.isclose(q_base, expected_q_base, rel_tol=1e-6), (
+            f"Baseline Q={q_base} ≠ comp*tan(acos(0.96))+fan*tan(acos(0.87))"
+            f"={expected_q_base}"
+        )
+        assert math.isclose(q_ov, expected_q_ov, rel_tol=1e-6), (
+            f"Override Q={q_ov} ≠ comp*tan(acos(0.9))+fan*tan(acos(0.87))"
+            f"={expected_q_ov}"
+        )
 
     def test_zip_override_telemetry_reactive_key_present(self):
         from ochre_next import Dwelling
 
+        # July afternoon: the compressor must run for Q != 0 — on winter
+        # standby only the resistive crankcase heater draws power and the
+        # per-component model correctly reports Q == 0 for it.
         common = dict(
             hpxml=HPXML,
             schedule=SCHEDULE,
             weather=WEATHER,
-            start_time="2019-01-01T00:00:00",
+            start_time="2019-07-01T14:00:00",
             duration_s=3600,
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
@@ -487,9 +508,16 @@ class TestZipPfOverride:
             **common,
         )
         dw.initialize()
-        dw.step()
 
-        tel = _equipment_telemetry(dw, "Air Conditioner")
+        tel = None
+        for _ in range(60):
+            dw.step()
+            tel = _equipment_telemetry(dw, "Air Conditioner")
+            if tel.get("compressor_kw", 0.0) > 0.0:
+                break
+        assert tel is not None and tel.get("compressor_kw", 0.0) > 0.0, (
+            "AC compressor must run in a July afternoon hour"
+        )
         assert "reactive_power_kvar" in tel
         assert tel["reactive_power_kvar"] != 0.0
 

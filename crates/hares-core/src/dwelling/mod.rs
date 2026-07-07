@@ -67,10 +67,10 @@ use hares_types::LoopId;
 use hares_types::validate_port_core_electrical_consistency;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, FuelType, GridState, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
-    ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
-    validate_core_contract, validate_fluid_type_consistency,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
+    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -239,8 +239,11 @@ fn build_equipment_column_map(
             } else {
                 base.clone()
             };
-            let fuel = desc.fuel;
-            let has_gas = matches!(fuel, FuelType::Gas | FuelType::Propane | FuelType::Oil);
+            // Shared predicate with build_schema: the schema emits a
+            // "{name} Gas Power (therms/hour)" column iff this returns true,
+            // so resolving with the same predicate guarantees every emitted
+            // column is populated.
+            let has_gas = hares_io::fuel_reports_gas_power_column(desc.fuel);
             let is_hvac = is_hvac_or_wh(&desc.name);
             let is_cooling = is_cooling_equipment(&desc.name);
             let is_hp_heater = is_heat_pump_heater(&desc.name);
@@ -2165,57 +2168,64 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         HaresError::Dwelling(format!("fluid type consistency validation failed: {err}"))
     })?;
 
-    let zone_types = environment.zone_types().to_vec();
-    let indoor_zone = solvers.thermal.config().indoor_zone_id;
-    let zone_names: Vec<(ZoneId, String)> = initial_env
-        .zones
-        .iter()
-        .map(|z| {
-            let zone_type = initial_env
-                .zones
-                .iter()
-                .position(|zt| zt.id == z.id)
-                .and_then(|idx| zone_types.get(idx));
-            (z.id, zone_display_name(z.id, indoor_zone, zone_type))
-        })
-        .collect();
-    let schema = build_schema(
-        &equipment_specs,
-        config.sim_config.output_verbosity,
-        &zone_names,
-    );
-    let output_value_count = schema.fields().len() - 1; // exclude timestamp
-    let output_column_index = build_output_column_index(&schema);
     let output_path = config
         .sim_config
         .output_path
         .clone()
         .unwrap_or_else(|| default_output_path(&config));
-    let recorder = if config.sim_config.write_output {
-        Some(
-            StreamingRecorder::new(
-                schema,
-                config.sim_config.output_chunk_size,
-                config.sim_config.output_format,
-                &output_path,
-                config.sim_config.retain_batches,
-                config.sim_config.rotation,
-            )
-            .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?,
+    // write_output=false skips the entire output pipeline: no schema
+    // construction, no column index/maps, no recorder, no row scratch.
+    // record_step is only called when write_output=true, so none of these
+    // caches are ever consulted on the disabled path.
+    let (output_value_count, output_column_index, recorder) = if config.sim_config.write_output {
+        let zone_types = environment.zone_types().to_vec();
+        let indoor_zone = solvers.thermal.config().indoor_zone_id;
+        let zone_names: Vec<(ZoneId, String)> = initial_env
+            .zones
+            .iter()
+            .map(|z| {
+                let zone_type = initial_env
+                    .zones
+                    .iter()
+                    .position(|zt| zt.id == z.id)
+                    .and_then(|idx| zone_types.get(idx));
+                (z.id, zone_display_name(z.id, indoor_zone, zone_type))
+            })
+            .collect();
+        let schema = build_schema(
+            &equipment_specs,
+            config.sim_config.output_verbosity,
+            &zone_names,
+        );
+        let output_value_count = schema.fields().len() - 1; // exclude timestamp
+        let output_column_index = build_output_column_index(&schema);
+        let recorder = StreamingRecorder::new(
+            schema,
+            config.sim_config.output_chunk_size,
+            config.sim_config.output_format,
+            &output_path,
+            config.sim_config.retain_batches,
+            config.sim_config.rotation,
         )
+        .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
+        (output_value_count, output_column_index, Some(recorder))
     } else {
-        None
+        (0, HashMap::new(), None)
     };
 
     let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&bp.building);
     let latitude_deg = bp.building.site.latitude_deg;
     let facility_type = bp.building.residential_facility_type.clone();
 
-    let equipment_column_map = build_equipment_column_map(
-        &equipment,
-        &output_column_index,
-        config.sim_config.output_verbosity,
-    );
+    let equipment_column_map = if config.sim_config.write_output {
+        build_equipment_column_map(
+            &equipment,
+            &output_column_index,
+            config.sim_config.output_verbosity,
+        )
+    } else {
+        Vec::new()
+    };
     let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
         .iter()
         .map(|spec| {
@@ -3054,12 +3064,15 @@ impl Dwelling {
 
         // Rebuild output schema so dynamically added equipment and actors get columns.
         // Only safe before any rows have been recorded; mid-simulation schema
-        // changes would corrupt the output file.
-        if self
-            .recorder
-            .as_ref()
-            .map_or(0, StreamingRecorder::total_rows)
-            == 0
+        // changes would corrupt the output file. Skipped entirely when output
+        // is disabled: record_step never runs, so schema/column-map work would
+        // be pure waste (mirrors the write_output gate at assembly).
+        if self.write_output
+            && self
+                .recorder
+                .as_ref()
+                .map_or(0, StreamingRecorder::total_rows)
+                == 0
         {
             let specs: Vec<hares_io::EquipmentSpec> = self
                 .equipment
@@ -3278,16 +3291,15 @@ impl Dwelling {
             self.record_scratch.clear();
             self.record_scratch.resize(self.output_value_count, 0.0);
 
-            if self.write_output
-                && let Ok(recorder) = StreamingRecorder::new(
-                    schema,
-                    self.output_chunk_size,
-                    self.output_format,
-                    &self.output_path,
-                    self.retain_batches,
-                    self.output_rotation,
-                )
-            {
+            // The enclosing block is gated on self.write_output.
+            if let Ok(recorder) = StreamingRecorder::new(
+                schema,
+                self.output_chunk_size,
+                self.output_format,
+                &self.output_path,
+                self.retain_batches,
+                self.output_rotation,
+            ) {
                 self.recorder = Some(recorder);
             }
         }
@@ -3445,17 +3457,31 @@ impl Dwelling {
             }
         }
 
-        let mut actor_telemetry: HashMap<String, HashMap<String, f64>> =
-            HashMap::with_capacity(self.actors.len() + 1);
+        // BTreeMaps keep actor and channel iteration deterministic; equipment
+        // `Telemetry` maps are HashMaps, so channels are re-collected rather
+        // than cloned.
+        let mut actor_telemetry: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, f64>,
+        > = std::collections::BTreeMap::new();
+        let collect_channels = |tel: &hares_types::Telemetry| {
+            tel.0
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect::<std::collections::BTreeMap<String, f64>>()
+        };
 
         // Collect solver feedback actor telemetry (always None, but included for completeness).
         if let Some(tel) = self.solver_feedback_actor.telemetry() {
-            actor_telemetry.insert(self.solver_feedback_actor.name().to_string(), tel.0.clone());
+            actor_telemetry.insert(
+                self.solver_feedback_actor.name().to_string(),
+                collect_channels(tel),
+            );
         }
 
         for actor in &self.actors {
             if let Some(tel) = actor.telemetry() {
-                actor_telemetry.insert(actor.name().to_string(), tel.0.clone());
+                actor_telemetry.insert(actor.name().to_string(), collect_channels(tel));
             }
         }
 
@@ -3465,9 +3491,7 @@ impl Dwelling {
             telemetry_keys = ?actor_telemetry
                 .iter()
                 .map(|(name, channels)| {
-                    let mut keys: Vec<_> = channels.keys().cloned().collect();
-                    keys.sort();
-                    (name.clone(), keys)
+                    (name.clone(), channels.keys().cloned().collect::<Vec<_>>())
                 })
                 .collect::<Vec<_>>(),
             "actor_telemetry keys at timestep"
@@ -3635,11 +3659,15 @@ impl Dwelling {
             map
         };
 
-        let all_zones: HashSet<ZoneId> = port_by_zone
+        // Sort zones so warning emission order is deterministic run-to-run.
+        let mut all_zones: Vec<ZoneId> = port_by_zone
             .keys()
             .chain(equip_by_zone.keys())
             .copied()
+            .collect::<HashSet<ZoneId>>()
+            .into_iter()
             .collect();
+        all_zones.sort();
 
         for zone in all_zones {
             let port_total = port_by_zone.get(&zone).copied().unwrap_or(0.0);
@@ -3741,12 +3769,15 @@ impl Dwelling {
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     pub fn save_checkpoint(&self) -> Result<DwellingCheckpoint> {
         let snap = self.thermal_solver.snapshot_state();
-        let humidity_states: Vec<(ZoneId, f64)> = self
+        // humidity_ratios is a HashMap; sort by zone so serialized checkpoints
+        // of identical state are byte-identical (restore is order-insensitive).
+        let mut humidity_states: Vec<(ZoneId, f64)> = self
             .humidity_solver
             .humidity_ratios
             .iter()
             .map(|(zone, value)| (*zone, *value))
             .collect();
+        humidity_states.sort_by_key(|&(zone, _)| zone);
         let fluid_states = self.fluid_solver.snapshot_payload();
 
         let mut equipment_states = Vec::with_capacity(self.equipment.len());
@@ -13228,6 +13259,55 @@ master_seed = 42
         assert!(bat.setpoint.is_none());
         assert!(bat.capacity.is_none());
         assert!(bat.cop.is_none());
+    }
+
+    /// For every `FuelType` variant, the schema emits a
+    /// `"{name} Gas Power (therms/hour)"` column if and only if
+    /// `build_equipment_column_map` resolves it. Both sites share
+    /// `hares_io::fuel_reports_gas_power_column`; this test guards against the
+    /// predicate being forked again (previously Wood/Coal/WoodPellet equipment
+    /// got a schema column that was never populated).
+    #[test]
+    fn gas_power_schema_column_and_resolved_column_agree_for_every_fuel_type() {
+        let all_fuels = hares_types::ports::ALL_FUEL_TYPES
+            .iter()
+            .copied()
+            .chain(std::iter::once(FuelType::None));
+        for fuel in all_fuels {
+            let name = "Test Load";
+            let specs = vec![hares_io::EquipmentSpec {
+                instance_name: None,
+                name: name.to_string(),
+                fuel_type: fuel,
+                parameters: Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            }];
+            let schema = hares_io::build_schema(&specs, 1, &[]);
+            let column_index = build_output_column_index(&schema);
+            let schema_has_gas_col =
+                column_index.contains_key(&format!("{name} {GAS_POWER_SUFFIX}"));
+
+            let mut eq = TestEquipment::new(name, ControlCapabilities::empty());
+            eq.descriptor.fuel = fuel;
+            let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+            let col_map = build_equipment_column_map(&equipment, &column_index, 1);
+            let resolved_gas_col = col_map[0].gas_power.is_some();
+
+            assert_eq!(
+                schema_has_gas_col, resolved_gas_col,
+                "fuel {fuel:?}: schema column presence ({schema_has_gas_col}) must match \
+                 resolved column presence ({resolved_gas_col})"
+            );
+            assert_eq!(
+                schema_has_gas_col,
+                hares_io::fuel_reports_gas_power_column(fuel),
+                "fuel {fuel:?}: schema must follow the shared predicate"
+            );
+        }
     }
 
     /// At verbosity 0, per-equipment columns are not in the schema.

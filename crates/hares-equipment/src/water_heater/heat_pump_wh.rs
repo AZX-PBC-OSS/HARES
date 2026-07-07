@@ -581,6 +581,19 @@ impl Equipment for HeatPumpWH {
             return OperatingMode::Off;
         }
 
+        // Grid outage (voltage 0): compressor and backup element have no
+        // supply power, so no heat can be pumped or dissipated into the tank.
+        // Gating here (the root of dispatch) keeps the energy balance
+        // consistent: previously only the *reported* electric draw was zeroed
+        // while the tank still received full compressor/element heat.
+        // On/off timers keep advancing in `step`, so min-off-time is honoured
+        // naturally when the grid is restored.
+        if env.grid.voltage_pu == 0.0 {
+            self.compressor_on = false;
+            self.backup_on = false;
+            return OperatingMode::Off;
+        }
+
         let call_for_heat = self.call_for_heat() && self.duty_cycle > 0.0;
         let ambient_c = self.ambient_temp_c(env);
         let ambient_in_range =
@@ -765,21 +778,19 @@ impl Equipment for HeatPumpWH {
             .accumulate(draw_volume_l, env.current_time.hour());
 
         // OCHRE WaterHeater.py:662: fan runs when compressor is on; parasitic when off.
-        let fan_parasitic_w = if self.compressor_on {
+        // Grid outage (voltage 0): the standby parasitic draw is also lost —
+        // compressor/backup are already forced off at the root in
+        // `update_control`.
+        let fan_parasitic_w = if env.grid.voltage_pu == 0.0 {
+            0.0
+        } else if self.compressor_on {
             self.fan_power_w
         } else {
             self.parasitic_power_w
         };
 
         // OCHRE WaterHeater.py:671: total electric = compressor + ER + fan/parasitic.
-        let rated_electric_power_w = compressor_power_w + backup_power_w + fan_parasitic_w;
-        // Grid outage (voltage 0): no electric draw — preserves the legacy
-        // ZIP zero-voltage guard bit-for-bit.
-        let electric_power_w = if env.grid.voltage_pu == 0.0 {
-            0.0
-        } else {
-            rated_electric_power_w
-        };
+        let electric_power_w = compressor_power_w + backup_power_w + fan_parasitic_w;
         // Rule R1: Q from the already-computed real power (never through the
         // real-power ZIP polynomial). Blended pf 0.97 on the total draw —
         // OCHRE lab values are whole-unit; per-component PFs are a future
@@ -1755,6 +1766,66 @@ mod tests {
         assert!(
             any_reactive,
             "the pf 0.97 twin must produce reactive power while heating"
+        );
+    }
+
+    /// Grid outage: compressor, backup element, and standby parasitic have no
+    /// supply power, so no heat may enter the tank while the meter reads
+    /// zero. The tank must evolve bit-identically to a twin whose unit is
+    /// forced Off, and heating must resume once the grid is restored.
+    #[test]
+    fn grid_outage_blocks_hpwh_heat_and_recovers_after_restoration() {
+        let cfg = config();
+        let base_env = env(21.0);
+        let mut hp_outage = HeatPumpWH::new(cfg.clone());
+        hp_outage.init(&cfg, &base_env).unwrap();
+        let mut hp_off = HeatPumpWH::new(cfg.clone());
+        hp_off.init(&cfg, &base_env).unwrap();
+        hp_off
+            .apply_control_unchecked(&hares_types::ControlSignal::ModeOverride {
+                mode: hares_types::OperatingMode::Off,
+            })
+            .unwrap();
+
+        let mut env_outage = env(21.0);
+        env_outage.grid.voltage_pu = 0.0;
+        for step in 0..30 {
+            let mut p_outage = ports();
+            let mut p_off = ports();
+            hp_outage
+                .step(&env_outage, Duration::from_secs(60), &mut p_outage)
+                .unwrap();
+            hp_off
+                .step(&base_env, Duration::from_secs(60), &mut p_off)
+                .unwrap();
+            assert_eq!(
+                p_outage.electrical.load_power_w, 0.0,
+                "step {step}: no electric draw during outage (incl. parasitic)"
+            );
+            assert_eq!(p_outage.electrical.reactive_power_kvar, 0.0);
+            for (a, b) in hp_outage
+                .tank
+                .node_temps()
+                .iter()
+                .zip(hp_off.tank.node_temps())
+            {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "step {step}: outage tank must evolve exactly like a forced-off tank"
+                );
+            }
+        }
+
+        // Restoration: tank is below setpoint, the compressor fires again
+        // (min_off_time is 0 in this config).
+        let mut p = ports();
+        hp_outage
+            .step(&base_env, Duration::from_secs(60), &mut p)
+            .unwrap();
+        assert!(
+            p.electrical.load_power_w > 0.0,
+            "heating must resume after grid restoration"
         );
     }
 

@@ -699,6 +699,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
         "TestGasWH".to_string(),
         "Gas Water Heater".to_string(),
         GasWaterHeaterConfig {
+            fan_power_w: None,
             equipment_id: None,
             zone_id: Some(1),
             loop_id: None,

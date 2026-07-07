@@ -313,6 +313,17 @@ impl Equipment for TanklessWH {
             }
         }
 
+        // Grid outage (voltage 0): an electric tankless heater has no supply
+        // power and cannot fire — cold water passes through unheated. Gating
+        // here (the root of dispatch) keeps the energy balance consistent:
+        // previously only the *reported* electric draw was zeroed while the
+        // water was still heated to setpoint. Gas-fired units keep firing
+        // (fuel-side heat is unaffected); their electric ignition-controller
+        // parasitic is zeroed separately in `step`.
+        if self.fuel_type == FuelType::Electric && env.grid.voltage_pu == 0.0 {
+            return OperatingMode::Off;
+        }
+
         if self.is_enabled() {
             OperatingMode::Heating
         } else {
@@ -389,15 +400,12 @@ impl Equipment for TanklessWH {
         let mut parasitic_electric_w_reported = 0.0_f64;
         let (electric_kw_for_core, reactive_kvar_for_core) = if self.fuel_type == FuelType::Electric
         {
-            // Grid outage (voltage 0): no electric draw — preserves the
-            // legacy ZIP zero-voltage guard bit-for-bit. Rule R1: Q from the
-            // already-computed real power (never through the real-power ZIP
-            // polynomial).
-            let electric_w = if env.grid.voltage_pu == 0.0 {
-                0.0
-            } else {
-                fuel_input_w
-            };
+            // Grid outage is gated at the root in `update_control` (electric
+            // units are forced Off at voltage 0, making fuel_input_w zero),
+            // so delivered heat and metered draw are always consistent here.
+            // Rule R1: Q from the already-computed real power (never through
+            // the real-power ZIP polynomial).
+            let electric_w = fuel_input_w;
             let reactive_kvar = self
                 .zip
                 .reactive_kvar(power_w_to_kw(electric_w), env.grid.voltage_pu);
@@ -824,6 +832,71 @@ mod tests {
 
     fn config() -> EquipmentConfig {
         config_from_typed(typed_config())
+    }
+
+    /// Grid outage: an electric tankless heater cannot fire — cold water
+    /// passes through unheated and the meter reads zero (energy-balance
+    /// consistency). Heating resumes once the grid is restored.
+    #[test]
+    fn grid_outage_stops_electric_tankless_heating_until_restoration() {
+        let mut typed = typed_config();
+        typed.fuel_type = FuelType::Electric;
+        typed.energy_factor = Some(0.95);
+        let config = config_from_typed(typed);
+        let mut eq = TanklessWH::new(config.clone());
+        let mut env = env();
+        eq.init(&config, &env).unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "no electric draw during outage"
+        );
+        assert_eq!(eq.telemetry().get(tk::THERMAL_OUTPUT_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::FUEL_INPUT_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::OPERATING_MODE), Some(0.0));
+        // Cold water passes through: outlet equals inlet.
+        assert_eq!(eq.telemetry().get(tk::OUTLET_TEMP_C), Some(20.0));
+
+        env.grid.voltage_pu = 1.0;
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.electrical.load_power_w > 0.0,
+            "heating must resume after grid restoration"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::OUTLET_TEMP_C),
+            Some(50.0),
+            "within capacity, restored unit delivers setpoint temperature"
+        );
+    }
+
+    /// Grid outage: a gas tankless keeps firing (fuel-side heat is
+    /// unaffected) but its ignition-controller electric parasitic is lost.
+    #[test]
+    fn grid_outage_gas_tankless_keeps_firing_without_parasitic() {
+        let config = config();
+        let mut eq = TanklessWH::new(config.clone());
+        let mut env = env();
+        eq.init(&config, &env).unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let thermal_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        assert!(
+            thermal_w > 0.0,
+            "gas burner must keep firing during an outage"
+        );
+        assert!(eq.telemetry().get(tk::FUEL_INPUT_W).unwrap() > thermal_w);
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "ignition-controller parasitic must be lost during the outage"
+        );
+        assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(0.0));
     }
 
     /// Build a config that also sets max_thermal_power_w explicitly.

@@ -1,6 +1,6 @@
 //! Scheduled loads, lighting, appliances, ventilation, and miscellaneous load resolution.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
@@ -562,7 +562,11 @@ pub(super) fn resolve_scheduled_loads(
         let foundation_area_ft2 = conv::area_m2_to_ft2(foundation_floor_area_m2(building));
         let garage_area_ft2 = conv::area_m2_to_ft2(garage_floor_area_m2(building));
 
-        let mut by_location: HashMap<String, LightingFractions> = HashMap::new();
+        // BTreeMap (not HashMap): iteration below pushes one EquipmentSpec per
+        // location, and spec order fixes the equipment step order — which in
+        // turn fixes the float-summation order behind "Total Electric Power".
+        // Sorted-key iteration keeps run-to-run output bit-identical.
+        let mut by_location: BTreeMap<String, LightingFractions> = BTreeMap::new();
         for group in lighting.children_named("LightingGroup") {
             let location = child_text(group, "Location")
                 .unwrap_or_else(|| "interior".to_string())
@@ -1340,5 +1344,83 @@ mod tests {
             !specs.iter().any(|s| s.name == "Occupancy"),
             "Occupancy spec should not be created when no occupant fields and no extension params"
         );
+    }
+
+    /// Regression: lighting specs must resolve in a deterministic order.
+    ///
+    /// Lighting groups are aggregated per location before one spec is pushed
+    /// per location. That aggregation previously used a `HashMap`, whose
+    /// iteration order varies per process/instance (`RandomState`), so the
+    /// equipment spec order — and with it output column order and the
+    /// float-summation order behind "Total Electric Power" — wobbled between
+    /// identical runs. The aggregation now uses a `BTreeMap`, so lighting
+    /// specs appear in sorted-location order on every run.
+    #[test]
+    fn lighting_specs_resolve_in_deterministic_sorted_location_order() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>garage</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <LightingGroup>
+                      <Location>interior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <LightingGroup>
+                      <Location>exterior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <LightingGroup>
+                      <Location>basement</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+
+        let resolve_names = || {
+            let mut specs = Vec::new();
+            resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+                .expect("resolve_scheduled_loads");
+            specs
+                .into_iter()
+                .filter(|s| s.name.ends_with("Lighting"))
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
+
+        let first = resolve_names();
+        assert_eq!(
+            first,
+            vec![
+                "Basement Lighting",
+                "Exterior Lighting",
+                "Garage Lighting",
+                "Indoor Lighting",
+            ],
+            "lighting specs must appear in sorted-location order"
+        );
+        // Re-resolving must yield the identical order (run-to-run determinism).
+        assert_eq!(first, resolve_names());
     }
 }

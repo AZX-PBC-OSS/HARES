@@ -194,11 +194,19 @@ struct HeatPumpHeaterCore {
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// folded pf 0.84 on the total unit electric draw (compressor + fan + ER
-    /// backup + pan heater + ground-loop pump). OCHRE lab values are
-    /// whole-unit; per-component PFs are a future refinement hook. Real power
-    /// stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// applies to the compressor component only (class default pf 0.84, or a
+    /// user `"zip"` override). Real power stays bit-identical; Q comes from
+    /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`). ER
+    /// backup, pan heater, and resistive defrost elements are resistive
+    /// (pf 1.0) and contribute Q ≡ 0.
     zip: hares_types::zip::ZipLoad,
+    /// Indoor blower / outdoor fan motor component ZIP (pf 0.87), derived at
+    /// init via `hvac::reactive::secondary_motor_zip`.
+    fan_zip: hares_types::zip::ZipLoad,
+    /// Ground/water-loop circulation pump motor component ZIP (pf 0.84),
+    /// derived at init via `hvac::reactive::secondary_motor_zip`. Only GSHP
+    /// and WSHP variants draw pump power.
+    pump_zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -630,6 +638,8 @@ impl HeatPumpHeaterCore {
             dr_level: DRLevel::Normal,
             zone_id_explicit,
             zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_types::zip::ZipLoad::constant_power(),
+            pump_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -667,6 +677,14 @@ impl HeatPumpHeaterCore {
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.zip = crate::config::resolve_reactive_zip(config)?;
+        self.fan_zip = crate::hvac::reactive::secondary_motor_zip(
+            &self.zip,
+            crate::hvac::reactive::FAN_MOTOR_ZIP,
+        );
+        self.pump_zip = crate::hvac::reactive::secondary_motor_zip(
+            &self.zip,
+            crate::hvac::reactive::LOOP_PUMP_ZIP,
+        );
         self.telemetry = default_heater_telemetry();
         self.telemetry.set(
             tk::BIQUADRATIC_CURVE_SOURCE,
@@ -1208,13 +1226,23 @@ impl HeatPumpHeaterCore {
                 ThermalCategory::HvacHeating,
             )?;
         }
-        let scaled_electric_kw = step.electric_kw * self.hvac.config.space_fraction;
-        // Rule R1: Q from the already-computed real power (folded unit pf on
-        // compressor + fan + ER + pan heater + ground-loop pump). OCHRE lab
-        // values are whole-unit; per-component PFs are a future refinement hook.
+        let sf = self.hvac.config.space_fraction;
+        let scaled_electric_kw = step.electric_kw * sf;
+        // Rule R1: Q from the already-computed real power, per component
+        // (see `hvac::reactive`): compressor at the unit ZIP (pf 0.84),
+        // blower/outdoor fan at pf 0.87, loop pump at pf 0.84. The ER
+        // backup, pan heater, and resistive defrost elements are resistive
+        // (pf 1.0) and contribute Q ≡ 0 — assigning them the compressor pf
+        // would fabricate ~0.646·P_ER of phantom kvar during backup events.
         let reactive_power_kvar = self
             .zip
-            .reactive_kvar(scaled_electric_kw, env.grid.voltage_pu);
+            .reactive_kvar(step.compressor_kw * sf, env.grid.voltage_pu)
+            + self
+                .fan_zip
+                .reactive_kvar(step.fan_kw * sf, env.grid.voltage_pu)
+            + self
+                .pump_zip
+                .reactive_kvar(step.pump_kw * sf, env.grid.voltage_pu);
         if scaled_electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(scaled_electric_kw),
@@ -2930,10 +2958,10 @@ mod tests {
         assert_eq!(eq.telemetry().get(tk::DEFROST_ACTIVE), Some(0.0));
     }
 
-    /// Reactive-power contract for the ASHP heater: folded pf 0.84 on the total
-    /// unit electric draw (compressor + fan + ER + pan heater + pump), Q/P =
-    /// tan(acos(0.84)) at nominal voltage, REACTIVE declared, and
-    /// port/CoreOutput/telemetry agree bit-for-bit. Off ⇒ Q == 0.
+    /// Reactive-power contract for the ASHP heater: per-component Q
+    /// (compressor pf 0.84, fan pf 0.87; ER/pan resistive Q=0), REACTIVE
+    /// declared, and port/CoreOutput/telemetry agree bit-for-bit.
+    /// Off ⇒ Q == 0.
     #[test]
     fn heating_reactive_power_pf_and_channels_agree() {
         let cfg = heater_config();
@@ -2946,7 +2974,12 @@ mod tests {
                 .contains(hares_types::CoreCapabilities::REACTIVE),
             "ASHP heater must declare REACTIVE"
         );
-        assert_eq!(eq.core.zip.pf, 0.84, "class default folded pf");
+        assert_eq!(eq.core.zip.pf, 0.84, "class default compressor pf");
+        assert_eq!(
+            eq.core.fan_zip,
+            crate::hvac::reactive::FAN_MOTOR_ZIP,
+            "fan component uses the FAN motor ZIP"
+        );
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2957,11 +2990,22 @@ mod tests {
 
         let p_kw = ports.electrical.load_power_w / 1000.0;
         assert!(p_kw > 0.0, "heating call must draw real power");
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        assert!(compressor_kw > 0.0 && fan_kw > 0.0);
+        assert_eq!(
+            eq.telemetry().get(tk::BACKUP_ER_KW),
+            Some(0.0),
+            "precondition: ER backup must be off in this HP-only step"
+        );
         let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.84_f64.acos().tan();
+        // Per-component: Q = P_comp·tan(acos(0.84)) + P_fan·tan(acos(0.87)).
+        // No ER, pan heater, or pump draw in this mild-weather HP-only step.
+        let expected = compressor_kw * 0.84_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
-            "Q/P must equal tan(acos(0.84)): q={q}, expected={expected}"
+            "per-component Q must be comp·tan(acos(0.84)) + fan·tan(acos(0.87)): \
+             q={q}, expected={expected}"
         );
         assert_eq!(
             eq.core_output()
@@ -3001,6 +3045,134 @@ mod tests {
             eq.core_output().flows.reactive_power_kvar,
             Some(0.0),
             "off ⇒ CoreOutput Q == Some(0.0)"
+        );
+    }
+
+    /// Compressor-only operation (fan power configured to zero, no ER/pan/
+    /// pump): Q/P must equal tan(acos(0.84)) — the pure compressor arm of the
+    /// per-component model.
+    #[test]
+    fn compressor_only_reactive_q_over_p_is_tan_acos_084() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.fan_power_w = Some(0.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 10.0, 0.005);
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(p_kw > 0.0, "heating call must draw real power");
+        assert_eq!(eq.telemetry().get(tk::FAN_KW), Some(0.0), "fan must be 0");
+        assert_eq!(
+            eq.telemetry().get(tk::BACKUP_ER_KW),
+            Some(0.0),
+            "ER must be off"
+        );
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = p_kw * 0.84_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-12,
+            "compressor-only Q/P must equal tan(acos(0.84)): q={q}, expected={expected}"
+        );
+    }
+
+    /// ER-backup-active rows must exclude the resistive ER wattage from Q:
+    /// with HP + ER forced on, Q = comp·tan(acos(0.84)) + fan·tan(acos(0.87))
+    /// and NOT total·tan(acos(0.84)) — the old folded pf fabricated
+    /// ~0.646·P_ER of phantom kvar during backup events.
+    #[test]
+    fn er_backup_active_reactive_excludes_er_wattage() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.backup_capacity_w = Some(10_000.0);
+            typed.common.backup_eir = Some(1.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(15.0, 2.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .expect("mode override accepted");
+        let mode = eq.update_control(&environment);
+        assert_eq!(mode, OperatingMode::HeatingHPAndER);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
+        assert!(compressor_kw > 0.0, "compressor must run");
+        assert!(er_kw > 5.0, "ER element must draw its rated ~10 kW");
+        let p_kw = ports.electrical.load_power_w / 1000.0;
+        assert!(
+            (p_kw - (compressor_kw + fan_kw + er_kw)).abs() < 1e-9,
+            "port draw must be the component sum: p={p_kw}, \
+             comp={compressor_kw} fan={fan_kw} er={er_kw}"
+        );
+
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = compressor_kw * 0.84_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "Q must exclude ER wattage: q={q}, expected={expected}"
+        );
+        let phantom_blend = p_kw * 0.84_f64.acos().tan();
+        assert!(
+            q < phantom_blend - er_kw * 0.84_f64.acos().tan() + 1e-9,
+            "per-component Q ({q}) must drop the ~0.646·P_ER phantom kvar \
+             relative to the folded blend ({phantom_blend})"
+        );
+    }
+
+    /// ER-only mode (HP locked out): the blower still runs, so Q is exactly
+    /// the fan component — fan·tan(acos(0.87)) — while the resistive ER
+    /// element contributes zero.
+    #[test]
+    fn er_only_mode_reactive_is_fan_component_only() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.backup_capacity_w = Some(4_000.0);
+            typed.common.backup_eir = Some(1.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // OAT 0 °C: below hp_lockout (10 °C) and below the ER OAT lockout.
+        let environment = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+        let mode = eq.update_control(&environment);
+        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
+        assert_eq!(
+            eq.telemetry().get(tk::COMPRESSOR_KW),
+            Some(0.0),
+            "compressor must be off in ER-only mode"
+        );
+        assert!(fan_kw > 0.0, "blower must run in ER-only mode");
+        assert!(er_kw > 0.0, "ER element must draw power");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = fan_kw * 0.87_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-12,
+            "ER-only Q must be the fan component alone: q={q}, expected={expected}"
         );
     }
 

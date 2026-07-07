@@ -93,12 +93,32 @@ graph LR
 - Efficiency: constant AFUE or polynomial `eta(PLR) = c0 + c1*PLR + c2*PLR^2`
 - Flue losses: `flue_loss = gross_heat * flue_loss_fraction` (exits building, default 10%)
 - Tank heat: `gross - flue_loss`, further reduced by skin_loss_fraction
-- Standing pilot: 5W default (electronic ignition = 0W)
+- Standing pilot: 150 W thermal default (electronic ignition = 0 W); a
+  `pilot_fraction_to_tank` share (default 0.80) heats the tank, the remainder
+  goes to the zone
+
+### Draft-Inducer / Power-Vent Fan
+
+`fan_power_w` (config; default `None` → 0 W = atmospheric vent, no blower)
+sets the electric draw of the draft-inducer or power-vent blower while the
+burner fires. Typical power-vent blowers draw roughly 30-100 W; OCHRE's
+gas-tankless reference hardcode uses 65 W on-cycle
+(`vendors/OCHRE/ochre/Equipment/WaterHeater.py`). The fan is a vented
+parasitic: it contributes real power and Rule R1 reactive power (pf 0.87
+fan-motor class row) but adds no heat to the tank or zone.
+
+**HPXML mapping**: the HPXML schema has no standard `WaterHeatingSystem`
+element for water-heater fan power, so HARES reads
+`WaterHeatingSystem/extension/FanPowerWatts` — the same extension convention
+used for HVAC systems (and by OCHRE's HPXML parser). The optional `units`
+attribute is checked at the hares-io boundary (`W` default per the element
+name; `kW` converted; anything else rejected with a warning). Absent → 0 W,
+leaving existing simulations unchanged.
 
 ### Port Interactions
 
 - **Fuel**: `burner_input_w + pilot_power_w`
-- **Electrical**: fan power only (applies ZIP voltage scaling)
+- **Electrical**: draft-fan power only, while the burner fires (real + Rule R1 reactive)
 - **Thermal**: `standby_loss * skin_loss_fraction` (jacket portion, not flue)
 - **Fluid**: DHW loop
 
@@ -153,6 +173,21 @@ graph LR
 - Gas tankless: fuel input = `thermal_output / efficiency` + parasitic (7.38W ANSI RESNET 301)
 - Electric tankless: electrical input = `thermal_output / efficiency`
 
+## Grid Outage Behaviour
+
+Outages are signalled by `env.grid.voltage_pu == 0.0` and are gated **at the
+root of dispatch** (control/element level), never by merely zeroing the
+reported electric draw — tank energy change always equals delivered heat
+minus losses:
+
+| WH Type | During outage | Notes |
+|---------|---------------|-------|
+| Electric Resistance | Elements off: no tank heat, 0 W metered | Tank evolves exactly as if forced Off; hysteresis resumes on restoration |
+| Heat Pump WH | Compressor, backup element, and standby parasitic off | Off-timer keeps advancing, so min-off-time is honoured at restoration |
+| Electric Tankless | Cannot fire: outlet = inlet, 0 W metered | Resumes on restoration |
+| Gas / Gas Tankless | Burner and pilot keep firing; electric parasitics (draft fan, ignition controller) drop to 0 W | Modelling simplification: a real power-vent unit would lock out without draft proving; HARES follows OCHRE in keeping gas water heating available when islanded |
+| Indirect Tank | Unaffected | No electrical port; heat comes from the boiler loop |
+
 ## Demand Response Levels
 
 All storage water heaters implement DR response:
@@ -161,9 +196,9 @@ All storage water heaters implement DR response:
 |-------|----------------|---------------|--------|
 | Normal | 0C | 1.0 | Yes |
 | Moderate | -3C | 1.0 | Yes |
-| High | -6C | 0.75 | Yes |
+| High | -6C | 0.8 | Yes |
 | Critical | -10C | 0.5 | Yes |
-| GridEmergency | -15C | 0.25 | Locked out |
+| GridEmergency | 0C | 0.0 (full shed) | Locked out |
 
 Duration auto-revert: timer decrements each step, reverts to Normal on expiration.
 

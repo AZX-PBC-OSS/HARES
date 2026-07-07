@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from .gym_env import (
     RewardContext,
     _build_control_signal,
+    _drain_step_warnings,
     _field_bounds,
     _observation_field_bounds,
     _sorted_action_layout,
@@ -76,15 +77,15 @@ class VecDwellingGymEnv:
 
         action_low_arr = np.asarray(action_low, dtype=np.float64)
         action_high_arr = np.asarray(action_high, dtype=np.float64)
+        bounds = [
+            _observation_field_bounds(f) for f in observation_fields
+        ]
+        if field_bounds_overrides:
+            for idx, field in enumerate(observation_fields):
+                override = field_bounds_overrides.get(field)
+                if override is not None:
+                    bounds[idx] = (float(override[0]), float(override[1]))
         if spaces is not None:
-            bounds = [
-                _observation_field_bounds(f) for f in observation_fields
-            ]
-            if field_bounds_overrides:
-                for idx, field in enumerate(observation_fields):
-                    override = field_bounds_overrides.get(field)
-                    if override is not None:
-                        bounds[idx] = (float(override[0]), float(override[1]))
             obs_low = np.asarray([b[0] for b in bounds], dtype=np.float64)
             obs_high = np.asarray([b[1] for b in bounds], dtype=np.float64)
             self.observation_space = spaces.Box(
@@ -161,6 +162,15 @@ class VecDwellingGymEnv:
         return obs.astype(np.float64, copy=False), infos
 
     def step(self, actions: np.ndarray):
+        """Advance every dwelling one timestep.
+
+        Each entry of ``infos`` carries ``"warning_count"`` (float, always
+        present) and ``"warnings"`` (list[str], present only when the count is
+        non-zero) — the warnings drained from that dwelling during the step
+        (e.g. control signals rejected at dispatch time). The contract is
+        identical on the Rust ``batch_step`` fast path and the pure-Python
+        fallback; warnings are drained exactly once per step.
+        """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
         action_dim = (
@@ -228,7 +238,11 @@ class VecDwellingGymEnv:
                 rewards.append(float(self._reward_fn(ctx)))
                 dones.append(False)
                 truncs.append(False)
-                infos.append({"step": step_data})
+                warning_count, warning_messages = _drain_step_warnings(dwelling)
+                info: dict[str, Any] = {"step": step_data, "warning_count": warning_count}
+                if warning_messages:
+                    info["warnings"] = warning_messages
+                infos.append(info)
             obs = np.asarray(obs_rows, dtype=np.float64)
             rewards = np.asarray(rewards, dtype=np.float64)
             dones = np.asarray(dones, dtype=np.bool_)

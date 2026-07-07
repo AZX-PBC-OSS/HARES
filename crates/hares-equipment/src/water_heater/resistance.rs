@@ -477,6 +477,18 @@ impl Equipment for ResistanceWH {
             return OperatingMode::Off;
         }
 
+        // Grid outage (voltage 0): the heating elements have no supply power,
+        // so no electrical heat can enter the tank. Gating here (the root of
+        // element dispatch) keeps the energy balance consistent: previously
+        // only the *reported* electric draw was zeroed while the tank still
+        // received full element heat. Thermostat hysteresis resumes normally
+        // once the grid is restored.
+        if env.grid.voltage_pu == 0.0 {
+            self.upper_element_on = false;
+            self.lower_element_on = false;
+            return OperatingMode::Off;
+        }
+
         let (upper_call, lower_call) = self.thermostat_calls();
         match self.element_priority {
             ElementPriorityMode::MasterSlave => {
@@ -622,14 +634,10 @@ impl Equipment for ResistanceWH {
         self.draw_tracker
             .accumulate(draw_volume_l, env.current_time.hour());
 
-        let rated_electric_power_w = upper_power_w + lower_power_w;
-        // Grid outage (voltage 0): no electric draw — preserves the legacy
-        // ZIP zero-voltage guard bit-for-bit.
-        let electric_power_w = if env.grid.voltage_pu == 0.0 {
-            0.0
-        } else {
-            rated_electric_power_w
-        };
+        // Grid outage is gated at the root in `update_control` (elements are
+        // forced off at voltage 0), so delivered tank heat and metered draw
+        // are always consistent here.
+        let electric_power_w = upper_power_w + lower_power_w;
         // Rule R1: Q from the already-computed real power (never through the
         // real-power ZIP polynomial). pf = 1.0 (resistive element) yields
         // exactly 0.0 kVAR.
@@ -1170,6 +1178,114 @@ mod tests {
             humidity: vec![],
             ..Default::default()
         }
+    }
+
+    /// Grid outage: elements have no supply power, so no electrical heat may
+    /// enter the tank while the meter reads zero. The tank must evolve
+    /// bit-identically to a twin whose elements are forced Off, and heating
+    /// must resume once the grid is restored.
+    #[test]
+    fn grid_outage_blocks_element_heat_and_recovers_after_restoration() {
+        let cfg = config();
+        let base_env = env(21.0);
+        let mut wh_outage = ResistanceWH::new(cfg.clone());
+        wh_outage.init(&cfg, &base_env).unwrap();
+        let mut wh_off = ResistanceWH::new(cfg.clone());
+        wh_off.init(&cfg, &base_env).unwrap();
+        wh_off
+            .apply_control_unchecked(&ControlSignal::ModeOverride {
+                mode: hares_types::OperatingMode::Off,
+            })
+            .unwrap();
+
+        let mut env_outage = env(21.0);
+        env_outage.grid.voltage_pu = 0.0;
+        for step in 0..30 {
+            let mut p_outage = ports();
+            let mut p_off = ports();
+            wh_outage
+                .step(&env_outage, Duration::from_secs(60), &mut p_outage)
+                .unwrap();
+            wh_off
+                .step(&base_env, Duration::from_secs(60), &mut p_off)
+                .unwrap();
+            assert_eq!(
+                p_outage.electrical.load_power_w, 0.0,
+                "step {step}: no electric draw during outage"
+            );
+            assert_eq!(
+                wh_outage.telemetry().get(tk::UPPER_ELEMENT_POWER_W),
+                Some(0.0)
+            );
+            assert_eq!(
+                wh_outage.telemetry().get(tk::LOWER_ELEMENT_POWER_W),
+                Some(0.0)
+            );
+            for (a, b) in wh_outage
+                .tank
+                .node_temps()
+                .iter()
+                .zip(wh_off.tank.node_temps())
+            {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "step {step}: outage tank must evolve exactly like a forced-off tank"
+                );
+            }
+        }
+
+        // Restoration: tank is below setpoint, elements fire again.
+        let mut p = ports();
+        wh_outage
+            .step(&base_env, Duration::from_secs(60), &mut p)
+            .unwrap();
+        assert!(
+            p.electrical.load_power_w > 0.0,
+            "heating must resume after grid restoration"
+        );
+    }
+
+    /// One-step energy balance: with a zero draw and the ambient pinned to
+    /// the tank temperature (no standby loss at step start), the tank energy
+    /// gain must equal the metered electric energy input.
+    #[test]
+    fn tank_energy_gain_equals_metered_electric_energy() {
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        let cfg = config_from_typed(typed);
+        let e = env(40.0);
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &e).unwrap();
+
+        let pre: Vec<f64> = wh.tank.node_temps().to_vec();
+        let volumes: Vec<f64> = wh.tank.node_volumes_m3().to_vec();
+        let mut p = ports();
+        let dt_s = 60.0;
+        wh.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let electric_j = p.electrical.load_power_w * dt_s;
+        assert!(electric_j > 0.0, "elements must fire below setpoint");
+        // Mirror the tank's injection accounting: density at the pre-injection
+        // node temperature (uniform tank at ambient ⇒ conduction/standby are
+        // exactly zero this step).
+        let gained_j: f64 = wh
+            .tank
+            .node_temps()
+            .iter()
+            .zip(&pre)
+            .zip(&volumes)
+            .map(|((post, pre), vol)| {
+                hares_physics::water_density_kg_m3(*pre)
+                    * vol
+                    * hares_physics::constants::CP_LIQUID_WATER_J_KG_K
+                    * (post - pre)
+            })
+            .sum();
+        assert!(
+            (gained_j - electric_j).abs() <= 1e-6 * electric_j,
+            "tank energy gain {gained_j} J must equal electric input {electric_j} J"
+        );
     }
 
     #[test]

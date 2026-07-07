@@ -146,6 +146,17 @@ pub(super) fn resolve_water_heaters(
                 let conversion_efficiency = ua_result.map(|r| r.conversion_efficiency);
                 let gas_flue_loss_fraction = child_f64(wh, "FlueLossFraction")
                     .or_else(|| conversion_efficiency.map(|_| 0.0));
+                // Draft-inducer / power-vent blower wattage. The HPXML schema
+                // has no standard WaterHeatingSystem element for water-heater
+                // fan power, so HARES reads the `extension/FanPowerWatts`
+                // convention already used for HVAC systems (see
+                // resolve_hvac.rs and OCHRE's HPXML parser,
+                // vendors/OCHRE/ochre/utils/hpxml.py:900). Absent → None →
+                // 0 W (atmospheric vent), leaving existing simulations
+                // unchanged.
+                let fan_power_w = wh
+                    .path(&["extension"])
+                    .and_then(|ext| child_power_w(ext, "FanPowerWatts"));
                 let cfg = GasWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -178,6 +189,7 @@ pub(super) fn resolve_water_heaters(
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
                     pilot_fraction_to_tank: None,
+                    fan_power_w,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)?
             }
@@ -740,6 +752,31 @@ fn canonical_water_heater_name(
     Ok(name.to_string())
 }
 
+/// Parse an electrical-power child element into SI watts, honouring an
+/// optional HPXML `units` attribute (SI-at-the-boundary policy: never read an
+/// HPXML numeric without checking its declared units). Elements named
+/// `*Watts` carry watts by definition, so `W` is the default when no `units`
+/// attribute is present; an explicit `kW` is converted. Unrecognized units
+/// are rejected (with a warning) rather than guessed.
+fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
+    let el = node.child(child_name)?;
+    let value = hares_types::parse_trimmed_f64(&el.text)?;
+    let units = el.attrs.get("units").map(String::as_str).unwrap_or("W");
+    match units.to_ascii_lowercase().as_str() {
+        "w" | "watts" => Some(value),
+        "kw" => Some(conv::power_kw_to_w(value)),
+        other => {
+            tracing::warn!(
+                units = other,
+                value,
+                field = child_name,
+                "unrecognized power unit; accepted: W, kW — ignoring value"
+            );
+            None
+        }
+    }
+}
+
 fn param_f64(params: &Map<String, Value>, key: &str) -> Option<f64> {
     params.get(key).and_then(Value::as_f64)
 }
@@ -799,6 +836,7 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
         pilot_fraction_to_tank: param_f64(params, "pilot_fraction_to_tank"),
+        fan_power_w: param_f64(params, "fan_power_w"),
     };
     EquipmentConfig::from_typed(name.to_string(), "Gas Water Heater".to_string(), cfg).ok()
 }
@@ -1045,6 +1083,7 @@ mod tests {
     #[test]
     fn typed_spec_serializes_canonical_fields() {
         let cfg = GasWaterHeaterConfig {
+            fan_power_w: None,
             equipment_id: None,
             zone_id: Some(2),
             loop_id: Some(3),
@@ -1865,6 +1904,80 @@ mod tests {
         assert!(
             cfg.pilot_power_w.is_none(),
             "absent PilotPower must yield None in config"
+        );
+    }
+
+    fn gas_wh_xml_with_extension(extension: &str) -> String {
+        format!(
+            r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <EnergyFactor>0.59</EnergyFactor>
+{extension}
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        )
+    }
+
+    #[test]
+    fn gas_wh_fan_power_watts_extension_is_mapped() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_extension(
+            "                      <extension><FanPowerWatts>65</FanPowerWatts></extension>",
+        ));
+        assert_eq!(
+            cfg.fan_power_w,
+            Some(65.0),
+            "extension/FanPowerWatts must map to fan_power_w in watts"
+        );
+    }
+
+    #[test]
+    fn gas_wh_fan_power_units_attribute_is_honoured() {
+        // SI-at-the-boundary: an explicit units attribute must be checked and
+        // converted, never assumed.
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_extension(
+            "                      <extension><FanPowerWatts units=\"kW\">0.065</FanPowerWatts></extension>",
+        ));
+        assert_eq!(
+            cfg.fan_power_w,
+            Some(65.0),
+            "kW units must convert to watts"
+        );
+    }
+
+    #[test]
+    fn gas_wh_fan_power_unrecognized_units_rejected() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_extension(
+            "                      <extension><FanPowerWatts units=\"hp\">0.1</FanPowerWatts></extension>",
+        ));
+        assert!(
+            cfg.fan_power_w.is_none(),
+            "unrecognized power units must be rejected, not guessed"
+        );
+    }
+
+    #[test]
+    fn gas_wh_fan_power_absent_yields_none() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_ignition(None));
+        assert!(
+            cfg.fan_power_w.is_none(),
+            "absent extension/FanPowerWatts must yield None (0 W, atmospheric vent)"
         );
     }
 

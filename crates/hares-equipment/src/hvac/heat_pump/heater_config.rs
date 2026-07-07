@@ -76,7 +76,7 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
             unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging), folded unit pf on total draw"
+            description: "Reactive power (positive = inductive/lagging), per component: compressor pf 0.84, fan pf 0.87, pump pf 0.84, ER/pan resistive Q=0"
                 .to_string(),
         },
         TelemetryField {

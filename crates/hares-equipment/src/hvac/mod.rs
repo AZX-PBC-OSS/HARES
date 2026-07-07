@@ -20,6 +20,7 @@ pub(crate) mod helpers;
 pub(super) mod hvac_core;
 pub mod ideal_hvac;
 pub(super) mod latent_degradation;
+pub(crate) mod reactive;
 pub(super) mod speed_control;
 pub(super) mod staging;
 pub(super) mod thermostat;

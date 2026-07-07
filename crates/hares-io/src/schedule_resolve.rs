@@ -2104,6 +2104,7 @@ mod tests {
                 "gas".to_string(),
                 "Gas Water Heater".to_string(),
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     equipment_id: None,
                     zone_id: None,
                     loop_id: None,

@@ -125,8 +125,9 @@ const DEFAULT_INITIAL_SOC: f64 = 0.5;
 // OCHRE default_parameters.csv: soc_min=0.15, soc_max=0.95
 const DEFAULT_MIN_SOC: f64 = 0.15;
 const DEFAULT_MAX_SOC: f64 = 0.95;
-/// Disabled by default; set to ~500 W for Franklin aPower 2 style pad heater,
-/// or ~100 W for Tesla Powerwall 3 cell-level resistive heaters.
+/// Disabled by default. Catalog values (battery/catalog.rs): 300 W for
+/// FranklinWH aPower/aPower 2 pad heaters and Tesla Powerwall 3 cell heaters,
+/// 100 W for Tesla Powerwall 2 (600 W for the ×2 stacked variants).
 const DEFAULT_HEATER_POWER_W: f64 = 0.0;
 /// Heater activation threshold. Tesla Heat Mode targets 0 C minimum cell temp;
 /// Franklin activates around 5-10 C. 0 C is the Li-ion plating safety boundary.
@@ -349,10 +350,9 @@ pub struct Battery {
     charge_efficiency: f64,
     discharge_efficiency: f64,
 
-    // Cell heater config (e.g. Franklin WH ~500 W heater at 0 C)
+    // Cell heater config (catalog: 100-600 W depending on model)
     heater_power_w: f64,
     heater_threshold_c: f64,
-    heater_on_discharge: bool,
 
     // Temperature-dependent power and capacity derating
     min_discharge_temp_c: f64,
@@ -479,7 +479,6 @@ impl Battery {
             discharge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
             heater_power_w: DEFAULT_HEATER_POWER_W,
             heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
-            heater_on_discharge: false,
             min_discharge_temp_c: DEFAULT_MIN_DISCHARGE_TEMP_C,
             full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
             min_charge_temp_c: DEFAULT_MIN_CHARGE_TEMP_C,
@@ -1014,7 +1013,10 @@ impl Battery {
             }
         }
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
-        self.heater_on_discharge = c.heater_on_discharge.unwrap_or(false);
+        // NOTE: c.heater_on_discharge is intentionally not read. The heater
+        // activates on cell temperature alone (see the cell-heater block in
+        // step()), which is a superset of discharge-gated activation; the
+        // config knob is retained only for serialization compatibility.
         self.min_discharge_temp_c = c
             .min_discharge_temp_c
             .unwrap_or(DEFAULT_MIN_DISCHARGE_TEMP_C);
@@ -1189,7 +1191,6 @@ impl Equipment for Battery {
         // -- Temperature-dependent power limits --
         // Capture intent before temp limits may zero the power
         let wants_charge = target_power_kw > IDLE_POWER_THRESHOLD_KW;
-        let wants_discharge = target_power_kw < -IDLE_POWER_THRESHOLD_KW;
         // Charging blocked below min_charge_temp_c (Li-ion safety: lithium plating risk)
         if wants_charge && !self.charge_allowed() {
             target_power_kw = 0.0;
@@ -1271,10 +1272,6 @@ impl Equipment for Battery {
             };
 
         // -- Cell heater --
-        // Default (Franklin-style): fires when charge is desired but cells are cold.
-        // With heater_on_discharge (Tesla-style): also fires when discharge is
-        // desired but blocked/derated by cold temps, e.g. grid outage at -25 C.
-        let _wants_power = wants_charge || (wants_discharge && self.heater_on_discharge);
         // Heater activates based on cell temperature alone -- it protects cells
         // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
         // Mode and similar systems run proactively to maintain cells above the
@@ -2723,7 +2720,10 @@ mod tests {
     }
 
     #[test]
-    fn heater_activates_on_discharge_when_configured() {
+    fn heater_activates_when_discharge_requested_and_cells_cold() {
+        // The heater is gated on cell temperature alone, so it must run when a
+        // discharge is requested at cell temps below the activation threshold
+        // (e.g. grid outage at -25 C).
         let config = EquipmentConfig::from_typed(
             "Test Battery".to_string(),
             "Battery".to_string(),
@@ -2731,7 +2731,6 @@ mod tests {
                 heater_power_w: Some(500.0),
                 heater_threshold_c: Some(5.0),
                 self_discharge_pct_per_day: Some(0.0),
-                heater_on_discharge: Some(true),
                 min_dwell_steps: 0,
                 ..battery_config(&[])
                     .typed::<BatteryConfig>()
@@ -2759,7 +2758,7 @@ mod tests {
 
         assert!(
             bat.heater_active,
-            "heater should activate when discharge requested and cells cold (heater_on_discharge=true)"
+            "heater should activate when discharge requested and cells cold"
         );
         assert!(bat.cell_temp_c > -25.0, "heater should warm cells");
     }

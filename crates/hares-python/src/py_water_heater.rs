@@ -124,6 +124,7 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
         let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
         let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
         let cfg = GasWaterHeaterConfig {
+            fan_power_w: None,
             fuel_type: FuelType::Gas,
             tank_volume_m3: volume,
             uniform_energy_factor: wh.uniform_energy_factor,

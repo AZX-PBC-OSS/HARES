@@ -22,9 +22,10 @@ pub use columns::{
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, build_schema,
     display_name_to_end_use_key, end_use_display_name, end_use_electric_power_column,
-    equipment_name_to_end_use, expected_columns_at_verbosity, has_soc, is_compressor_equipment,
-    is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv,
-    parse_end_use_electric_power_column, parse_end_use_electric_power_column_key,
+    equipment_name_to_end_use, expected_columns_at_verbosity, fuel_reports_gas_power_column,
+    has_soc, is_compressor_equipment, is_cooling_equipment, is_ev, is_heat_pump_heater,
+    is_hvac_or_wh, is_pv, parse_end_use_electric_power_column,
+    parse_end_use_electric_power_column_key,
 };
 pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,

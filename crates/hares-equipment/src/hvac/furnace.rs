@@ -52,9 +52,13 @@ pub struct ElectricFurnace {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
-    /// Q exactly zero, real power stays bit-identical.
+    /// Rule R1 reactive-only ZIP for the resistance element (class default
+    /// pf 1.0 → Q exactly zero, or a user `"zip"` override). Real power
+    /// stays bit-identical.
     zip: hares_types::zip::ZipLoad,
+    /// Blower fan motor component ZIP (pf 0.87), derived at init via
+    /// `hvac::reactive::secondary_motor_zip`.
+    fan_zip: hares_types::zip::ZipLoad,
 }
 
 pub struct GasFurnace {
@@ -147,6 +151,7 @@ impl ElectricFurnace {
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -171,6 +176,8 @@ impl Equipment for ElectricFurnace {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
+        self.fan_zip =
+            super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
         let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
@@ -224,9 +231,14 @@ impl Equipment for ElectricFurnace {
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
         let fan_kw = power_w_to_kw(self.fan_power_w * duty) * sf;
         // Heating element power + fan power
-        let electric_kw = power_w_to_kw(gross_capacity_w * self.eir) + fan_kw;
+        let element_kw = power_w_to_kw(gross_capacity_w * self.eir);
+        let electric_kw = element_kw + fan_kw;
 
-        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
+        // Per-component reactive (see `hvac::reactive`): the resistance
+        // element at the unit ZIP (pf 1.0 → Q ≡ 0), the blower fan motor at
+        // pf 0.87.
+        let reactive_power_kvar = self.zip.reactive_kvar(element_kw, env.grid.voltage_pu)
+            + self.fan_zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -2021,9 +2033,23 @@ mod tests {
         );
     }
 
+    /// Per-component reactive for the electric furnace: the resistance
+    /// element is unity pf (Q ≡ 0), but the blower fan motor carries the
+    /// FAN component (pf 0.87) — Q must equal fan·tan(acos(0.87)) alone.
     #[test]
-    fn electric_furnace_reactive_power_is_some_zero_at_unity_pf() {
-        let cfg = ef_config(8_000.0, 1.05);
+    fn electric_furnace_reactive_power_is_fan_component_only() {
+        let cfg = EquipmentConfig::from_typed(
+            "EF".to_string(),
+            "Electric Furnace".to_string(),
+            ElectricFurnaceConfig {
+                eir: 1.05,
+                capacity_w: 8_000.0,
+                fan_power_w: Some(300.0),
+                zone_id: Some(1),
+                ..ElectricFurnaceConfig::default()
+            },
+        )
+        .unwrap();
         let mut eq = ElectricFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -2032,7 +2058,12 @@ mod tests {
                 .core_capabilities
                 .contains(CoreCapabilities::REACTIVE)
         );
-        assert_eq!(eq.zip.pf, 1.0);
+        assert_eq!(eq.zip.pf, 1.0, "element class default pf (RESISTANCE)");
+        assert_eq!(
+            eq.fan_zip,
+            crate::hvac::reactive::FAN_MOTOR_ZIP,
+            "blower component uses the FAN motor ZIP"
+        );
 
         eq.update_control(&env);
         let mut ports = PortSlots {
@@ -2042,9 +2073,17 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(ports.electrical.load_power_w > 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
-        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        assert!(fan_kw > 0.0, "blower must run while heating");
+        let q = ports.electrical.reactive_power_kvar;
+        let expected = fan_kw * 0.87_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-12,
+            "Q must be the blower component only (element resistive): \
+             q={q}, expected={expected}"
+        );
+        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(q));
+        assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(q));
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
             .expect("validate_core_contract");
     }

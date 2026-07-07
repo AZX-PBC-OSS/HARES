@@ -283,6 +283,7 @@ fn sample_dehumidifier_config() -> DehumidifierConfig {
 
 fn sample_gas_water_heater_config() -> GasWaterHeaterConfig {
     GasWaterHeaterConfig {
+        fan_power_w: None,
         equipment_id: Some(11),
         zone_id: Some(1),
         loop_id: Some(1),

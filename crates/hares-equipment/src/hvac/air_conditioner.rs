@@ -115,11 +115,13 @@ pub(super) struct CoolingCore {
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// folded pf 0.96 on the total unit electric draw (compressor + fan +
-    /// crankcase). OCHRE lab values are whole-unit; per-component PFs are a
-    /// future refinement hook. Real power stays bit-identical; Q comes from
-    /// `ZipLoad::reactive_kvar`.
+    /// applies to the compressor component only (class default pf 0.96, or a
+    /// user `"zip"` override). Real power stays bit-identical; Q comes from
+    /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`).
     zip: hares_types::zip::ZipLoad,
+    /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
+    /// at init via `hvac::reactive::secondary_motor_zip`.
+    fan_zip: hares_types::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -545,6 +547,7 @@ impl CoolingCore {
             dr_level: DRLevel::Normal,
             zone_id_explicit,
             zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -780,6 +783,8 @@ impl CoolingCore {
         self.crankcase_heater_kw = 0.0;
         self.last_cooling_rtf = 0.0;
         self.zip = crate::config::resolve_reactive_zip(config)?;
+        self.fan_zip =
+            super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         Ok(())
@@ -999,12 +1004,16 @@ impl CoolingCore {
             self.crankcase_heater_kw = crankcase_kw;
         }
 
-        let electric_kw =
-            (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.config.space_fraction;
-        // Rule R1: Q from the already-computed real power (folded unit pf on
-        // compressor + fan + crankcase). OCHRE lab values are whole-unit;
-        // per-component PFs are a future refinement hook.
-        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
+        let sf = self.hvac.config.space_fraction;
+        let electric_kw = (compressor_kw + fan_kw + self.crankcase_heater_kw) * sf;
+        // Rule R1: Q from the already-computed real power, per component
+        // (see `hvac::reactive`): compressor at the unit ZIP (pf 0.96),
+        // blower/condenser fans at pf 0.87. The crankcase heater is
+        // resistive (pf 1.0) and contributes Q ≡ 0.
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(compressor_kw * sf, env.grid.voltage_pu)
+            + self.fan_zip.reactive_kvar(fan_kw * sf, env.grid.voltage_pu);
         if electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -2908,10 +2917,10 @@ mod tests {
         );
     }
 
-    /// Reactive-power contract for the central AC: folded pf 0.96 on the total
-    /// unit electric draw (compressor + fan + crankcase), Q/P = tan(acos(0.96))
-    /// at nominal voltage, REACTIVE declared, and port/CoreOutput/telemetry
-    /// agree bit-for-bit. Off ⇒ Q == 0.
+    /// Reactive-power contract for the central AC: per-component Q
+    /// (compressor pf 0.96, fan pf 0.87, crankcase resistive Q=0),
+    /// REACTIVE declared, and port/CoreOutput/telemetry agree bit-for-bit.
+    /// Off ⇒ Q == 0.
     #[test]
     fn cooling_reactive_power_pf_and_channels_agree() {
         let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));
@@ -2925,7 +2934,12 @@ mod tests {
                 .contains(hares_types::CoreCapabilities::REACTIVE),
             "central AC must declare REACTIVE"
         );
-        assert_eq!(eq.core.zip.pf, 0.96, "class default folded pf");
+        assert_eq!(eq.core.zip.pf, 0.96, "class default compressor pf");
+        assert_eq!(
+            eq.core.fan_zip,
+            crate::hvac::reactive::FAN_MOTOR_ZIP,
+            "fan component uses the FAN motor ZIP"
+        );
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2937,11 +2951,21 @@ mod tests {
 
         let p_kw = ports.electrical.load_power_w / 1000.0;
         assert!(p_kw > 0.0, "cooling call must draw real power");
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        assert!(compressor_kw > 0.0 && fan_kw > 0.0);
         let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.96_f64.acos().tan();
+        // Per-component: Q = P_comp·tan(acos(0.96)) + P_fan·tan(acos(0.87)).
+        // No crankcase draw while cooling (warm OAT), space_fraction = 1.0.
+        let expected = compressor_kw * 0.96_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
-            "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
+            "per-component Q must be comp·tan(acos(0.96)) + fan·tan(acos(0.87)): \
+             q={q}, expected={expected}"
+        );
+        assert!(
+            q < p_kw * 0.87_f64.acos().tan(),
+            "blend must lie below the all-fan bound"
         );
         assert_eq!(
             eq.core_output()
@@ -4561,6 +4585,36 @@ mod crankcase_tests {
         assert!(
             (kw - 0.10).abs() < 1e-9,
             "expected 0.10 kW crankcase, got {kw}"
+        );
+    }
+
+    /// Per-component reactive: crankcase-only standby (unit off, cold OAT)
+    /// draws real power through the purely resistive crankcase heater
+    /// (pf 1.0), so Q must be exactly zero — the old folded pf 0.96 wrongly
+    /// assigned the compressor pf to this resistive draw.
+    #[test]
+    fn crankcase_only_standby_produces_zero_reactive_power() {
+        let cfg = base_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = cold_env(5.0, 20.0); // off (zone below setpoint), cold OAT
+        eq.init(&cfg, &e).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+        let p_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(p_kw > 0.0, "crankcase heater must draw real power");
+        assert_eq!(
+            ports.electrical.reactive_power_kvar, 0.0,
+            "resistive crankcase draw must produce zero Q"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar,
+            Some(0.0),
+            "CoreOutput Q must be Some(0.0) on crankcase-only standby"
         );
     }
 

@@ -106,13 +106,15 @@ The real-power polynomial (`zp`, `ip`, `pp`) is also defined per class in the so
 
 | Equipment | PF | Controllable? | Notes |
 |-----------|----|---------------|-------|
-| ASHP/MSHP/GSHP/WSHP Heater | 0.84 | No | Compressor PF is physics, not a control surface |
-| AC/ASHP/MSHP Cooler | 0.96 | No | Whole-unit (compressor + fan + crankcase) |
-| Room AC | 0.96 | No | |
-| GSHP/WSHP Cooler | 0.96 | No | |
-| Dehumidifier | 0.96 | No | |
-| Gas Furnace (blower) | 0.87 | No | Fan motor only; electric elements pf=1.0 (Q=Some(0.0)) |
-| Gas Boiler (pump) | 0.84 | No | Circulation pump; electric elements pf=1.0 (Q=Some(0.0)) |
+| ASHP/MSHP/GSHP/WSHP Heater | 0.84 compressor | No | Per-component: + fan 0.87, loop pump 0.84 (GSHP/WSHP); ER/pan/defrost resistive Q≡0. Compressor PF is physics, not a control surface |
+| AC/ASHP/MSHP Cooler | 0.96 compressor | No | Per-component: + fan 0.87; crankcase resistive Q≡0 |
+| Room AC | 0.96 compressor | No | Per-component: + fan 0.87 |
+| GSHP/WSHP Cooler | 0.96 compressor | No | Per-component: + fan 0.87, loop pump 0.84 |
+| Dehumidifier | 0.96 | No | Whole-unit (sealed appliance; EF model has no fan split) |
+| Gas Furnace (blower) | 0.87 | No | Fan motor only |
+| Electric Furnace | 1.0 element | No | Per-component: element Q≡0 + blower fan 0.87 |
+| Gas Boiler (pump) | 0.84 | No | Circulation pump only |
+| Electric Boiler | 1.0 | No | Element only, Q=Some(0.0) |
 | Ventilation/HRV/ERV | 0.87 | No | Same PF whether ScheduledLoad or typed ventilation model |
 | HPWH | 0.97 | No | Blended on total (compressor + backup + fan) |
 | Resistance WH | 1.0 | No | Q=Some(0.0) — resistive element |
@@ -235,8 +237,11 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 
 - Baseline-only: compressor/fan/pump PF is physics, not a control surface
 - All typed HVAC equipment uses Rule R1 (Q derived from already-computed P)
-- PF 0.84 for heat pump compressors and pumps; 0.96 for cooling compressors; 0.87 for fans/blowers; 1.0 for resistive elements
-- Folded unit PF (compressor + fan + crankcase on one electrical port) — matches OCHRE whole-unit convention
+- **Per-component reactive** (`crates/hares-equipment/src/hvac/reactive.rs`): `Q_total = Σ_c P_c · tan(acos(pf_c)) · reactive_base_c(V)`, summed over the components on the unit's single electrical port instead of folding one blended PF over the total draw
+- Component PFs: 0.84 heat-pump compressors and loop pumps; 0.96 cooling compressors; 0.87 fans/blowers (`FAN_MOTOR_ZIP`); 1.0 (Q ≡ 0) resistive elements — ER backup, crankcase / base-pan heaters, resistive defrost. Fan and pump component constants are drift-tested against the canonical class table
+- **Override semantics**: the resolved unit ZIP (config `"zip"` sidecar → class default) applies to the *primary* component — the one the class row describes (compressor for DX equipment, blower for gas furnace, pump for gas boiler, element for electric furnace/boiler/baseboard). A `pf` override therefore retunes the compressor, not the blend. The `pf = 0.0` sentinel disables reactive for the whole unit including secondary components (`secondary_motor_zip`)
+- The split eliminates the former ER-backup phantom kvar (`0.646 · P_ER` on a folded pf 0.84 heat pump) and crankcase-standby phantom vars; it also stops the GSHP/WSHP loop pump from being assigned the 0.96 cooling-compressor PF
+- Dehumidifier remains deliberately whole-unit at 0.96 (sealed appliance, no fan split in the energy-factor model)
 
 ### Water Heaters
 
@@ -256,6 +261,7 @@ These are deliberate, documented improvements over OCHRE:
 | Signed power factor on PV | Uses negative signed pf for gen-P/consume-Q case (`PV.py:194-196`) | Uses unsigned pf magnitude (0,1], sign is inherent in generation direction |
 | Power factor setpoint on PV | Not uniform across ports | Unified sign: one signed bus Q on port/CoreOutput/telemetry |
 | HPWH per-component PF | Single blended PF 0.97 | Same (documented; per-component split is future work) |
+| HVAC per-component PF | Single whole-unit PF folded over the total draw (compressor + fan + resistive elements) | Per-component Q (compressor / fan / pump / resistive) — eliminates phantom kvar on ER backup and crankcase standby (see [HVAC (all types)](#hvac-all-types)) |
 
 ## Extension Hooks (Future Work)
 
@@ -263,7 +269,7 @@ These are documented as potential enhancements, not currently implemented:
 
 - **Load-dependent PF**: compressors do not maintain constant pf across the full load range; a PLR-dependent pf curve would improve accuracy at part load
 - **Per-speed PF in multi-speed heat pumps**: each compressor speed stage could carry its own pf
-- **Per-component PF splitting for blended units** (HPWH and heat pump heaters): separate pf values for compressor, fan, and resistive backup instead of one folded value. Until this lands, resistive ER-backup power inside a blended HP heater is assigned the compressor pf (0.84) and produces phantom kvar during backup events — see the caveat in [hvac.md](./hvac.md#reactive-power)
+- **Per-component PF splitting for the HPWH**: HVAC per-component splitting has landed (see [HVAC (all types)](#hvac-all-types) and `crates/hares-equipment/src/hvac/reactive.rs`); the HPWH still folds one lab-blended 0.97 over compressor + backup + fan, so resistive HPWH backup power is assigned the blended pf and produces a (small) phantom-kvar artifact during backup events
 - **PV-style priority modes on battery**: Watt/Var/Cpf inverter priority modes (currently only active-power priority clamping is implemented)
 - **Typed equipment real-power ZIP**: allowing real-power voltage sensitivity on typed equipment where it is justified by physics (currently Rule R1 blocks this by design, guaranteeing bit-identical real power)
 
@@ -273,6 +279,7 @@ These are documented as potential enhancements, not currently implemented:
 |------|---------|
 | `crates/hares-types/src/zip.rs` | `ZipLoad` struct, `zip_defaults_for_class()` table, `reactive_only()` constructor |
 | `crates/hares-equipment/src/config.rs` | `resolve_zip()`, `resolve_reactive_zip()`, `validate_zip_sums()`, `EquipmentConfig.zip` sidecar |
+| `crates/hares-equipment/src/hvac/reactive.rs` | Per-component HVAC reactive: `FAN_MOTOR_ZIP`, `LOOP_PUMP_ZIP`, `secondary_motor_zip()` |
 | `crates/hares-equipment/src/battery/config.rs` | `BatteryConfig.power_factor`, `BatteryConfig.inverter_capacity_kva` |
 | `crates/hares-equipment/src/ev/config.rs` | `EvConfig.power_factor`, `EvConfig.charger_capacity_kva` |
 | `crates/hares-equipment/src/ev/mod.rs` | `Ev::compute_reactive_kvar()`, `Ev::apply_control_unchecked()` |

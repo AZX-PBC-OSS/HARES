@@ -105,6 +105,20 @@ pub struct GasWaterHeaterConfig {
     /// (EnergyPlus WaterThermalTanks.cc:6213-6214).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pilot_fraction_to_tank: Option<f64>,
+    /// Draft-inducer / power-vent blower electrical power (W), drawn while the
+    /// burner fires. Default: `None` → 0 W, matching an atmospheric-vent unit
+    /// with no blower (the OCHRE reference model carries no electric fan for
+    /// gas storage water heaters — vendors/OCHRE/ochre/Equipment/WaterHeater.py).
+    /// Typical power-vent draft-inducer blowers draw roughly 30–100 W while
+    /// firing; OCHRE's gas-tankless reference hardcode uses 65 W on-cycle
+    /// (vendors/OCHRE/ochre/Equipment/WaterHeater.py:800-804), and EnergyPlus
+    /// models the same draw as WaterHeater:Mixed "On Cycle Parasitic Fuel
+    /// Consumption Rate" with an electricity fuel type.
+    /// This draw is a vented parasitic: it contributes real + reactive
+    /// electrical power (fan-motor pf 0.87 class default) but no heat to the
+    /// tank or zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_power_w: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GasWaterHeaterConfig {
@@ -158,6 +172,7 @@ impl GasWaterHeaterConfig {
             false,
         )?;
         check_finite("gas_wh: pilot_power_w", self.pilot_power_w, 0.0, false)?;
+        check_finite("gas_wh: fan_power_w", self.fan_power_w, 0.0, false)?;
         check_range(
             "gas_wh: flue_loss_fraction",
             self.flue_loss_fraction,
@@ -771,6 +786,7 @@ mod tests {
     #[test]
     fn gas_wh_round_trips_and_rejects_unknown_fields() {
         let cfg = GasWaterHeaterConfig {
+            fan_power_w: None,
             equipment_id: Some(7),
             zone_id: Some(2),
             loop_id: Some(3),
@@ -1052,6 +1068,7 @@ mod tests {
 
     fn gas_wh_with_deadband(deadband_c: Option<f64>) -> GasWaterHeaterConfig {
         GasWaterHeaterConfig {
+            fan_power_w: None,
             fuel_type: FuelType::Gas,
             deadband_c,
             equipment_id: None,
@@ -1227,6 +1244,7 @@ mod tests {
 
     fn gas_wh_with_ua(ua_w_per_k: Option<f64>) -> GasWaterHeaterConfig {
         GasWaterHeaterConfig {
+            fan_power_w: None,
             fuel_type: FuelType::Gas,
             ua_w_per_k,
             equipment_id: None,
@@ -1426,6 +1444,7 @@ mod tests {
 
     fn gas_wh_with_setpoint(setpoint_c: Option<f64>) -> GasWaterHeaterConfig {
         GasWaterHeaterConfig {
+            fan_power_w: None,
             fuel_type: FuelType::Gas,
             setpoint_c,
             equipment_id: None,
@@ -1624,6 +1643,7 @@ mod tests {
         deadband_c: Option<f64>,
     ) -> GasWaterHeaterConfig {
         GasWaterHeaterConfig {
+            fan_power_w: None,
             fuel_type: FuelType::Gas,
             setpoint_c,
             deadband_c,

@@ -526,7 +526,11 @@ impl Equipment for Dehumidifier {
             rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
-        // Rule R1: Q from the already-computed real power (compressor pf 0.96).
+        // Rule R1: Q from the already-computed real power (whole-unit pf
+        // 0.96). The dehumidifier is a sealed unit whose energy-factor model
+        // never splits the small internal fan from the compressor, so the
+        // single-component whole-unit pf is deliberate (unlike ducted HVAC,
+        // which computes Q per component — see `hvac::reactive`).
         let reactive_power_kvar = self.zip.reactive_kvar(
             power_w_to_kw(snapshot.electric_power_w),
             env.grid.voltage_pu,

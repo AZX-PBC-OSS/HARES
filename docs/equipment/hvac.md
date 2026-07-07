@@ -83,9 +83,25 @@ graph LR
 
 ### Reactive Power
 
-All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Heater PF is 0.84 (lagging); cooler PF is 0.96. GSHP/WSHP heaters and coolers use the same PF as their air-source counterparts (identical compressor motor class). Reactive power follows Rule R1: `Q = P · tan(acos(pf)) · reactive_base(V)` computed from the already-computed real power — real power remains bit-identical at all voltages. The heater PF is a whole-unit value applied to the *entire blended electric draw on the single electrical port*: compressor + indoor/outdoor fan + electric-resistance (ER) backup + crankcase/pan heater + (for GSHP/WSHP) loop pump. Compressor PF is physics, not a control surface.
+All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Reactive power follows Rule R1 (`Q` computed from the already-computed real power — real power remains bit-identical at all voltages) and is computed **per component** (`crates/hares-equipment/src/hvac/reactive.rs`):
 
-**Caveat — ER-backup phantom kvar**: because the 0.84 PF is folded over the whole blend, the resistive ER backup element (true pf ≈ 1.0, Q ≈ 0) is also assigned pf 0.84 while it runs. During ER-backup events this produces phantom reactive power of `P_ER · tan(acos(0.84)) ≈ 0.646 · P_ER` — up to ~6.5 kvar on a 10 kW ER element — that a real installation would not draw. This persists until the per-component PF split lands; see the "Per-component PF splitting for blended units" extension hook in [power-factor.md](./power-factor.md#extension-hooks-future-work).
+```
+Q_total = Σ_c  P_c · tan(acos(pf_c)) · reactive_base_c(V)
+```
+
+| Component | pf | Source |
+|-----------|----|--------|
+| Compressor (heating) | 0.84 | Unit ZIP: class default (Hajagos & Danai 1998) or `"zip"` override |
+| Compressor (cooling) | 0.96 | Unit ZIP: class default (Hajagos & Danai 1998) or `"zip"` override |
+| Indoor blower / outdoor fan | 0.87 | `FAN_MOTOR_ZIP` (OCHRE fans row) |
+| Ground/water-loop pump (GSHP/WSHP) | 0.84 | `LOOP_PUMP_ZIP` (PUMPS row) |
+| ER backup, crankcase / base-pan heater, resistive defrost | 1.0 | Resistive — Q ≡ 0 by construction |
+
+GSHP/WSHP heaters and coolers use the same compressor PF as their air-source counterparts (identical compressor motor class). Compressor PF is physics, not a control surface.
+
+The per-component split eliminates the former ER-backup phantom-kvar artifact: with a folded whole-unit pf 0.84, a 10 kW resistive ER element was wrongly assigned `0.646 · P_ER` (~6.5 kvar) of reactive power during backup events. Now ER-active timesteps carry only the compressor + fan Q, compressor-only rows are unchanged (`Q/P = tan(acos(0.84))`), ER-only rows carry just the blower Q, and crankcase-only standby draws zero vars — matching real AMI signatures.
+
+**Config semantics**: a user `"zip"` sidecar override (`pf`/`zq`/`iq`/`pq`) retargets the **compressor component only** (the component the class row describes); fan/pump components keep their fixed physical values, and resistive components are always Q ≡ 0. Exception: the `pf = 0.0` sentinel (e.g. `ZipLoad::constant_power()`) disables reactive power for the whole unit, secondary components included. See [power-factor.md](./power-factor.md#hvac-all-types).
 
 All typed HVAC equipment is covered by the class-defaults table in [power-factor.md](./power-factor.md).
 
@@ -112,7 +128,7 @@ All typed HVAC equipment is covered by the class-defaults table in [power-factor
 - Gas: `thermal_output = fuel_input * AFUE` (flue losses implicit in AFUE)
 - Electric: `thermal_output = electrical_input * efficiency`
 - Fan power proportional to heating duty
-- **Reactive power**: Gas furnace blower fan PF 0.87 (FAN class in [power-factor.md](./power-factor.md)); electric furnace element PF 1.0 (Q=Some(0.0) — resistive)
+- **Reactive power**: Gas furnace blower fan PF 0.87 (FAN class in [power-factor.md](./power-factor.md)). Electric furnace is per-component: element PF 1.0 (Q≡0, resistive) + blower fan PF 0.87 — Q equals the blower component alone
 
 ### Port Interactions
 
@@ -183,7 +199,7 @@ At part load, condensate re-evaporates on off-cycles:
 - **Thermal**: negative sensible (cooling) + latent, both with `duct_dse`
 - **Electrical**: compressor + fan + crankcase heater, plus reactive power per [power-factor.md](./power-factor.md)
 
-**Reactive power**: PF 0.96 (HVAC_COOLING class). Whole-unit value (compressor + fan + crankcase on one electrical port). Same PF across Central AC, Room AC, ASHP/MSHP/GSHP/WSHP cooler.
+**Reactive power**: per component (`hvac::reactive`): compressor PF 0.96 (HVAC_COOLING class, or `"zip"` override), fan PF 0.87, crankcase heater resistive (Q ≡ 0). Same component PFs across Central AC, Room AC, ASHP/MSHP/GSHP/WSHP cooler; GSHP/WSHP coolers add their loop pump at PF 0.84 (PUMPS class).
 
 **Telemetry**: `electric_kw`, `sensible_cooling_w`, `latent_cooling_w`, `shr`, `cop`, `runtime_fraction`, `reactive_power_kvar`
 
@@ -232,7 +248,7 @@ Minimum cycle time prevents rapid cycling via `last_mode_switch_at` timestamp.
 
 **Telemetry**: `water_removal_l_day`, `electric_power_w`, `latent_removal_w`, `reactive_power_kvar`
 
-**Reactive power**: PF 0.96 (HVAC_COOLING class — compressor behaves like a cooling compressor per [power-factor.md](./power-factor.md)).
+**Reactive power**: PF 0.96 (HVAC_COOLING class — compressor behaves like a cooling compressor per [power-factor.md](./power-factor.md)). Deliberately whole-unit, not per-component: the dehumidifier is a sealed appliance whose energy-factor model never splits the small internal fan from the compressor.
 
 ---
 

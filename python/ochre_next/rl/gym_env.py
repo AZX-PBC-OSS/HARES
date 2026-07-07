@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import math
 import secrets
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 import warnings
 
 import numpy as np
@@ -56,11 +56,24 @@ class GymDwellingConfig:
 
 
 class StepInfo(TypedDict):
+    """Per-step ``info`` payload for :class:`DwellingGymEnv`.
+
+    ``warning_count`` and ``warnings`` follow the same contract as the Rust
+    ``batch_step`` fast path: ``warning_count`` (float) is always present and
+    counts the warnings drained from the dwelling during the step (e.g.
+    control signals rejected at dispatch time); ``warnings`` (list[str]) is
+    present only when the count is non-zero and holds the drained messages.
+    Warnings are drained exactly once per step, so a subsequent
+    ``Dwelling.take_warnings()`` will not return them again.
+    """
+
     seed: int
     timestep_index: int
     step: dict[str, Any]
     observation_bounds: dict[str, tuple[float, float]]
     initial_observation_mask: np.ndarray | None
+    warning_count: float
+    warnings: NotRequired[list[str]]
 
 
 class StepResult(TypedDict):
@@ -396,6 +409,20 @@ def _build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
     raise ValueError(f"unsupported signal type: {signal_type!r}")
 
 
+def _drain_step_warnings(dwelling: Any) -> tuple[float, list[str]]:
+    """Drain warnings accumulated on ``dwelling`` during the step just taken.
+
+    Returns ``(warning_count, messages)`` matching the Rust ``batch_step``
+    info contract: the count is a float published under
+    ``info["warning_count"]`` on every step, while the messages go under
+    ``info["warnings"]`` only when the count is non-zero.
+    ``Dwelling.take_warnings()`` drains, so each warning is surfaced exactly
+    once.
+    """
+    messages = [str(message) for message in dwelling.take_warnings()]
+    return float(len(messages)), messages
+
+
 # ---------------------------------------------------------------------------
 # Gymnasium environment
 # ---------------------------------------------------------------------------
@@ -461,8 +488,8 @@ class DwellingGymEnv(_GYM_BASE):
             warnings.warn(
                 "Observation space contains infinite bounds for fields: "
                 + ", ".join(sorted(set(
-                    f for f, (l, h) in self._observation_bounds.items()
-                    if not (np.isfinite(l) and np.isfinite(h))
+                    f for f, (low, high) in self._observation_bounds.items()
+                    if not (np.isfinite(low) and np.isfinite(high))
                 ))),
                 stacklevel=2,
             )
@@ -543,6 +570,13 @@ class DwellingGymEnv(_GYM_BASE):
     def step(
         self, action: np.ndarray
     ) -> tuple[np.ndarray, float, bool, bool, StepInfo]:
+        """Apply ``action``, advance one timestep, and return
+        ``(obs, reward, terminated, truncated, info)``.
+
+        ``info`` is a :class:`StepInfo`; see its docstring for the
+        ``warning_count`` / ``warnings`` surfacing contract shared with the
+        Rust ``batch_step`` path.
+        """
         arr = np.asarray(action, dtype=np.float64)
         arr = np.ascontiguousarray(arr.reshape(-1))
         if arr.shape != (len(self._action_layout),):
@@ -564,11 +598,15 @@ class DwellingGymEnv(_GYM_BASE):
             total_power_kw=float(telemetry.total_power_kw),
         )
         reward = float(self._reward_fn(reward_context))
+        warning_count, warning_messages = _drain_step_warnings(self._dwelling)
         info = StepInfo(
             step=step_data,
             seed=self._active_seed if self._active_seed is not None else 0,
             timestep_index=self._steps_elapsed,
             observation_bounds=self._observation_bounds,
             initial_observation_mask=None,
+            warning_count=warning_count,
         )
+        if warning_messages:
+            info["warnings"] = warning_messages
         return obs, reward, False, truncated, info

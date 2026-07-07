@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 
 use hares_physics::units::power_kw_to_w;
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,

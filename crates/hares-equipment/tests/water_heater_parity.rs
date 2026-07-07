@@ -394,6 +394,7 @@ fn gas_wh_fuel_not_electricity() {
         "GWH".to_string(),
         "Gas Water Heater".to_string(),
         GasWaterHeaterConfig {
+            fan_power_w: None,
             equipment_id: None,
             zone_id: None,
             loop_id: None,
@@ -704,6 +705,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                 "GWH".to_string(),
                 "Gas Water Heater".to_string(),
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     equipment_id: None,
                     zone_id: None,
                     loop_id: None,
@@ -769,6 +771,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                 "GWH".to_string(),
                 "Gas Water Heater".to_string(),
                 GasWaterHeaterConfig {
+                    fan_power_w: None,
                     equipment_id: None,
                     zone_id: None,
                     loop_id: None,

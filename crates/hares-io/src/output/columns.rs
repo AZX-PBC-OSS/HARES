@@ -29,6 +29,26 @@ const LEVEL_0_COLUMNS: &[&str] = &[
 pub const ELECTRIC_POWER_SUFFIX: &str = "Electric Power (kW)";
 pub const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
 
+/// Whether equipment burning `fuel` reports a `"{name} Gas Power (therms/hour)"`
+/// column (all combustion fuels; the OCHRE-style column name is historical).
+///
+/// Single source of truth for the fuel→column mapping: [`build_schema`] uses it
+/// to emit the schema column and `hares-core`'s equipment column map uses it to
+/// resolve (and populate) the same column. Keeping one predicate guarantees a
+/// schema column is emitted if and only if it will be populated.
+#[must_use]
+pub fn fuel_reports_gas_power_column(fuel: FuelType) -> bool {
+    match fuel {
+        FuelType::Gas
+        | FuelType::Propane
+        | FuelType::Oil
+        | FuelType::Wood
+        | FuelType::Coal
+        | FuelType::WoodPellet => true,
+        FuelType::Electric | FuelType::None => false,
+    }
+}
+
 /// Zone-level column templates for verbosity 2.
 /// OCHRE convention: `"Temperature - {zone} (C)"` with zone name between dashes.
 const ZONE_TEMP_PREFIX: &str = "Temperature -";
@@ -390,15 +410,7 @@ pub fn build_schema(
                 DataType::Float64,
                 true,
             ));
-            if matches!(
-                fuel,
-                FuelType::Gas
-                    | FuelType::Propane
-                    | FuelType::Oil
-                    | FuelType::Wood
-                    | FuelType::Coal
-                    | FuelType::WoodPellet
-            ) {
+            if fuel_reports_gas_power_column(*fuel) {
                 fields.push(Field::new(
                     format!("{name} {GAS_POWER_SUFFIX}"),
                     DataType::Float64,

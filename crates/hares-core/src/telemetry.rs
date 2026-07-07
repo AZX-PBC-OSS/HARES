@@ -1,6 +1,6 @@
 //! Dwelling telemetry payloads used by control and RL integrations.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, FixedOffset, Timelike};
@@ -29,7 +29,12 @@ pub struct DwellingTelemetry {
     /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
     pub outdoor_humidity_ratio: f64,
     /// Per-actor telemetry: actor_name → channel_name → value.
-    pub actor_telemetry: HashMap<String, HashMap<String, f64>>,
+    ///
+    /// `BTreeMap` (not `HashMap`) so iteration order is deterministic:
+    /// bare-name observation fields resolve to the same actor on every run,
+    /// and downstream views (e.g. the Python `actors` dict) list actors and
+    /// channels in a stable order.
+    pub actor_telemetry: BTreeMap<String, BTreeMap<String, f64>>,
     /// 0/1 flag indicating whether the dwelling has been marked as permanently
     /// failed after a prior panic and will not be stepped again.
     pub dwelling_failed: bool,
@@ -194,7 +199,9 @@ impl DwellingTelemetry {
                     }
                 }
             }
-            // Bare field name: search all actors (non-deterministic on duplicates).
+            // Bare field name: search all actors in sorted-name order
+            // (BTreeMap), so duplicate channel names always resolve to the
+            // lexicographically-first actor's value.
             if !found_in_actors {
                 for channels in self.actor_telemetry.values() {
                     if let Some(&value) = channels.get(field) {
@@ -268,7 +275,7 @@ fn single_instance_alias(
 mod tests {
     use super::DwellingTelemetry;
     use chrono::{FixedOffset, TimeZone};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
@@ -291,7 +298,7 @@ mod tests {
             reactive_power_kvar: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.008,
-            actor_telemetry: HashMap::new(),
+            actor_telemetry: BTreeMap::new(),
             dwelling_failed: false,
             telemetry_consistency_flag: true,
             initialized: true,
@@ -461,7 +468,7 @@ mod tests {
     #[test]
     fn actor_telemetry_dot_notation_resolves_field() {
         let mut t = sample();
-        let mut channels = HashMap::new();
+        let mut channels = BTreeMap::new();
         channels.insert("price".to_string(), 0.12);
         t.actor_telemetry.insert("market".to_string(), channels);
         let obs = t.to_observation_vec(&["market.price"]).unwrap();
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn actor_telemetry_bare_name_resolves_field() {
         let mut t = sample();
-        let mut channels = HashMap::new();
+        let mut channels = BTreeMap::new();
         channels.insert("dr_flag".to_string(), 1.0);
         t.actor_telemetry.insert("dr_actor".to_string(), channels);
         let obs = t.to_observation_vec(&["dr_flag"]).unwrap();
@@ -482,7 +489,7 @@ mod tests {
     fn actor_telemetry_builtin_wins_over_actor_fallback() {
         let mut t = sample();
         // Put a bogus outdoor_temp in actor_telemetry: built-in must win.
-        let mut channels = HashMap::new();
+        let mut channels = BTreeMap::new();
         channels.insert("outdoor_temp".to_string(), 999.0);
         t.actor_telemetry.insert("weather".to_string(), channels);
         let obs = t.to_observation_vec(&["outdoor_temp"]).unwrap();
@@ -498,10 +505,10 @@ mod tests {
         // Dot notation is tried before bare-name fallback.  If both an
         // actor.xyz and a bare xyz exist, dot notation wins.
         let mut t = sample();
-        let mut ch_a = HashMap::new();
+        let mut ch_a = BTreeMap::new();
         ch_a.insert("val".to_string(), 1.0);
         t.actor_telemetry.insert("a".to_string(), ch_a);
-        let mut ch_b = HashMap::new();
+        let mut ch_b = BTreeMap::new();
         ch_b.insert("a.val".to_string(), 2.0);
         t.actor_telemetry.insert("b".to_string(), ch_b);
         let obs = t.to_observation_vec(&["a.val"]).unwrap();
