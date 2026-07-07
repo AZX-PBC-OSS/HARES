@@ -98,6 +98,7 @@ fn base_battery_config() -> BatteryConfig {
         grid_export_rule: None,
         power_factor: None,
         inverter_capacity_kva: None,
+        grid_forming: None,
         min_dwell_steps: 0,
     }
 }
@@ -209,6 +210,7 @@ fn soc_clamped_at_min_max() {
             "Battery".to_string(),
             BatteryConfig {
                 initial_soc: Some(0.16),
+                grid_forming: None,
                 min_dwell_steps: 0,
                 ..base_battery_config()
             },
@@ -244,6 +246,7 @@ fn soc_clamped_at_min_max() {
             "Battery".to_string(),
             BatteryConfig {
                 initial_soc: Some(0.94),
+                grid_forming: None,
                 min_dwell_steps: 0,
                 ..base_battery_config()
             },

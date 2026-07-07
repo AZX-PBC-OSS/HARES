@@ -145,8 +145,20 @@ graph LR
 ## Grid Outage Behaviour
 
 The battery is the canonical island source: when the utility voltage is 0.0
-and the battery is grid-connected and dischargeable (SOC above its floor,
-temperature/DR permitting), it holds the home bus at nominal and serves the
-loads (`Equipment::island_source_available`). On a *dead* bus (battery
+and the battery is grid-connected, grid-forming (`grid_forming` config flag,
+default true — set false for grid-following-only inverters), and
+dischargeable (SOC above its floor, temperature/DR permitting), it holds the
+home bus at nominal and serves the loads
+(`Equipment::island_source_available`). On a *dead* bus (battery
 empty/cold/disconnected) charging, standby electronics, the cell heater, and
-vars are all gated. See [outage-behavior.md](../outage-behavior.md).
+vars are all gated.
+
+While **islanded** (utility out, bus energized) charging is clamped to the
+visible on-site generation surplus — there is no grid to import from, so an
+explicit `PowerSetpoint` charge command beyond the PV/generator surplus is
+curtailed to that surplus; self-consumption charging is unaffected (it
+already charges only from surplus). Discharge is never clamped by the island
+state: downstream (thermal-stage) loads step after the battery, and any
+residual island imbalance is reported as `island_unserved_kw` /
+`island_excess_kw` in `DwellingTelemetry`. See
+[outage-behavior.md](../outage-behavior.md).

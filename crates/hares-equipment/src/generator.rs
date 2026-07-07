@@ -114,6 +114,19 @@ pub struct GeneratorConfig {
     /// Kohler 20RESCL spec sheet: idle fuel ~40–45% of full load.
     /// Default 0.40 is a conservative midpoint for residential standby generators.
     pub no_load_fuel_fraction: Option<f64>,
+    /// Whether the generator plus transfer switch can island the home bus during
+    /// a utility outage. When false, the generator participates normally in all
+    /// other dispatch but does not report `island_source_available()` — the
+    /// dwelling will NOT form an island around it. Default true.
+    pub grid_forming: Option<bool>,
+    /// A standby generator runs ONLY during a utility outage (transfer-switch
+    /// behaviour). When true and `!env.grid.grid_outage()`, the generator must
+    /// not dispatch (self-consumption suppressed, output 0, no fuel beyond
+    /// zero). When the utility is out it dispatches normally (self-consumption
+    /// picks up the house load). `island_source_available()` remains true for an
+    /// enabled standby generator during normal operation (it CAN island — that
+    /// is exactly its purpose). Default false.
+    pub standby_mode: Option<bool>,
 }
 
 impl EquipmentTypedConfig for GeneratorConfig {
@@ -321,6 +334,10 @@ const KEY_STACK_NOMINAL_TEMP_C: &str = "stack_nominal_temp_c";
 const KEY_HEAT_REC_MAX_TEMP_C: &str = "heat_rec_max_temp_c";
 #[cfg(test)]
 const KEY_NO_LOAD_FUEL_FRACTION: &str = "no_load_fuel_fraction";
+#[cfg(test)]
+const KEY_GRID_FORMING: &str = "grid_forming";
+#[cfg(test)]
+const KEY_STANDBY_MODE: &str = "standby_mode";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -807,6 +824,8 @@ pub struct Generator {
     /// Fuel consumption at no-load idle, as a fraction of full-load fuel rate.
     /// Residential standby generators: 0.30–0.50 per vendor spec sheets.
     no_load_fuel_fraction: f64,
+    grid_forming: bool,
+    standby_mode: bool,
 
     // Dynamic state
     current_power_kw: f64,
@@ -969,6 +988,8 @@ impl Generator {
                 .as_ref()
                 .and_then(|c| c.no_load_fuel_fraction)
                 .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION),
+            grid_forming: typed.as_ref().and_then(|c| c.grid_forming).unwrap_or(true),
+            standby_mode: typed.as_ref().and_then(|c| c.standby_mode).unwrap_or(false),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
             power_setpoint_kw: None,
@@ -1001,8 +1022,9 @@ impl Generator {
 
     /// Determine the unconstrained target power before ramp-rate limiting.
     ///
-    /// Priority 1: explicit power setpoint.
-    /// Priority 2: self-consumption controller (OCHRE `update_internal_control` equivalent).
+    /// Priority 1: standby suppression (standby_mode && no outage → 0).
+    /// Priority 2: explicit power setpoint.
+    /// Priority 3: self-consumption controller (OCHRE `update_internal_control` equivalent).
     ///
     /// Self-consumption formula (matches OCHRE lines 108-116):
     ///   desired_import = clamp(net_load, -export_limit, import_limit)
@@ -1011,7 +1033,11 @@ impl Generator {
     /// When `capacity_min_kw` is set, generator will not operate below that level;
     /// it shuts off instead (OCHRE `get_power_limits` min operating power).
     /// This check is applied after resolving the target regardless of source.
-    fn determine_target_kw(&self, net_load_kw: f64) -> f64 {
+    fn determine_target_kw(&self, net_load_kw: f64, grid_outage: bool) -> f64 {
+        // Standby mode: suppress dispatch when utility is alive.
+        if self.standby_mode && !grid_outage {
+            return 0.0;
+        }
         let max_ac = self.max_ac_kw();
         let raw = if let Some(sp) = self.power_setpoint_kw {
             sp.clamp(0.0, max_ac)
@@ -1081,6 +1107,8 @@ impl Generator {
         self.no_load_fuel_fraction = c
             .no_load_fuel_fraction
             .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION);
+        self.grid_forming = c.grid_forming.unwrap_or(true);
+        self.standby_mode = c.standby_mode.unwrap_or(false);
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
@@ -1137,13 +1165,15 @@ impl Equipment for Generator {
     }
 
     fn island_source_available(&self) -> bool {
-        // A generator islands the home whenever it is enabled: either
-        // self-consumption control is active (it will pick up the house load
-        // — a utility outage is precisely when it runs) or an explicit
-        // positive setpoint commands output. Fuel supply is modeled as
-        // unlimited (no on-site tank model), so availability does not
-        // deplete. See `Equipment::island_source_available`.
+        // A generator islands the home whenever it is grid-forming AND
+        // enabled: either self-consumption control is active (it will pick
+        // up the house load — a utility outage is precisely when it runs)
+        // or an explicit positive setpoint commands output. Fuel supply is
+        // modeled as unlimited (no on-site tank model), so availability does
+        // not deplete. A standby-mode generator reports available during
+        // normal operation because islanding is its entire purpose.
         self.rated_power_kw > 0.0
+            && self.grid_forming
             && (self.self_consumption_enabled
                 || self.power_setpoint_kw.unwrap_or(0.0) > IDLE_KW_THRESHOLD)
     }
@@ -1164,7 +1194,7 @@ impl Equipment for Generator {
 
     fn step(
         &mut self,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
@@ -1178,7 +1208,7 @@ impl Equipment for Generator {
         // Read Stage 1 accumulated net load (load + any earlier generation).
         let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
 
-        let unconstrained_kw = self.determine_target_kw(net_load_kw);
+        let unconstrained_kw = self.determine_target_kw(net_load_kw, env.grid.grid_outage());
         // Ramp rate only constrains power increases (OCHRE Generator.py:129).
         // Flag is true only when ramping up and the increase exceeds the limit.
         let ramp_delta = unconstrained_kw - self.current_power_kw;
@@ -2134,6 +2164,8 @@ mod tests {
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         };
         for (k, v) in overrides {
             match (*k, v) {
@@ -2191,6 +2223,8 @@ mod tests {
                 (KEY_NO_LOAD_FUEL_FRACTION, ConfigValue::Float(value)) => {
                     cfg.no_load_fuel_fraction = Some(*value)
                 }
+                (KEY_GRID_FORMING, ConfigValue::Bool(value)) => cfg.grid_forming = Some(*value),
+                (KEY_STANDBY_MODE, ConfigValue::Bool(value)) => cfg.standby_mode = Some(*value),
                 (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
                     cfg.equipment_id = Some(*value as u32)
@@ -4042,6 +4076,150 @@ mod tests {
         );
     }
 
+    // =======================================================================
+    // Standby mode (outage-only dispatch)
+    // =======================================================================
+
+    #[test]
+    fn standby_mode_no_output_at_nominal_voltage() {
+        // A standby generator must not dispatch during normal utility operation,
+        // even with net load present.
+        let config = gen_config(&[
+            (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        let mut slots = ports_for(&generator);
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        assert!(
+            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            "standby generator must not produce output at nominal voltage, got {}",
+            generator.current_power_kw
+        );
+        assert_eq!(generator.mode, OperatingMode::Off);
+    }
+
+    #[test]
+    fn standby_mode_serves_load_during_outage() {
+        // During a utility outage, a standby generator dispatches via
+        // self-consumption to pick up the house load.
+        let config = gen_config(&[
+            (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // Utility outage: voltage 0, islanded at 1.0 pu.
+        let mut env_outage = base_env();
+        env_outage.grid.voltage_pu = 0.0;
+        env_outage.grid.island_bus_voltage_pu = Some(1.0);
+
+        let mut slots = ports_for(&generator);
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&env_outage, Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        assert!(
+            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            "standby generator must serve load during outage, got {}",
+            generator.current_power_kw
+        );
+    }
+
+    #[test]
+    fn standby_mode_stops_on_restoration() {
+        // After serving load during an outage, a standby generator must go
+        // back off when the utility is restored.
+        let config = gen_config(&[
+            (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // Outage: generator runs.
+        let mut env_outage = base_env();
+        env_outage.grid.voltage_pu = 0.0;
+        env_outage.grid.island_bus_voltage_pu = Some(1.0);
+
+        let mut slots = ports_for(&generator);
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&env_outage, Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert!(generator.current_power_kw > IDLE_KW_THRESHOLD);
+
+        // Restoration: generator stops (ramp down is instant on decrease).
+        slots.zero();
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert!(
+            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            "standby generator must stop on restoration, got {}",
+            generator.current_power_kw
+        );
+        assert_eq!(generator.mode, OperatingMode::Off);
+
+        // Fuel must be zero after stopping.
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        assert!(
+            fuel_w < IDLE_KW_THRESHOLD,
+            "fuel must be zero after standby generator stops"
+        );
+    }
+
+    // =======================================================================
+    // grid_forming flag
+    // =======================================================================
+
+    #[test]
+    fn grid_forming_false_disables_island_source() {
+        let config = gen_config(&[(KEY_GRID_FORMING, ConfigValue::Bool(false))]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        assert!(
+            !generator.island_source_available(),
+            "grid_forming=false generator must not be an island source"
+        );
+    }
+
+    #[test]
+    fn standby_generator_is_island_source_while_idle() {
+        // A standby generator at nominal voltage (idle) must still report
+        // island_source_available() — it CAN island, that is its purpose.
+        let config = gen_config(&[(KEY_STANDBY_MODE, ConfigValue::Bool(true))]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // At nominal voltage, self-consumption is active but standby suppresses
+        // dispatch — the generator is idle.
+        let mut slots = ports_for(&generator);
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert!(
+            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            "standby generator must be idle at nominal voltage"
+        );
+
+        assert!(
+            generator.island_source_available(),
+            "standby generator must report island_source_available while idle at nominal voltage"
+        );
+    }
+
     #[test]
     fn apply_control_rejects_unsupported_signal() {
         let mut generator = Generator::new(gen_config(&[]), GeneratorKind::GasGenerator);
@@ -4322,6 +4500,8 @@ mod tests {
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         }
     }
 

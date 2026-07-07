@@ -25,6 +25,13 @@ pub struct DwellingTelemetry {
     pub energy_balance_residuals: Vec<f64>,
     pub total_power_kw: f64,
     pub reactive_power_kvar: f64,
+    /// Load [kW] the island sources failed to cover during islanded operation
+    /// (would-be phantom grid import). Always 0.0 when not islanded.
+    pub island_unserved_kw: f64,
+    /// Surplus on-site generation [kW] the island could not absorb during
+    /// islanded operation (would-be phantom grid export). Always 0.0 when not
+    /// islanded.
+    pub island_excess_kw: f64,
     pub outdoor_temp_c: f64,
     /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
     pub outdoor_humidity_ratio: f64,
@@ -296,6 +303,8 @@ mod tests {
             energy_balance_residuals: vec![0.0],
             total_power_kw: 1.2,
             reactive_power_kvar: 0.0,
+            island_unserved_kw: 0.0,
+            island_excess_kw: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.008,
             actor_telemetry: BTreeMap::new(),

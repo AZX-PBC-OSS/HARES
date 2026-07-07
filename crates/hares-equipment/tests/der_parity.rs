@@ -127,6 +127,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         },
     )
@@ -712,6 +713,8 @@ fn generator_fuel_efficiency_at_half_load() {
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         },
     )
     .unwrap();
@@ -813,6 +816,8 @@ fn generator_ramp_rate_is_kw_per_second() {
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         },
     )
     .unwrap();
@@ -896,6 +901,8 @@ fn generator_capacity_min_enforced() {
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         },
     )
     .unwrap();

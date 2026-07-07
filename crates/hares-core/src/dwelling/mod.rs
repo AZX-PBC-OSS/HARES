@@ -121,6 +121,18 @@ const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 /// modeled (see `GridState::island_bus_voltage_pu`).
 const ISLAND_BUS_NOMINAL_VOLTAGE_PU: f64 = 1.0;
 
+/// Unserved-load threshold [kW] above which islanded operation emits a
+/// scenario-signal warning. 50 W sits above numerical residue and standby
+/// noise but below any real appliance draw.
+const ISLAND_UNSERVED_WARN_THRESHOLD_KW: f64 = 0.05;
+
+/// Rate-limit gate for the islanded unserved-load warning: `tracing::warn!`
+/// once per process, `tracing::debug!` for every subsequent occurrence
+/// (unserved load recurs on every islanded step, so unthrottled warns would
+/// flood the log).
+static ISLAND_UNSERVED_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Minimum timestep resolution at which PV re-evaluation and BMS staleness
 /// diagnostics have meaningful impact.  5 min matches the EnergyPlus minimum
 /// `TimeStep` for sub-hourly simulation.
@@ -1493,6 +1505,17 @@ pub struct Dwelling {
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
     /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
     zone_is_conditioned: Vec<bool>,
+    /// Islanded-operation imbalance accounting, recomputed every step after
+    /// the electrical solver resolves net grid power. While islanded there is
+    /// no service connection, so any residual net flow at the "meter" is a
+    /// power-balance violation the island sources could not resolve:
+    /// `island_unserved_kw` is the load the island sources failed to cover
+    /// (would-be phantom import, `net_active_kw().max(0.0)`); 0.0 when not
+    /// islanded. See docs/outage-behavior.md.
+    island_unserved_kw: f64,
+    /// Surplus generation the island could not absorb (would-be phantom
+    /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded.
+    island_excess_kw: f64,
     /// Output config retained for schema rebuilds when equipment changes.
     output_verbosity: u8,
     output_chunk_size: usize,
@@ -2373,6 +2396,8 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
                 .collect()
         },
+        island_unserved_kw: 0.0,
+        island_excess_kw: 0.0,
         output_verbosity: config.sim_config.output_verbosity,
         output_chunk_size: config.sim_config.output_chunk_size,
         output_format: config.sim_config.output_format,
@@ -2954,6 +2979,21 @@ impl Dwelling {
     #[must_use]
     pub fn latest_env(&self) -> &EnvironmentState {
         &self.latest_env
+    }
+
+    /// Load [kW] the island sources failed to cover during the last islanded
+    /// step (would-be phantom grid import). 0.0 when not islanded.
+    #[must_use]
+    pub fn island_unserved_kw(&self) -> f64 {
+        self.island_unserved_kw
+    }
+
+    /// Surplus on-site generation [kW] the island could not absorb during the
+    /// last islanded step (would-be phantom grid export). 0.0 when not
+    /// islanded.
+    #[must_use]
+    pub fn island_excess_kw(&self) -> f64 {
+        self.island_excess_kw
     }
 
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -3598,6 +3638,8 @@ impl Dwelling {
             energy_balance_residuals,
             total_power_kw: self.electrical_solver.net_active_kw(),
             reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
+            island_unserved_kw: self.island_unserved_kw,
+            island_excess_kw: self.island_excess_kw,
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
@@ -5259,6 +5301,49 @@ impl Dwelling {
                     value: net_kvar,
                     tolerance: 0.0,
                 });
+            }
+
+            // Islanded-imbalance accounting (honest accounting, not fake
+            // physics): while islanded there is no service connection, so any
+            // residual net flow the electrical solver reports at the "grid"
+            // channel is a power-balance violation inside the island —
+            // positive = load the island sources failed to cover (would-be
+            // phantom import), negative = surplus generation the island could
+            // not absorb (would-be phantom export). Both are 0.0 during
+            // normal (grid-connected) operation. See docs/outage-behavior.md.
+            if self.latest_env.grid.islanded() {
+                self.island_unserved_kw = net_kw.max(0.0);
+                self.island_excess_kw = (-net_kw).max(0.0);
+                if self.island_unserved_kw > ISLAND_UNSERVED_WARN_THRESHOLD_KW {
+                    // Rate-limited: warn! once per process, debug! thereafter
+                    // — unserved load recurs every islanded step, and one
+                    // warning is enough to flag the scenario.
+                    if ISLAND_UNSERVED_WARNED
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        tracing::warn!(
+                            step = self.clock.current_step(),
+                            island_unserved_kw = self.island_unserved_kw,
+                            "islanded operation: on-site sources are not covering the load \
+                             (unserved load; subsequent occurrences logged at debug level)"
+                        );
+                    } else {
+                        tracing::debug!(
+                            step = self.clock.current_step(),
+                            island_unserved_kw = self.island_unserved_kw,
+                            "islanded operation: unserved load"
+                        );
+                    }
+                }
+            } else {
+                self.island_unserved_kw = 0.0;
+                self.island_excess_kw = 0.0;
             }
         }
 

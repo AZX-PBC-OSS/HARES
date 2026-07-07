@@ -78,6 +78,12 @@ pub struct BatteryConfig {
     pub power_factor: Option<f64>,
     pub inverter_capacity_kva: Option<f64>,
 
+    /// Whether the battery inverter can form an island bus during a utility
+    /// outage. `None` (default) ⇒ true (grid-forming). Set `Some(false)` for
+    /// grid-following-only batteries that cannot island the home even when
+    /// charged and dischargeable.
+    pub grid_forming: Option<bool>,
+
     // Actor-level dwell: minimum steps a mode/action must persist before it can change.
     // Defaults to 0 (no dwell enforcement) for backward compatibility.
     #[serde(default)]
@@ -216,6 +222,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         }
     }

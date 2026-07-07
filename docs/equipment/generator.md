@@ -76,5 +76,23 @@ graph LR
 A utility outage is precisely when the generator runs: an enabled generator
 (self-consumption active or a positive setpoint) islands the home
 (`Equipment::island_source_available`) and its self-consumption control
-picks up the house load. It is never gated by the bus. See
-[outage-behavior.md](../outage-behavior.md).
+picks up the house load. It is never gated by the bus.
+
+Two config flags control outage and islanding semantics:
+
+- **`grid_forming: Option<bool>`** (default `true`) — Whether the generator
+  plus transfer switch can island the home bus during a utility outage. When
+  `false`, the generator participates normally in all other dispatch but does
+  not report `island_source_available()`, so the dwelling will NOT form an
+  island around it.
+
+- **`standby_mode: Option<bool>`** (default `false`) — A standby generator
+  runs ONLY during a utility outage (transfer-switch behaviour). When `true`
+  and the utility is alive, the generator does not dispatch
+  (self-consumption suppressed, output 0, no fuel beyond zero). When the
+  utility is out it dispatches normally (self-consumption picks up the house
+  load). `island_source_available()` remains `true` for an enabled standby
+  generator during normal operation — it CAN island, that is exactly its
+  purpose.
+
+See [outage-behavior.md](../outage-behavior.md).

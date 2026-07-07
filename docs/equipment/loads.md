@@ -97,7 +97,7 @@ Multi-phase cycles (e.g., washer: fill -> wash -> spin):
 ## Grid Outage Behaviour
 
 Scheduled and event-based loads draw nothing and deposit no gains while the
-home bus is de-energized; event timers freeze and interrupted cycles resume
-when power returns. Gas scheduled loads are also zeroed (modern gas
-appliances need electricity for ignition/controls). Islanded homes keep
+home bus is de-energized; event timers and schedule cursors keep advancing so
+missed cycles are not deferred. Gas scheduled loads are also zeroed (modern
+gas appliances need electricity for ignition/controls). Islanded homes keep
 their loads running. See [outage-behavior.md](../outage-behavior.md).

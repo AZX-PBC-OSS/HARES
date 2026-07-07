@@ -242,6 +242,7 @@ impl BatterySpec {
                 grid_export_rule: None,
                 power_factor: None,
                 inverter_capacity_kva: None,
+                grid_forming: None,
                 min_dwell_steps: 0,
             },
         )
@@ -752,6 +753,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         // n_series derived: round(50.4 / 3.2) = round(15.75) = 16
@@ -1419,6 +1421,7 @@ mod tests {
                     grid_export_rule: None,
                     power_factor: None,
                     inverter_capacity_kva: None,
+                    grid_forming: None,
                     min_dwell_steps: 0,
                 },
             )

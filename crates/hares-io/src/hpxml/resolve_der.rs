@@ -163,6 +163,7 @@ pub(super) fn resolve_batteries(
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let mut spec = build_typed_spec("Battery".to_string(), FuelType::Electric, cfg, defaults)?;
@@ -310,6 +311,8 @@ pub(super) fn resolve_generators(
             stack_nominal_temp_c: None,
             heat_rec_max_temp_c: None,
             no_load_fuel_fraction: None,
+            grid_forming: None,
+            standby_mode: None,
         };
 
         let mut spec = build_typed_spec("Gas Generator".to_string(), fuel, cfg, defaults)?;

@@ -101,6 +101,21 @@ impl PyTelemetry {
         self.inner.reactive_power_kvar
     }
 
+    /// Load [kW] the island sources failed to cover during islanded
+    /// operation (would-be phantom grid import). 0.0 when not islanded.
+    #[getter]
+    pub fn island_unserved_kw(&self) -> f64 {
+        self.inner.island_unserved_kw
+    }
+
+    /// Surplus on-site generation [kW] the island could not absorb during
+    /// islanded operation (would-be phantom grid export). 0.0 when not
+    /// islanded.
+    #[getter]
+    pub fn island_excess_kw(&self) -> f64 {
+        self.inner.island_excess_kw
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Telemetry(step={}, time={})",

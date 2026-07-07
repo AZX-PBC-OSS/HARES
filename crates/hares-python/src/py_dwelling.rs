@@ -456,6 +456,7 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
         discharge_efficiency: battery.discharge_efficiency,
         bms_mode: None,
         grid_export_rule: None,
+        grid_forming: None,
         min_dwell_steps: 0,
     };
     EquipmentConfig::from_typed(battery.name.clone(), "Battery".to_string(), cfg)
@@ -1730,6 +1731,11 @@ impl PyDwelling {
         // islands the home).
         dict.set_item("grid_bus_voltage_pu", env.grid.bus_voltage_pu())?;
         dict.set_item("grid_islanded", env.grid.islanded())?;
+        // Islanded-imbalance accounting: residual load the island sources
+        // could not cover / surplus generation the island could not absorb.
+        // Both 0.0 during normal (grid-connected) operation.
+        dict.set_item("island_unserved_kw", dwelling.island_unserved_kw())?;
+        dict.set_item("island_excess_kw", dwelling.island_excess_kw())?;
         dict.set_item("current_time", chrono_to_py_datetime(py, env.current_time)?)?;
         let zones: Vec<Py<PyDict>> = env
             .zones

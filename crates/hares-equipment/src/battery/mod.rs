@@ -405,6 +405,12 @@ pub struct Battery {
     grid_export_rule: GridExportRule,
     min_dwell_steps: usize,
 
+    /// Whether the battery inverter can form an island bus during a utility
+    /// outage. Configurable via `BatteryConfig::grid_forming` (default true).
+    /// Grid-following-only batteries (`false`) never report
+    /// `island_source_available` even when charged and dischargeable.
+    grid_forming: bool,
+
     /// Count of SOCTarget signals that violated SOC ordering constraints
     /// (min_soc < target_soc < max_soc) and were auto-corrected.
     /// Gated on `observe` feature for diagnostic CSV output.
@@ -510,6 +516,7 @@ impl Battery {
             bms_mode: BmsMode::Manual,
             grid_export_rule: GridExportRule::Unrestricted,
             min_dwell_steps: 0,
+            grid_forming: true,
             #[cfg(feature = "observe")]
             setpoint_violation_count: 0,
         }
@@ -1052,6 +1059,7 @@ impl Battery {
                 .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
         }
         self.min_dwell_steps = c.min_dwell_steps;
+        self.grid_forming = c.grid_forming.unwrap_or(true);
 
         self.power_factor = c.power_factor.unwrap_or(1.0);
         self.inverter_capacity_kva = c
@@ -1135,13 +1143,14 @@ impl Equipment for Battery {
         // to discharge: SOC above its effective floor (physical min narrowed
         // by any SOC-target window), hardware discharge capability, cell
         // temperature above the discharge cutoff, and DR not commanding a
-        // full shed. Grid-forming capability is assumed (no separate opt-in
-        // flag yet — see `Equipment::island_source_available`).
+        // full shed. `grid_forming` (default true) gates grid-following-only
+        // inverters that cannot form an island bus even when dischargeable.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
             .unwrap_or(self.min_soc);
-        self.grid_connected
+        self.grid_forming
+            && self.grid_connected
             && self.max_discharge_kw > 0.0
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
@@ -1194,6 +1203,23 @@ impl Equipment for Battery {
         } else {
             0.0
         };
+
+        // -- Islanded charge clamp: no phantom grid import during an outage --
+        // While the utility is out and the bus is energized (islanded), there
+        // is no grid to import from: every watt of charge must come from
+        // on-site generation surplus already on the bus. PV and the generator
+        // run in the Independent stage before the battery, so the Stage-1
+        // accumulated `net_load_kw < 0` is exactly the visible surplus. Cap
+        // any charging target at that surplus — an explicit PowerSetpoint
+        // charge command beyond it is curtailed; self-consumption is
+        // unaffected (it already charges only from surplus). Discharge is
+        // NEVER clamped here: thermal-stage loads step after the battery, so
+        // a discharge clamp would strand them — the dwelling-level island
+        // accounting (island_unserved_kw / island_excess_kw) captures any
+        // residual imbalance instead. See docs/outage-behavior.md.
+        if env.grid.grid_outage() && !bus_dead && target_power_kw > 0.0 {
+            target_power_kw = target_power_kw.min((-net_load_kw).max(0.0));
+        }
 
         // -- Effective SOC bounds: physical limits narrowed by any active SOC target window --
         let eff_min_soc = self
@@ -2130,6 +2156,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         for (k, v) in overrides {
@@ -2202,6 +2229,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
@@ -2533,16 +2561,145 @@ mod tests {
             "SOC must not increase during a dead-bus outage"
         );
 
-        // Islanded bus (another source formed it): standby returns and the
-        // commanded charge proceeds.
+        // Islanded bus (another source formed it): standby returns, but the
+        // commanded charge is clamped to the on-site surplus — none here, so
+        // no charging (there is no grid to import from during the outage).
         env.grid.island_bus_voltage_pu = Some(1.0);
+        let soc_before_islanded = bat.soc;
         let mut ports2 = PortSlots::default();
         bat.step(&env, Duration::from_secs(300), &mut ports2)
             .unwrap();
         assert!(
             ports2.electrical.net_active_w() > 0.0,
-            "energized (islanded) bus restores standby draw and charging"
+            "energized (islanded) bus restores standby draw"
         );
+        assert!(
+            ports2.electrical.net_active_w() < 1000.0,
+            "islanded charge command without surplus must not draw charging power, got {} W",
+            ports2.electrical.net_active_w()
+        );
+        assert!(
+            bat.soc <= soc_before_islanded,
+            "no on-site surplus while islanded: SOC must not increase"
+        );
+    }
+
+    /// Islanded charge clamp: during a utility outage with an energized
+    /// (islanded) bus there is no grid to import from, so a commanded charge
+    /// with no on-site surplus (positive Stage-1 net load) is curtailed to
+    /// zero.
+    #[test]
+    fn islanded_charge_command_without_surplus_is_curtailed() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // Utility outage, bus islanded (this battery is the source).
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        // Stage-1 net load is positive: house loads, no generation surplus.
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 1500.0;
+
+        let soc_before = bat.soc;
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            (ports.electrical.load_power_w - 1500.0).abs() < 5.0,
+            "islanded charge command without surplus must add no charging draw, got {} W",
+            ports.electrical.load_power_w
+        );
+        assert!(
+            bat.soc <= soc_before,
+            "SOC must not increase while islanded with no on-site surplus"
+        );
+    }
+
+    /// Islanded charge clamp: with an on-site generation surplus the
+    /// commanded charge is capped at exactly that surplus, not the full
+    /// setpoint.
+    #[test]
+    fn islanded_charge_command_is_capped_at_onsite_surplus() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        // Command 3 kW of charging — more than the visible surplus.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        // Stage-1 surplus: 2.5 kW PV generation against a 0.5 kW load
+        // → 2.0 kW visible on-site surplus.
+        let mut ports = PortSlots::default();
+        ports.electrical.generation_power_w = -2500.0;
+        ports.electrical.load_power_w = 500.0;
+
+        let soc_before = bat.soc;
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let charge_draw_w = ports.electrical.load_power_w - 500.0;
+        assert!(
+            (charge_draw_w - 2000.0).abs() < 50.0,
+            "islanded charge must be capped at the 2 kW surplus, drew {charge_draw_w} W"
+        );
+        assert!(
+            bat.soc > soc_before,
+            "battery must still charge from the available surplus"
+        );
+    }
+
+    /// The islanded clamp applies to charging only: a commanded discharge
+    /// during islanded operation proceeds at the full setpoint (the battery
+    /// is the source serving downstream loads).
+    #[test]
+    fn islanded_discharge_command_is_never_clamped() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            (ports.electrical.generation_power_w - (-2000.0)).abs() < 50.0,
+            "islanded discharge must proceed at the full 2 kW setpoint, got {} W",
+            ports.electrical.generation_power_w
+        );
+        assert_eq!(bat.mode, OperatingMode::Discharging);
     }
 
     /// `island_source_available` reflects dischargeability: SOC above the
@@ -2854,6 +3011,7 @@ mod tests {
                 heater_power_w: Some(500.0),
                 heater_threshold_c: Some(5.0),
                 self_discharge_pct_per_day: Some(0.0),
+                grid_forming: None,
                 min_dwell_steps: 0,
                 ..battery_config(&[])
                     .typed::<BatteryConfig>()
@@ -5633,6 +5791,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: Some(0.9),
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -5705,6 +5864,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: Some(0.9),
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -5777,6 +5937,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: Some(0.9),
             inverter_capacity_kva: Some(10.0),
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -5841,6 +6002,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: Some(0.9),
             inverter_capacity_kva: Some(10.0),
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -6012,6 +6174,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: Some(5.0),
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -6093,6 +6256,7 @@ mod tests {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: Some(5.0),
+            grid_forming: None,
             min_dwell_steps: 0,
         };
         let config =
@@ -6234,6 +6398,7 @@ mod tests {
                         grid_export_rule: None,
                         power_factor: None,
                         inverter_capacity_kva: None,
+                        grid_forming: None,
                         min_dwell_steps: 0,
                     },
                 )

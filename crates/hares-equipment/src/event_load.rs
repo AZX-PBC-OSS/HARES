@@ -374,11 +374,12 @@ impl EventBasedLoad {
         ports: &mut PortSlots,
         month_scale: f64,
         voltage_pu: f64,
+        bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         crate::config::debug_assert_zip_sums(&self.zip, "EventBasedLoad", &self.descriptor.name);
 
-        let active_now = self.phase == EventPhase::Active;
+        let active_now = self.phase == EventPhase::Active && bus_energized;
         // PowerSetpoint overrides the configured active_power_kw for this step,
         // but only when the equipment is actually in an active event phase.
         // OCHRE gates p_setpoint on self.mode == "On".
@@ -650,47 +651,13 @@ impl Equipment for EventBasedLoad {
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
 
-        // Grid outage (de-energized bus): no power, no gains; event timers
-        // freeze (early return) and the interrupted cycle resumes when power
-        // returns. Islanded homes keep an energized bus and are not
-        // affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
-            self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
-            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
-            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
-            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
-            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
-            self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
-            self.core_output = CoreOutput {
-                flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: self
-                        .descriptor
-                        .core_capabilities
-                        .contains(CoreCapabilities::REACTIVE)
-                        .then_some(0.0),
-                    fuel_w: self
-                        .descriptor
-                        .core_capabilities
-                        .contains(CoreCapabilities::FUEL)
-                        .then_some(FuelPower {
-                            fuel_type: self.fuel_type,
-                            consumption_w: 0.0,
-                        }),
-                    thermal_output_w: None,
-                    sensible_cooling_w: None,
-                    latent_cooling_w: None,
-                },
-                state: CoreState {
-                    operating_mode: None,
-                    soc: None,
-                    speed_index: None,
-                    setpoint_c: None,
-                },
-                performance: CorePerformance::default(),
-            };
-            return Ok(());
-        }
+        // Grid outage (de-energized bus): no power, no gains, but time and
+        // schedule state keep advancing. The event cursor passes completed
+        // events, current_step increments, delay_remaining_s decrements, and
+        // phase timers run. Cycles that fall during the outage are missed, not
+        // deferred. Islanded homes keep an energized bus and are not affected.
+        // See docs/outage-behavior.md.
+        let bus_energized = env.grid.bus_energized();
 
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
@@ -737,7 +704,7 @@ impl Equipment for EventBasedLoad {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu())?;
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
 
         if self.extracted_events.is_empty() {
             self.advance_phase_timer(dt_s);
@@ -1004,11 +971,12 @@ impl WetAppliance {
         ports: &mut PortSlots,
         month_scale: f64,
         voltage_pu: f64,
+        bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         crate::config::debug_assert_zip_sums(&self.zip, "WetAppliance", &self.descriptor.name);
 
-        let active_power_kw = if self.active {
+        let active_power_kw = if self.active && bus_energized {
             // In deterministic mode, use extracted event power directly.
             // In stochastic mode, use configured phase power × n_units.
             let base_kw = if !self.extracted_events.is_empty()
@@ -1068,7 +1036,7 @@ impl WetAppliance {
             })?;
         }
 
-        if self.active && self.hot_water_draw_rate_kg_s > 0.0 {
+        if bus_energized && self.active && self.hot_water_draw_rate_kg_s > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: crate::water_heater::DHW_DEMAND_LOOP,
                 flow_rate_kg_s: self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0),
@@ -1302,50 +1270,13 @@ impl Equipment for WetAppliance {
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
 
-        // Grid outage (de-energized bus): no power, no gains; event timers
-        // freeze (early return) and the interrupted cycle resumes when power
-        // returns. Islanded homes keep an energized bus and are not
+        // Grid outage (de-energized bus): no power, no gains, but time and
+        // schedule state keep advancing. The event cursor passes completed
+        // events, current_step increments, delay_remaining_s decrements, and
+        // cycle phases advance. Cycles that fall during the outage are missed,
+        // not deferred. Islanded homes keep an energized bus and are not
         // affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
-            self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
-            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
-            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
-            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
-            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
-            self.telemetry.set(
-                tk::CYCLE_PHASE,
-                cycle_phase_ordinal(self.active, self.phase_index),
-            );
-            self.core_output = CoreOutput {
-                flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: self
-                        .descriptor
-                        .core_capabilities
-                        .contains(CoreCapabilities::REACTIVE)
-                        .then_some(0.0),
-                    fuel_w: self
-                        .descriptor
-                        .core_capabilities
-                        .contains(CoreCapabilities::FUEL)
-                        .then_some(FuelPower {
-                            fuel_type: self.fuel_type,
-                            consumption_w: 0.0,
-                        }),
-                    thermal_output_w: None,
-                    sensible_cooling_w: None,
-                    latent_cooling_w: None,
-                },
-                state: CoreState {
-                    operating_mode: None,
-                    soc: None,
-                    speed_index: None,
-                    setpoint_c: None,
-                },
-                performance: CorePerformance::default(),
-            };
-            return Ok(());
-        }
+        let bus_energized = env.grid.bus_energized();
 
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
@@ -1389,7 +1320,7 @@ impl Equipment for WetAppliance {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu())?;
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
         if self.extracted_events.is_empty() {
             self.advance_cycle(dt_s);
         }

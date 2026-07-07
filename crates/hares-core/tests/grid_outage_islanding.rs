@@ -96,12 +96,20 @@ fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
 }
 
 fn add_battery(dwelling: &mut Dwelling, initial_soc: f64) {
+    add_battery_with_discharge_limit(dwelling, initial_soc, 5.0);
+}
+
+fn add_battery_with_discharge_limit(
+    dwelling: &mut Dwelling,
+    initial_soc: f64,
+    max_discharge_kw: f64,
+) {
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
         capacity_kwh: 10.0,
         max_charge_kw: 5.0,
-        max_discharge_kw: 5.0,
+        max_discharge_kw,
         n_series: None,
         n_parallel: None,
         ah_cell: None,
@@ -131,6 +139,7 @@ fn add_battery(dwelling: &mut Dwelling, initial_soc: f64) {
         grid_export_rule: None,
         power_factor: None,
         inverter_capacity_kva: None,
+        grid_forming: None,
         min_dwell_steps: 0,
     };
     let config =
@@ -236,6 +245,52 @@ fn outage_with_battery_islands_and_keeps_loads_running() {
         summary.battery_power_kw < 0.0,
         "battery must discharge to serve the islanded load, got {} kW",
         summary.battery_power_kw
+    );
+}
+
+/// An islanded home whose load exceeds the battery's discharge capability
+/// reports the shortfall as `island_unserved_kw` in `DwellingTelemetry` —
+/// honest accounting of the island power-balance violation instead of
+/// phantom grid import. Nominal (grid-connected) operation reports 0.0.
+#[test]
+fn islanded_load_beyond_discharge_capability_reports_unserved() {
+    let mut dwelling = build_dwelling_with_base_load("unserved-load");
+    // 0.5 kW max discharge against a 1.5 kW base load: the battery can
+    // island the home but cannot fully serve it.
+    add_battery_with_discharge_limit(&mut dwelling, 0.6, 0.5);
+
+    // Nominal operation: grid-connected, no island accounting.
+    dwelling.step().expect("nominal step");
+    let telem = dwelling.telemetry();
+    assert_eq!(
+        telem.island_unserved_kw, 0.0,
+        "island_unserved_kw must be 0.0 during nominal (grid-connected) operation"
+    );
+    assert_eq!(
+        telem.island_excess_kw, 0.0,
+        "island_excess_kw must be 0.0 during nominal (grid-connected) operation"
+    );
+
+    // Utility outage: the battery islands the home but its 0.5 kW discharge
+    // limit leaves ~1 kW of the base load unserved.
+    dwelling.set_grid_voltage(0.0);
+    dwelling.step().expect("islanded step");
+    assert!(
+        dwelling.latest_env().grid.islanded(),
+        "battery with usable SOC must island the home"
+    );
+
+    dwelling.step().expect("second islanded step");
+    let telem = dwelling.telemetry();
+    assert!(
+        telem.island_unserved_kw > 0.5,
+        "load beyond max_discharge_kw must be reported as unserved, got {} kW",
+        telem.island_unserved_kw
+    );
+    assert_eq!(
+        telem.island_excess_kw, 0.0,
+        "no surplus generation in this island, got {} kW",
+        telem.island_excess_kw
     );
 }
 

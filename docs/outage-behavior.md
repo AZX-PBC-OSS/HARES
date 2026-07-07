@@ -26,20 +26,27 @@ Island sources:
 - **Battery** — grid-connected and dischargeable: SOC above its effective
   floor (`min_soc`, narrowed by any SOC-target window), hardware discharge
   capability, cell temperature above the discharge cutoff, DR not commanding
-  a full shed.
+  a full shed, AND grid-forming (`grid_forming` flag, default true; set
+  false for grid-following-only inverters).
 - **Generator** — enabled (self-consumption control active, or an explicit
-  positive setpoint). Fuel is modeled as unlimited (no on-site tank model).
+  positive setpoint) AND grid-forming (`grid_forming` flag, default true).
+  Fuel is modeled as unlimited (no on-site tank model). In `standby_mode`
+  (default false), the generator runs ONLY during an outage — it remains
+  idle during normal utility operation but still reports
+  `island_source_available()` so the dwelling can form an island when the
+  outage occurs.
 - **EV** — plugged in at home **and actively discharging** (V2L/V2G). A
   merely plugged-in EV is not counted: most EVSEs cannot island a home, and
   HARES only dispatches EV discharge on explicit negative setpoints.
 - **PV is never an island source** — it is a grid-following inverter
   (IEEE 1547) and cannot form a bus on its own.
 
-Grid-forming capability (transfer switch / grid-forming inverter) is assumed
-present whenever a source can deliver power; there is no separate opt-in
-config flag yet. This is the minimal model that keeps battery-backed homes
-from dropping their loads during outages (the VPP/resilience use case);
-a per-equipment `backup_capable` flag is the natural extension point.
+Grid-forming capability (transfer switch / grid-forming inverter) is
+controlled by the per-equipment `grid_forming` flag (default true). Setting
+`grid_forming = false` prevents a source from declaring island availability
+even if it is otherwise enabled and capable; setting `standby_mode = true`
+on a generator makes it dispatch ONLY during outages (transfer-switch
+behaviour) while still reporting availability for island formation.
 
 ## The gating rule
 
@@ -82,13 +89,13 @@ operation (the bus is at nominal voltage).
 | Dehumidifier | Off | Humidistat hysteresis resumes on restoration |
 | Ventilation (HRV/ERV/exhaust) | Fans off: no airflow, no recovery, 0 W | |
 | Scheduled loads (lighting, MELs, …) | 0 W, no gains | Gas scheduled loads are also zeroed — modern gas appliances need electricity (electronic ignition, controls) |
-| Event loads / wet appliances | 0 W, no gains; event timers freeze | The interrupted cycle resumes when power returns; cycles are not re-scheduled |
+| Event loads / wet appliances | 0 W, no gains; time and schedule state advance, phase/cycle timers run | Cycles that fall during the outage are missed, not deferred |
 | EV (charging) | Home charging + battery preconditioning stop; SOC holds; no vars (even on a commanded q-setpoint) | *Away* charging is off-site and unaffected by the home's outage |
 | EV (V2L/V2G discharge) | **Not gated** — the EV is a source; while discharging it islands the home (one-step lag) | |
 | PV | **Inverter trips** (IEEE 1547 anti-islanding): no AC, no DC extraction, no vars | Keeps producing when the home is islanded by a grid-forming source; panel thermal/soiling states evolve either way |
-| Battery (charge) | Blocked — nothing on a dead bus to charge from | Standby electronics and cell heater also 0 W (they are AC loads) |
+| Battery (charge) | Blocked — nothing on a dead bus to charge from | Standby electronics and cell heater also 0 W (they are AC loads). While **islanded**, charging is clamped to the on-site generation surplus (see Meter behaviour) |
 | Battery (discharge) | Never blocked by the bus — discharge capability *is* what energizes it | A dead bus with a battery present implies the battery is empty/cold/disconnected |
-| Generator | **Runs** — an outage is precisely when it runs (self-consumption picks up the house load) | Never gated |
+| Generator | **Runs** — an outage is precisely when it runs (self-consumption picks up the house load). In `standby_mode`, runs ONLY during an outage and stays off otherwise. | Never gated; `grid_forming` flag (default true) controls island-source eligibility |
 
 ## Meter behaviour
 
@@ -96,21 +103,36 @@ operation (the bus is at nominal voltage).
   nothing → net grid power is exactly 0 kW. Any non-zero residual indicates
   an un-gated load (kept visible by design — see `effective_load_scale`).
 - **Islanded**: loads run and sources serve them; the "grid" channel of the
-  electrical solver reports the island's internal balance. HARES does **not**
-  yet enforce zero flow at the service entrance during islanded operation:
-  if commanded dispatch exceeds on-site source capability (e.g. an explicit
-  battery charge setpoint beyond PV surplus, or load beyond
-  `max_discharge_kw`), the residual appears as phantom grid import/export.
-  Enforcing island power balance (unserved-energy accounting, source
-  saturation) is intentionally out of scope of the outage gate and is the
-  next extension point.
+  electrical solver reports the island's internal balance.
+  - **Battery charging is clamped to the on-site surplus**: during a utility
+    outage with an energized bus there is no grid to import from, so the
+    battery's charging target is capped at the visible Stage-1 generation
+    surplus (PV/generator output beyond the loads). An explicit
+    `PowerSetpoint` charge command beyond the surplus is curtailed;
+    self-consumption is unaffected (it already charges only from surplus).
+    Discharge is never clamped — thermal-stage loads step after the battery,
+    and a discharge clamp would strand them.
+  - **Residual imbalance is accounted, not faked**: any remaining net flow at
+    the service entrance during islanded operation is reported as
+    `island_unserved_kw` (load the island sources failed to cover — e.g.
+    load beyond `max_discharge_kw`; the would-be phantom import) and
+    `island_excess_kw` (surplus generation the island could not absorb; the
+    would-be phantom export) on `DwellingTelemetry` and in the Python
+    telemetry/env dict. Both are 0.0 during normal grid-connected operation.
+    Unserved load above 0.05 kW while islanded emits a rate-limited
+    `tracing` warning (once per process, debug-level thereafter). Enforcing
+    hard island power balance (load shedding, source saturation physics)
+    remains out of scope of the outage gate; the accounting makes any
+    violation observable instead of letting it appear as phantom grid flow.
 
 ## Observability
 
 - Rust: `EnvironmentState::grid` — `voltage_pu` (utility), `bus_voltage_pu()`,
-  `islanded()`.
+  `islanded()`; `DwellingTelemetry` — `island_unserved_kw`,
+  `island_excess_kw`.
 - Python (`Dwelling.get_env_dict()`): `grid_voltage_pu`, `grid_bus_voltage_pu`,
-  `grid_islanded`.
+  `grid_islanded`, `island_unserved_kw`, `island_excess_kw`. The same two
+  island fields are also getters on the `Telemetry` object.
 - Python actors (`env["grid"]`): `voltage_pu`, `bus_voltage_pu`, `islanded`.
 
 ## Testing

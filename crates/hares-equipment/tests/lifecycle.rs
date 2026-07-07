@@ -362,6 +362,7 @@ fn lifecycle_battery() {
             grid_export_rule: None,
             power_factor: None,
             inverter_capacity_kva: None,
+            grid_forming: None,
             min_dwell_steps: 0,
         },
     );
@@ -1052,6 +1053,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 grid_export_rule: None,
                 power_factor: None,
                 inverter_capacity_kva: None,
+                grid_forming: None,
                 min_dwell_steps: 0,
             },
         ),
@@ -1153,6 +1155,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 stack_nominal_temp_c: None,
                 heat_rec_max_temp_c: None,
                 no_load_fuel_fraction: None,
+                grid_forming: None,
+                standby_mode: None,
             },
         ),
         "HRV" => typed_alias_config(
