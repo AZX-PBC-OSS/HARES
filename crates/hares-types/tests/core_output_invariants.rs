@@ -8,6 +8,7 @@ use hares_types::{
     ElectricPower, EndUse, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
     OperatingMode, Soc, validate_core_contract,
 };
+use strum::IntoEnumIterator;
 
 fn sample_unit(rng: &mut ChaCha8Rng) -> f64 {
     // Map to [0, 1) using the high 53 bits so the result is a stable finite f64.
@@ -140,6 +141,20 @@ fn operating_mode_codes_are_stable_and_unique() {
                 "OperatingMode codes must remain unique"
             );
         }
+    }
+}
+
+#[test]
+fn all_variants_round_trip_through_tryfrom() {
+    for variant in OperatingMode::iter() {
+        let discriminant = variant as u8;
+        let round_tripped = OperatingMode::try_from(discriminant)
+            .expect("every OperatingMode discriminant must round-trip through TryFrom<u8>");
+        assert_eq!(
+            round_tripped, variant,
+            "TryFrom<u8> round-trip mismatch: {variant:?} has discriminant {discriminant} but \
+             try_from returned {round_tripped:?}"
+        );
     }
 }
 

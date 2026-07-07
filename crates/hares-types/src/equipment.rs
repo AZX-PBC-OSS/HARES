@@ -285,6 +285,9 @@ impl OperatingMode {
 impl TryFrom<u8> for OperatingMode {
     type Error = HaresError;
 
+    // Every enum variant must have a corresponding arm in this match.
+    // When a new variant is added, update this impl and verify with
+    // `all_variants_round_trip_through_tryfrom` in core_output_invariants.rs.
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0 => Ok(Self::Off),
@@ -1577,6 +1580,7 @@ mod tests {
             OperatingMode::HeatingHPAndER,
             OperatingMode::HeatPumpWH,
             OperatingMode::BackupElement,
+            OperatingMode::On,
         ];
         for mode in modes {
             let json = serde_json::to_string(&mode).expect("serialize mode");
