@@ -1142,6 +1142,32 @@ pub struct CoreOutput {
     pub performance: CorePerformance,
 }
 
+// Range-validation observer counters — zero-cost when `observe` is disabled.
+#[cfg(feature = "observe")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "observe")]
+static RANGE_REJECTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "observe")]
+static RANGE_WARNING_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "observe")]
+fn record_range_rejection() {
+    RANGE_REJECTION_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "observe"))]
+fn record_range_rejection() {}
+
+#[cfg(feature = "observe")]
+fn record_range_warning() {
+    RANGE_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "observe"))]
+fn record_range_warning() {}
+
 /// Validates that CoreOutput and declared capabilities agree in both directions.
 ///
 /// Declared capabilities must be populated, undeclared capabilities must remain
@@ -1248,10 +1274,122 @@ pub fn validate_core_contract(
             }
         }
 
+        // --- physical-range validation ---
+        // Error for physically impossible values; warn for implausible-but-possible.
+
+        // COP must be > 0: negative implies a degenerate performance curve.
+        // COP = Q_thermal / W_electric, both ≥ 0, so negative COP is physically
+        // impossible. COP == 0 is valid for equipment that's off or in transition
+        // (zero useful output, zero work input — ratio undefined, reported as 0).
+        // AHRI 210/240-2023 §6.2: COP is total heating capacity / effective power
+        // input, both positive quantities when operating.
+        if let Some(c) = co.performance.cop {
+            if c < 0.0 {
+                record_range_rejection();
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): \
+                     performance.cop={c} must be >= 0.0; \
+                     negative COP is physically impossible \
+                     (COP = Q_thermal / W_electric, both ≥ 0 per AHRI 210/240-2023 §6.2)",
+                    desc.name, caps
+                )));
+            }
+            if c == 0.0 {
+                record_range_warning();
+                tracing::warn!(
+                    equipment = %desc.name,
+                    cop = c,
+                    "performance.cop=0: equipment may be off or in transition; \
+                     consider reporting cop=None when no performance metric is available"
+                );
+            }
+        }
+
+        // Main power consumed cannot be negative.
+        if let Some(p) = co.performance.main_power_kw {
+            if p < 0.0 {
+                record_range_rejection();
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): \
+                     performance.main_power_kw={p} must be >= 0.0; \
+                     negative main power is physically impossible",
+                    desc.name, caps
+                )));
+            }
+        }
+
+        // Sensible cooling by documented convention is ≤ 0 (heat removed from zone).
+        if let Some(sc) = co.flows.sensible_cooling_w {
+            if sc > 0.0 {
+                record_range_rejection();
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): \
+                     flows.sensible_cooling_w={sc} must be <= 0.0; \
+                     positive sensible cooling violates the sign convention \
+                     (negative = heat removed from zone)",
+                    desc.name, caps
+                )));
+            }
+        }
+
+        // Latent cooling by documented convention is ≤ 0 (moisture condensed from zone air).
+        if let Some(lc) = co.flows.latent_cooling_w {
+            if lc > 0.0 {
+                record_range_rejection();
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): \
+                     flows.latent_cooling_w={lc} must be <= 0.0; \
+                     positive latent cooling violates the sign convention \
+                     (negative = moisture condensed from zone)",
+                    desc.name, caps
+                )));
+            }
+        }
+
+        // setpoint_c: [-50, 80] °C is the plausible residential HVAC range.
+        // Values outside this are physically possible (extreme arctic climates,
+        // industrial process heat) but rare — warn rather than reject.
+        // ASHRAE HoF 2021 Ch.18: residential heating setpoints rarely below 15°C;
+        // ASHRAE 55-2020 §5.3: typical occupied range 20-30°C.
+        if let Some(sp) = co.state.setpoint_c {
+            if !(-50.0..=80.0).contains(&sp) {
+                record_range_warning();
+                if sp > 100.0 {
+                    tracing::warn!(
+                        equipment = %desc.name,
+                        setpoint_c = sp,
+                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
+                         and may indicate a Fahrenheit-to-Celsius conversion bug"
+                    );
+                } else {
+                    tracing::warn!(
+                        equipment = %desc.name,
+                        setpoint_c = sp,
+                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
+                    );
+                }
+            }
+        }
+
+        // thermal_output_w: [-100 kW, 100 kW] is a residential-scale soft range.
+        // Large commercial heat pumps can legitimately exceed this — warn only.
+        if let Some(t) = co.flows.thermal_output_w {
+            if !(-100_000.0..=100_000.0).contains(&t) {
+                record_range_warning();
+                tracing::warn!(
+                    equipment = %desc.name,
+                    thermal_output_w = t,
+                    "thermal_output_w={t} W outside residential range [-100, 100] kW; \
+                     may be valid for large commercial equipment"
+                );
+            }
+        }
+
         // --- mode-vs-flows consistency checks ---
         crate::mode_flow_guard::check_mode_flow_consistency(desc, co)
             .map_err(|v| HaresError::Equipment(v.message))?;
         crate::mode_flow_guard::invariant_recheck_mode_flow_consistency(desc, co);
+        invariant_recheck_range_consistency(desc, co);
 
         return Ok(());
     }
@@ -1294,6 +1432,68 @@ pub fn validate_core_contract(
         caps,
         details.join("; "),
     )))
+}
+
+/// Invariant re-check for physical-range validation.
+///
+/// Re-runs the same range constraints independently and logs a warning if a
+/// violation is found. Called after the production check has passed — a
+/// warning here means the production path has a logic bug.
+///
+/// Present only in debug or `check_invariants` builds.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn invariant_recheck_range_consistency(desc: &EquipmentDescriptor, co: &CoreOutput) {
+    if let Some(c) = co.performance.cop {
+        if c < 0.0 {
+            tracing::warn!(
+                equipment = %desc.name,
+                cop = c,
+                "invariant violation: negative COP ({c}) passed production check"
+            );
+        }
+    }
+    if let Some(p) = co.performance.main_power_kw {
+        if p < 0.0 {
+            tracing::warn!(
+                equipment = %desc.name,
+                main_power_kw = p,
+                "invariant violation: negative main_power_kw ({p}) passed production check"
+            );
+        }
+    }
+    if let Some(sc) = co.flows.sensible_cooling_w {
+        if sc > 0.0 {
+            tracing::warn!(
+                equipment = %desc.name,
+                sensible_cooling_w = sc,
+                "invariant violation: positive sensible_cooling_w ({sc}) passed production check"
+            );
+        }
+    }
+    if let Some(lc) = co.flows.latent_cooling_w {
+        if lc > 0.0 {
+            tracing::warn!(
+                equipment = %desc.name,
+                latent_cooling_w = lc,
+                "invariant violation: positive latent_cooling_w ({lc}) passed production check"
+            );
+        }
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+fn invariant_recheck_range_consistency(_desc: &EquipmentDescriptor, _co: &CoreOutput) {}
+
+/// Returns the total number of physical-range rejections in this process.
+#[cfg(feature = "observe")]
+pub fn range_rejection_counter() -> u64 {
+    RANGE_REJECTION_COUNT.load(Ordering::Relaxed)
+}
+
+/// Returns the total number of physical-range warnings in this process.
+#[cfg(feature = "observe")]
+pub fn range_warning_counter() -> u64 {
+    RANGE_WARNING_COUNT.load(Ordering::Relaxed)
 }
 
 /// Tolerance for [`validate_port_core_electrical_consistency`]: ~1e-6
@@ -3234,6 +3434,179 @@ mod tests {
             ..Default::default()
         };
         validate_core_contract(&desc, &out).expect("On mode with positive thermal must pass");
+    }
+
+    fn range_test_descriptor(name: &str) -> EquipmentDescriptor {
+        EquipmentDescriptor {
+            id: EquipmentId(8),
+            name: name.to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT
+                | CoreCapabilities::HAS_COP,
+            telemetry_fields: vec![],
+            zone_type: None,
+        }
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_negative_cop() {
+        let desc = range_test_descriptor("Negative COP");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(-2.3),
+                ..Default::default()
+            },
+        };
+        let err = validate_core_contract(&desc, &out).expect_err("negative COP must be rejected");
+        assert!(
+            err.to_string()
+                .contains("performance.cop=-2.3 must be >= 0.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_allows_zero_cop() {
+        let desc = range_test_descriptor("Zero COP");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(0.0),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out)
+            .expect("zero COP must be allowed (equipment off / in transition)");
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_negative_main_power() {
+        let desc = range_test_descriptor("Negative Main Power");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                main_power_kw: Some(-1.0),
+            },
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("negative main_power_kw must be rejected");
+        assert!(
+            err.to_string()
+                .contains("performance.main_power_kw=-1 must be >= 0.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_positive_sensible_cooling() {
+        let desc = range_test_descriptor("Positive Sensible");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(-3000.0),
+                sensible_cooling_w: Some(500.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                ..Default::default()
+            },
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("positive sensible_cooling_w must be rejected");
+        assert!(
+            err.to_string()
+                .contains("flows.sensible_cooling_w=500 must be <= 0.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_positive_latent_cooling() {
+        let desc = range_test_descriptor("Positive Latent");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(-3000.0),
+                latent_cooling_w: Some(300.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                ..Default::default()
+            },
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("positive latent_cooling_w must be rejected");
+        assert!(
+            err.to_string()
+                .contains("flows.latent_cooling_w=300 must be <= 0.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_allows_valid_ranges_at_boundaries() {
+        let desc = range_test_descriptor("Valid Boundaries");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(100_000.0),
+                sensible_cooling_w: Some(0.0),
+                latent_cooling_w: Some(0.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(80.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.5),
+                main_power_kw: Some(0.0),
+            },
+        };
+        validate_core_contract(&desc, &out).expect("valid ranges at boundaries must pass");
     }
 
     /// Minimal electric-equipment descriptor for port/core consistency tests.

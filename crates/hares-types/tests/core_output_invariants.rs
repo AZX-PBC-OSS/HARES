@@ -930,3 +930,156 @@ fn random_charge_discharge_direction_enforced() {
         ));
     }
 }
+
+/// Random negative COP values must be rejected.
+#[test]
+fn random_negative_cop_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xDEAD_C0D0_u64);
+    for i in 0..128 {
+        let desc = full_descriptor(&format!("BadCOP {i}"));
+        let cop_val = -sample_range(&mut rng, 0.001, 100.0);
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(cop_val),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "negative COP={cop_val} must be rejected (trial {i})"
+        ));
+    }
+}
+
+/// Random negative main_power_kw values must be rejected.
+#[test]
+fn random_negative_main_power_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xBEEF_1000_u64);
+    for i in 0..64 {
+        let desc = full_descriptor(&format!("BadMP {i}"));
+        let mpk = -sample_range(&mut rng, 0.001, 100.0);
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                main_power_kw: Some(mpk),
+            },
+        };
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "negative main_power_kw={mpk} must be rejected (trial {i})"
+        ));
+    }
+}
+
+/// Random positive sensible_cooling_w values must be rejected.
+#[test]
+fn random_positive_sensible_cooling_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_2222_u64);
+    for i in 0..64 {
+        let desc = full_descriptor(&format!("BadSC {i}"));
+        let sc = sample_range(&mut rng, 0.001, 50_000.0);
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(-3000.0),
+                sensible_cooling_w: Some(sc),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "positive sensible_cooling_w={sc} must be rejected (trial {i})"
+        ));
+    }
+}
+
+/// Random positive latent_cooling_w values must be rejected.
+#[test]
+fn random_positive_latent_cooling_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x1A7E_3333_u64);
+    for i in 0..64 {
+        let desc = full_descriptor(&format!("BadLC {i}"));
+        let lc = sample_range(&mut rng, 0.001, 20_000.0);
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(-3000.0),
+                latent_cooling_w: Some(lc),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "positive latent_cooling_w={lc} must be rejected (trial {i})"
+        ));
+    }
+}
+
+/// Out-of-range setpoint_c is a warning only — validation still passes.
+#[test]
+fn extreme_setpoint_c_still_passes_validation() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_4444_u64);
+    for i in 0..64 {
+        let desc = full_descriptor(&format!("ExtSP {i}"));
+        let sp = if rng.next_u64() % 2 == 0 {
+            // Below plausible range: [-200, -51) °C
+            -sample_range(&mut rng, 51.0, 200.0)
+        } else {
+            // Above plausible range: (80, 500] °C
+            sample_range(&mut rng, 80.001, 500.0)
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(sp),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(3.0),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out).unwrap_or_else(|e| {
+            panic!("extreme setpoint_c={sp} must not be rejected (trial {i}): {e}")
+        });
+    }
+}
