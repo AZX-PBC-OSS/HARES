@@ -99,6 +99,37 @@ pub fn parse_epw<P: AsRef<Path>>(path: P) -> Result<WeatherTimeSeries, WeatherEr
     parse_epw_str(&contents)
 }
 
+/// Extract the US state abbreviation from an EPW file's LOCATION header.
+///
+/// Reads only the first line of the file. Returns the two-letter state
+/// abbreviation (e.g. `"CO"`) from field index 2 of the LOCATION header
+/// per the EPW Data Dictionary, or `None` if the file is missing,
+/// unreadable, or the header is absent.
+pub fn parse_epw_location_state<P: AsRef<Path>>(path: P) -> Option<String> {
+    let path_ref = path.as_ref();
+    if path_ref.extension()?.to_str()? != "epw" {
+        return None;
+    }
+    let first_line =
+        std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(path_ref).ok()?))
+            .next()?
+            .ok()?;
+
+    if !first_line.starts_with("LOCATION") {
+        return None;
+    }
+    let fields: Vec<&str> = first_line.split(',').collect();
+    if fields.len() < 3 {
+        return None;
+    }
+    let state = fields[2].trim();
+    if state.len() == 2 && state.chars().all(|c| c.is_ascii_uppercase()) {
+        Some(state.to_string())
+    } else {
+        None
+    }
+}
+
 fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let mut lines = contents.lines();
 

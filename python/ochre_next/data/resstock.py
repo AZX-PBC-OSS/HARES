@@ -9,6 +9,7 @@ import io
 import os
 import tempfile
 import urllib.request
+import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -249,6 +250,141 @@ _STATE_FIPS: dict[str, str] = {
     "56": "WY",
 }
 
+# IECC climate zone number ranges valid for each US state.
+# Source: IECC 2021 climate zone map (ASHRAE 169-2021 Table B-1).
+# Each list contains the integer zone numbers (1-8) that appear in that state.
+# Used for coarse cross-zone validation between building HPXML and weather EPW.
+_IECC_STATE_ZONES: dict[str, frozenset[int]] = {
+    "AL": frozenset({2, 3}),       "AK": frozenset({7, 8}),
+    "AZ": frozenset({2, 3, 4, 5}), "AR": frozenset({3, 4}),
+    "CA": frozenset({2, 3, 4, 5, 6}), "CO": frozenset({4, 5, 6, 7}),
+    "CT": frozenset({5}),          "DE": frozenset({4}),
+    "FL": frozenset({1, 2}),       "GA": frozenset({2, 3, 4}),
+    "HI": frozenset({1}),         "ID": frozenset({5, 6}),
+    "IL": frozenset({4, 5}),       "IN": frozenset({4, 5}),
+    "IA": frozenset({5, 6}),       "KS": frozenset({3, 4, 5}),
+    "KY": frozenset({4}),          "LA": frozenset({2, 3}),
+    "ME": frozenset({6, 7}),       "MD": frozenset({4}),
+    "MA": frozenset({5}),         "MI": frozenset({5, 6, 7}),
+    "MN": frozenset({6, 7}),       "MS": frozenset({2, 3}),
+    "MO": frozenset({4, 5}),       "MT": frozenset({6, 7}),
+    "NE": frozenset({5, 6}),       "NV": frozenset({3, 4, 5}),
+    "NH": frozenset({5, 6}),       "NJ": frozenset({4, 5}),
+    "NM": frozenset({3, 4, 5}),    "NY": frozenset({4, 5, 6}),
+    "NC": frozenset({3, 4, 5}),       "ND": frozenset({6, 7}),
+    "OH": frozenset({4, 5}),       "OK": frozenset({3, 4}),
+    "OR": frozenset({4, 5}),       "PA": frozenset({4, 5}),
+    "RI": frozenset({5}),          "SC": frozenset({2, 3}),
+    "SD": frozenset({5, 6}),       "TN": frozenset({3, 4}),
+    "TX": frozenset({1, 2, 3, 4}), "UT": frozenset({5, 6, 7}),
+    "VT": frozenset({5, 6}),       "VA": frozenset({3, 4, 5}),
+    "WA": frozenset({4, 5, 6}),    "WV": frozenset({4, 5}),
+    "WI": frozenset({6, 7}),       "WY": frozenset({6, 7}),
+    "DC": frozenset({4}),          "PR": frozenset({1}),
+}
+
+
+def _parse_climate_zone(hpxml_path: Path) -> str | None:
+    """Extract IECC climate zone from HPXML ClimateandRiskZones/ClimateZoneIECC/ClimateZone."""
+    try:
+        tree = ET.parse(hpxml_path)  # noqa: S314
+        root = tree.getroot()
+    except ET.ParseError:
+        return None
+
+    for prefix, uri in _HPXML_NS.items():
+        zone_el = root.find(
+            f".//{{{uri}}}ClimateandRiskZones/{{{uri}}}ClimateZoneIECC/{{{uri}}}ClimateZone"
+        )
+        if zone_el is not None and zone_el.text:
+            return zone_el.text.strip()
+
+    zone_el = root.find(".//ClimateandRiskZones/ClimateZoneIECC/ClimateZone")
+    if zone_el is not None and zone_el.text:
+        return zone_el.text.strip()
+
+    return None
+
+
+def _extract_epw_state(epw_path: Path) -> str | None:
+    """Extract US state abbreviation from an EPW file's LOCATION header line.
+
+    EPW LOCATION header format (EPW Data Dictionary):
+        LOCATION,city_state_country,state_province,country,source,WMO#,lat,lon,tz,elev
+    Field index 2 is the state/province abbreviation (e.g. 'CO').
+    """
+    try:
+        with epw_path.open() as fh:
+            first_line = fh.readline()
+    except OSError:
+        return None
+
+    if not first_line.startswith("LOCATION"):
+        return None
+
+    fields = first_line.strip().split(",")
+    if len(fields) < 3:
+        return None
+
+    state = fields[2].strip()
+    if len(state) == 2 and state.isascii() and state.isalpha():
+        return state.upper()
+    return None
+
+
+def _validate_zone_for_state(building_zone: str, state: str) -> None:
+    """Validate that a building's IECC zone is plausible for a given US state.
+
+    Checks whether the building's IECC zone number is plausible for the state.
+    Emits ``warnings.warn()`` for mismatches; raises ``ValueError`` for
+    detectably invalid combinations (zone differences ≥ 4).
+    """
+    valid_zone_numbers = _IECC_STATE_ZONES.get(state)
+    if valid_zone_numbers is None:
+        return
+
+    try:
+        building_zone_number = int(building_zone[0])
+    except (IndexError, ValueError):
+        return
+
+    if building_zone_number in valid_zone_numbers:
+        return
+
+    diff = min(abs(building_zone_number - n) for n in valid_zone_numbers)
+    if diff >= 4:
+        raise ValueError(
+            f"Building IECC zone {building_zone!r} is incompatible with state "
+            f"{state!r} (valid zone numbers: {sorted(valid_zone_numbers)}). "
+            f"The building location is too far from the weather location "
+            f"to produce physically meaningful results."
+        )
+
+    warnings.warn(
+        f"Building IECC zone {building_zone!r} may not match state "
+        f"{state!r} (valid zone numbers for state: {sorted(valid_zone_numbers)}). "
+        f"Cross-zone pairings produce physically invalid results with no other visible "
+        f"symptom.",
+        UserWarning,
+        stacklevel=2,
+    )
+
+
+def _validate_zone_for_weather_path(building_zone: str, weather_path: Path) -> None:
+    """Validate that a weather file's location is compatible with the building's IECC zone.
+
+    Parses the EPW LOCATION header to extract the weather file's state, then
+    delegates to ``_validate_zone_for_state``.
+    """
+    if not weather_path.name or weather_path.suffix.lower() != ".epw":
+        return
+
+    epw_state = _extract_epw_state(weather_path)
+    if epw_state is None:
+        return
+
+    _validate_zone_for_state(building_zone, epw_state)
+
 
 def _fetch_weather(
     cfg: _VersionConfig,
@@ -270,6 +406,8 @@ def _fetch_weather(
     station = _parse_weather_station(hpxml_path)
     if station is None:
         return Path("")
+
+    building_zone = _parse_climate_zone(hpxml_path)
     state, fips = station
 
     fmt = weather_format if weather_format is not None else cfg.weather_format
@@ -281,14 +419,21 @@ def _fetch_weather(
         from ochre_next.data.weather import get_epw_for_fips
 
         weather_cache = cache_dir / "weather"
-        return get_epw_for_fips(fips, cache_dir=weather_cache)
+        weather_path = get_epw_for_fips(fips, cache_dir=weather_cache)
+        if building_zone is not None and weather_path.exists():
+            _validate_zone_for_weather_path(building_zone, weather_path)
+        return weather_path
 
     # CSV: download the simplified ResStock CSV from S3.
     weather_dest = cache_dir / version / "weather" / f"{fips}_{cfg.weather_suffix}.csv"
     if weather_dest.exists() and weather_dest.stat().st_size > 0:
+        if building_zone is not None:
+            _validate_zone_for_state(building_zone, state)
         return weather_dest
     url = _weather_url(cfg, state, fips)
     _download_file(url, weather_dest)
+    if building_zone is not None:
+        _validate_zone_for_state(building_zone, state)
     return weather_dest
 
 
@@ -330,6 +475,13 @@ def fetch_resstock_building(
 
     if weather_override is not None:
         weather_path = weather_override
+        building_zone = _parse_climate_zone(hpxml_path)
+        if building_zone is not None and weather_path.exists():
+            _validate_zone_for_weather_path(building_zone, weather_path)
+            if weather_path.suffix.lower() != ".epw":
+                station = _parse_weather_station(hpxml_path)
+                if station is not None:
+                    _validate_zone_for_state(building_zone, station[0])
     else:
         weather_path = _fetch_weather(
             cfg, hpxml_path, base_cache, version,

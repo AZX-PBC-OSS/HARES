@@ -33,7 +33,8 @@ pub use envelope_lut::{
 };
 pub use epw::{
     DesignConditions, SkyTempModel, berdahl_martin_sky_emissivity, clark_allen_sky_emissivity,
-    compute_sky_temp_c, monthly_day_counts, parse_epw, sky_temp_from_emissivity,
+    compute_sky_temp_c, monthly_day_counts, parse_epw, parse_epw_location_state,
+    sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
@@ -41,7 +42,8 @@ pub use hares_physics::constants::STEFAN_BOLTZMANN;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use hpxml::building::check_foundation_zone_invariant;
 pub use hpxml::{
-    Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml, resolve_equipment,
+    Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml,
+    parse_iecc_climate_zone, resolve_equipment,
 };
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use output::check_mode_ordinals_invariant;

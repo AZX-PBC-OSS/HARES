@@ -138,6 +138,7 @@ impl Fleet {
             .map(|building| {
                 let weather_path =
                     remap_weather_path(&building.weather_path, hpxml_dir, weather_dir);
+                validate_fleet_building_zone(&building.hpxml_path, &weather_path, building.bldg_id);
                 FleetEntry {
                     config: DwellingConfig {
                         hpxml_path: building.hpxml_path,
@@ -726,6 +727,166 @@ fn remap_weather_path(path: &Path, hpxml_dir: &Path, weather_dir: &Path) -> Path
     match path.file_name() {
         Some(file_name) => weather_dir.join(file_name),
         None => weather_dir.to_path_buf(),
+    }
+}
+
+/// IECC climate zone number ranges valid for each US state.
+///
+/// Source: IECC 2021 climate zone map (ASHRAE 169-2021 Table B-1).
+/// Used for coarse cross-zone validation between building HPXML and weather EPW.
+fn iecc_state_zones(state: &str) -> &[u8] {
+    match state {
+        "AL" => &[2, 3],
+        "AK" => &[7, 8],
+        "AZ" => &[2, 3, 4, 5],
+        "AR" => &[3, 4],
+        "CA" => &[2, 3, 4, 5, 6],
+        "CO" => &[4, 5, 6, 7],
+        "CT" => &[5],
+        "DE" => &[4],
+        "FL" => &[1, 2],
+        "GA" => &[2, 3, 4],
+        "HI" => &[1],
+        "ID" => &[5, 6],
+        "IL" => &[4, 5],
+        "IN" => &[4, 5],
+        "IA" => &[5, 6],
+        "KS" => &[3, 4, 5],
+        "KY" => &[4],
+        "LA" => &[2, 3],
+        "ME" => &[6, 7],
+        "MD" => &[4],
+        "MA" => &[5],
+        "MI" => &[5, 6, 7],
+        "MN" => &[6, 7],
+        "MS" => &[2, 3],
+        "MO" => &[4, 5],
+        "MT" => &[6, 7],
+        "NE" => &[5, 6],
+        "NV" => &[3, 4, 5],
+        "NH" => &[5, 6],
+        "NJ" => &[4, 5],
+        "NM" => &[3, 4, 5],
+        "NY" => &[4, 5, 6],
+        "NC" => &[3, 4, 5],
+        "ND" => &[6, 7],
+        "OH" => &[4, 5],
+        "OK" => &[3, 4],
+        "OR" => &[4, 5],
+        "PA" => &[4, 5],
+        "RI" => &[5],
+        "SC" => &[2, 3],
+        "SD" => &[5, 6],
+        "TN" => &[3, 4],
+        "TX" => &[1, 2, 3, 4],
+        "UT" => &[5, 6, 7],
+        "VT" => &[5, 6],
+        "VA" => &[3, 4, 5],
+        "WA" => &[4, 5, 6],
+        "WV" => &[4, 5],
+        "WI" => &[6, 7],
+        "WY" => &[6, 7],
+        "DC" => &[4],
+        "PR" => &[1],
+        _ => &[],
+    }
+}
+
+/// Outcome of a climate-zone-to-weather-file validation check.
+#[derive(Debug, PartialEq, Eq)]
+enum ZoneMatchStatus {
+    /// Building zone matches weather file location.
+    Match {
+        building_zone: String,
+        weather_state: String,
+    },
+    /// Building zone does not match weather file location.
+    Mismatch {
+        building_zone: String,
+        weather_state: String,
+    },
+    /// Validation was skipped (missing zone, missing state, unknown state,
+    /// or non-EPW weather file).
+    Skipped,
+}
+
+/// Validate that a building's IECC climate zone is compatible with the weather file's location.
+///
+/// Extracts the building's IECC zone from HPXML and the weather file's state from
+/// the EPW LOCATION header. Returns a ``ZoneMatchStatus`` indicating the outcome,
+/// and logs an `ERROR` via `tracing` when the zone is not valid for the weather
+/// file's state.
+fn validate_fleet_building_zone(
+    hpxml_path: &Path,
+    weather_path: &Path,
+    bldg_id: i64,
+) -> ZoneMatchStatus {
+    let Some(building_zone) = hares_io::parse_iecc_climate_zone(hpxml_path) else {
+        return ZoneMatchStatus::Skipped;
+    };
+
+    let Some(epw_state) = hares_io::parse_epw_location_state(weather_path) else {
+        return ZoneMatchStatus::Skipped;
+    };
+
+    let valid_zones = iecc_state_zones(&epw_state);
+    if valid_zones.is_empty() {
+        return ZoneMatchStatus::Skipped;
+    }
+
+    let Some(zone_number) = building_zone.chars().next().and_then(|c| c.to_digit(10)) else {
+        return ZoneMatchStatus::Skipped;
+    };
+    let zone_number = zone_number as u8;
+
+    tracing::debug!(
+        bldg_id = bldg_id,
+        building_zone = %building_zone,
+        "extracted IECC climate zone from building HPXML"
+    );
+
+    if valid_zones.contains(&zone_number) {
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                target: "observe",
+                building_id = bldg_id,
+                expected_zone = %building_zone,
+                actual_zone = %epw_state,
+                match_status = "match",
+                "climate zone validated"
+            );
+        }
+        return ZoneMatchStatus::Match {
+            building_zone,
+            weather_state: epw_state,
+        };
+    }
+
+    tracing::error!(
+        bldg_id = bldg_id,
+        building_zone = %building_zone,
+        weather_state = %epw_state,
+        valid_state_zones = ?valid_zones,
+        "building IECC climate zone does not match weather file location; \
+         cross-zone pairings produce physically invalid results"
+    );
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::debug!(
+            target: "observe",
+            building_id = bldg_id,
+            expected_zone = %building_zone,
+            actual_zone = %epw_state,
+            match_status = "mismatch",
+            "climate zone mismatch detected"
+        );
+    }
+
+    ZoneMatchStatus::Mismatch {
+        building_zone,
+        weather_state: epw_state,
     }
 }
 
@@ -1508,5 +1669,104 @@ mod tests {
             }
             other => panic!("expected SimError::Panic with fallback, got {:?}", other),
         }
+    }
+
+    fn build_hpxml_with_zone(zone: &str) -> String {
+        format!(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
+  <Building>
+    <BuildingDetails>
+      <ClimateandRiskZones>
+        <ClimateZoneIECC>
+          <Year>2006</Year>
+          <ClimateZone>{}</ClimateZone>
+        </ClimateZoneIECC>
+        <WeatherStation>
+          <SystemIdentifier id='WeatherStation'/>
+          <Name>USA_CO_Denver</Name>
+        </WeatherStation>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#,
+            zone
+        )
+    }
+
+    #[test]
+    fn test_remap_weather_path_zone_validation() {
+        let hpxml_dir = unique_temp_path("hpxml_dir");
+        fs::create_dir_all(&hpxml_dir).expect("create temp hpxml dir");
+        let hpxml_path = hpxml_dir.join("home.xml");
+        write_temp_file(&hpxml_path, &build_hpxml_with_zone("5B"));
+
+        let epw_path = unique_temp_path("epw");
+        write_temp_file(
+            &epw_path,
+            "LOCATION,USA_CO_Denver.Intl.AP.725650_TMY3,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1609.0",
+        );
+
+        let zone = hares_io::parse_iecc_climate_zone(&hpxml_path);
+        assert_eq!(
+            zone.as_deref(),
+            Some("5B"),
+            "should extract IECC climate zone from HPXML"
+        );
+
+        let state = hares_io::parse_epw_location_state(&epw_path);
+        assert_eq!(
+            state.as_deref(),
+            Some("CO"),
+            "should extract state from EPW LOCATION header"
+        );
+
+        assert!(
+            iecc_state_zones("CO").contains(&5),
+            "Colorado IECC zones should include zone 5"
+        );
+
+        assert!(
+            !iecc_state_zones("CO").contains(&2),
+            "Colorado IECC zones should NOT include zone 2"
+        );
+
+        // zone=5B + weather=CO -> valid match
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &epw_path, 1),
+            ZoneMatchStatus::Match {
+                building_zone: "5B".to_string(),
+                weather_state: "CO".to_string()
+            }
+        );
+
+        // zone=2A + weather=CO -> mismatch
+        write_temp_file(&hpxml_path, &build_hpxml_with_zone("2A"));
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &epw_path, 2),
+            ZoneMatchStatus::Mismatch {
+                building_zone: "2A".to_string(),
+                weather_state: "CO".to_string()
+            }
+        );
+
+        // Missing zone -> skipped
+        let no_zone_xml = r#"<?xml version='1.0'?>
+<HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
+  <Building/>
+</HPXML>"#;
+        write_temp_file(&hpxml_path, no_zone_xml);
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &epw_path, 3),
+            ZoneMatchStatus::Skipped
+        );
+
+        // Non-EPW extension -> skipped (state parse returns None)
+        let csv_path = unique_temp_path("csv");
+        write_temp_file(&csv_path, "not,an,epw");
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &csv_path, 4),
+            ZoneMatchStatus::Skipped
+        );
     }
 }

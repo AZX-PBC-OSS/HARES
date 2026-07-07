@@ -601,3 +601,155 @@ def _fake_fleet_building(tmp_path: Path):
         )
 
     return _inner
+
+
+# ---------------------------------------------------------------------------
+# 8. Climate zone extraction and zone validation
+# ---------------------------------------------------------------------------
+
+
+def _make_hpxml_with_zone(zone: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">'
+        "<Building>"
+        "<BuildingDetails>"
+        "<ClimateandRiskZones>"
+        "<ClimateZoneIECC>"
+        "<Year>2006</Year>"
+        f"<ClimateZone>{zone}</ClimateZone>"
+        "</ClimateZoneIECC>"
+        "</ClimateandRiskZones>"
+        "</BuildingDetails>"
+        "</Building>"
+        "</HPXML>"
+    )
+
+
+def _make_epw_file(path: Path, state: str) -> None:
+    path.write_text(f"LOCATION,Test,{state},USA,TMY3,999999,39.7,-104.9,-7.0,1600.0")
+
+
+class TestClimateZoneExtraction:
+    def test_parses_iecc_zone(self, tmp_path: Path):
+        from ochre_next.data.resstock import _parse_climate_zone
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_make_hpxml_with_zone("5B"))
+        result = _parse_climate_zone(hpxml)
+        assert result == "5B"
+
+    def test_parses_iecc_zone_2a(self, tmp_path: Path):
+        from ochre_next.data.resstock import _parse_climate_zone
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_make_hpxml_with_zone("2A"))
+        result = _parse_climate_zone(hpxml)
+        assert result == "2A"
+
+    def test_returns_none_for_missing_zone(self, tmp_path: Path):
+        from ochre_next.data.resstock import _parse_climate_zone
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text("<HPXML><Building/></HPXML>")
+        result = _parse_climate_zone(hpxml)
+        assert result is None
+
+    def test_returns_none_for_bad_xml(self, tmp_path: Path):
+        from ochre_next.data.resstock import _parse_climate_zone
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text("not xml <<<")
+        result = _parse_climate_zone(hpxml)
+        assert result is None
+
+
+class TestExtractEpwState:
+    def test_extracts_co(self, tmp_path: Path):
+        from ochre_next.data.resstock import _extract_epw_state
+
+        epw = tmp_path / "weather.epw"
+        _make_epw_file(epw, "CO")
+        result = _extract_epw_state(epw)
+        assert result == "CO"
+
+    def test_returns_none_for_non_epw_extension(self, tmp_path: Path):
+        from ochre_next.data.resstock import _extract_epw_state
+
+        csv = tmp_path / "weather.csv"
+        csv.write_text("some,data")
+        result = _extract_epw_state(csv)
+        assert result is None
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path):
+        from ochre_next.data.resstock import _extract_epw_state
+
+        result = _extract_epw_state(tmp_path / "nonexistent.epw")
+        assert result is None
+
+
+class TestValidateZoneForState:
+    def test_match_co_zone5(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Zone 5B is valid for CO — should not raise or warn.
+        _validate_zone_for_state("5B", "CO")
+
+    def test_match_fl_zone1(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Zone 1A is valid for FL — should not raise or warn.
+        _validate_zone_for_state("1A", "FL")
+
+    def test_mismatch_warns_close_zone(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Zone 3A in MN (valid zones: 6, 7) — diff=3, should warn not raise.
+        with pytest.warns(UserWarning, match="Building IECC zone"):
+            _validate_zone_for_state("3A", "MN")
+
+    def test_mismatch_raises_far_zone(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Zone 1A in MN (valid zones: 6, 7) — diff>=4, should raise ValueError.
+        with pytest.raises(ValueError, match="incompatible"):
+            _validate_zone_for_state("1A", "MN")
+
+    def test_unknown_state_skips(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Unknown state abbreviation — should not raise or warn.
+        _validate_zone_for_state("5B", "ZZ")
+
+    def test_invalid_zone_format_skips(self):
+        from ochre_next.data.resstock import _validate_zone_for_state
+
+        # Zone that doesn't start with a number — should skip silently.
+        _validate_zone_for_state("ABC", "CO")
+
+
+class TestValidateZoneForWeatherPath:
+    def test_epw_match_passes(self, tmp_path: Path):
+        from ochre_next.data.resstock import _validate_zone_for_weather_path
+
+        epw = tmp_path / "weather.epw"
+        _make_epw_file(epw, "CO")
+        # Zone 5B is valid for CO — should not raise or warn.
+        _validate_zone_for_weather_path("5B", epw)
+
+    def test_epw_mismatch_warns(self, tmp_path: Path):
+        from ochre_next.data.resstock import _validate_zone_for_weather_path
+
+        epw = tmp_path / "weather.epw"
+        _make_epw_file(epw, "CO")
+        # Zone 2A is not valid for CO (diff=3<4) — should warn.
+        with pytest.warns(UserWarning, match="Building IECC zone"):
+            _validate_zone_for_weather_path("2A", epw)
+
+    def test_non_epw_skips(self, tmp_path: Path):
+        from ochre_next.data.resstock import _validate_zone_for_weather_path
+
+        csv = tmp_path / "weather.csv"
+        csv.write_text("some,data")
+        # Non-EPW file — should be silently skipped.
+        _validate_zone_for_weather_path("1A", csv)

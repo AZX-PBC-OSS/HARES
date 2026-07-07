@@ -341,6 +341,19 @@ pub fn design_temperatures_f(lat: f64, lon: f64) -> Option<(f64, f64)> {
         return None;
     }
     let station = nearest_station(lat, lon);
+    let station_distance_km = haversine_km(lat, lon, station.latitude_deg, station.longitude_deg);
+    if station_distance_km > 200.0 {
+        tracing::warn!(
+            input_lat = lat,
+            input_lon = lon,
+            station_lat = station.latitude_deg,
+            station_lon = station.longitude_deg,
+            distance_km = station_distance_km,
+            "ASHRAE 152: nearest climate station for design temperatures is {:.0} km away — \
+             design temperatures may be unreliable",
+            station_distance_km
+        );
+    }
     Some((station.heating_design_temp_f, station.cooling_design_temp_f))
 }
 
@@ -380,6 +393,24 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // 3. Climate station lookup
     // ------------------------------------------------------------------
     let station = nearest_station(input.latitude_deg, input.longitude_deg);
+    let station_distance_km = haversine_km(
+        input.latitude_deg,
+        input.longitude_deg,
+        station.latitude_deg,
+        station.longitude_deg,
+    );
+    if station_distance_km > 200.0 {
+        tracing::warn!(
+            input_lat = input.latitude_deg,
+            input_lon = input.longitude_deg,
+            station_lat = station.latitude_deg,
+            station_lon = station.longitude_deg,
+            distance_km = station_distance_km,
+            "ASHRAE 152 DSE: nearest climate station is {:.0} km away — \
+             DSE may be unreliable",
+            station_distance_km
+        );
+    }
     let heating_des_init = station.heating_design_temp_f;
     let heating_seas_init = station.heating_seasonal_temp_f;
     let cooling_des_init = station.cooling_design_temp_f;
@@ -816,5 +847,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Remote Pacific location (0°N, 170°W) is far from any ASHRAE 152
+    /// station, but `calculate_dse()` must still return a value in (0, 1]
+    /// rather than failing.
+    #[test]
+    fn dse_distant_station_returns_valid_value() {
+        let input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 0.0,
+            longitude_deg: -170.0,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let dse = calculate_dse(&input);
+        assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
+    }
+
+    /// Denver (39.7°N, 104.9°W) is a typical continental US location;
+    /// the nearest ASHRAE 152 station must be within 200 km so the DSE
+    /// uses representative design temperatures.
+    #[test]
+    fn denver_nearest_station_within_threshold() {
+        let station = nearest_station(39.7, -104.9);
+        let distance_km = haversine_km(39.7, -104.9, station.latitude_deg, station.longitude_deg);
+        assert!(
+            distance_km <= 200.0,
+            "Denver nearest station is {:.1} km away — exceeds 200 km threshold",
+            distance_km
+        );
+    }
+
+    /// Remote Pacific location (0°N, 170°W) is far from any ASHRAE 152
+    /// station, but `design_temperatures_f()` must still return valid
+    /// design temperatures rather than failing.
+    #[test]
+    fn design_temps_distant_station_returns_valid_value() {
+        let temps = design_temperatures_f(0.0, -170.0);
+        assert!(
+            temps.is_some(),
+            "design_temperatures_f returned None for distant location"
+        );
+        let (htg_f, clg_f) = temps.unwrap();
+        assert!(htg_f.is_finite(), "heating design temp not finite: {htg_f}");
+        assert!(clg_f.is_finite(), "cooling design temp not finite: {clg_f}");
+    }
+
+    /// Denver (39.7°N, 104.9°W) is a typical continental US location;
+    /// the returned heating and cooling design temperatures must be within
+    /// a reasonable range for that climate.
+    #[test]
+    fn design_temps_denver_within_reasonable_range() {
+        let temps = design_temperatures_f(39.7, -104.9);
+        assert!(
+            temps.is_some(),
+            "design_temperatures_f returned None for Denver"
+        );
+        let (htg_f, clg_f) = temps.unwrap();
+        assert!(
+            (-40.0..=60.0).contains(&htg_f),
+            "Denver heating design temp {htg_f}°F outside -40..60 °F range"
+        );
+        assert!(
+            (60.0..=120.0).contains(&clg_f),
+            "Denver cooling design temp {clg_f}°F outside 60..120 °F range"
+        );
     }
 }

@@ -201,6 +201,26 @@ pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
     Ok(building)
 }
 
+/// Extract the IECC climate zone from an HPXML file without a full parse.
+///
+/// Returns the zone string (e.g. `"5B"`, `"2A"`) from the
+/// `ClimateandRiskZones/ClimateZoneIECC/ClimateZone` element,
+/// or `None` if the file is missing or doesn't declare a zone.
+///
+/// Assumes a single `ClimateZoneIECC` entry per HPXML. The HPXML 4.x schema
+/// permits multiple entries (e.g. 2006 and 2021 designations for the same
+/// building). If future ResStock vintages emit multiple entries, the parser
+/// should select the most current year rather than blindly picking the first
+/// match.
+pub fn parse_iecc_climate_zone(path: &Path) -> Option<String> {
+    let xml = fs::read_to_string(path).ok()?;
+    let root = parse_xml_document(&xml).ok()?;
+
+    root.first_descendant("ClimateZone")
+        .map(|node| node.text.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HpxmlError, parse_hpxml_str};
