@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    fs,
     fs::File,
     path::{Path, PathBuf},
 };
@@ -38,7 +39,8 @@ pub struct ResStockBuilding {
     pub sample_weight: f64,
     pub hpxml_path: PathBuf,
     pub schedule_path: PathBuf,
-    pub weather_path: PathBuf,
+    pub weather_path: Option<PathBuf>,
+    pub weather_fips: Option<String>,
     pub characteristics: HashMap<String, String>,
 }
 
@@ -290,7 +292,8 @@ pub fn parse_resstock_metadata(
                 sample_weight,
                 hpxml_path: zip_path.clone(),
                 schedule_path: zip_path.clone(),
-                weather_path: zip_path,
+                weather_path: None,
+                weather_fips: None,
                 characteristics,
             });
         }
@@ -338,6 +341,44 @@ fn maybe_range_to_midpoint(value: &str) -> String {
     match (left.parse::<f64>(), right.parse::<f64>()) {
         (Ok(lo), Ok(hi)) => ((lo + hi) / 2.0).to_string(),
         _ => value.to_string(),
+    }
+}
+
+/// Extract the weather station FIPS code from an HPXML file.
+///
+/// ResStock HPXML files contain a `WeatherStation/Name` element under
+/// `ClimateandRiskZones` that holds a county FIPS code (e.g. `"G0800130"`)
+/// which identifies the weather station for the building.
+///
+/// Returns the FIPS code string if the element exists and its content
+/// matches the expected FIPS pattern (`G + 2-digit state + 3-digit
+/// county + 2-digit suffix`). Returns `None` if the file is missing,
+/// cannot be parsed, or lacks a FIPS-format weather station name.
+///
+/// Weather station names that do not match the FIPS pattern (e.g.
+/// `"USA_CO_Denver"`) also return `None` — these are legacy OCHRE
+/// fixtures, not ResStock dataset entries.
+pub fn parse_weather_station_fips(path: &Path) -> Option<String> {
+    let xml = fs::read_to_string(path).ok()?;
+    let root = crate::hpxml::building::parse_xml_document(&xml).ok()?;
+
+    let name_text = root
+        .first_descendant("WeatherStation")
+        .and_then(|ws| ws.child("Name"))
+        .map(|n| n.text.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+
+    // ResStock weather station names are FIPS codes like 'G0100290'.
+    // Pattern: G + state_fips(2) + county_fips(3) + suffix(2) e.g. G0800130
+    if !name_text.starts_with('G') || name_text.len() < 7 {
+        return None;
+    }
+
+    let fips = name_text;
+    if fips[1..].chars().all(|c| c.is_ascii_digit()) {
+        Some(fips)
+    } else {
+        None
     }
 }
 
@@ -445,7 +486,8 @@ mod tests {
                 .join("building_energy_models/CO/up03-baseline/bldg12345.zip")
         );
         assert_eq!(row.hpxml_path, row.schedule_path);
-        assert_eq!(row.hpxml_path, row.weather_path);
+        assert!(row.weather_path.is_none());
+        assert!(row.weather_fips.is_none());
     }
 
     fn sample_batch_v2024_2() -> RecordBatch {
@@ -658,5 +700,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ResStockError::IoError(_)));
+    }
+
+    fn write_hpxml_fixture(path: &Path, weather_station_name: &str) {
+        let xml = format!(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
+  <Building>
+    <BuildingDetails>
+      <ClimateandRiskZones>
+        <ClimateZoneIECC>
+          <Year>2006</Year>
+          <ClimateZone>5B</ClimateZone>
+        </ClimateZoneIECC>
+        <WeatherStation>
+          <SystemIdentifier id='WeatherStation'/>
+          <Name>{weather_station_name}</Name>
+        </WeatherStation>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+        );
+        fs::write(path, xml).expect("write hpxml fixture");
+    }
+
+    #[test]
+    fn parse_weather_station_fips_extracts_valid_fips() {
+        let tmp = tempdir().expect("tmp");
+        let hpxml_path = tmp.path().join("home.xml");
+        write_hpxml_fixture(&hpxml_path, "G0800130");
+        let fips = parse_weather_station_fips(&hpxml_path);
+        assert_eq!(fips, Some("G0800130".to_string()));
+    }
+
+    #[test]
+    fn parse_weather_station_fips_rejects_non_fips_name() {
+        let tmp = tempdir().expect("tmp");
+        let hpxml_path = tmp.path().join("home.xml");
+        write_hpxml_fixture(&hpxml_path, "USA_CO_Denver");
+        let fips = parse_weather_station_fips(&hpxml_path);
+        assert_eq!(fips, None);
+    }
+
+    #[test]
+    fn parse_weather_station_fips_handles_missing_weather_station() {
+        let tmp = tempdir().expect("tmp");
+        let hpxml_path = tmp.path().join("home.xml");
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
+  <Building>
+    <BuildingDetails>
+      <ClimateandRiskZones>
+        <ClimateZoneIECC>
+          <Year>2006</Year>
+          <ClimateZone>5B</ClimateZone>
+        </ClimateZoneIECC>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        fs::write(&hpxml_path, xml).expect("write hpxml fixture");
+        let fips = parse_weather_station_fips(&hpxml_path);
+        assert_eq!(fips, None);
+    }
+
+    #[test]
+    fn parse_weather_station_fips_handles_missing_hpxml_file() {
+        let fips = parse_weather_station_fips(Path::new("/nonexistent/hpxml.xml"));
+        assert_eq!(fips, None);
     }
 }

@@ -68,6 +68,7 @@ pub use output::{
 pub use psm3::parse_psm3;
 pub use resstock::{
     ColumnMapper, ResStockBuilding, ResStockError, ResStockVersion, parse_resstock_metadata,
+    parse_weather_station_fips,
 };
 pub use resstock_csv::parse_resstock_csv;
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};

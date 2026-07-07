@@ -11,7 +11,9 @@ use hares_core::{
     Dwelling, DwellingConfig, DwellingTelemetry, SimStatus as CoreSimStatus, SimulationEngine,
     SimulationResults, StepResult,
 };
-use hares_io::{OutputFormat, ResStockVersion, SimulationConfig, parse_resstock_metadata};
+use hares_io::{
+    OutputFormat, ResStockBuilding, ResStockVersion, SimulationConfig, parse_resstock_metadata,
+};
 use hares_types::ControlSignal;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 use rayon::ThreadPoolBuilder;
@@ -132,12 +134,38 @@ impl Fleet {
         let buildings = parse_resstock_metadata(metadata_path, version, hpxml_dir)
             .map_err(|err| FleetError::ResStock(err.to_string()))?;
 
-        let entries = buildings
+        let mut resolved = 0usize;
+        let mut unresolved = 0usize;
+
+        let entries: Vec<FleetEntry> = buildings
             .into_iter()
             .filter(|building| matches_filter(&building.characteristics, filter.as_ref()))
             .map(|building| {
                 let weather_path =
-                    remap_weather_path(&building.weather_path, hpxml_dir, weather_dir);
+                    resolve_weather_path_for_building(&building, weather_dir, version);
+
+                match &weather_path {
+                    Some(path) if path.exists() && path_is_readable_weather_file(path) => {
+                        resolved += 1;
+                    }
+                    Some(_) => {
+                        unresolved += 1;
+                        tracing::warn!(
+                            bldg_id = building.bldg_id,
+                            fips = building.weather_fips.as_deref().unwrap_or("none"),
+                            "weather file not found or not readable for building"
+                        );
+                    }
+                    None => {
+                        unresolved += 1;
+                        tracing::error!(
+                            bldg_id = building.bldg_id,
+                            "no weather station FIPS code; cannot resolve weather file"
+                        );
+                    }
+                }
+
+                let weather_path = weather_path.unwrap_or_else(|| PathBuf::from(""));
                 validate_fleet_building_zone(&building.hpxml_path, &weather_path, building.bldg_id);
                 FleetEntry {
                     config: DwellingConfig {
@@ -160,6 +188,15 @@ impl Fleet {
                 }
             })
             .collect();
+
+        tracing::info!(
+            total = entries.len(),
+            resolved,
+            unresolved,
+            "ResStock fleet: {} buildings with resolved weather paths, {} unresolved",
+            resolved,
+            unresolved,
+        );
 
         Ok(Self {
             entries,
@@ -719,15 +756,51 @@ fn matches_filter(
     })
 }
 
-fn remap_weather_path(path: &Path, hpxml_dir: &Path, weather_dir: &Path) -> PathBuf {
-    if hpxml_dir == weather_dir {
-        return path.to_path_buf();
+/// Returns the weather filename for a building given its FIPS code and ResStock version.
+///
+/// Convention derived from the ResStock dataset and the Python `_fetch_weather` reference:
+/// - 2024.x (TMY3): `{fips}.epw` — the Python `_VersionConfig` defaults to
+///   `WeatherFormat.EPW` for TMY3 releases, producing EPW files via `get_epw_for_fips`.
+/// - 2025.1 (AMY 2018): `{fips}_2018.csv` — the Python `_VersionConfig` explicitly sets
+///   `weather_format=WeatherFormat.CSV` for this release.
+fn weather_filename_for_building(fips: &str, version: ResStockVersion) -> String {
+    match version {
+        ResStockVersion::V2024_1 | ResStockVersion::V2024_2 => format!("{fips}.epw"),
+        ResStockVersion::V2025_1 => format!("{fips}_2018.csv"),
     }
+}
 
-    match path.file_name() {
-        Some(file_name) => weather_dir.join(file_name),
-        None => weather_dir.to_path_buf(),
+/// Resolve the weather file path for a ResStock building using its FIPS code.
+///
+/// Constructs a path of the form `weather_dir/FILENAME` where FILENAME is
+/// version-dependent (e.g. `G0800130.epw` for 2024.x, `G0800130_2018.csv`
+/// for 2025.1).
+///
+/// Returns `None` if the building has no FIPS code.
+fn resolve_weather_path_for_building(
+    building: &ResStockBuilding,
+    weather_dir: &Path,
+    version: ResStockVersion,
+) -> Option<PathBuf> {
+    let fips = building.weather_fips.as_ref()?;
+    tracing::debug!(
+        bldg_id = building.bldg_id,
+        fips = fips.as_str(),
+        "extracted FIPS code from weather station"
+    );
+    let filename = weather_filename_for_building(fips, version);
+    Some(weather_dir.join(filename))
+}
+
+/// Check whether a path points to a readable weather file (not a ZIP).
+fn path_is_readable_weather_file(path: &Path) -> bool {
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+    if ext.eq_ignore_ascii_case("zip") {
+        return false;
     }
+    path.exists() && !path.is_dir()
 }
 
 /// IECC climate zone number ranges valid for each US state.
@@ -1200,33 +1273,164 @@ mod tests {
     }
 
     #[test]
-    fn test_remap_weather_path_same_dir_passthrough() {
-        let hpxml_dir = PathBuf::from("/data/buildings");
-        let weather_dir = PathBuf::from("/data/buildings");
-        let path = PathBuf::from("/data/buildings/USA_CO_Denver.epw");
-
-        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
-        assert_eq!(result, PathBuf::from("/data/buildings/USA_CO_Denver.epw"));
+    fn weather_filename_matches_dataset_conventions() {
+        assert_eq!(
+            weather_filename_for_building("G0800130", ResStockVersion::V2024_1),
+            "G0800130.epw"
+        );
+        assert_eq!(
+            weather_filename_for_building("G0800130", ResStockVersion::V2024_2),
+            "G0800130.epw"
+        );
+        assert_eq!(
+            weather_filename_for_building("G0800130", ResStockVersion::V2025_1),
+            "G0800130_2018.csv"
+        );
     }
 
     #[test]
-    fn test_remap_weather_path_different_dir_remaps() {
-        let hpxml_dir = PathBuf::from("/data/buildings");
+    fn test_resolve_weather_path_with_fips_2024_epw() {
+        let building = ResStockBuilding {
+            bldg_id: 1,
+            upgrade: 0,
+            sample_weight: 1.0,
+            hpxml_path: PathBuf::from("/data/bldg.zip"),
+            schedule_path: PathBuf::from("/data/bldg.zip"),
+            weather_path: None,
+            weather_fips: Some("G0800130".to_string()),
+            characteristics: HashMap::new(),
+        };
         let weather_dir = PathBuf::from("/data/weather");
-        let path = PathBuf::from("/data/buildings/USA_CO_Denver.epw");
-
-        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
-        assert_eq!(result, PathBuf::from("/data/weather/USA_CO_Denver.epw"));
+        let result =
+            resolve_weather_path_for_building(&building, &weather_dir, ResStockVersion::V2024_2);
+        assert_eq!(result, Some(PathBuf::from("/data/weather/G0800130.epw")));
     }
 
     #[test]
-    fn test_remap_weather_path_empty_path_uses_weather_dir() {
-        let hpxml_dir = PathBuf::from("/data/buildings");
+    fn test_resolve_weather_path_with_fips_2025_csv() {
+        let building = ResStockBuilding {
+            bldg_id: 2,
+            upgrade: 0,
+            sample_weight: 1.0,
+            hpxml_path: PathBuf::from("/data/bldg.zip"),
+            schedule_path: PathBuf::from("/data/bldg.zip"),
+            weather_path: None,
+            weather_fips: Some("G0800130".to_string()),
+            characteristics: HashMap::new(),
+        };
         let weather_dir = PathBuf::from("/data/weather");
-        let path = PathBuf::from("");
+        let result =
+            resolve_weather_path_for_building(&building, &weather_dir, ResStockVersion::V2025_1);
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/data/weather/G0800130_2018.csv"))
+        );
+    }
 
-        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
-        assert_eq!(result, PathBuf::from("/data/weather"));
+    #[test]
+    fn test_resolve_weather_path_without_fips_returns_none() {
+        let building = ResStockBuilding {
+            bldg_id: 1,
+            upgrade: 0,
+            sample_weight: 1.0,
+            hpxml_path: PathBuf::from("/data/bldg.zip"),
+            schedule_path: PathBuf::from("/data/bldg.zip"),
+            weather_path: None,
+            weather_fips: None,
+            characteristics: HashMap::new(),
+        };
+        let result = resolve_weather_path_for_building(
+            &building,
+            &PathBuf::from("/data/weather"),
+            ResStockVersion::V2024_2,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn path_is_readable_weather_file_rejects_zip() {
+        // Even if the path doesn't exist, a .zip extension should be rejected.
+        assert!(!path_is_readable_weather_file(Path::new("something.zip")));
+    }
+
+    #[test]
+    fn resolve_weather_path_matches_fixture_files() {
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/resstock");
+
+        // 2024.2 fixtures use {fips}.epw naming
+        {
+            let weather_dir = fixture_root.join("2024.2/weather");
+            assert!(
+                weather_dir.is_dir(),
+                "fixture weather directory missing: {weather_dir:?}"
+            );
+            let building = ResStockBuilding {
+                bldg_id: 1,
+                upgrade: 0,
+                sample_weight: 1.0,
+                hpxml_path: PathBuf::from(""),
+                schedule_path: PathBuf::from(""),
+                weather_path: None,
+                weather_fips: Some("G0800050".to_string()),
+                characteristics: HashMap::new(),
+            };
+            let resolved = resolve_weather_path_for_building(
+                &building,
+                &weather_dir,
+                ResStockVersion::V2024_2,
+            )
+            .expect("FIPS should produce a path");
+            assert_eq!(
+                resolved.file_name().unwrap(),
+                std::ffi::OsStr::new("G0800050.epw"),
+            );
+            assert!(
+                resolved.exists(),
+                "resolved 2024.2 path does not exist: {resolved:?}"
+            );
+            assert!(
+                path_is_readable_weather_file(&resolved),
+                "resolved 2024.2 path is not a readable weather file: {resolved:?}"
+            );
+        }
+
+        // 2025.1 fixtures use {fips}_2018.csv naming
+        {
+            let weather_dir = fixture_root.join("2025.1/weather");
+            assert!(
+                weather_dir.is_dir(),
+                "fixture weather directory missing: {weather_dir:?}"
+            );
+            let building = ResStockBuilding {
+                bldg_id: 2,
+                upgrade: 0,
+                sample_weight: 1.0,
+                hpxml_path: PathBuf::from(""),
+                schedule_path: PathBuf::from(""),
+                weather_path: None,
+                weather_fips: Some("G0100590".to_string()),
+                characteristics: HashMap::new(),
+            };
+            let resolved = resolve_weather_path_for_building(
+                &building,
+                &weather_dir,
+                ResStockVersion::V2025_1,
+            )
+            .expect("FIPS should produce a path");
+            assert_eq!(
+                resolved.file_name().unwrap(),
+                std::ffi::OsStr::new("G0100590_2018.csv"),
+            );
+            assert!(
+                resolved.exists(),
+                "resolved 2025.1 path does not exist: {resolved:?}"
+            );
+            assert!(
+                path_is_readable_weather_file(&resolved),
+                "resolved 2025.1 path is not a readable weather file: {resolved:?}"
+            );
+        }
     }
 
     #[test]
