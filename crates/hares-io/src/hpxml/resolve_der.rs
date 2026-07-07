@@ -151,7 +151,6 @@ pub(super) fn resolve_batteries(
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,

@@ -36,6 +36,7 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::CRANKCASE_KW, 0.0);
     // OCHRE HVAC.py:575: main_power = total_input - fan.
     telemetry.insert(tk::MAIN_POWER_KW, 0.0);
     // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
@@ -133,12 +134,18 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::COMPRESSOR_KW.to_string(),
             unit: "kW".to_string(),
-            description: "Compressor-only electric power".to_string(),
+            description: "Compressor-only electric power (space_fraction-scaled)".to_string(),
         },
         TelemetryField {
             name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
-            description: "Supply fan electric power".to_string(),
+            description: "Supply fan electric power (space_fraction-scaled)".to_string(),
+        },
+        TelemetryField {
+            name: tk::CRANKCASE_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Crankcase heater electric power (space_fraction-scaled, resistive Q=0)"
+                .to_string(),
         },
         TelemetryField {
             name: tk::MAIN_POWER_KW.to_string(),

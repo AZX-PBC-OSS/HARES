@@ -23,7 +23,7 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, loop_id_from_config, operating_mode_code, update_heating_control,
+        equipment_id_from_config, loop_id_from_config, update_heating_control,
         zone_id_from_config_or_default,
     },
 };
@@ -86,6 +86,9 @@ pub struct ElectricBoiler {
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
     default_return_temp_c: f64,
+    /// Hydronic circulation-pump electric draw [kW], from `fan_power_w`
+    /// (same config surface as the gas boiler; 0.0 when unspecified).
+    pump_kw: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     /// Cached from last update_control; true when timestep >= 5 min
@@ -97,9 +100,13 @@ pub struct ElectricBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
-    /// Q exactly zero, real power stays bit-identical.
+    /// Rule R1 reactive-only ZIP for the primary component (resistive
+    /// element, class default pf 1.0 → Q exactly zero); real power stays
+    /// bit-identical.
     zip: hares_types::zip::ZipLoad,
+    /// Hydronic circulation-pump motor component ZIP (pf 0.84), derived at
+    /// init via `hvac::reactive::secondary_motor_zip`.
+    pump_zip: hares_types::zip::ZipLoad,
 }
 
 pub struct GasBoiler {
@@ -197,6 +204,7 @@ impl ElectricBoiler {
             fluid_type: FluidType::Water,
             flow_rate_kg_s: 0.0,
             default_return_temp_c: DEFAULT_RETURN_TEMP_C,
+            pump_kw: 0.0,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
@@ -204,6 +212,7 @@ impl ElectricBoiler {
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ZipLoad::constant_power(),
+            pump_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
 }
@@ -228,9 +237,14 @@ impl Equipment for ElectricBoiler {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
+        // The circulation pump is a secondary motor component (pf 0.84); the
+        // unit ZIP describes the primary component (resistive element, pf 1.0).
+        self.pump_zip =
+            super::reactive::secondary_motor_zip(&self.zip, super::reactive::LOOP_PUMP_ZIP);
         let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
+        self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
         if let Some(lid) = typed.loop_id {
             self.loop_id = LoopId(lid);
         }
@@ -278,7 +292,16 @@ impl Equipment for ElectricBoiler {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
-        let electric_kw = power_w_to_kw(thermal_output_w * self.eir);
+        let element_kw = power_w_to_kw(thermal_output_w * self.eir);
+        // Circulation pump runs whenever the boiler delivers heat (same
+        // modeling as the gas boiler: contactor-switched, rated draw, not
+        // modulated by PLR).
+        let pump_kw = if thermal_output_w > 0.0 {
+            self.pump_kw * sf
+        } else {
+            0.0
+        };
+        let electric_kw = element_kw + pump_kw;
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -297,7 +320,11 @@ impl Equipment for ElectricBoiler {
             return_temp_c
         };
 
-        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
+        // Per-component reactive (see `hvac::reactive`): the resistance
+        // element at the unit ZIP (pf 1.0 → Q ≡ 0), the circulation pump
+        // motor at pf 0.84.
+        let reactive_power_kvar = self.zip.reactive_kvar(element_kw, env.grid.voltage_pu)
+            + self.pump_zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -326,6 +353,7 @@ impl Equipment for ElectricBoiler {
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::PUMP_POWER_KW, pump_kw);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
@@ -333,7 +361,7 @@ impl Equipment for ElectricBoiler {
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
@@ -415,10 +443,8 @@ impl Equipment for ElectricBoiler {
             .insert(tk::SUPPLY_TEMP_C, decoded.supply_temp_c);
         self.telemetry
             .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
-        self.telemetry.insert(
-            tk::OPERATING_MODE,
-            operating_mode_code(decoded.operating_mode),
-        );
+        self.telemetry
+            .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -715,7 +741,7 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
@@ -803,10 +829,8 @@ impl Equipment for GasBoiler {
             .insert(tk::SUPPLY_TEMP_C, decoded.supply_temp_c);
         self.telemetry
             .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
-        self.telemetry.insert(
-            tk::OPERATING_MODE,
-            operating_mode_code(decoded.operating_mode),
-        );
+        self.telemetry
+            .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -860,9 +884,10 @@ fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(9);
+    let mut telemetry = Telemetry::with_capacity(10);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    telemetry.insert(tk::PUMP_POWER_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
@@ -910,12 +935,18 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
-            description: "Electric boiler active power draw".to_string(),
+            description: "Electric boiler active power draw (element + circulation pump)"
+                .to_string(),
         },
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
             unit: "kVAR".to_string(),
             description: "Reactive power (positive = inductive/lagging)".to_string(),
+        },
+        TelemetryField {
+            name: tk::PUMP_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Hydronic circulation pump electric draw".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -2008,6 +2039,97 @@ mod tests {
         );
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
             .expect("validate_core_contract");
+    }
+
+    /// Electric boiler circulation-pump draw: `fan_power_w` (same config
+    /// surface as the gas boiler) adds a pump draw whenever the boiler
+    /// delivers heat, sub-metered via PUMP_POWER_KW, with per-component
+    /// reactive power (element pf 1.0 → Q ≡ 0; pump pf 0.84).
+    #[test]
+    fn electric_boiler_pump_draw_real_and_reactive() {
+        const CAPACITY_W: f64 = 8_000.0;
+        const EIR: f64 = 1.0;
+        const PUMP_W: f64 = 87.0;
+
+        let cfg = EquipmentConfig::from_typed(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: EIR,
+                capacity_w: CAPACITY_W,
+                fan_power_w: Some(PUMP_W),
+                ..ElectricBoilerConfig::default()
+            },
+        )
+        .unwrap();
+        let cold_env = env(18.0);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        eq.init(&cfg, &cold_env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&cold_env);
+        eq.step(&cold_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // Real power: element + pump.
+        let expected_w = CAPACITY_W * EIR + PUMP_W;
+        let p_w = ports.electrical.net_active_w();
+        assert!(
+            (p_w - expected_w).abs() < 1e-6,
+            "electric boiler draw must include the pump: {p_w} W vs expected {expected_w} W"
+        );
+        let pump_kw = eq.telemetry().get(tk::PUMP_POWER_KW).unwrap();
+        assert!(
+            (pump_kw - PUMP_W / 1000.0).abs() < 1e-12,
+            "PUMP_POWER_KW sub-meter must report the pump draw; got {pump_kw}"
+        );
+
+        // Reactive: element Q ≡ 0 (pf 1.0), pump at the loop-pump component
+        // (pf 0.84, reactive polynomial sums to 1.0 at nominal voltage).
+        let q = ports.electrical.reactive_power_kvar;
+        let expected_q = pump_kw * 0.84_f64.acos().tan();
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "Q must come from the pump component alone: {q} vs {expected_q}"
+        );
+        assert_eq!(
+            eq.core_output().flows.reactive_power_kvar.map(f64::to_bits),
+            Some(q.to_bits()),
+            "CoreOutput Q must match port Q"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::REACTIVE_POWER_KVAR)
+                .map(f64::to_bits),
+            Some(q.to_bits()),
+            "telemetry Q must match port Q"
+        );
+
+        // Off: no thermal output → no pump draw, Q back to zero.
+        let warm_env = env(25.0);
+        eq.update_control(&warm_env);
+        let mut off_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&warm_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        assert_eq!(off_ports.electrical.load_power_w, 0.0);
+        assert_eq!(eq.telemetry().get(tk::PUMP_POWER_KW), Some(0.0));
+        assert_eq!(off_ports.electrical.reactive_power_kvar, 0.0);
     }
 
     #[test]

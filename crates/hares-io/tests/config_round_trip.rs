@@ -456,7 +456,6 @@ fn sample_battery_config() -> BatteryConfig {
         export_limit_w: Some(5_000.0),
         heater_power_w: Some(250.0),
         heater_threshold_c: Some(0.0),
-        heater_on_discharge: Some(false),
         min_discharge_temp_c: Some(-10.0),
         full_power_temp_c: Some(20.0),
         min_charge_temp_c: Some(0.0),

@@ -28,7 +28,7 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config_or_default},
+    helpers::{equipment_id_from_config, zone_id_from_config_or_default},
 };
 
 /// Biquadratic curve pair (capacity + EIR) with shared input bounds.
@@ -735,7 +735,7 @@ impl Equipment for IdealHvac {
         }
         self.telemetry.set(tk::FAN_HEAT_W, fan_power_w);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode.as_code());
         self.telemetry
             .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
         self.telemetry.set(

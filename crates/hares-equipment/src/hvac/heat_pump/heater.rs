@@ -35,9 +35,7 @@ use super::constants::{
 use super::defrost::{
     DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostStrategy, evaluate_defrost,
 };
-use super::heater_config::{
-    default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
-};
+use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
 use hares_physics::biquadratic::biquadratic;
 use hares_physics::ground::SourceTemperature;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
@@ -231,7 +229,6 @@ struct HeaterState {
     electric_kw: f64,
     thermal_output_w: f64,
     speed_index: f64,
-    operating_mode_code: f64,
     prev_base_setpoint: f64,
     er_lockout_remaining_s: f64,
     prev_zone_temp_c: f64,
@@ -255,7 +252,9 @@ struct HeaterState {
     time_at_current_speed_s: f64,
 }
 
-const HEATER_CHECKPOINT_VERSION: u32 = 1;
+// Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
+// code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
+const HEATER_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 struct HeaterControl {
@@ -1316,7 +1315,7 @@ impl HeatPumpHeaterCore {
         self.telemetry
             .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         self.telemetry.set(
@@ -1904,6 +1903,11 @@ impl HeatPumpHeaterCore {
         // Apply control multipliers: DutyCycle (sticky) × LoadFraction (transient)
         // × DR load fraction × DR duty cycle.
         // ER is on/off -- not modulatable -- so only compressor and fan are scaled.
+        // The resistive defrost element is likewise a protective, deterministic
+        // draw (it must fully clear the outdoor coil): like ER it is on/off and
+        // exempt from duty-cycle curtailment. Its thermal output is already
+        // carried unscaled inside er_capacity_w (see the Resistive branch above),
+        // so the electric side must stay unscaled too.
         let effective_load = self.ctrl_duty_cycle
             * self.ctrl_load_fraction
             * self.dr_load_fraction
@@ -1913,13 +1917,14 @@ impl HeatPumpHeaterCore {
             let er_thermal = er_capacity_w;
             thermal_output_w = hp_thermal * effective_load + er_thermal;
             let hp_electric = power_w_to_kw(hp_electric_w + fan_power_w + pan_heater_w);
-            let er_electric = power_w_to_kw(er_electric_w);
+            let er_electric = power_w_to_kw(er_electric_w + defrost_resistive_electric_w);
             electric_kw = hp_electric * effective_load + er_electric;
             compressor_kw *= effective_load;
             fan_kw *= effective_load;
             step_pan_heater_kw *= effective_load;
             step_hp_capacity_w *= effective_load;
-            // backup_er_kw, fuel_w, and step_er_capacity_w are not scaled (ER is not modulatable)
+            // backup_er_kw, fuel_w, step_er_capacity_w, and
+            // defrost_resistive_electric_w are not scaled (on/off elements)
         }
 
         // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
@@ -2314,7 +2319,6 @@ impl HeatPumpHeaterCore {
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
-                operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
                 prev_base_setpoint: self.prev_base_setpoint,
                 er_lockout_remaining_s: self.er_lockout_remaining_s,
                 prev_zone_temp_c: self.prev_zone_temp_c,
@@ -2389,7 +2393,7 @@ impl HeatPumpHeaterCore {
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry.insert(tk::SPEED_INDEX, decoded.speed_index);
         self.telemetry
-            .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
+            .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         self.telemetry.insert(
             tk::DEFROST_ACTIVE,
             if decoded.defrost_active { 1.0 } else { 0.0 },
@@ -3842,7 +3846,7 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        // operating_mode telemetry code 0.0 = Off (matches OPERATING_MODE_CODE_OFF)
+        // operating_mode telemetry code 0.0 = OperatingMode::Off.as_code()
         assert_eq!(
             eq.telemetry().get(tk::OPERATING_MODE),
             Some(0.0),
@@ -5435,6 +5439,110 @@ mod tests {
             (electric_kw - er_full_kw).abs() < 0.01,
             "ER power must remain full ({er_full_kw:.3} kW) even with 50% duty cycle; \
              got {electric_kw:.3} kW"
+        );
+    }
+
+    // Resistive defrost is a protective, deterministic draw: like ER it must
+    // NOT be scaled by duty-cycle curtailment. With a DutyCycle=0.5 control and
+    // discrete resistive defrost active (compressor+fan+ER all zero), the unit
+    // draw must equal the full defrost element power, not half (and previously
+    // the defrost draw was dropped from electric_kw entirely in this branch).
+    #[test]
+    fn duty_cycle_scaling_does_not_reduce_resistive_defrost_draw() {
+        use crate::hvac::heat_pump::defrost::{DefrostCycleState, DefrostStrategy};
+
+        const DEFROST_ELEMENT_W: f64 = 3_000.0;
+        const DEFROST_CONTROL_W: f64 = 200.0;
+        let defrost_kw = (DEFROST_ELEMENT_W + DEFROST_CONTROL_W) / 1000.0;
+
+        let run = |duty: f64| -> (f64, f64) {
+            let cfg = heater_config_with(|typed| {
+                // HP-only: no backup ER, no fan, so the defrost element is the
+                // only draw during discrete resistive defrost.
+                typed.common.backup_capacity_w = Some(0.0);
+                typed.common.fan_power_w = Some(0.0);
+                typed.defrost = DefrostConfig {
+                    strategy: DefrostStrategy::Resistive,
+                    resistive_defrost_capacity_w: DEFROST_ELEMENT_W,
+                    defrost_power_w: DEFROST_CONTROL_W,
+                    ..DefrostConfig::default()
+                };
+            });
+            let e = env(18.0, 0.0, 0.005);
+            let mut eq = ASHPHeater::new(cfg.clone());
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.init(&cfg, &e).unwrap();
+            let mode = eq.update_control(&e);
+            assert_eq!(mode, OperatingMode::HeatingHP, "must be HP-only mode");
+
+            // Force the discrete defrost FSM into Defrosting for this step.
+            eq.core.defrost_cycle_tracker.state = DefrostCycleState::Defrosting;
+            eq.core.defrost_cycle_tracker.defrost_elapsed_s = 0.0;
+
+            eq.apply_control(&ControlSignal::DutyCycle {
+                on_fraction: duty,
+                period_s: None,
+                component: None,
+            })
+            .unwrap();
+            eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+            (
+                eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                eq.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap_or(-1.0),
+            )
+        };
+
+        let (full_kw, full_q) = run(1.0);
+        let (curtailed_kw, curtailed_q) = run(0.5);
+        assert!(
+            (full_kw - defrost_kw).abs() < 1e-9,
+            "uncurtailed resistive defrost draw must be {defrost_kw:.3} kW; got {full_kw:.3}"
+        );
+        assert!(
+            (curtailed_kw - defrost_kw).abs() < 1e-9,
+            "resistive defrost draw must remain {defrost_kw:.3} kW under 50% duty cycle \
+             (protective on/off element, like ER); got {curtailed_kw:.3} kW"
+        );
+        // Defrost element is resistive: Q stays exactly zero in both cases.
+        assert_eq!(full_q, 0.0, "resistive defrost must produce Q == 0");
+        assert_eq!(curtailed_q, 0.0, "resistive defrost must produce Q == 0");
+    }
+
+    // Telemetry OPERATING_MODE must use the canonical OperatingMode::as_code()
+    // encoding — the single source of truth shared with the CSV "Mode" columns.
+    // (The legacy parallel HVAC encoding 3/4/5 for HP/HP+ER/ER is deleted.)
+    #[test]
+    fn telemetry_operating_mode_uses_canonical_as_code_encoding() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0); // HP locked out at OAT 0 → ER-only
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+        let e = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingER);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let code = eq.telemetry().get(tk::OPERATING_MODE);
+        assert_eq!(
+            code,
+            Some(OperatingMode::HeatingER.as_code()),
+            "telemetry mode code must be OperatingMode::as_code() (HeatingER = 8)"
+        );
+        assert_eq!(code, Some(8.0));
+        assert_eq!(
+            eq.core_output().state.operating_mode.map(|m| m.as_code()),
+            code,
+            "telemetry and CoreOutput must agree on the canonical encoding"
         );
     }
 

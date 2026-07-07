@@ -1013,10 +1013,6 @@ impl Battery {
             }
         }
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
-        // NOTE: c.heater_on_discharge is intentionally not read. The heater
-        // activates on cell temperature alone (see the cell-heater block in
-        // step()), which is a superset of discharge-gated activation; the
-        // config knob is retained only for serialization compatibility.
         self.min_discharge_temp_c = c
             .min_discharge_temp_c
             .unwrap_or(DEFAULT_MIN_DISCHARGE_TEMP_C);
@@ -2069,7 +2065,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -2142,7 +2137,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5498,7 +5492,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5571,7 +5564,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5644,7 +5636,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5709,7 +5700,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5853,7 +5843,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -5935,7 +5924,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -6077,7 +6065,6 @@ mod tests {
                         export_limit_w: None,
                         heater_power_w: None,
                         heater_threshold_c: None,
-                        heater_on_discharge: None,
                         min_discharge_temp_c: None,
                         full_power_temp_c: None,
                         min_charge_temp_c: None,

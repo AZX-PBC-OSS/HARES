@@ -358,14 +358,22 @@ mod tests {
 
     #[test]
     fn panic_payload_still_readable_when_hook_not_installed() {
-        // Simulate a panic *without* the hook installed.
+        // The panic hook is process-global: sibling tests in this binary
+        // legitimately hold `PanicHookGuard`s on other threads, so this test
+        // cannot assume the hook is uninstalled while it panics (asserting on
+        // that shared state was a race). What "hook not installed" actually
+        // means for `panic_payload_to_string` is that this thread's
+        // PANIC_INFO cell holds no capture — the default hook never populates
+        // it. Reproduce that state race-free by clearing the (thread-local,
+        // unshareable) cell after the panic and before conversion.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             panic!("raw message without hook");
         }));
 
         assert!(result.is_err());
+        PANIC_INFO.with(|cell| *cell.borrow_mut() = None);
         let msg = panic_payload_to_string(result.unwrap_err());
-        // Should fall back to the raw payload string.
+        // Must fall back to the raw payload string, with no location prefix.
         assert_eq!(msg, "raw message without hook");
     }
 

@@ -158,24 +158,6 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
     }
 }
 
-pub fn operating_mode_code(mode: OperatingMode) -> f64 {
-    match mode {
-        OperatingMode::Off => 0.0,
-        OperatingMode::Heating => 1.0,
-        OperatingMode::Cooling => 2.0,
-        OperatingMode::HeatingHP => 3.0,
-        OperatingMode::HeatingHPAndER => 4.0,
-        OperatingMode::HeatingER => 5.0,
-        OperatingMode::HeatPumpWH => 6.0,
-        OperatingMode::BackupElement => 7.0,
-        OperatingMode::Defrost => 8.0,
-        OperatingMode::Standby => 9.0,
-        OperatingMode::Charging => 10.0,
-        OperatingMode::Discharging => 11.0,
-        OperatingMode::On => 12.0,
-    }
-}
-
 /// Shared `update_control` logic for simple heating equipment.
 ///
 /// Runs the thermostat FSM and returns the resulting `OperatingMode`.
@@ -478,7 +460,7 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
 
 #[cfg(test)]
 mod tests {
-    use hares_types::{FuelType, OperatingMode};
+    use hares_types::FuelType;
 
     use crate::{
         EquipmentConfig,
@@ -486,8 +468,8 @@ mod tests {
     };
 
     use super::{
-        equipment_id_from_config, loop_id_from_config, operating_mode_code, parse_fuel_type,
-        parse_zone_id_key, zone_id_from_config, zone_id_from_config_or_default,
+        equipment_id_from_config, loop_id_from_config, parse_fuel_type, parse_zone_id_key,
+        zone_id_from_config, zone_id_from_config_or_default,
     };
 
     #[test]
@@ -538,48 +520,6 @@ mod tests {
             None,
             "unknown fuel should return None"
         );
-    }
-
-    #[test]
-    fn operating_mode_code_covers_all_variants() {
-        // Each variant must map to a unique, non-negative code.
-        // Codes must match the values used in heater.rs constants and OCHRE telemetry.
-        let cases: &[(OperatingMode, f64)] = &[
-            (OperatingMode::Off, 0.0),
-            (OperatingMode::Heating, 1.0),
-            (OperatingMode::Cooling, 2.0),
-            (OperatingMode::HeatingHP, 3.0),
-            (OperatingMode::HeatingHPAndER, 4.0),
-            (OperatingMode::HeatingER, 5.0),
-            (OperatingMode::HeatPumpWH, 6.0),
-            (OperatingMode::BackupElement, 7.0),
-            (OperatingMode::Defrost, 8.0),
-            (OperatingMode::Standby, 9.0),
-            (OperatingMode::Charging, 10.0),
-            (OperatingMode::Discharging, 11.0),
-            (OperatingMode::On, 12.0),
-        ];
-
-        for &(mode, expected) in cases {
-            let got = operating_mode_code(mode);
-            assert_eq!(
-                got, expected,
-                "{mode:?} must map to code {expected}, got {got}"
-            );
-            assert!(got >= 0.0, "{mode:?} must not return a negative code");
-        }
-
-        // All codes must be distinct (no two modes share a telemetry code).
-        let codes: Vec<f64> = cases.iter().map(|&(m, _)| operating_mode_code(m)).collect();
-        for i in 0..codes.len() {
-            for j in (i + 1)..codes.len() {
-                assert_ne!(
-                    codes[i], codes[j],
-                    "modes {:?} and {:?} must have distinct codes",
-                    cases[i].0, cases[j].0
-                );
-            }
-        }
     }
 
     #[test]

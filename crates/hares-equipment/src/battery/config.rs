@@ -54,7 +54,6 @@ pub struct BatteryConfig {
     // Heater
     pub heater_power_w: Option<f64>,
     pub heater_threshold_c: Option<f64>,
-    pub heater_on_discharge: Option<bool>,
 
     // Thermal model
     pub min_discharge_temp_c: Option<f64>,
@@ -205,7 +204,6 @@ mod tests {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,

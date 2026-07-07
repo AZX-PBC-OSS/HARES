@@ -114,7 +114,7 @@ The real-power polynomial (`zp`, `ip`, `pp`) is also defined per class in the so
 | Gas Furnace (blower) | 0.87 | No | Fan motor only |
 | Electric Furnace | 1.0 element | No | Per-component: element Q≡0 + blower fan 0.87 |
 | Gas Boiler (pump) | 0.84 | No | Circulation pump only |
-| Electric Boiler | 1.0 | No | Element only, Q=Some(0.0) |
+| Electric Boiler | 1.0 element | No | Per-component: element Q≡0 + circulation pump 0.84 (`fan_power_w`, 0 W default) |
 | Ventilation/HRV/ERV | 0.87 | No | Same PF whether ScheduledLoad or typed ventilation model |
 | HPWH | 0.97 | No | Blended on total (compressor + backup + fan) |
 | Resistance WH | 1.0 | No | Q=Some(0.0) — resistive element |

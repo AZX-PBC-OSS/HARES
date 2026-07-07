@@ -24,8 +24,7 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, operating_mode_code, update_heating_control,
-        zone_id_from_config_or_default,
+        equipment_id_from_config, update_heating_control, zone_id_from_config_or_default,
     },
 };
 
@@ -203,7 +202,7 @@ impl Equipment for ElectricBaseboard {
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.core_output = CoreOutput {
@@ -272,10 +271,8 @@ impl Equipment for ElectricBaseboard {
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
-        self.telemetry.insert(
-            tk::OPERATING_MODE,
-            operating_mode_code(decoded.operating_mode),
-        );
+        self.telemetry
+            .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         self.core_output = CoreOutput::default();
         Ok(())
     }

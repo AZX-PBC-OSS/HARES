@@ -608,7 +608,9 @@ impl Equipment for GshpCooler {
         let tel = self.inner.telemetry();
         let coil_sens_w = tel.get(tk::COIL_SENSIBLE_COOLING_W).unwrap_or(0.0);
         let coil_lat_w = tel.get(tk::COIL_LATENT_COOLING_W).unwrap_or(0.0);
-        let compressor_kw = tel.get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        // Gross compressor power (pre-space_fraction) to match the gross coil
+        // values above; COMPRESSOR_KW telemetry is scaled by space_fraction.
+        let compressor_kw = self.inner.core.last_compressor_kw;
         let borehole_heat_w = coil_sens_w + coil_lat_w + compressor_kw * KW_TO_W;
         self.inner
             .core
@@ -617,7 +619,11 @@ impl Equipment for GshpCooler {
 
         // Ground-loop circulation pump: runs whenever the GSHP compressor is
         // active. `last_cooling_rtf > 0` means the compressor was on this step.
+        // space_fraction scales the pump draw exactly like the inner unit's
+        // compressor/fan/crankcase (the GSHP heater likewise applies
+        // space_fraction to its combined electric_kw, pump included).
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
+        let sf = self.inner.core.hvac.config.space_fraction;
         let pump_kw = if compressor_ran {
             hares_physics::pump::compute_ground_loop_pump_power_kw(
                 self.pump_loop_depth_m,
@@ -626,7 +632,7 @@ impl Equipment for GshpCooler {
                 self.pump_efficiency,
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
-            )
+            ) * sf
         } else {
             0.0
         };
@@ -939,7 +945,10 @@ impl Equipment for WshpCooler {
     ) -> std::result::Result<(), HaresError> {
         self.inner.step(env, dt, ports)?;
 
+        // space_fraction scales the pump draw exactly like the inner unit's
+        // compressor/fan (see GshpCooler::step).
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
+        let sf = self.inner.core.hvac.config.space_fraction;
         let pump_kw = if compressor_ran {
             hares_physics::pump::compute_ground_loop_pump_power_kw(
                 self.pump_loop_depth_m,
@@ -948,7 +957,7 @@ impl Equipment for WshpCooler {
                 self.pump_efficiency,
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
-            )
+            ) * sf
         } else {
             0.0
         };

@@ -31,9 +31,7 @@ use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
-    helpers::{
-        equipment_id_from_config, lookup_zone, operating_mode_code, zone_id_from_config_or_default,
-    },
+    helpers::{equipment_id_from_config, lookup_zone, zone_id_from_config_or_default},
 };
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
@@ -72,6 +70,11 @@ pub(super) struct CoolingCore {
     /// Runtime fraction of the cooling coil in the most recent step (PLR value).
     /// Used so the HP system can pass it as companion RTF to the heater side.
     pub(super) last_cooling_rtf: f64,
+    /// Gross compressor power of the most recent step [kW], before the
+    /// `space_fraction` scaling applied to telemetry. Used by the GSHP cooler
+    /// for the borehole heat-rejection balance, which pairs it with the gross
+    /// (unscaled) coil sensible/latent values.
+    pub(super) last_compressor_kw: f64,
     flow_fraction_correction: f64,
     coil_ao_by_stage: Vec<f64>,
     is_room_ac: bool,
@@ -145,7 +148,6 @@ struct AirConditionerState {
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
     shr: f64,
-    operating_mode_code: f64,
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
@@ -163,7 +165,9 @@ struct AirConditionerState {
     time_at_current_speed_s: f64,
 }
 
-const AC_CHECKPOINT_VERSION: u32 = 1;
+// Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
+// code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
+const AC_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 struct PerformanceResult {
@@ -524,6 +528,7 @@ impl CoolingCore {
             crankcase_threshold_c: CRANKCASE_HEATER_THRESHOLD_C,
             crankcase_capacity_curve: None,
             last_cooling_rtf: 0.0,
+            last_compressor_kw: 0.0,
             flow_fraction_correction: 1.0,
             coil_ao_by_stage: vec![10.0],
             is_room_ac,
@@ -1004,6 +1009,7 @@ impl CoolingCore {
             self.crankcase_heater_kw = crankcase_kw;
         }
 
+        self.last_compressor_kw = compressor_kw;
         let sf = self.hvac.config.space_fraction;
         let electric_kw = (compressor_kw + fan_kw + self.crankcase_heater_kw) * sf;
         // Rule R1: Q from the already-computed real power, per component
@@ -1056,7 +1062,7 @@ impl CoolingCore {
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
         self.telemetry
-            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry.set(
             tk::COOLING_OAT_LOCKOUT,
             if self.cooling_oat_locked_out {
@@ -1086,8 +1092,12 @@ impl CoolingCore {
         self.telemetry.set(tk::COP, cop);
         self.telemetry
             .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
-        self.telemetry.set(tk::COMPRESSOR_KW, compressor_kw);
-        self.telemetry.set(tk::FAN_KW, fan_kw);
+        // Sub-metering telemetry is scaled by space_fraction, matching ELECTRIC_KW
+        // and MAIN_POWER_KW, so per-component telemetry sums to the unit total.
+        self.telemetry.set(tk::COMPRESSOR_KW, compressor_kw * sf);
+        self.telemetry.set(tk::FAN_KW, fan_kw * sf);
+        self.telemetry
+            .set(tk::CRANKCASE_KW, self.crankcase_heater_kw * sf);
         self.telemetry
             .set(tk::SUPPLY_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry
@@ -1537,7 +1547,6 @@ impl CoolingCore {
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
                 shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
-                operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
                 ctrl_duty_cycle: self.ctrl_duty_cycle,
                 ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
                     Some(self.ctrl_power_limit_kw)
@@ -1603,7 +1612,7 @@ impl CoolingCore {
             .insert(tk::LATENT_COOLING_W, decoded.latent_cooling_w);
         self.telemetry.insert(tk::SHR, decoded.shr);
         self.telemetry
-            .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
+            .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Telemetry fields are recomputed on next step; not restored from checkpoint.
         // Setpoints, COP, fan_kw, etc. will be updated on the next step() call.
         self.core_output = CoreOutput::default();
@@ -3335,10 +3344,74 @@ mod tests {
 
         let main_kw = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
         let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
-        let sf = eq.core.hvac.config.space_fraction;
+        // Both telemetry values are space_fraction-scaled, so they are equal.
         assert!(
-            (main_kw - compressor_kw * sf).abs() < 1e-9,
-            "AC main_power must equal compressor_kw * space_fraction, got main={main_kw} compressor={compressor_kw} sf={sf}"
+            (main_kw - compressor_kw).abs() < 1e-9,
+            "AC main_power must equal compressor_kw telemetry (both space_fraction-scaled), \
+             got main={main_kw} compressor={compressor_kw}"
+        );
+    }
+
+    /// Sub-metering telemetry (COMPRESSOR_KW, FAN_KW, CRANKCASE_KW) must be
+    /// scaled by space_fraction consistently with ELECTRIC_KW so components
+    /// always sum to the unit total.
+    #[test]
+    fn ac_submeter_components_scaled_by_space_fraction_sum_to_total() {
+        let sum_matches_total = |eq: &AirConditioner, label: &str| {
+            let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap();
+            let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+            let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap();
+            let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
+            assert!(
+                (compressor_kw + fan_kw + crankcase_kw - electric_kw).abs() < 1e-12,
+                "{label}: sub-meter components must sum to the unit total: \
+                 compressor={compressor_kw} + fan={fan_kw} + crankcase={crankcase_kw} \
+                 != electric={electric_kw}"
+            );
+            electric_kw
+        };
+
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env(28.0, 0.009, 19.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+        eq.core.hvac.config.space_fraction = 0.6;
+
+        // Phase 1: active cooling (warm OAT, no crankcase draw).
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+        let electric_kw = sum_matches_total(&eq, "cooling");
+        assert!(electric_kw > 0.0, "cooling call must draw power");
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        // Gross compressor power stays unscaled for companion physics
+        // (GSHP borehole balance); the telemetry sub-meter is scaled.
+        assert!(
+            (compressor_kw - eq.core.last_compressor_kw * 0.6).abs() < 1e-12,
+            "COMPRESSOR_KW telemetry must be gross * space_fraction"
+        );
+
+        // Phase 2: compressor off at cold OAT — crankcase heater carries the
+        // whole (scaled) draw and the sum invariant still holds.
+        let off_env = env(21.0, 0.006, 18.0, 5.0);
+        eq.update_control(&off_env);
+        let mut off_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
+            .unwrap();
+        let electric_kw = sum_matches_total(&eq, "crankcase standby");
+        let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
+        assert!(
+            crankcase_kw > 0.0 && (electric_kw - crankcase_kw).abs() < 1e-12,
+            "cold-OAT standby draw must be the crankcase heater alone \
+             (crankcase={crankcase_kw}, electric={electric_kw})"
         );
     }
 

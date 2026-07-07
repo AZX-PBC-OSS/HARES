@@ -4,6 +4,24 @@
 
 HVAC equipment in HARES covers heating, cooling, and dehumidification for conditioned zones. All HVAC models share a common thermostat FSM and duct distribution system, with equipment-specific physics for capacity and efficiency.
 
+## Operating-Mode Codes
+
+There is exactly one numeric encoding of operating modes: `OperatingMode::as_code()` (`crates/hares-types/src/equipment.rs`), the `#[repr(u8)]` enum discriminant as `f64`. The `operating_mode` telemetry key, the CSV/Parquet "Mode" columns, and the Parquet `MODE_ORDINALS` metadata (`crates/hares-io/src/output/columns.rs`) all use it.
+
+| Code | Mode | | Code | Mode |
+|------|------|-|------|------|
+| 0 | Off | | 7 | HeatingHP |
+| 1 | Heating | | 8 | HeatingER |
+| 2 | Cooling | | 9 | HeatingHPAndER |
+| 3 | Defrost | | 10 | HeatPumpWH |
+| 4 | Standby | | 11 | BackupElement |
+| 5 | Charging | | 12 | On |
+| 6 | Discharging | | | |
+
+## Sub-Metering Telemetry
+
+Per-component power telemetry (`compressor_kw`, `fan_kw`, `crankcase_kw`, `backup_er_kw`, `pan_heater_kw`, `pump_power_kw`) is scaled by `space_fraction` consistently with `electric_kw`, so components sum to the unit total. Gross (unscaled) values used for companion physics (e.g. the GSHP borehole balance) are kept in equipment state, not telemetry. Exception: `defrost_extra_power_w` is a diagnostic in W of the defrost draw at the unit (for reverse-cycle defrost it is already contained in `compressor_kw`; for resistive defrost it is a separate resistive element reported only by this key).
+
 ## Heat Pump
 
 **Source**: `crates/hares-equipment/src/hvac/heat_pump/`
@@ -158,15 +176,19 @@ graph LR
 - Efficiency as biquadratic function of PLR and return water temperature
 - Condensing mode: different EIR curve coefficients for better low-load performance
 
+### Circulation Pump
+
+Both boilers model a hydronic circulation-pump electric draw from the shared `fan_power_w` config field (0 W when unspecified; HPXML `<extension>/<FanPowerWatts>`). The pump is contactor-switched: rated draw whenever the boiler delivers heat, not modulated by PLR.
+
 ### Port Interactions
 
 - **Hydronic loop**: supply/return temperatures, mass flow rate, FluidType (Water/Glycol)
-- **Electrical**: pump power plus reactive per [power-factor.md](./power-factor.md)
+- **Electrical**: element (electric boiler) plus pump power, reactive per [power-factor.md](./power-factor.md)
 - **Thermal**: parasitic losses to zone
 
-**Reactive power**: Gas boiler circulation pump PF 0.84 (PUMPS class); electric boiler element PF 1.0 (Q=Some(0.0) — resistive).
+**Reactive power**: Gas boiler circulation pump PF 0.84 (PUMPS class, primary component). Electric boiler is per-component: element PF 1.0 (Q ≡ 0, primary) + circulation pump PF 0.84 (`LOOP_PUMP_ZIP` secondary component).
 
-**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `supply_temp_c`, `return_temp_c`, `reactive_power_kvar`
+**Telemetry**: `electric_kw`, `thermal_output_w`, `operating_mode`, `supply_temp_c`, `return_temp_c`, `reactive_power_kvar`, `pump_power_kw` (electric boiler)
 
 ---
 

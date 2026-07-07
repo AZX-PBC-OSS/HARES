@@ -446,7 +446,6 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
         export_limit_w: battery.export_limit_w,
         heater_power_w: battery.heater_power_w,
         heater_threshold_c: battery.heater_threshold_c,
-        heater_on_discharge: None,
         min_discharge_temp_c: None,
         full_power_temp_c: battery.full_power_temp_c,
         min_charge_temp_c: battery.min_charge_temp_c,

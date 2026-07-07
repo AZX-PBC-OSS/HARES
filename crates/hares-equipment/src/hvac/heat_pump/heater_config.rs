@@ -1,20 +1,15 @@
 //! Configuration parsing and initialization helpers for heat-pump heaters.
 
-use hares_types::{Telemetry, TelemetryField, telemetry_keys as tk};
+use hares_types::{OperatingMode, Telemetry, TelemetryField, telemetry_keys as tk};
 
 use super::constants::HEATER_TELEMETRY_CAPACITY;
-
-const OPERATING_MODE_CODE_OFF: f64 = 0.0;
-const OPERATING_MODE_CODE_HP_ON: f64 = 3.0;
-const OPERATING_MODE_CODE_HP_ER_ON: f64 = 4.0;
-const OPERATING_MODE_CODE_ER_ON: f64 = 5.0;
 
 pub(super) fn default_heater_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(HEATER_TELEMETRY_CAPACITY);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
-    telemetry.insert(tk::OPERATING_MODE, OPERATING_MODE_CODE_OFF);
+    telemetry.insert(tk::OPERATING_MODE, OperatingMode::Off.as_code());
     telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry.insert(tk::DEFROST_ACTIVE, 0.0);
     telemetry.insert(tk::COP, 0.0);
@@ -87,7 +82,9 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
-            description: "Operating mode code".to_string(),
+            description: "Operating mode code (OperatingMode::as_code): 0=Off, \
+                          7=HeatingHP, 8=HeatingER, 9=HeatingHPAndER"
+                .to_string(),
         },
         TelemetryField {
             name: tk::SPEED_INDEX.to_string(),
@@ -337,14 +334,4 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             description: "Seconds since the last thermostat mode change".to_string(),
         },
     ]
-}
-
-pub(super) fn operating_mode_code(mode: hares_types::OperatingMode) -> f64 {
-    match mode {
-        hares_types::OperatingMode::Off => OPERATING_MODE_CODE_OFF,
-        hares_types::OperatingMode::HeatingHP => OPERATING_MODE_CODE_HP_ON,
-        hares_types::OperatingMode::HeatingHPAndER => OPERATING_MODE_CODE_HP_ER_ON,
-        hares_types::OperatingMode::HeatingER => OPERATING_MODE_CODE_ER_ON,
-        _ => OPERATING_MODE_CODE_OFF,
-    }
 }

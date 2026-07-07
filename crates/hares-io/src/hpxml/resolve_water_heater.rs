@@ -177,7 +177,7 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
-                    pilot_power_w: child_f64(wh, "PilotPower").map(conv::power_btu_h_to_w),
+                    pilot_power_w: child_pilot_power_w(wh),
                     flue_loss_fraction: gas_flue_loss_fraction,
                     skin_loss_fraction: None,
                     ignition_type: child_text(wh, "IgnitionType"),
@@ -771,6 +771,34 @@ fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
                 value,
                 field = child_name,
                 "unrecognized power unit; accepted: W, kW — ignoring value"
+            );
+            None
+        }
+    }
+}
+
+/// Parse the `PilotPower` child element into SI watts, honouring an optional
+/// HPXML `units` attribute (SI-at-the-boundary policy: never read an HPXML
+/// numeric without checking its declared units). HPXML expresses pilot-light
+/// power in Btu/h — the sibling HVAC convention is literally named
+/// `PilotLightBtuh` (see vendors/OCHRE/test/OS-HPXML Sample Files/
+/// base-hvac-furnace-gas-only-pilot.xml and OCHRE's parser,
+/// vendors/OCHRE/ochre/utils/hpxml.py:845) — so `Btuh` is the default when no
+/// `units` attribute is present. An explicit `W` is accepted as-is.
+/// Unrecognized units are rejected (with a warning) rather than guessed.
+fn child_pilot_power_w(node: &XmlNode) -> Option<f64> {
+    let el = node.child("PilotPower")?;
+    let value = hares_types::parse_trimmed_f64(&el.text)?;
+    let units = el.attrs.get("units").map(String::as_str).unwrap_or("Btuh");
+    match units.to_ascii_lowercase().as_str() {
+        "btuh" | "btu/h" | "btu/hr" => Some(conv::power_btu_h_to_w(value)),
+        "w" | "watts" => Some(value),
+        other => {
+            tracing::warn!(
+                units = other,
+                value,
+                field = "PilotPower",
+                "unrecognized power unit; accepted: Btuh, W — ignoring value"
             );
             None
         }
@@ -1859,10 +1887,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pilot_power_btu_h_converted_to_watts() {
-        let ignition_elem = "                      <PilotPower>600</PilotPower>\n";
-        let xml = format!(
+    fn gas_wh_xml_with_pilot_power(pilot_power_elem: &str) -> String {
+        format!(
             r#"
             <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
               <Building>
@@ -1879,15 +1905,19 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
-{ignition_elem}
+                      {pilot_power_elem}
                     </WaterHeatingSystem>
                   </WaterHeating>
                 </BuildingDetails>
               </Building>
             </HPXML>
         "#
-        );
-        let cfg = parse_gas_wh_config(&xml);
+        )
+    }
+
+    #[test]
+    fn pilot_power_without_units_defaults_to_btu_h_and_converts_to_watts() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_pilot_power("<PilotPower>600</PilotPower>"));
         let expected_w = 600.0 * 0.293_071_07;
         let pw = cfg
             .pilot_power_w
@@ -1895,6 +1925,44 @@ mod tests {
         assert!(
             (pw - expected_w).abs() < 0.01,
             "PilotPower=600 BTU/h must convert to ~{expected_w:.2} W, got {pw:.2}"
+        );
+    }
+
+    #[test]
+    fn pilot_power_with_explicit_btuh_units_converts_to_watts() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_pilot_power(
+            r#"<PilotPower units="Btuh">500</PilotPower>"#,
+        ));
+        let expected_w = 500.0 * 0.293_071_07;
+        let pw = cfg
+            .pilot_power_w
+            .expect("pilot_power_w must be set for units=\"Btuh\"");
+        assert!(
+            (pw - expected_w).abs() < 0.01,
+            "PilotPower=500 Btuh must convert to ~{expected_w:.2} W, got {pw:.2}"
+        );
+    }
+
+    #[test]
+    fn pilot_power_with_explicit_watt_units_passes_through_unconverted() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_pilot_power(
+            r#"<PilotPower units="W">150</PilotPower>"#,
+        ));
+        assert_eq!(
+            cfg.pilot_power_w,
+            Some(150.0),
+            "PilotPower with units=\"W\" must be taken as SI watts without conversion"
+        );
+    }
+
+    #[test]
+    fn pilot_power_with_unknown_units_is_rejected() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_pilot_power(
+            r#"<PilotPower units="therms">600</PilotPower>"#,
+        ));
+        assert!(
+            cfg.pilot_power_w.is_none(),
+            "PilotPower with unrecognized units must be rejected (None), not guessed"
         );
     }
 

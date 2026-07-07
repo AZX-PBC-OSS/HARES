@@ -350,7 +350,6 @@ fn lifecycle_battery() {
             export_limit_w: None,
             heater_power_w: None,
             heater_threshold_c: None,
-            heater_on_discharge: None,
             min_discharge_temp_c: None,
             full_power_temp_c: None,
             min_charge_temp_c: None,
@@ -1041,7 +1040,6 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 export_limit_w: None,
                 heater_power_w: None,
                 heater_threshold_c: None,
-                heater_on_discharge: None,
                 min_discharge_temp_c: None,
                 full_power_temp_c: None,
                 min_charge_temp_c: None,
@@ -1507,6 +1505,7 @@ fn operating_mode_numeric_codes_are_stable() {
     assert_eq!(OperatingMode::HeatingHPAndER as u8, 9);
     assert_eq!(OperatingMode::HeatPumpWH as u8, 10);
     assert_eq!(OperatingMode::BackupElement as u8, 11);
+    assert_eq!(OperatingMode::On as u8, 12);
 }
 
 #[test]

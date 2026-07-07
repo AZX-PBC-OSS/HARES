@@ -510,6 +510,12 @@ pub const MIN_COMPRESSOR_FRACTION: &str = "min_compressor_fraction";
 /// scope: internal
 pub const PUMP_POWER_KW: &str = "pump_power_kw";
 
+/// Crankcase heater electric draw [kW], space_fraction-scaled like the other
+/// per-component sub-meters so components sum to the unit total.
+///
+/// scope: internal
+pub const CRANKCASE_KW: &str = "crankcase_kw";
+
 // ── Water heater ────────────────────────────────────────────────────────────
 
 /// scope: internal
@@ -1059,6 +1065,7 @@ mod tests {
             ER_STAGES_ON,
             MIN_COMPRESSOR_FRACTION,
             PUMP_POWER_KW,
+            CRANKCASE_KW,
             // Water heater
             ELEMENT_KW,
             PILOT_KW,
@@ -1295,6 +1302,7 @@ mod tests {
             ER_STAGES_ON,
             MIN_COMPRESSOR_FRACTION,
             PUMP_POWER_KW,
+            CRANKCASE_KW,
             // Water heater
             ELEMENT_KW,
             PILOT_KW,
