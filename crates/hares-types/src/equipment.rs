@@ -1170,6 +1170,28 @@ pub fn validate_core_contract(
     }
 
     if missing_bits == 0 && unexpected_bits == 0 {
+        let checks: [(&str, Option<f64>); 7] = [
+            ("flows.reactive_power_kvar", co.flows.reactive_power_kvar),
+            ("flows.thermal_output_w", co.flows.thermal_output_w),
+            ("flows.sensible_cooling_w", co.flows.sensible_cooling_w),
+            ("flows.latent_cooling_w", co.flows.latent_cooling_w),
+            ("state.setpoint_c", co.state.setpoint_c),
+            ("performance.cop", co.performance.cop),
+            ("performance.main_power_kw", co.performance.main_power_kw),
+        ];
+        // Runtime finiteness guard — always present. Returns Err for
+        // non-finite values (NaN, ±∞) that would silently corrupt
+        // downstream telemetry, ports, and checkpoint serialization.
+        for (name, value) in &checks {
+            if let Some(v) = value {
+                if !v.is_finite() {
+                    return Err(HaresError::Equipment(format!(
+                        "core_output contract violation for '{}' ({:?}): non-finite value in {}={}",
+                        desc.name, caps, name, v,
+                    )));
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -2810,6 +2832,92 @@ mod tests {
             err.to_string()
                 .contains("flows.reactive_power_kvar requires flows.electric_kw"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_nan() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(6),
+            name: "Validator NaN".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::THERMAL,
+            telemetry_fields: vec![],
+            zone_type: None,
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                thermal_output_w: Some(f64::NAN),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err =
+            validate_core_contract(&desc, &out).expect_err("NaN in thermal_output_w must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite value in flows.thermal_output_w"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_infinity() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(7),
+            name: "Validator Infinity".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::THERMAL | CoreCapabilities::HAS_SETPOINT,
+            telemetry_fields: vec![],
+            zone_type: None,
+        };
+
+        let out_inf = CoreOutput {
+            flows: CoreFlows {
+                thermal_output_w: Some(f64::INFINITY),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out_inf)
+            .expect_err("INFINITY in thermal_output_w must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite value in flows.thermal_output_w"),
+            "unexpected error: {msg}"
+        );
+
+        let out_neg_inf = CoreOutput {
+            flows: CoreFlows {
+                thermal_output_w: Some(1000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(f64::NEG_INFINITY),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out_neg_inf)
+            .expect_err("NEG_INFINITY in setpoint_c must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite value in state.setpoint_c"),
+            "unexpected error: {msg}"
         );
     }
 

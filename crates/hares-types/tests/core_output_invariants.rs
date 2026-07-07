@@ -3,7 +3,11 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use hares_types::{ElectricPower, OperatingMode, Soc};
+use hares_types::{
+    ControlCapabilities, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState,
+    ElectricPower, EndUse, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
+    OperatingMode, Soc, validate_core_contract,
+};
 
 fn sample_unit(rng: &mut ChaCha8Rng) -> f64 {
     // Map to [0, 1) using the high 53 bits so the result is a stable finite f64.
@@ -137,4 +141,474 @@ fn operating_mode_codes_are_stable_and_unique() {
             );
         }
     }
+}
+
+fn full_descriptor(name: &str) -> EquipmentDescriptor {
+    EquipmentDescriptor {
+        id: EquipmentId(101),
+        name: name.to_string(),
+        end_use: EndUse::OTHER,
+        equipment_type: "Test".into(),
+        zone: None,
+        fuel: FuelType::Electric,
+        stage: ExecutionStage::Independent,
+        control_capabilities: ControlCapabilities::empty(),
+        core_capabilities: CoreCapabilities::THERMAL
+            | CoreCapabilities::HAS_SETPOINT
+            | CoreCapabilities::HAS_COP
+            | CoreCapabilities::ELECTRIC
+            | CoreCapabilities::REACTIVE,
+        telemetry_fields: vec![],
+        zone_type: None,
+    }
+}
+
+#[test]
+fn core_output_rejects_nan_in_any_bare_f64_field() {
+    let desc = full_descriptor("NaN Rejector");
+
+    let nan_fields = [
+        (
+            "flows.reactive_power_kvar",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(f64::NAN),
+                    thermal_output_w: Some(1000.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "flows.thermal_output_w",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(f64::NAN),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "flows.sensible_cooling_w",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(1000.0),
+                    sensible_cooling_w: Some(f64::NAN),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "flows.latent_cooling_w",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(1000.0),
+                    latent_cooling_w: Some(f64::NAN),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "state.setpoint_c",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(1000.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(f64::NAN),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "performance.cop",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(1000.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(f64::NAN),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "performance.main_power_kw",
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_kvar: Some(0.0),
+                    thermal_output_w: Some(1000.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(3.0),
+                    main_power_kw: Some(f64::NAN),
+                },
+            },
+        ),
+    ];
+
+    for (field_name, out) in &nan_fields {
+        let err = validate_core_contract(&desc, out)
+            .expect_err(&format!("NaN in {field_name} must be rejected"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("non-finite value in {field_name}")),
+            "unexpected error for {field_name}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn core_output_rejects_infinity_in_any_bare_f64_field() {
+    let desc = full_descriptor("Inf Rejector");
+
+    let non_finite_values = [f64::INFINITY, f64::NEG_INFINITY];
+    let field_names = [
+        "flows.reactive_power_kvar",
+        "flows.thermal_output_w",
+        "flows.sensible_cooling_w",
+        "flows.latent_cooling_w",
+        "state.setpoint_c",
+        "performance.cop",
+        "performance.main_power_kw",
+    ];
+
+    for &non_finite in &non_finite_values {
+        for &field_name in &field_names {
+            let out = match field_name {
+                "flows.reactive_power_kvar" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(non_finite),
+                        thermal_output_w: Some(1000.0),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        ..Default::default()
+                    },
+                },
+                "flows.thermal_output_w" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(non_finite),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        ..Default::default()
+                    },
+                },
+                "flows.sensible_cooling_w" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(1000.0),
+                        sensible_cooling_w: Some(non_finite),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        ..Default::default()
+                    },
+                },
+                "flows.latent_cooling_w" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(1000.0),
+                        latent_cooling_w: Some(non_finite),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        ..Default::default()
+                    },
+                },
+                "state.setpoint_c" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(1000.0),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(non_finite),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        ..Default::default()
+                    },
+                },
+                "performance.cop" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(1000.0),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(non_finite),
+                        ..Default::default()
+                    },
+                },
+                "performance.main_power_kw" => CoreOutput {
+                    flows: CoreFlows {
+                        electric_kw: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_kvar: Some(0.0),
+                        thermal_output_w: Some(1000.0),
+                        ..Default::default()
+                    },
+                    state: CoreState {
+                        setpoint_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    performance: CorePerformance {
+                        cop: Some(3.0),
+                        main_power_kw: Some(non_finite),
+                    },
+                },
+                _ => unreachable!(),
+            };
+
+            let err = validate_core_contract(&desc, &out)
+                .expect_err(&format!("{non_finite} in {field_name} must be rejected"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("non-finite value in {field_name}")),
+                "unexpected error for {field_name}={non_finite}: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn core_output_random_with_injected_nan_is_always_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xDEAD_BEEF_5EED_u64);
+
+    let desc = full_descriptor("Random NaN Probe");
+
+    let bare_f64_slot_count = 7usize;
+    let mut nan_used: [bool; 7] = [false; 7];
+
+    for _ in 0..200 {
+        let slot: usize = (rng.next_u64() as usize) % bare_f64_slot_count;
+
+        let out = build_random_core_output_with_nan_in_slot(&mut rng, slot);
+        nan_used[slot] = true;
+
+        let err = validate_core_contract(&desc, &out)
+            .expect_err(&format!("NaN in slot {slot} must be rejected"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite value in"),
+            "unexpected error for NaN in slot {slot}: {msg}"
+        );
+    }
+
+    for (i, &used) in nan_used.iter().enumerate() {
+        assert!(
+            used,
+            "Slot {i} was never selected for NaN injection; insufficient coverage"
+        );
+    }
+}
+
+fn build_random_core_output_with_nan_in_slot(rng: &mut ChaCha8Rng, slot: usize) -> CoreOutput {
+    fn sample_finite(rng: &mut ChaCha8Rng) -> f64 {
+        const DENOM: f64 = (1u64 << 53) as f64;
+        let bits = rng.next_u64() >> 11;
+        (bits as f64) / DENOM * 10_000.0
+    }
+
+    let (rpk, tow, scw, lcw, sp, cop_opt, mpk) = match slot {
+        0 => (
+            Some(f64::NAN),
+            Some(sample_finite(rng)),
+            None,
+            None,
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+        ),
+        1 => (
+            Some(sample_finite(rng)),
+            Some(f64::NAN),
+            None,
+            None,
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+        ),
+        2 => (
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            Some(f64::NAN),
+            None,
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+        ),
+        3 => (
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+            Some(f64::NAN),
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+        ),
+        4 => (
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+            None,
+            Some(f64::NAN),
+            Some(sample_finite(rng)),
+            None,
+        ),
+        5 => (
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+            None,
+            Some(sample_finite(rng)),
+            Some(f64::NAN),
+            None,
+        ),
+        6 => (
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            None,
+            None,
+            Some(sample_finite(rng)),
+            Some(sample_finite(rng)),
+            Some(f64::NAN),
+        ),
+        _ => unreachable!(),
+    };
+
+    CoreOutput {
+        flows: CoreFlows {
+            electric_kw: Some(ElectricPower::Consumption(1.0)),
+            reactive_power_kvar: rpk,
+            thermal_output_w: tow,
+            sensible_cooling_w: scw,
+            latent_cooling_w: lcw,
+            ..Default::default()
+        },
+        state: CoreState {
+            setpoint_c: sp,
+            ..Default::default()
+        },
+        performance: CorePerformance {
+            cop: cop_opt,
+            main_power_kw: mpk,
+        },
+    }
+}
+
+#[test]
+fn core_output_all_finite_is_accepted() {
+    let desc = full_descriptor("Finite Producer");
+
+    let out = CoreOutput {
+        flows: CoreFlows {
+            electric_kw: Some(ElectricPower::Consumption(1.0)),
+            reactive_power_kvar: Some(0.1),
+            thermal_output_w: Some(1000.0),
+            sensible_cooling_w: Some(-500.0),
+            latent_cooling_w: Some(-200.0),
+            ..Default::default()
+        },
+        state: CoreState {
+            setpoint_c: Some(20.0),
+            ..Default::default()
+        },
+        performance: CorePerformance {
+            cop: Some(3.5),
+            main_power_kw: Some(2.1),
+        },
+    };
+    validate_core_contract(&desc, &out).expect("all-finite CoreOutput must be accepted");
 }
