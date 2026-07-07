@@ -24,7 +24,8 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, update_heating_control, zone_id_from_config_or_default,
+        equipment_id_from_config, outage_forces_off, update_heating_control,
+        zone_id_from_config_or_default,
     },
 };
 
@@ -206,6 +207,16 @@ impl Equipment for ElectricFurnace {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        // Grid outage: a de-energized bus removes supply power for the
+        // elements/burner controls and the blower/circulator, so the unit
+        // cannot run (and cannot deliver heat) regardless of thermostat
+        // calls or overrides. Gated before override handling; islanded
+        // (battery/generator-backed) homes keep an energized bus and are
+        // not affected. See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         if let Some(mode) = apply_simple_mode_override_in_control(
             &mut self.hvac,
             &mut self.mode_override,
@@ -236,8 +247,12 @@ impl Equipment for ElectricFurnace {
         // Per-component reactive (see `hvac::reactive`): the resistance
         // element at the unit ZIP (pf 1.0 → Q ≡ 0), the blower fan motor at
         // pf 0.87.
-        let reactive_power_kvar = self.zip.reactive_kvar(element_kw, env.grid.voltage_pu)
-            + self.fan_zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(element_kw, env.grid.bus_voltage_pu())
+            + self
+                .fan_zip
+                .reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -364,6 +379,10 @@ impl Equipment for ElectricFurnace {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -558,6 +577,16 @@ impl Equipment for GasFurnace {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        // Grid outage: a de-energized bus removes supply power for the
+        // elements/burner controls and the blower/circulator, so the unit
+        // cannot run (and cannot deliver heat) regardless of thermostat
+        // calls or overrides. Gated before override handling; islanded
+        // (battery/generator-backed) homes keep an energized bus and are
+        // not affected. See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         if let Some(mode) = apply_simple_mode_override_in_control(
             &mut self.hvac,
             &mut self.mode_override,
@@ -596,7 +625,7 @@ impl Equipment for GasFurnace {
             })?;
         }
 
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
         if fan_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
@@ -729,6 +758,10 @@ impl Equipment for GasFurnace {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1155,6 +1188,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1261,6 +1295,90 @@ mod tests {
         assert!((ports.fuel.get(hares_types::FuelType::Gas) - EXPECTED_FUEL_INPUT_W).abs() < 1e-6);
         assert!((ports.electrical.net_active_w() - EXPECTED_FAN_W).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - EXPECTED_SENSIBLE_GAIN_W).abs() < 1e-6);
+    }
+
+    /// Grid outage (de-energized bus): a gas furnace cannot run — the blower
+    /// and burner controls are electric, so no fuel is burned and no heat is
+    /// delivered (unlike a gas storage water heater, whose burner needs no
+    /// electricity). Islanded homes keep an energized bus and keep heating.
+    #[test]
+    fn grid_outage_forces_gas_furnace_off_and_islanded_home_keeps_heating() {
+        let cfg = gf_config(10_000.0, 0.8);
+        let mut eq = GasFurnace::new(cfg.clone());
+        let env_nominal = env(18.0);
+        eq.init(&cfg, &env_nominal).unwrap();
+
+        // Baseline: heating call burns fuel and delivers heat.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env_nominal);
+        eq.step(&env_nominal, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(ports.fuel.get(hares_types::FuelType::Gas) > 0.0);
+        assert!(ports.thermal[0].sensible_gain_w > 0.0);
+
+        // Utility outage, no backup: no fuel, no heat, no fan.
+        let mut env_outage = env(18.0);
+        env_outage.grid.voltage_pu = 0.0;
+        env_outage.current_time += ChronoDuration::minutes(1);
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        ports.zero();
+        eq.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.fuel.get(hares_types::FuelType::Gas), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+        assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
+
+        // Islanded: bus held at nominal by a backup source → keeps heating.
+        let mut env_islanded = env(18.0);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        env_islanded.current_time += ChronoDuration::minutes(2);
+        assert_eq!(eq.update_control(&env_islanded), OperatingMode::Heating);
+        ports.zero();
+        eq.step(&env_islanded, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(ports.fuel.get(hares_types::FuelType::Gas) > 0.0);
+        assert!(ports.thermal[0].sensible_gain_w > 0.0);
+
+        // Restoration: heating resumes.
+        let mut env_restored = env(18.0);
+        env_restored.current_time += ChronoDuration::minutes(3);
+        assert_eq!(eq.update_control(&env_restored), OperatingMode::Heating);
+    }
+
+    /// Electric furnace during an outage: elements and blower are dead —
+    /// forced off at the control level; resumes after restoration.
+    #[test]
+    fn grid_outage_forces_electric_furnace_off() {
+        let cfg = ef_config(8_000.0, 1.0);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let env_nominal = env(18.0);
+        eq.init(&cfg, &env_nominal).unwrap();
+
+        let mut env_outage = env(18.0);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+        assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
+
+        // Restoration: heating resumes.
+        let mut env_restored = env(18.0);
+        env_restored.current_time += ChronoDuration::minutes(1);
+        assert_eq!(eq.update_control(&env_restored), OperatingMode::Heating);
+        ports.zero();
+        eq.step(&env_restored, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(ports.electrical.net_active_w() > 0.0);
+        assert!(ports.thermal[0].sensible_gain_w > 0.0);
     }
 
     #[test]

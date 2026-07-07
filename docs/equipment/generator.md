@@ -70,3 +70,11 @@ graph LR
 ## Telemetry
 
 `electric_output_kw`, `fuel_input_w`, `eta_electric`, `ramp_limited`, `thermal_output_w` (CHP), `flue_loss_w` (CHP)
+
+## Grid Outage Behaviour
+
+A utility outage is precisely when the generator runs: an enabled generator
+(self-consumption active or a positive setpoint) islands the home
+(`Equipment::island_source_available`) and its self-consumption control
+picks up the house load. It is never gated by the bus. See
+[outage-behavior.md](../outage-behavior.md).

@@ -69,6 +69,14 @@ from ochre_next._hares import SteppableFleet as PySteppableFleet
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
 from .broker import allocate_ephemeral_port
 from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant, _set_publication_info, _validate_control_signal, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN
+from .federate import (
+    DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_GRANT_TIMEOUT_S,
+    core_init_timeout_option,
+    enter_executing_mode_with_timeout,
+    request_time_with_timeout,
+    validate_timeout,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -88,6 +96,12 @@ class HELICSFleet:
         core_type: HELICS core transport (e.g. ``"zmq"``).
         time_offset_s: HELICS time offset in seconds.  Use a positive offset
             so this federate steps after an aggregator at the same granted time.
+        connect_timeout_s: Wall-clock seconds allowed for broker registration
+            and for entering executing mode.  A stale or unreachable broker
+            raises within this budget instead of hanging indefinitely.
+        grant_timeout_s: Wall-clock seconds allowed for each HELICS time
+            grant.  A stalled peer federate raises ``TimeoutError`` instead of
+            blocking ``run()`` forever.
     """
 
     def __init__(
@@ -97,12 +111,16 @@ class HELICSFleet:
         broker_address: str = "localhost",
         core_type: str = "zmq",
         time_offset_s: float = 0.0,
+        connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+        grant_timeout_s: float = DEFAULT_GRANT_TIMEOUT_S,
     ) -> None:
         self._fleet = fleet
         self._fed_name = fed_name
         self._broker_address = broker_address
         self._core_type = core_type
         self._time_offset_s = time_offset_s
+        self._connect_timeout_s = validate_timeout(connect_timeout_s, "connect_timeout_s")
+        self._grant_timeout_s = validate_timeout(grant_timeout_s, "grant_timeout_s")
 
         self._time_res_s = float(fleet.time_res_s())
         self._total_steps = int(fleet.total_steps())
@@ -345,7 +363,7 @@ class HELICSFleet:
             if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
                 raise RuntimeError("Publications are not registered; call register_publications() first")
 
-            self._fed.enter_executing_mode()
+            self._enter_executing_mode()
             self._verify_registration_completeness()
             self._verify_helics_counts()
             sim_time_s = 0.0
@@ -359,10 +377,10 @@ class HELICSFleet:
                     break
 
                 exit_time_s = sim_time_s + self._time_res_s
-                granted = float(self._fed.request_time(exit_time_s))
+                granted = self._request_time(exit_time_s)
                 while not _handle_time_grant(exit_time_s, granted):
                     self._publish_results()
-                    granted = float(self._fed.request_time(exit_time_s))
+                    granted = self._request_time(exit_time_s)
 
                 if granted >= helics.HELICS_TIME_MAXTIME:
                     self._federation_terminated = True
@@ -384,7 +402,7 @@ class HELICSFleet:
                     "HELICS federate %s signalling completion via request_time(HELICS_TIME_MAXTIME)",
                     self._fed_name,
                 )
-                self._fed.request_time(helics.HELICS_TIME_MAXTIME)
+                self._request_time(helics.HELICS_TIME_MAXTIME)
             except Exception:
                 _LOG.warning(
                     "HELICS federate %s request_time(HELICS_TIME_MAXTIME) failed during completion signalling",
@@ -400,6 +418,29 @@ class HELICSFleet:
             return
         self._fed.disconnect()
         self._finalized = True
+
+    def _enter_executing_mode(self) -> None:
+        """Enter executing mode with a wall-clock deadline.
+
+        On timeout the federate has already been torn down with a
+        non-blocking disconnect, so ``finalize()`` must not issue a blocking
+        ``disconnect()`` afterwards — it could hang on the same stale broker.
+        """
+        try:
+            enter_executing_mode_with_timeout(self._fed, self._connect_timeout_s, self._fed_name)
+        except TimeoutError:
+            self._finalized = True
+            raise
+
+    def _request_time(self, requested_time_s: float) -> float:
+        """Request a HELICS time grant with a wall-clock deadline (see above)."""
+        try:
+            return request_time_with_timeout(
+                self._fed, requested_time_s, self._grant_timeout_s, self._fed_name
+            )
+        except TimeoutError:
+            self._finalized = True
+            raise
 
     def _read_subscriptions(self) -> None:
         self._last_voltage_all_out_of_range = False
@@ -702,7 +743,13 @@ class HELICSFleet:
         # enterExecutingMode instead of raising a bind error (reproduced on
         # macOS/arm64 with HELICS 3.6.1).
         local_port = allocate_ephemeral_port()
-        core_init_value = f"--broker_address={broker_address} --port={local_port}"
+        # --timeout bounds broker registration: helicsCreateValueFederate
+        # against an unreachable or unresponsive broker raises within the
+        # timeout instead of stalling for the library default (~30s).
+        core_init_value = (
+            f"--broker_address={broker_address} --port={local_port} "
+            f"{core_init_timeout_option(self._connect_timeout_s)}"
+        )
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:

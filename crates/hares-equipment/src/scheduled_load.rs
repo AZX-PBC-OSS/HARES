@@ -474,8 +474,12 @@ impl Equipment for ScheduledLoad {
             }
         }
 
-        // Grid outage: all outputs are zero.
-        if env.grid.voltage_pu == 0.0 {
+        // Grid outage (de-energized bus): all outputs are zero. Gas scheduled
+        // loads are also zeroed — modern gas appliances (ranges, dryers,
+        // fireplaces with electronic ignition) need electricity to operate.
+        // Islanded (battery/generator-backed) homes keep an energized bus and
+        // are not affected. See docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
@@ -588,7 +592,8 @@ impl Equipment for ScheduledLoad {
                 };
 
                 let (real_kw, reactive_kvar) = if scheduled_power_kw > 0.0 {
-                    self.zip.apply(scheduled_power_kw, env.grid.voltage_pu)
+                    self.zip
+                        .apply(scheduled_power_kw, env.grid.bus_voltage_pu())
                 } else {
                     (0.0, 0.0)
                 };
@@ -688,6 +693,10 @@ impl Equipment for ScheduledLoad {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1297,6 +1306,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1612,6 +1622,29 @@ mod tests {
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(ports.electrical.net_active_w(), 0.0);
         assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
+    }
+
+    /// An islanded home (utility out, backup source holding the bus at
+    /// nominal) keeps its scheduled loads running at nominal power.
+    #[test]
+    fn islanded_home_keeps_scheduled_load_running() {
+        let config = config_with_schedule("s", "Lighting", &[3.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.net_active_w() - 3_000.0).abs() < 10.0,
+            "islanded bus at nominal voltage powers the load at schedule power, got {}",
+            ports.electrical.net_active_w()
+        );
     }
 
     #[test]

@@ -141,3 +141,12 @@ graph LR
 | `cycle_count` | - | Equivalent full cycles (rainflow) |
 | `capacity_fade_pct` | 0-1 | Capacity degradation fraction |
 | `reactive_power_kvar` | kvar | Signed bus reactive power (positive = absorbing) |
+
+## Grid Outage Behaviour
+
+The battery is the canonical island source: when the utility voltage is 0.0
+and the battery is grid-connected and dischargeable (SOC above its floor,
+temperature/DR permitting), it holds the home bus at nominal and serves the
+loads (`Equipment::island_source_available`). On a *dead* bus (battery
+empty/cold/disconnected) charging, standby electronics, the cell heater, and
+vars are all gated. See [outage-behavior.md](../outage-behavior.md).

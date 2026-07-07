@@ -134,3 +134,11 @@ PV supports full reactive control with unified sign convention per [power-factor
 | `curtailment_kw` | Power curtailed by PowerLimit |
 | `inverter_clipping_kw` | Power lost to inverter AC capacity |
 | `soiling_ratio` | Kimber model output (1.0 = clean) |
+
+## Grid Outage Behaviour
+
+IEEE 1547 anti-islanding: on a de-energized bus the grid-following inverter
+trips — no AC export, no DC extraction, no vars. When the home is islanded
+on a grid-forming source (battery/generator), the bus stays energized and PV
+keeps producing. PV itself is never an island source. See
+[outage-behavior.md](../outage-behavior.md).

@@ -31,7 +31,9 @@ use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
-    helpers::{equipment_id_from_config, lookup_zone, zone_id_from_config_or_default},
+    helpers::{
+        equipment_id_from_config, lookup_zone, outage_forces_off, zone_id_from_config_or_default,
+    },
 };
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
@@ -312,6 +314,12 @@ impl Equipment for AirConditioner {
         &self.core.core_output
     }
 
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the compressor (class default pf 0.96, or a user
+        // "zip" override). The fan component ZIP is secondary.
+        Some(self.core.zip)
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.core.save_state()
     }
@@ -373,6 +381,12 @@ impl Equipment for RoomAC {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the compressor (class default pf 0.96, or a user
+        // "zip" override). The fan component ZIP is secondary.
+        Some(self.core.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -812,6 +826,16 @@ impl CoolingCore {
             }
         }
 
+        // Grid outage: a de-energized bus removes supply power for the
+        // compressor and blower — force off before any override handling
+        // (WH precedent). Islanded (battery/generator-backed) homes keep an
+        // energized bus and are not affected. See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.operating_mode = OperatingMode::Off;
+            self.hvac.update_prev_zone_temp(None);
+            return OperatingMode::Off;
+        }
+
         // Short-circuit: GridEmergency or explicit Off override.
         if self.dr_load_fraction <= 0.0 || self.ctrl_mode_override == Some(OperatingMode::Off) {
             self.hvac.runtime.duty_cycle = 0.0;
@@ -999,11 +1023,17 @@ impl CoolingCore {
         // Crankcase heater: draws power when outdoor temp is below threshold AND
         // neither coil (cooling or companion heating) is running. For HP systems
         // the max of both RTFs determines the off-time fraction.
-        let crankcase_kw = self.crankcase_heater_power_internal(
-            env.weather.outdoor_temp_c,
-            self.last_cooling_rtf,
-            companion_heating_rtf,
-        );
+        // A de-energized bus (grid outage without backup) also removes the
+        // crankcase heater's supply — it is a standby load, not a source.
+        let crankcase_kw = if env.grid.bus_energized() {
+            self.crankcase_heater_power_internal(
+                env.weather.outdoor_temp_c,
+                self.last_cooling_rtf,
+                companion_heating_rtf,
+            )
+        } else {
+            0.0
+        };
         if crankcase_kw > 0.0 {
             self.crankcase_heater_on = true;
             self.crankcase_heater_kw = crankcase_kw;
@@ -1018,8 +1048,10 @@ impl CoolingCore {
         // resistive (pf 1.0) and contributes Q ≡ 0.
         let reactive_power_kvar = self
             .zip
-            .reactive_kvar(compressor_kw * sf, env.grid.voltage_pu)
-            + self.fan_zip.reactive_kvar(fan_kw * sf, env.grid.voltage_pu);
+            .reactive_kvar(compressor_kw * sf, env.grid.bus_voltage_pu())
+            + self
+                .fan_zip
+                .reactive_kvar(fan_kw * sf, env.grid.bus_voltage_pu());
         if electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -1834,6 +1866,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -2081,6 +2114,97 @@ mod tests {
             eq.telemetry().get(tk::ELECTRIC_KW),
             Some(0.0),
             "no power should be drawn when operating mode is Off",
+        );
+    }
+
+    /// Grid outage (de-energized bus): the compressor/blower have no supply,
+    /// so cooling is forced off at the control level — zero draw, zero
+    /// delivered cooling. An islanded home (battery/generator backup holding
+    /// the bus at nominal) keeps cooling; control resumes on restoration.
+    #[test]
+    fn grid_outage_forces_cooling_off_and_islanded_home_keeps_cooling() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let env_hot = env(28.0, 0.01, 19.0, 35.0);
+        eq.init(&cfg, &env_hot).unwrap();
+
+        // Baseline: zone above setpoint → cooling runs.
+        assert_eq!(eq.update_control(&env_hot), OperatingMode::Cooling);
+
+        // Utility outage, no backup: forced off, no draw, no delivered heat.
+        let mut env_outage = env(28.0, 0.01, 19.0, 35.0);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "no electric draw during outage"
+        );
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w, 0.0,
+            "no delivered cooling during outage"
+        );
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_KW), Some(0.0));
+
+        // Islanded: utility out but a backup source holds the bus at nominal
+        // → the bus is energized and cooling proceeds normally.
+        let mut env_islanded = env(28.0, 0.01, 19.0, 35.0);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        assert_eq!(eq.update_control(&env_islanded), OperatingMode::Cooling);
+
+        // Restoration: thermostat control resumes.
+        assert_eq!(eq.update_control(&env_hot), OperatingMode::Cooling);
+    }
+
+    /// The crankcase heater is a standby load: a de-energized bus removes its
+    /// supply, so it must not draw during an outage.
+    #[test]
+    fn grid_outage_removes_crankcase_heater_draw() {
+        let cfg = ac_config();
+
+        // Cold outdoor (below the 12.8 °C crankcase threshold), zone below
+        // setpoint → compressor off, crankcase heater normally draws.
+        let env_cold = env(20.0, 0.008, 15.0, 5.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap_or(0.0);
+        assert!(
+            crankcase_kw > 0.0,
+            "crankcase heater should draw below threshold OAT with compressor off"
+        );
+
+        // Same conditions during an outage: zero draw.
+        let mut env_outage = env(20.0, 0.008, 15.0, 5.0);
+        env_outage.grid.voltage_pu = 0.0;
+        let mut eq2 = AirConditioner::new(cfg.clone());
+        eq2.init(&cfg, &env_outage).unwrap();
+        eq2.update_control(&env_outage);
+        let mut ports2 = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq2.step(&env_outage, Duration::from_secs(60), &mut ports2)
+            .unwrap();
+        assert_eq!(eq2.telemetry().get(tk::CRANKCASE_KW), Some(0.0));
+        assert_eq!(
+            ports2.electrical.load_power_w, 0.0,
+            "crankcase heater must not draw from a dead bus"
         );
     }
 
@@ -3802,6 +3926,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -4046,6 +4171,7 @@ mod dr_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -4457,6 +4583,7 @@ mod crankcase_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -4550,6 +4677,7 @@ mod crankcase_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -4890,6 +5018,7 @@ mod ideal_capacity_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -5342,6 +5471,7 @@ mod defaults_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -5612,6 +5742,7 @@ mod speed_selection_parity_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

@@ -693,6 +693,7 @@ impl EnvironmentManager {
         state.grid = self.grid_override.clone().unwrap_or(GridState {
             voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
+            island_bus_voltage_pu: None,
         });
 
         // Step 6: custom_domains -- swap-based reuse to avoid per-step allocations.
@@ -791,6 +792,7 @@ impl EnvironmentManager {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: Vec::new(),
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1732,6 +1734,7 @@ mod tests {
         manager.set_grid_override(GridState {
             voltage_pu: 0.95,
             frequency_hz: 59.8,
+            island_bus_voltage_pu: None,
         });
         let env_override = manager.update(&clock(), &[]).unwrap();
         assert_eq!(env_override.grid.voltage_pu, 0.95);

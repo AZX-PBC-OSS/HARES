@@ -93,3 +93,11 @@ Multi-phase cycles (e.g., washer: fill -> wash -> spin):
 - **Electrical**: phase-based or setpoint-overridden power
 - **Thermal**: sensible + latent gains to zone
 - **Fuel**: optional if `fuel_type != Electric`
+
+## Grid Outage Behaviour
+
+Scheduled and event-based loads draw nothing and deposit no gains while the
+home bus is de-energized; event timers freeze and interrupted cycles resume
+when power returns. Gas scheduled loads are also zeroed (modern gas
+appliances need electricity for ignition/controls). Islanded homes keep
+their loads running. See [outage-behavior.md](../outage-behavior.md).

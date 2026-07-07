@@ -1130,6 +1130,24 @@ impl Equipment for Battery {
         self.init_typed(config, env)
     }
 
+    fn island_source_available(&self) -> bool {
+        // The battery can island the home when it is grid-connected and able
+        // to discharge: SOC above its effective floor (physical min narrowed
+        // by any SOC-target window), hardware discharge capability, cell
+        // temperature above the discharge cutoff, and DR not commanding a
+        // full shed. Grid-forming capability is assumed (no separate opt-in
+        // flag yet — see `Equipment::island_source_available`).
+        let soc_floor = self
+            .soc_target_min
+            .map(|v| v.max(self.min_soc))
+            .unwrap_or(self.min_soc);
+        self.grid_connected
+            && self.max_discharge_kw > 0.0
+            && self.soc > soc_floor
+            && self.discharge_derate_factor() > 0.0
+            && self.dr_power_fraction() > 0.0
+    }
+
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         // DR duration countdown: auto-revert to Normal when timer expires.
         if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
@@ -1160,8 +1178,18 @@ impl Equipment for Battery {
         // -- Read Stage 1 accumulated electrical power --
         let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
 
+        // Grid outage with a de-energized bus: the battery can neither charge
+        // (nothing on the bus to charge from) nor dispatch — if it *could*
+        // discharge, it would be the island source and the bus would be
+        // energized (see `island_source_available`), so a dead bus implies
+        // this battery is empty/cold/disconnected. Standby electronics and
+        // the cell heater lose their supply too (gated below). During
+        // islanded operation the bus is energized and dispatch proceeds
+        // normally. See docs/outage-behavior.md.
+        let bus_dead = !env.grid.bus_energized();
+
         // -- Determine target power --
-        let mut target_power_kw = if self.grid_connected {
+        let mut target_power_kw = if self.grid_connected && !bus_dead {
             self.determine_target_power(net_load_kw, dt_hours)
         } else {
             0.0
@@ -1272,7 +1300,12 @@ impl Equipment for Battery {
         // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
         // Mode and similar systems run proactively to maintain cells above the
         // min_charge_temp threshold.
-        let heater_w = if self.heater_power_w > 0.0 && self.cell_temp_c <= self.heater_threshold_c {
+        // A de-energized bus removes the heater's supply — it is an AC
+        // standby load, not powered from the cells.
+        let heater_w = if !bus_dead
+            && self.heater_power_w > 0.0
+            && self.cell_temp_c <= self.heater_threshold_c
+        {
             self.heater_active = true;
             self.heater_power_w
         } else {
@@ -1298,8 +1331,14 @@ impl Equipment for Battery {
             self.cell_temp_c += dt_cell;
         }
 
-        // -- Standby power is always consumed --
-        let standby_kw = power_w_to_kw(self.standby_power_w);
+        // -- Standby power is consumed whenever the bus is energized --
+        // (grid up or islanded); a dead bus removes the supply for the
+        // battery's own control electronics.
+        let standby_kw = if bus_dead {
+            0.0
+        } else {
+            power_w_to_kw(self.standby_power_w)
+        };
         let heater_kw = power_w_to_kw(heater_w);
         let port_power_kw = actual_power_kw + standby_kw + heater_kw;
 
@@ -1313,13 +1352,19 @@ impl Equipment for Battery {
         // cell-heater power on top (`port_power_kw`). Standby electronics and
         // the resistive heater are not inverter throughput, so port-level
         // Q/P deviates slightly from tan(acos(pf)) whenever they draw power.
-        let reactive_power_kvar = match self.q_setpoint_kvar {
-            Some(q) => q,
-            None if self.power_factor < 1.0 => {
-                let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
-                actual_power_kw * zip.tan_phi()
+        // A de-energized bus produces no vars either — a commanded
+        // q-setpoint cannot be served by an idle inverter on a dead bus.
+        let reactive_power_kvar = if bus_dead {
+            0.0
+        } else {
+            match self.q_setpoint_kvar {
+                Some(q) => q,
+                None if self.power_factor < 1.0 => {
+                    let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+                    actual_power_kw * zip.tan_phi()
+                }
+                None => 0.0,
             }
-            None => 0.0,
         };
 
         // kVA clamp: active-power priority — P is never curtailed by Q.
@@ -1466,6 +1511,13 @@ impl Equipment for Battery {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        // Live runtime state: constant-power reactive-only ZIP carrying the
+        // current effective power factor (config baseline, later mutated by
+        // PowerFactorSetpoint) — mirrors the baseline Q path in `step()`.
+        Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor))
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {
@@ -2020,6 +2072,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -2431,6 +2484,82 @@ mod tests {
         assert!(
             (actual - expected_standby_w).abs() < 1.0,
             "idle battery should consume standby power: expected {expected_standby_w}, got {actual}"
+        );
+    }
+
+    /// Grid outage with a de-energized bus (battery itself cannot discharge:
+    /// SOC at floor): charging, standby electronics, cell heater, and vars
+    /// are all gated — nothing on a dead bus can deliver or absorb power.
+    #[test]
+    fn dead_bus_blocks_charging_standby_heater_and_vars() {
+        let config = battery_config(&[
+            (KEY_STANDBY_POWER_W, 20.0),
+            (KEY_MIN_SOC, 0.2),
+            (KEY_INITIAL_SOC, 0.2),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = base_env();
+        bat.init(&config, &env).unwrap();
+        assert!(
+            !bat.island_source_available(),
+            "battery at its SOC floor cannot island the home"
+        );
+
+        // Command a charge — during a dead-bus outage it must not happen.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: Some(1.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        env.grid.voltage_pu = 0.0;
+
+        let soc_before = bat.soc;
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "no charging and no standby draw on a dead bus"
+        );
+        assert_eq!(
+            ports.electrical.reactive_power_kvar, 0.0,
+            "no vars on a dead bus"
+        );
+        assert!(
+            bat.soc <= soc_before,
+            "SOC must not increase during a dead-bus outage"
+        );
+
+        // Islanded bus (another source formed it): standby returns and the
+        // commanded charge proceeds.
+        env.grid.island_bus_voltage_pu = Some(1.0);
+        let mut ports2 = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports2)
+            .unwrap();
+        assert!(
+            ports2.electrical.net_active_w() > 0.0,
+            "energized (islanded) bus restores standby draw and charging"
+        );
+    }
+
+    /// `island_source_available` reflects dischargeability: SOC above the
+    /// floor and grid-connected → available; disconnected → not.
+    #[test]
+    fn island_source_availability_tracks_soc_and_connection() {
+        let config = battery_config(&[(KEY_MIN_SOC, 0.2), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        assert!(bat.island_source_available());
+
+        bat.apply_control(&ControlSignal::GridConnect { connected: false })
+            .unwrap();
+        assert!(
+            !bat.island_source_available(),
+            "a disconnected battery cannot island the home"
         );
     }
 
@@ -5788,6 +5917,34 @@ mod tests {
             "expected Q={expected_q} (P={p_kw} × tan(acos(0.8))={tan_phi}), got {q}"
         );
         assert!(q > 0.0);
+    }
+
+    /// A default battery (no `power_factor` in config) inspects as a
+    /// constant-power reactive-only ZIP at unity power factor.
+    #[test]
+    fn resolved_zip_default_battery_is_unity_pf_constant_power() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let zip = bat.resolved_zip().expect("battery exposes a ZIP");
+        assert_eq!(zip, ZipLoad::reactive_only(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(zip.pf, 1.0);
+    }
+
+    /// `resolved_zip` reflects live runtime state: a PowerFactorSetpoint
+    /// updates the pf reported by the inspection surface.
+    #[test]
+    fn resolved_zip_reflects_power_factor_setpoint() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.85 })
+            .unwrap();
+
+        let zip = bat.resolved_zip().expect("battery exposes a ZIP");
+        assert_eq!(zip, ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.85));
     }
 
     /// PowerSetpoint with reactive_power_kvar is accepted and applied.

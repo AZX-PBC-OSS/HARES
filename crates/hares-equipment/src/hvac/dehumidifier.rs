@@ -495,6 +495,15 @@ impl Equipment for Dehumidifier {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        // Grid outage: a de-energized bus removes the compressor/fan supply —
+        // force off before humidistat control (WH precedent). Humidistat
+        // hysteresis resumes once power returns. Islanded homes keep an
+        // energized bus and are not affected. See docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
+            self.is_on = false;
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         let pressure_pa = env.weather.pressure_pa();
         let zone = env.zones.iter().find(|z| z.id == self.zone_id);
         if let Some(zone_state) = zone {
@@ -533,7 +542,7 @@ impl Equipment for Dehumidifier {
         // which computes Q per component — see `hvac::reactive`).
         let reactive_power_kvar = self.zip.reactive_kvar(
             power_w_to_kw(snapshot.electric_power_w),
-            env.grid.voltage_pu,
+            env.grid.bus_voltage_pu(),
         );
         if snapshot.electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -592,6 +601,10 @@ impl Equipment for Dehumidifier {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -898,6 +911,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -956,6 +970,39 @@ mod tests {
         assert_eq!(slots.electrical.load_power_w, 0.0);
         assert_eq!(slots.thermal[0].sensible_gain_w, 0.0);
         assert_eq!(slots.thermal[0].latent_gain_w, 0.0);
+    }
+
+    /// Grid outage (de-energized bus): compressor/fan have no supply —
+    /// forced off at the control level even at high RH. Islanded homes keep
+    /// dehumidifying; humidistat control resumes on restoration.
+    #[test]
+    fn grid_outage_forces_dehumidifier_off_and_islanded_home_keeps_running() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+
+        // Baseline: high RH → runs.
+        assert_eq!(eq.update_control(&env(0.60)), OperatingMode::Cooling);
+
+        // Utility outage: forced off, zero outputs.
+        let mut env_outage = env(0.60);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        let mut slots = ports();
+        eq.step(&env_outage, Duration::from_secs(60), &mut slots)
+            .unwrap();
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+        assert_eq!(slots.thermal[0].sensible_gain_w, 0.0);
+        assert_eq!(slots.thermal[0].latent_gain_w, 0.0);
+
+        // Islanded: bus energized by a backup source → runs again.
+        let mut env_islanded = env(0.60);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        assert_eq!(eq.update_control(&env_islanded), OperatingMode::Cooling);
+
+        // Restoration: humidistat control resumes.
+        assert_eq!(eq.update_control(&env(0.60)), OperatingMode::Cooling);
     }
 
     #[test]

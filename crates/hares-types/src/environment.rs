@@ -366,10 +366,83 @@ impl WeatherState {
 }
 
 /// Electrical grid state exposed to equipment.
+///
+/// # Outage and islanding semantics
+///
+/// `voltage_pu` is the **utility service voltage** set externally (scenario
+/// config, `Dwelling::set_grid_voltage`, or a co-simulation federate).
+/// Exactly `0.0` means "utility outage" — the distribution feeder is dead.
+///
+/// A utility outage does not necessarily de-energize the home: a battery,
+/// generator, or discharging V2G/V2L EV can island the home and hold the bus
+/// at nominal voltage. The dwelling resolves this each step and publishes the
+/// result in `island_bus_voltage_pu`. Equipment must therefore gate on
+/// [`GridState::bus_energized`] (never on raw `voltage_pu == 0.0`) and use
+/// [`GridState::bus_voltage_pu`] for voltage-dependent physics (ZIP scaling,
+/// reactive power), so that battery-backed homes do not drop their loads
+/// during outages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridState {
+    /// Utility service voltage [pu]. Exactly `0.0` = utility outage.
     pub voltage_pu: f64,
     pub frequency_hz: f64,
+    /// Island-formed bus voltage [pu] during a utility outage.
+    ///
+    /// `Some(v)` when an on-site island-capable source (battery with usable
+    /// charge, generator, discharging V2G/V2L EV) holds the home bus at `v`
+    /// while the utility is out. Resolved by the dwelling at the start of
+    /// each timestep from equipment state (see
+    /// `Equipment::island_source_available`); `None` otherwise. Only
+    /// consulted when `voltage_pu == 0.0` — see [`GridState::bus_voltage_pu`].
+    ///
+    /// The current islanding model is intentionally minimal: an available
+    /// source regulates the bus at nominal (1.0 pu); no island power-balance
+    /// or frequency physics is modeled.
+    #[serde(default)]
+    pub island_bus_voltage_pu: Option<f64>,
+}
+
+impl GridState {
+    /// True when the utility service is out (`voltage_pu == 0.0`).
+    ///
+    /// Note that the home bus may still be energized by an island source —
+    /// use [`GridState::bus_energized`] to gate loads.
+    #[inline]
+    #[must_use]
+    pub fn grid_outage(&self) -> bool {
+        self.voltage_pu == 0.0
+    }
+
+    /// Voltage at the home's bus [pu]: the utility voltage when the utility
+    /// is up, or the island-formed bus voltage (if any) during an outage.
+    /// `0.0` means the bus is de-energized.
+    #[inline]
+    #[must_use]
+    pub fn bus_voltage_pu(&self) -> f64 {
+        if self.voltage_pu != 0.0 {
+            self.voltage_pu
+        } else {
+            self.island_bus_voltage_pu.unwrap_or(0.0)
+        }
+    }
+
+    /// True when the home bus carries voltage (utility up, or islanded on a
+    /// backup source). Loads must force off at the control level when this is
+    /// false; source-type equipment (battery discharge, generator, V2G EV)
+    /// must NOT gate on this — they are what keeps it true.
+    #[inline]
+    #[must_use]
+    pub fn bus_energized(&self) -> bool {
+        self.bus_voltage_pu() != 0.0
+    }
+
+    /// True when the home is islanded: the utility is out but a backup
+    /// source holds the bus energized.
+    #[inline]
+    #[must_use]
+    pub fn islanded(&self) -> bool {
+        self.grid_outage() && self.bus_energized()
+    }
 }
 
 /// Complete runtime environment state fed into physics calls.
@@ -476,6 +549,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grid_state_bus_semantics() {
+        // Utility up: bus follows utility voltage; not an outage.
+        let up = GridState {
+            voltage_pu: 0.97,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert!(!up.grid_outage());
+        assert!(up.bus_energized());
+        assert_eq!(up.bus_voltage_pu(), 0.97);
+        assert!(!up.islanded());
+
+        // Utility outage, no island source: bus dead.
+        let dead = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert!(dead.grid_outage());
+        assert!(!dead.bus_energized());
+        assert_eq!(dead.bus_voltage_pu(), 0.0);
+        assert!(!dead.islanded());
+
+        // Utility outage, islanded on a backup source: bus at nominal.
+        let islanded = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: Some(1.0),
+        };
+        assert!(islanded.grid_outage());
+        assert!(islanded.bus_energized());
+        assert_eq!(islanded.bus_voltage_pu(), 1.0);
+        assert!(islanded.islanded());
+
+        // Stale island value while the utility is up must not leak into the
+        // bus voltage: the utility side wins whenever it is energized.
+        let stale = GridState {
+            voltage_pu: 1.02,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: Some(1.0),
+        };
+        assert_eq!(stale.bus_voltage_pu(), 1.02);
+        assert!(!stale.islanded());
+    }
+
+    #[test]
+    fn grid_state_island_field_defaults_on_deserialize() {
+        // Old serialized payloads (checkpoints) lack the island field.
+        let decoded: GridState =
+            serde_json::from_str(r#"{ "voltage_pu": 1.0, "frequency_hz": 60.0 }"#)
+                .expect("deserialize legacy GridState");
+        assert_eq!(decoded.island_bus_voltage_pu, None);
+        assert!(decoded.bus_energized());
+    }
+
+    #[test]
     fn environment_state_round_trips_through_json() {
         let state = EnvironmentState {
             zones: vec![ZoneState {
@@ -517,6 +646,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![DomainUpdate {
                 domain_id: crate::DomainId(9),
@@ -554,6 +684,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

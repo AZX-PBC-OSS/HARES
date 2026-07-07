@@ -115,6 +115,12 @@ use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
+/// Bus voltage [pu] formed by an island-capable source during a utility
+/// outage. The minimal islanding model assumes the grid-forming source
+/// regulates the bus at nominal; no island power-flow or droop physics is
+/// modeled (see `GridState::island_bus_voltage_pu`).
+const ISLAND_BUS_NOMINAL_VOLTAGE_PU: f64 = 1.0;
+
 /// Minimum timestep resolution at which PV re-evaluation and BMS staleness
 /// diagnostics have meaningful impact.  5 min matches the EnergyPlus minimum
 /// `TimeStep` for sub-hourly simulation.
@@ -3362,11 +3368,15 @@ impl Dwelling {
         self.tariff_evaluator.as_ref()
     }
 
-    /// Applies a grid voltage override through the environment manager.
+    /// Applies a utility grid voltage override through the environment
+    /// manager. `voltage_pu == 0.0` signals a utility outage; whether the
+    /// home bus stays energized is resolved per step from island-capable
+    /// sources (see `GridState::bus_energized`).
     pub fn set_grid_voltage(&mut self, voltage_pu: f64) {
         self.environment.set_grid_override(GridState {
             voltage_pu,
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
+            island_bus_voltage_pu: None,
         });
     }
 
@@ -4422,6 +4432,22 @@ impl Dwelling {
         // Populate electrical summary from prior step's solver results.
         self.latest_env.electrical = self.prior_electrical_summary.clone();
 
+        // Resolve bus energization for this step. During a utility outage
+        // (voltage_pu == 0.0), an island-capable source (battery with usable
+        // charge, generator, discharging V2G EV) holds the home bus at
+        // nominal voltage so loads keep running; otherwise the bus is dead
+        // and every load force-offs at the control level (see
+        // `GridState::bus_energized`). Source availability is evaluated from
+        // end-of-previous-step equipment state, so island formation/collapse
+        // takes effect with a one-step lag.
+        self.latest_env.grid.island_bus_voltage_pu = if self.latest_env.grid.voltage_pu == 0.0
+            && self.equipment.iter().any(|eq| eq.island_source_available())
+        {
+            Some(ISLAND_BUS_NOMINAL_VOLTAGE_PU)
+        } else {
+            None
+        };
+
         // Step-start humidity invariant: confirm that the humidity ratio in
         // `latest_env.zones` matches the humidity solver's committed state.
         // Both are updated together at the end of each timestep by
@@ -5114,7 +5140,7 @@ impl Dwelling {
         if self.observer_buf.is_some() {
             let zip_scale = self
                 .electrical_solver
-                .zip_load_scale(self.latest_env.grid.voltage_pu);
+                .effective_load_scale(&self.latest_env.grid);
             let port_load_raw_w = self.ports.electrical.load_power_w;
             let port_load_adj_w = port_load_raw_w * zip_scale;
             let port_net_w = port_load_adj_w + self.ports.electrical.generation_power_w;
@@ -6021,7 +6047,7 @@ impl Dwelling {
         // voltage produces a false-positive residual of P_load·(scale − 1).
         let scale = self
             .electrical_solver
-            .zip_load_scale(self.latest_env.grid.voltage_pu);
+            .effective_load_scale(&self.latest_env.grid);
         let port_net = power_w_to_kw(self.ports.electrical.load_power_w) * scale
             + power_w_to_kw(self.ports.electrical.generation_power_w);
         checker.check_electrical(net_kw, &[-port_net])?;
@@ -11208,6 +11234,7 @@ occupancy = 1.0
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: HashMap::new(),
@@ -11419,6 +11446,7 @@ master_seed = 0
                 grid: GridState {
                     voltage_pu: 1.0,
                     frequency_hz: 60.0,
+                    island_bus_voltage_pu: None,
                 },
                 custom_domains: vec![],
                 equipment_telemetry: Default::default(),

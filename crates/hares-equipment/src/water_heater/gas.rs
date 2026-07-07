@@ -622,14 +622,14 @@ impl Equipment for GasWH {
         } else {
             0.0
         };
-        // Grid outage (voltage 0): the draft fan has no supply power. The gas
+        // Grid outage (de-energized bus): the draft fan has no supply power. The gas
         // burner and standing pilot keep firing (fuel-side heat is
         // unaffected), but the electrical parasitic disappears. Modelling
         // simplification: a real power-vent unit would lock out its burner
         // without draft-fan proving; HARES keeps the burner firing so gas
         // water heating remains available in islanded scenarios (matches
         // OCHRE, which treats EF < 0.7 gas WHs as grid-independent).
-        let fan_electric_w = if env.grid.voltage_pu == 0.0 {
+        let fan_electric_w = if !env.grid.bus_energized() {
             0.0
         } else {
             rated_fan_electric_w
@@ -638,7 +638,7 @@ impl Equipment for GasWH {
         // real-power ZIP polynomial); fan motor pf 0.87 by class default.
         let fan_reactive_kvar = self
             .zip
-            .reactive_kvar(power_w_to_kw(fan_electric_w), env.grid.voltage_pu);
+            .reactive_kvar(power_w_to_kw(fan_electric_w), env.grid.bus_voltage_pu());
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: fan_electric_w,
@@ -741,6 +741,10 @@ impl Equipment for GasWH {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1088,6 +1092,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

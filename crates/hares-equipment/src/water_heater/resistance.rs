@@ -477,13 +477,15 @@ impl Equipment for ResistanceWH {
             return OperatingMode::Off;
         }
 
-        // Grid outage (voltage 0): the heating elements have no supply power,
-        // so no electrical heat can enter the tank. Gating here (the root of
-        // element dispatch) keeps the energy balance consistent: previously
-        // only the *reported* electric draw was zeroed while the tank still
-        // received full element heat. Thermostat hysteresis resumes normally
-        // once the grid is restored.
-        if env.grid.voltage_pu == 0.0 {
+        // Grid outage (de-energized bus): the heating elements have no supply
+        // power, so no electrical heat can enter the tank. Gating here (the
+        // root of element dispatch) keeps the energy balance consistent:
+        // previously only the *reported* electric draw was zeroed while the
+        // tank still received full element heat. Thermostat hysteresis
+        // resumes normally once power returns. Islanded (battery/generator-
+        // backed) homes keep an energized bus and are not affected — see
+        // `GridState::bus_energized` and docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
             self.upper_element_on = false;
             self.lower_element_on = false;
             return OperatingMode::Off;
@@ -635,7 +637,7 @@ impl Equipment for ResistanceWH {
             .accumulate(draw_volume_l, env.current_time.hour());
 
         // Grid outage is gated at the root in `update_control` (elements are
-        // forced off at voltage 0), so delivered tank heat and metered draw
+        // forced off when the bus is de-energized), so delivered tank heat and metered draw
         // are always consistent here.
         let electric_power_w = upper_power_w + lower_power_w;
         // Rule R1: Q from the already-computed real power (never through the
@@ -643,7 +645,7 @@ impl Equipment for ResistanceWH {
         // exactly 0.0 kVAR.
         let reactive_power_kvar = self
             .zip
-            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.voltage_pu);
+            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.bus_voltage_pu());
         if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: electric_power_w,
@@ -736,6 +738,10 @@ impl Equipment for ResistanceWH {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1043,6 +1049,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1969,6 +1976,7 @@ mod element_priority_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

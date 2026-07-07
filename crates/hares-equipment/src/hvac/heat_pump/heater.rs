@@ -20,7 +20,7 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, lookup_zone,
+        apply_heating_control_unchecked, equipment_id_from_config, lookup_zone, outage_forces_off,
         zone_id_from_config_or_default,
     },
 };
@@ -424,6 +424,13 @@ impl Equipment for HeatPumpHeaterCore {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the heat-pump compressor (class default pf 0.84,
+        // or a user "zip" override). Fan/loop-pump component ZIPs are
+        // secondary; ER backup/defrost elements are resistive (Q ≡ 0).
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1112,6 +1119,23 @@ impl HeatPumpHeaterCore {
             }
         }
 
+        // Grid outage: a de-energized bus removes supply power for the
+        // compressor, ER backup elements, and blower — force off before any
+        // override handling (WH precedent). The ER off-timer bookkeeping
+        // advances exactly as for any forced off, so min-off protection is
+        // honoured at restoration. Islanded (battery/generator-backed) homes
+        // keep an energized bus and are not affected.
+        // See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.hvac.runtime.last_speed_index = 0;
+            if self.er_was_on {
+                self.last_er_off_at = Some(env.current_time);
+            }
+            self.er_was_on = false;
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
+
         // If a ModeOverride forces Off, short-circuit thermostat.
         if matches!(self.ctrl_mode_override, Some(OperatingMode::Off))
             || self.dr_load_fraction <= 0.0
@@ -1235,13 +1259,13 @@ impl HeatPumpHeaterCore {
         // would fabricate ~0.646·P_ER of phantom kvar during backup events.
         let reactive_power_kvar = self
             .zip
-            .reactive_kvar(step.compressor_kw * sf, env.grid.voltage_pu)
+            .reactive_kvar(step.compressor_kw * sf, env.grid.bus_voltage_pu())
             + self
                 .fan_zip
-                .reactive_kvar(step.fan_kw * sf, env.grid.voltage_pu)
+                .reactive_kvar(step.fan_kw * sf, env.grid.bus_voltage_pu())
             + self
                 .pump_zip
-                .reactive_kvar(step.pump_kw * sf, env.grid.voltage_pu);
+                .reactive_kvar(step.pump_kw * sf, env.grid.bus_voltage_pu());
         if scaled_electric_kw > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(scaled_electric_kw),
@@ -2513,6 +2537,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -2910,6 +2935,44 @@ mod tests {
         e
     }
 
+    /// `resolved_zip` on an ASHP heater reports the primary (compressor)
+    /// component's Rule R1 ZIP: class default pf 0.84 with the real side
+    /// forced to constant power.
+    #[test]
+    fn resolved_zip_reports_compressor_class_default_pf() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+
+        let zip = eq.resolved_zip().expect("ASHP heater exposes a ZIP");
+        assert_eq!(zip.pf, 0.84);
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+        // Reactive coefficients come from the ASHP Heater class row.
+        let class_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        assert_eq!(
+            (zip.zq, zip.iq, zip.pq),
+            (class_row.zq, class_row.iq, class_row.pq)
+        );
+    }
+
+    /// A user `"zip"` sidecar override retargets the primary (compressor)
+    /// component and is visible through `resolved_zip`.
+    #[test]
+    fn resolved_zip_reflects_user_zip_override() {
+        let mut cfg = heater_config();
+        cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(
+            14.78, -23.71, 9.93, 0.9,
+        ));
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+
+        let zip = eq.resolved_zip().expect("ASHP heater exposes a ZIP");
+        assert_eq!(zip.pf, 0.9);
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+    }
+
     #[test]
     fn er_hard_lockout_defaults_to_ochre_parity_zero() {
         let cfg = heater_config();
@@ -2944,6 +3007,92 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(eq.telemetry().get(tk::DEFROST_ACTIVE), Some(1.0));
+    }
+
+    /// Grid outage (de-energized bus): compressor, ER backup, and blower
+    /// have no supply — heating is forced off at the control level (zero
+    /// draw, zero delivered heat, even against a heating call and an active
+    /// ModeOverride). Islanded homes (bus held at nominal by a backup
+    /// source) keep heating; control resumes on restoration.
+    #[test]
+    fn grid_outage_forces_heat_pump_off_and_islanded_home_keeps_heating() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env_cold = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &env_cold).unwrap();
+
+        // Baseline: zone below setpoint → heat pump runs and delivers heat.
+        eq.update_control(&env_cold);
+        let mut baseline_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cold, Duration::from_secs(60), &mut baseline_ports)
+            .unwrap();
+        assert!(
+            baseline_ports.electrical.load_power_w > 0.0,
+            "baseline heating draws power"
+        );
+        assert!(
+            baseline_ports.thermal[0].sensible_gain_w > 0.0,
+            "baseline heating delivers heat"
+        );
+
+        // Utility outage: forced off even with a ModeOverride forcing heat.
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHP,
+        })
+        .unwrap();
+        let mut env_outage = env(18.0, 0.0, 0.003);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "no electric draw during outage"
+        );
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w, 0.0,
+            "no delivered heat during outage"
+        );
+
+        // Islanded: bus energized by a backup source → override + thermostat
+        // control proceed normally and heat is delivered again. Time advances
+        // past the compressor min-off window (off-timers keep running during
+        // the outage, WH precedent).
+        let mut env_islanded = env_at(18.0, 0.0, 0.003, 1_800);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        eq.update_control(&env_islanded);
+        let mut island_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_islanded, Duration::from_secs(60), &mut island_ports)
+            .unwrap();
+        assert!(
+            island_ports.thermal[0].sensible_gain_w > 0.0,
+            "islanded home keeps heating"
+        );
+
+        // Restoration: heating resumes.
+        let env_restored = env_at(18.0, 0.0, 0.003, 3_600);
+        eq.update_control(&env_restored);
+        let mut restored_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_restored, Duration::from_secs(60), &mut restored_ports)
+            .unwrap();
+        assert!(
+            restored_ports.thermal[0].sensible_gain_w > 0.0,
+            "heating resumes after restoration"
+        );
     }
 
     #[test]
@@ -3978,6 +4127,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -6972,6 +7122,7 @@ mod ideal_capacity_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

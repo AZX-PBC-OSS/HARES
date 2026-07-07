@@ -313,14 +313,14 @@ impl Equipment for TanklessWH {
             }
         }
 
-        // Grid outage (voltage 0): an electric tankless heater has no supply
+        // Grid outage (de-energized bus): an electric tankless heater has no supply
         // power and cannot fire — cold water passes through unheated. Gating
         // here (the root of dispatch) keeps the energy balance consistent:
         // previously only the *reported* electric draw was zeroed while the
         // water was still heated to setpoint. Gas-fired units keep firing
         // (fuel-side heat is unaffected); their electric ignition-controller
         // parasitic is zeroed separately in `step`.
-        if self.fuel_type == FuelType::Electric && env.grid.voltage_pu == 0.0 {
+        if self.fuel_type == FuelType::Electric && !env.grid.bus_energized() {
             return OperatingMode::Off;
         }
 
@@ -401,14 +401,14 @@ impl Equipment for TanklessWH {
         let (electric_kw_for_core, reactive_kvar_for_core) = if self.fuel_type == FuelType::Electric
         {
             // Grid outage is gated at the root in `update_control` (electric
-            // units are forced Off at voltage 0, making fuel_input_w zero),
+            // units are forced Off on a de-energized bus, making fuel_input_w zero),
             // so delivered heat and metered draw are always consistent here.
             // Rule R1: Q from the already-computed real power (never through
             // the real-power ZIP polynomial).
             let electric_w = fuel_input_w;
             let reactive_kvar = self
                 .zip
-                .reactive_kvar(power_w_to_kw(electric_w), env.grid.voltage_pu);
+                .reactive_kvar(power_w_to_kw(electric_w), env.grid.bus_voltage_pu());
             if electric_w > 0.0 || reactive_kvar != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
                     active_power_w: electric_w,
@@ -430,14 +430,14 @@ impl Equipment for TanklessWH {
             // Gas ignition controller draws electricity continuously regardless of
             // burner state (OCHRE/ANSI RESNET 301 standby parasitic).
             // Grid outage guard and Rule R1 Q as above.
-            let parasitic_w = if env.grid.voltage_pu == 0.0 {
+            let parasitic_w = if !env.grid.bus_energized() {
                 0.0
             } else {
                 self.parasitic_power_w
             };
             let parasitic_kvar = self
                 .zip
-                .reactive_kvar(power_w_to_kw(parasitic_w), env.grid.voltage_pu);
+                .reactive_kvar(power_w_to_kw(parasitic_w), env.grid.bus_voltage_pu());
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: parasitic_w,
                 reactive_power_kvar: parasitic_kvar,
@@ -495,6 +495,10 @@ impl Equipment for TanklessWH {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -739,6 +743,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1708,6 +1713,7 @@ mod tests {
                 grid: hares_types::GridState {
                     voltage_pu: 1.0,
                     frequency_hz: 60.0,
+                    island_bus_voltage_pu: None,
                 },
                 custom_domains: vec![],
                 equipment_telemetry: std::collections::HashMap::new(),

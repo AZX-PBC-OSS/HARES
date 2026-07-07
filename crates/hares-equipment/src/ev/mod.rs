@@ -817,6 +817,18 @@ impl Equipment for Ev {
         self.init_typed(config)
     }
 
+    fn island_source_available(&self) -> bool {
+        // An EV plugged in at home and actively discharging (V2L/V2G) is a
+        // source that can hold the home bus energized during a utility
+        // outage. A merely plugged-in EV is NOT counted — most EVSEs cannot
+        // island a home, and HARES only dispatches EV discharge on explicit
+        // (negative) setpoints. Uses the previous step's discharge state, so
+        // EV-driven islanding takes effect one step after discharge begins.
+        matches!(self.connection_state, EvConnectionState::HomePluggedIn)
+            && self.v2l_active
+            && self.soc > 0.0
+    }
+
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
             *remaining -= env.time_res.num_seconds() as f64;
@@ -846,8 +858,21 @@ impl Equipment for Ev {
 
         match self.connection_state {
             EvConnectionState::HomePluggedIn => {
-                let (charger_kw, heater_kw, is_v2l_discharge) =
+                let (mut charger_kw, mut heater_kw, is_v2l_discharge) =
                     self.run_charging_physics(env, dt, self.rated_power_kw);
+
+                // Grid outage (de-energized bus): the EVSE has no supply, so
+                // charging and battery preconditioning stop — gated at the
+                // control decision (WH precedent). V2L/V2G *discharge* is NOT
+                // gated: the EV is then a source (it can island the home —
+                // see `island_source_available`). Islanded homes keep an
+                // energized bus, so charging from on-site backup remains
+                // possible. See docs/outage-behavior.md.
+                if !is_v2l_discharge && !env.grid.bus_energized() {
+                    charger_kw = 0.0;
+                    heater_kw = 0.0;
+                    self.heater_active = false;
+                }
 
                 self.v2l_active = is_v2l_discharge;
                 self.v2l_power_kw = if is_v2l_discharge {
@@ -868,7 +893,13 @@ impl Equipment for Ev {
                 // SAE J3072). The EV is an inverter-coupled DER when V2G/V2L
                 // capable; reactive Q is computed from the grid-side active
                 // power with the same precedence/clamp as the battery.
-                let q_kvar = self.compute_reactive_kvar(self.active_power_kw);
+                // A de-energized bus produces no vars either — a commanded
+                // q-setpoint cannot be served by a dead EVSE.
+                let q_kvar = if is_v2l_discharge || env.grid.bus_energized() {
+                    self.compute_reactive_kvar(self.active_power_kw)
+                } else {
+                    0.0
+                };
                 self.reactive_power_kvar = q_kvar;
 
                 ports.accumulate(&PortContribution::Electrical {
@@ -944,6 +975,13 @@ impl Equipment for Ev {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        // Live runtime state: constant-power reactive-only ZIP carrying the
+        // current effective power factor (config baseline, later mutated by
+        // PowerFactorSetpoint) — mirrors `compute_reactive_kvar`'s baseline.
+        Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor))
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {

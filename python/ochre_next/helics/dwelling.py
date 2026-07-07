@@ -64,6 +64,14 @@ from ochre_next._hares import Dwelling as PyDwelling
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
 from .broker import allocate_ephemeral_port
+from .federate import (
+    DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_GRANT_TIMEOUT_S,
+    core_init_timeout_option,
+    enter_executing_mode_with_timeout,
+    request_time_with_timeout,
+    validate_timeout,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -286,6 +294,12 @@ class HELICSDwelling:
             (e.g. ``1.0``) so that this federate steps *after* an aggregator
             federate at the same granted time, allowing the aggregator to
             publish control signals before the dwelling reads them.
+        connect_timeout_s: Wall-clock seconds allowed for broker registration
+            and for entering executing mode.  A stale or unreachable broker
+            raises within this budget instead of hanging indefinitely.
+        grant_timeout_s: Wall-clock seconds allowed for each HELICS time
+            grant.  A stalled peer federate raises ``TimeoutError`` instead of
+            blocking ``run()`` forever.
     """
 
     def __init__(
@@ -295,12 +309,16 @@ class HELICSDwelling:
         broker_address: str = "localhost",
         core_type: str = "zmq",
         time_offset_s: float = 0.0,
+        connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+        grant_timeout_s: float = DEFAULT_GRANT_TIMEOUT_S,
     ) -> None:
         self._dwelling = dwelling
         self._fed_name = fed_name
         self._broker_address = broker_address
         self._core_type = core_type
         self._time_offset_s = time_offset_s
+        self._connect_timeout_s = validate_timeout(connect_timeout_s, "connect_timeout_s")
+        self._grant_timeout_s = validate_timeout(grant_timeout_s, "grant_timeout_s")
 
         self._start_time, self._period_s = self._peek_timing(dwelling)
         _LOG.info("HELICS federate %s period %.1fs derived from dwelling timesteps", fed_name, self._period_s)
@@ -485,15 +503,15 @@ class HELICSDwelling:
             if self._pub_power is None or self._pub_reactive is None:
                 raise RuntimeError("Publications are not registered; call register_publications() first")
 
-            self._fed.enter_executing_mode()
+            self._enter_executing_mode()
             self._verify_registration_completeness()
             self._verify_helics_counts()
             for timestamp in self._timesteps:
                 exit_time_s = (timestamp - self._start_time).total_seconds() + self._period_s
-                granted = float(self._fed.request_time(exit_time_s))
+                granted = self._request_time(exit_time_s)
                 while not _handle_time_grant(exit_time_s, granted):
                     self._publish_results()
-                    granted = float(self._fed.request_time(exit_time_s))
+                    granted = self._request_time(exit_time_s)
                 if granted >= helics.HELICS_TIME_MAXTIME:
                     self._federation_terminated = True
                     break
@@ -510,7 +528,7 @@ class HELICSDwelling:
                     "HELICS federate %s signalling completion via request_time(HELICS_TIME_MAXTIME)",
                     self._fed_name,
                 )
-                self._fed.request_time(helics.HELICS_TIME_MAXTIME)
+                self._request_time(helics.HELICS_TIME_MAXTIME)
             except Exception:
                 _LOG.warning(
                     "HELICS federate %s request_time(HELICS_TIME_MAXTIME) failed during completion signalling",
@@ -526,6 +544,29 @@ class HELICSDwelling:
             return
         self._fed.disconnect()
         self._finalized = True
+
+    def _enter_executing_mode(self) -> None:
+        """Enter executing mode with a wall-clock deadline.
+
+        On timeout the federate has already been torn down with a
+        non-blocking disconnect, so ``finalize()`` must not issue a blocking
+        ``disconnect()`` afterwards — it could hang on the same stale broker.
+        """
+        try:
+            enter_executing_mode_with_timeout(self._fed, self._connect_timeout_s, self._fed_name)
+        except TimeoutError:
+            self._finalized = True
+            raise
+
+    def _request_time(self, requested_time_s: float) -> float:
+        """Request a HELICS time grant with a wall-clock deadline (see above)."""
+        try:
+            return request_time_with_timeout(
+                self._fed, requested_time_s, self._grant_timeout_s, self._fed_name
+            )
+        except TimeoutError:
+            self._finalized = True
+            raise
 
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
@@ -880,7 +921,13 @@ class HELICSDwelling:
         # enterExecutingMode instead of raising a bind error (reproduced on
         # macOS/arm64 with HELICS 3.6.1).
         local_port = allocate_ephemeral_port()
-        core_init_value = f"--broker_address={broker_address} --port={local_port}"
+        # --timeout bounds broker registration: helicsCreateValueFederate
+        # against an unreachable or unresponsive broker raises within the
+        # timeout instead of stalling for the library default (~30s).
+        core_init_value = (
+            f"--broker_address={broker_address} --port={local_port} "
+            f"{core_init_timeout_option(self._connect_timeout_s)}"
+        )
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:

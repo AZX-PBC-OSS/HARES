@@ -158,6 +158,30 @@ impl ElectricalSolver {
         }
         self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p
     }
+
+    /// ZIP load scale for the current grid state, evaluated at the **bus**
+    /// voltage ([`hares_types::GridState::bus_voltage_pu`]) so islanded
+    /// operation (utility out, backup source holding the bus at nominal)
+    /// scales loads correctly.
+    ///
+    /// When the bus is de-energized (utility outage with no island source)
+    /// the scale is held at 1.0: every load is force-gated off at the
+    /// control level in that state, so port-side load is expected to be
+    /// zero, and passing any residual through at full weight keeps a leaked
+    /// (un-gated) load visible at the meter and in the electrical-balance
+    /// invariant instead of masking it with the clamped-ZIP attenuation.
+    ///
+    /// Callers comparing port-side accumulation against `net_active_kw()`
+    /// (invariant checker, observer) must use this method so both sides see
+    /// the same scale.
+    #[must_use]
+    pub fn effective_load_scale(&self, grid: &hares_types::GridState) -> f64 {
+        if grid.bus_energized() {
+            self.zip_load_scale(grid.bus_voltage_pu())
+        } else {
+            1.0
+        }
+    }
 }
 
 impl DomainSolver for ElectricalSolver {
@@ -174,7 +198,7 @@ impl DomainSolver for ElectricalSolver {
     ) {
         let p_load = power_w_to_kw(ports.electrical.load_power_w);
         let p_gen = power_w_to_kw(ports.electrical.generation_power_w);
-        let load_scale = self.zip_load_scale(env.grid.voltage_pu);
+        let load_scale = self.effective_load_scale(&env.grid);
 
         let p_load_adj = p_load * load_scale;
         let p_gen_adj = p_gen;
@@ -241,6 +265,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: v,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -580,26 +605,28 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_voltage_gives_reasonable_load() {
-        // V=0.0 (extreme fault) is clamped to 0.9 pu. The solver produces
-        // the load corresponding to the clamped lower bound, not the raw
-        // V=0 result. With Z=0.5, I=0.3, P=0.2, V=0 raw gives scale=0.2
-        // (2 kW for a 10 kW load), which dramatically understates demand.
+    fn test_zero_voltage_passes_load_through_unscaled() {
+        // V=0.0 with no island source is a dead bus. Every load is
+        // force-gated off at the control level in that state, so the port
+        // load is expected to be zero; the solver deliberately holds the
+        // ZIP scale at 1.0 so any un-gated (leaked) load stays fully
+        // visible at the meter instead of being attenuated by the clamped
+        // ZIP polynomial (see `effective_load_scale`).
         let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let load_w = 10000.0;
 
         let result_zero = run_with_voltage(zip, 0.0, load_w);
+        assert!(
+            (result_zero - 10.0).abs() <= 1e-10,
+            "dead-bus scale must be 1.0 (leak-visible), got {result_zero} kW"
+        );
+
+        // A merely sagged (nonzero) voltage still goes through the clamped
+        // ZIP polynomial: V=0.5 clamps to the 0.9 pu modeling bound.
+        let result_sag = run_with_voltage(zip, 0.5, load_w);
         let result_bound = run_with_voltage(zip, 0.9, load_w);
-
-        // Clamped result matches the V=0.9 lower-bound result.
-        assert!((result_zero - result_bound).abs() <= 1e-10);
-
-        // Clamped result is non-zero — there is still load at 0.9 pu.
-        assert!(result_zero > 0.0);
-
-        // Sanity check: raw V=0 result would be 2.0 kW (= 10 * 0.2).
-        // The clamped result is substantially larger.
-        assert!(result_zero > 2.1);
+        assert!((result_sag - result_bound).abs() <= 1e-10);
+        assert!(result_sag > 0.0);
     }
 
     #[test]
@@ -626,5 +653,66 @@ mod tests {
         let scale_high = solver.zip_load_scale(1.3);
         let expected_high = 0.5 * 1.1_f64.powi(2) + 0.3 * 1.1 + 0.2;
         assert!((scale_high - expected_high).abs() <= 1e-10);
+    }
+
+    #[test]
+    fn effective_load_scale_uses_bus_voltage_and_passes_dead_bus_through() {
+        use hares_types::GridState;
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+
+        // Utility up: identical to zip_load_scale at the utility voltage.
+        let up = GridState {
+            voltage_pu: 0.95,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert!((solver.effective_load_scale(&up) - solver.zip_load_scale(0.95)).abs() <= 1e-12);
+
+        // Islanded: the backup source holds the bus at nominal → scale is
+        // evaluated at the island bus voltage, not the (zero) utility voltage.
+        let islanded = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: Some(1.0),
+        };
+        assert!((solver.effective_load_scale(&islanded) - 1.0).abs() <= 1e-12);
+
+        // Dead bus: scale held at 1.0 so any un-gated (leaked) load stays
+        // fully visible at the meter instead of being ZIP-attenuated.
+        let dead = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert_eq!(solver.effective_load_scale(&dead), 1.0);
+    }
+
+    #[test]
+    fn resolve_scales_loads_at_island_bus_voltage_during_outage() {
+        // 10 kW of (gated-off-in-practice, but here synthetic) load during
+        // islanded operation must be scaled at the island bus voltage (1.0)
+        // — not clamped-to-0.9 utility voltage.
+        let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+        let mut env = env_with_voltage(0.0);
+        env.grid.island_bus_voltage_pu = Some(1.0);
+        let mut ports = PortSlots::default();
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_w: 10_000.0,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        assert!((solver.net_active_kw() - 10.0).abs() <= 1e-10);
     }
 }

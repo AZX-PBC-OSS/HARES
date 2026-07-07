@@ -1057,6 +1057,19 @@ impl Equipment for PV {
         }
         let curtailment_kw = (unclipped_ac_kw - total_ac_power_kw).max(0.0);
 
+        // IEEE 1547 anti-islanding: on a de-energized bus (utility outage
+        // with no backup source) the grid-following inverter trips — no AC
+        // export, no DC extraction (no MPPT load on the array), and no vars
+        // (gated below). When the home is islanded on a backup source the
+        // bus stays energized and the PV keeps producing alongside the
+        // grid-forming source. Panel thermal/soiling states keep evolving
+        // either way. See docs/outage-behavior.md.
+        let inverter_online = env.grid.bus_energized();
+        if !inverter_online {
+            total_ac_power_kw = 0.0;
+            total_dc_power_kw = 0.0;
+        }
+
         // Compute ONE signed bus reactive power [kVAR] used identically for
         // the port push, CoreOutput, and telemetry (§3.14 sign convention:
         // positive = inductive/absorbing vars, negative = supplying vars).
@@ -1071,11 +1084,17 @@ impl Equipment for PV {
         //     negative; (3) pf = 1.0 (default) → tan_phi = 0 → Q = 0.
         // A `Some` q_setpoint (including a commanded 0.0) is an absolute
         // override; only `None` falls through to the power-factor baseline.
-        let bus_q_kvar = match self.q_setpoint_kvar {
-            Some(q) => q,
-            // `total_ac_power_kw` is the positive generation magnitude; the
-            // negative sign encodes "supplying vars to the bus."
-            None => -total_ac_power_kw * self.zip_pf.tan_phi(),
+        // A tripped inverter (de-energized bus) produces no vars regardless
+        // of any commanded setpoint.
+        let bus_q_kvar = if !inverter_online {
+            0.0
+        } else {
+            match self.q_setpoint_kvar {
+                Some(q) => q,
+                // `total_ac_power_kw` is the positive generation magnitude; the
+                // negative sign encodes "supplying vars to the bus."
+                None => -total_ac_power_kw * self.zip_pf.tan_phi(),
+            }
         };
 
         // Apply smart inverter limits (handles clipping and priority). The
@@ -1187,6 +1206,13 @@ impl Equipment for PV {
         &self.core_output
     }
 
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        // Live runtime state: `zip_pf` carries the current effective
+        // displacement power factor (config baseline, later mutated by
+        // PowerFactorSetpoint) — exactly the ZIP the baseline Q path uses.
+        Some(self.zip_pf)
+    }
+
     fn checkpoint_version() -> u32 {
         // v2: `q_setpoint_kvar` became Option<f64> (None = no var override;
         //     Some(0.0) is a commanded zero).
@@ -1222,6 +1248,11 @@ impl Equipment for PV {
         self.q_setpoint_kvar = decoded.q_setpoint_kvar;
         self.inverter_priority = decoded.inverter_priority;
         self.power_factor = decoded.power_factor;
+        // Re-derive the cached ZIP from the restored power factor. Without
+        // this, a PowerFactorSetpoint applied before the checkpoint would be
+        // silently dropped: step() computes baseline Q from `zip_pf`, which
+        // init() derived from the *config* power factor.
+        self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
         self.soiling_config = decoded.soiling_config;
         self.soiling_state = decoded.soiling_state;
         self.shading_model = decoded.shading_model;
@@ -1480,6 +1511,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1681,6 +1713,69 @@ mod tests {
         approx_eq(ports.electrical.generation_power_w, 0.0);
     }
 
+    /// IEEE 1547 anti-islanding: on a de-energized bus the inverter trips —
+    /// no AC export, no DC extraction, no vars (even against a commanded
+    /// q-setpoint). An islanded home (backup source holding the bus at
+    /// nominal) keeps producing; production resumes on restoration.
+    #[test]
+    fn grid_outage_trips_inverter_and_islanded_home_keeps_producing() {
+        let mut pv = PV::new(config_single());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single(), &env_nominal).unwrap();
+
+        // Baseline: sunny → produces.
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let baseline_gen_w = -ports.electrical.generation_power_w;
+        assert!(baseline_gen_w > 0.0, "baseline PV production");
+
+        // Utility outage, no backup: inverter trips despite full sun and a
+        // commanded q-setpoint.
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+            .unwrap();
+        let mut env_outage = env_with_surfaces(sunny.clone(), 25.0);
+        env_outage.grid.voltage_pu = 0.0;
+        ports.zero();
+        pv.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(pv.telemetry().get(tk::AC_POWER_KW), Some(0.0));
+        assert_eq!(pv.telemetry().get(tk::DC_POWER_KW), Some(0.0));
+        assert_eq!(
+            pv.update_control(&env_outage),
+            hares_types::OperatingMode::Off
+        );
+
+        // Islanded: bus held at nominal by a backup source → the inverter
+        // stays online and produces alongside the grid-forming source.
+        let mut env_islanded = env_with_surfaces(sunny.clone(), 25.0);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        ports.zero();
+        pv.step(&env_islanded, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            -ports.electrical.generation_power_w > 0.0,
+            "islanded PV keeps producing"
+        );
+
+        // Restoration: production resumes.
+        ports.zero();
+        pv.step(&env_nominal, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!((-ports.electrical.generation_power_w - baseline_gen_w).abs() < 1e-6);
+    }
+
     #[test]
     fn temperature_derating_matches_expected_fraction() {
         let cfg = config_single_with_losses(0.0);
@@ -1870,6 +1965,28 @@ mod tests {
         restored.load_state(&state).unwrap();
         let state2 = restored.save_state().unwrap();
         assert_eq!(state, state2);
+    }
+
+    /// Regression: `load_state` must re-derive the cached `zip_pf` from the
+    /// restored `power_factor`, otherwise a PowerFactorSetpoint applied
+    /// before the checkpoint is silently dropped from the baseline Q path.
+    #[test]
+    fn load_state_rederives_zip_pf_from_restored_power_factor() {
+        let mut pv = PV::new(config_single());
+        pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 })
+            .unwrap();
+        let state = pv.save_state().unwrap();
+
+        let mut restored = PV::new(config_single());
+        restored.load_state(&state).unwrap();
+
+        assert_eq!(restored.power_factor, 0.9);
+        assert_eq!(
+            restored.zip_pf,
+            hares_types::zip::ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.9)
+        );
+        // The inspection surface agrees with the live Q path.
+        assert_eq!(restored.resolved_zip(), Some(restored.zip_pf));
     }
 
     #[test]

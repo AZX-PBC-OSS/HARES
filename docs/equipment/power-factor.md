@@ -250,6 +250,13 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 - Checkpoint version 2 on all WH types — `REACTIVE_POWER_KVAR` persists across save/load
 - HPWH: blended 0.97 on total (compressor + backup + fan on single electrical port)
 
+## Inspection Surface
+
+The resolved ZIP is inspectable (read-only; never influences stepping or Q):
+
+- **Rust**: `Equipment::resolved_zip() -> Option<ZipLoad>` (`crates/hares-equipment/src/lib.rs`) returns the *primary* resolved ZIP — the one a user `"zip"` override retargets. Typed equipment returns the init-resolved ZIP (Rule R1 projected); battery/EV/PV synthesize a constant-power reactive-only ZIP carrying the *current* effective pf (config baseline, later mutated by `PowerFactorSetpoint`); `None` means no electrical ZIP concept (generator, protocol bridge, indirect tank). HVAC secondary component ZIPs (fan/loop pump) are not exposed.
+- **Python**: `Equipment.resolved_zip` property and `Dwelling.equipment_zip(name)` both return a dict with keys `zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0` (or `None`); `equipment_zip` raises `ValueError` for an unknown name.
+
 ## OCHRE Divergences
 
 These are deliberate, documented improvements over OCHRE:

@@ -80,6 +80,14 @@ macro_rules! delegate_equipment {
             fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
                 self.$inner.ideal_target()
             }
+
+            fn island_source_available(&self) -> bool {
+                self.$inner.island_source_available()
+            }
+
+            fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+                self.$inner.resolved_zip()
+            }
         }
     };
 }

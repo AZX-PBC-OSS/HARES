@@ -11,6 +11,10 @@ from typing import Any
 
 import pytest
 
+# These tests use in-process fakes (no HELICS networking), so any hang is a
+# logic bug; the thread method also catches blocking inside C extensions.
+pytestmark = pytest.mark.timeout(60, method="thread")
+
 
 class _FakePublication:
     def __init__(self, key: str, data_type: str, log: list[tuple[Any, ...]]) -> None:
@@ -266,6 +270,7 @@ class _FakeFleet:
 def _clear_helics_modules() -> None:
     sys.modules.pop("ochre_next.helics", None)
     sys.modules.pop("ochre_next.helics.dwelling", None)
+    sys.modules.pop("ochre_next.helics.federate", None)
     sys.modules.pop("ochre_next.helics.fleet", None)
 
 
@@ -317,6 +322,9 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
     assert fedinfo.core_init.startswith("--broker_address=tcp://10.0.0.7:23404")
     assert fedinfo.core_init_string.startswith("--broker_address=tcp://10.0.0.7:23404")
     assert "--port=" in fedinfo.core_init
+    # --timeout bounds broker registration so a stale/unreachable broker
+    # raises instead of stalling for the HELICS library default (~30s).
+    assert "--timeout=" in fedinfo.core_init
     assert fedinfo.property[fake_helics.HELICS_PROPERTY_TIME_PERIOD] == pytest.approx(0.0)
 
     pubs = orchestrator.register_publications(prefix="grid/")

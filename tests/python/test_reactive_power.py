@@ -558,3 +558,128 @@ class TestDefaultBatteryZeroQ:
             f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
         )
         assert abs(tel["reactive_power_kvar"]) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# (f) ZIP / power-factor inspection surface
+#     (Dwelling.equipment_zip and Equipment.resolved_zip)
+# ---------------------------------------------------------------------------
+
+ZIP_KEYS = {"zp", "ip", "pp", "zq", "iq", "pq", "pf", "v0"}
+
+
+def _equipment_resolved_zip(dw, name):
+    """Return the resolved_zip property of the named equipment object."""
+    for eq in dw.equipment():
+        if eq.name == name:
+            return eq.resolved_zip
+    raise KeyError(name)
+
+
+class TestResolvedZipInspection:
+    def _add_battery(self, dw, **kw):
+        from ochre_next import Battery
+
+        bat = Battery(
+            "Bat",
+            10.0,
+            max_charge_kw=5.0,
+            max_discharge_kw=5.0,
+            initial_soc=0.5,
+            standby_power_w=0.0,
+            **kw,
+        )
+        dw.add_battery(bat)
+
+    def test_default_battery_resolved_zip_pf_unity(self):
+        dw = make_dwelling(duration_s=600, time_res_s=60)
+        dw.initialize()
+        self._add_battery(dw)
+
+        zip_dict = dw.equipment_zip("Bat")
+        assert zip_dict is not None
+        assert set(zip_dict) == ZIP_KEYS
+        assert zip_dict["pf"] == 1.0
+        # Constant-power reactive-only ZIP (both polynomials (0, 0, 1)).
+        assert (zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]) == (0.0, 0.0, 1.0)
+        assert (zip_dict["zq"], zip_dict["iq"], zip_dict["pq"]) == (0.0, 0.0, 1.0)
+        # The Equipment inspection object exposes the same view.
+        assert _equipment_resolved_zip(dw, "Bat") == zip_dict
+
+    def test_ashp_heater_resolved_zip_pf_084(self):
+        from ochre_next import ASHPHeater, DwellingBlueprint, EndUse
+
+        bp = DwellingBlueprint.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            duration_s=600,
+            time_res_s=60,
+        )
+        bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
+        bp.add_equipment(
+            ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000)
+        )
+        dw = bp.build()
+        dw.initialize()
+
+        zip_dict = dw.equipment_zip("ASHP")
+        assert zip_dict is not None
+        # Primary component = compressor: ASHP Heater class default pf 0.84.
+        assert zip_dict["pf"] == 0.84
+        # Rule R1: real side forced to constant power.
+        assert (zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]) == (0.0, 0.0, 1.0)
+        assert _equipment_resolved_zip(dw, "ASHP") == zip_dict
+
+    def test_user_zip_override_pf_09_visible(self):
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-07-01T14:00:00",
+            duration_s=600,
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+            overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
+        )
+        dw.initialize()
+
+        zip_dict = dw.equipment_zip("Air Conditioner")
+        assert zip_dict is not None
+        assert zip_dict["pf"] == 0.9
+        # The override merges over the class row: reactive coefficients keep
+        # the Air Conditioner class values (Hajagos & Danai 1998).
+        assert math.isclose(zip_dict["zq"], 12.53)
+        assert math.isclose(zip_dict["iq"], -21.11)
+        assert math.isclose(zip_dict["pq"], 9.58)
+        assert _equipment_resolved_zip(dw, "Air Conditioner") == zip_dict
+
+    def test_battery_power_factor_setpoint_updates_resolved_zip(self):
+        from ochre_next import ControlSignal
+
+        dw = make_dwelling(duration_s=600, time_res_s=60)
+        dw.initialize()
+        self._add_battery(dw)
+
+        assert dw.equipment_zip("Bat")["pf"] == 1.0
+        dw.apply_control("Bat", ControlSignal.power_factor_setpoint(0.8))
+        # Control signals dispatch during the step.
+        dw.step()
+        zip_dict = dw.equipment_zip("Bat")
+        assert zip_dict["pf"] == 0.8, (
+            f"PowerFactorSetpoint(0.8) must be visible in resolved_zip, "
+            f"got pf={zip_dict['pf']}"
+        )
+        assert _equipment_resolved_zip(dw, "Bat") == zip_dict
+
+    def test_unknown_equipment_name_raises_value_error(self):
+        dw = make_dwelling(duration_s=600, time_res_s=60)
+        dw.initialize()
+        with pytest.raises(ValueError, match="not found"):
+            dw.equipment_zip("No Such Equipment")

@@ -650,7 +650,11 @@ impl Equipment for EventBasedLoad {
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
 
-        if env.grid.voltage_pu == 0.0 {
+        // Grid outage (de-energized bus): no power, no gains; event timers
+        // freeze (early return) and the interrupted cycle resumes when power
+        // returns. Islanded homes keep an energized bus and are not
+        // affected. See docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
             self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
@@ -733,7 +737,7 @@ impl Equipment for EventBasedLoad {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale, env.grid.voltage_pu)?;
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu())?;
 
         if self.extracted_events.is_empty() {
             self.advance_phase_timer(dt_s);
@@ -747,6 +751,10 @@ impl Equipment for EventBasedLoad {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1294,7 +1302,11 @@ impl Equipment for WetAppliance {
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
 
-        if env.grid.voltage_pu == 0.0 {
+        // Grid outage (de-energized bus): no power, no gains; event timers
+        // freeze (early return) and the interrupted cycle resumes when power
+        // returns. Islanded homes keep an energized bus and are not
+        // affected. See docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
             self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
@@ -1377,7 +1389,7 @@ impl Equipment for WetAppliance {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale, env.grid.voltage_pu)?;
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu())?;
         if self.extracted_events.is_empty() {
             self.advance_cycle(dt_s);
         }
@@ -1390,6 +1402,10 @@ impl Equipment for WetAppliance {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1938,6 +1954,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![DomainUpdate {
                 domain_id: SCHEDULE_DOMAIN_ID,
@@ -3737,6 +3754,45 @@ mod tests {
             slots.electrical.reactive_power_kvar.abs() < 1e-12,
             "expected zero reactive power without ZIP, got {}",
             slots.electrical.reactive_power_kvar
+        );
+    }
+
+    /// Grid outage (de-energized bus): a wet appliance draws nothing and
+    /// deposits no gains. An islanded home (utility out, backup source
+    /// holding the bus at nominal) keeps the appliance running at nominal
+    /// power.
+    #[test]
+    fn grid_outage_stops_wet_appliance_and_islanded_home_keeps_it_running() {
+        let mut env = base_env();
+        let config = wet_config("outage_washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Baseline: appliance draws power on an active event.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_nominal = slots.electrical.load_power_w;
+        assert!(power_nominal > 0.0, "baseline event draws power");
+
+        // Utility outage: zero draw, zero vars, zero gains.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.0;
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+        assert_eq!(slots.electrical.reactive_power_kvar, 0.0);
+
+        // Islanded: bus at nominal → appliance runs at nominal power.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.island_bus_voltage_pu = Some(1.0);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "islanded bus at nominal voltage restores the appliance draw"
         );
     }
 

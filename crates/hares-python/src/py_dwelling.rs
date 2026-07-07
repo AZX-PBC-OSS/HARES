@@ -876,9 +876,35 @@ impl PyDwelling {
                     eq.descriptor().clone(),
                     eq.core_output().clone(),
                     eq.telemetry().clone(),
+                    eq.resolved_zip(),
                 )
             })
             .collect())
+    }
+
+    /// The primary resolved ZIP/power-factor model for the named equipment,
+    /// as a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/``pf``/
+    /// ``v0``, or ``None`` when the equipment has no electrical ZIP concept
+    /// (e.g. generator, protocol bridge, indirect tank).
+    ///
+    /// For DER with live var control (battery, EV, PV) ``pf`` is the current
+    /// effective power factor (config baseline, later mutated by a
+    /// ``PowerFactorSetpoint``). Raises ``ValueError`` for an unknown
+    /// equipment name. Pure inspection — never influences the simulation.
+    pub fn equipment_zip<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let dwelling = self.acquire()?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("equipment '{}' not found", name)))?;
+        eq.resolved_zip()
+            .map(|zip| crate::py_equipment::zip_to_pydict(py, &zip))
+            .transpose()
     }
 
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {
@@ -1698,6 +1724,12 @@ impl PyDwelling {
         dict.set_item("mains_temp_c", env.weather.mains_temp_c)?;
         dict.set_item("grid_voltage_pu", env.grid.voltage_pu)?;
         dict.set_item("grid_frequency_hz", env.grid.frequency_hz)?;
+        // Outage/islanding observability: `grid_voltage_pu` is the utility
+        // service voltage (0.0 = outage); `grid_bus_voltage_pu` is the bus
+        // voltage equipment actually sees (nonzero when a backup source
+        // islands the home).
+        dict.set_item("grid_bus_voltage_pu", env.grid.bus_voltage_pu())?;
+        dict.set_item("grid_islanded", env.grid.islanded())?;
         dict.set_item("current_time", chrono_to_py_datetime(py, env.current_time)?)?;
         let zones: Vec<Py<PyDict>> = env
             .zones
@@ -2811,6 +2843,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: HashMap::new(),

@@ -252,6 +252,9 @@ impl Equipment for ProtocolBridge {
         &self.core_output
     }
 
+    // `resolved_zip()` keeps the default `None`: the bridge routes control
+    // signals and draws no electrical load of its own.
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &ProtocolBridgeCheckpoint {
@@ -447,6 +450,7 @@ mod tests {
             grid: hares_types::GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

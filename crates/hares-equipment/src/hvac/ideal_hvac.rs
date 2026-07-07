@@ -520,6 +520,19 @@ impl Equipment for IdealHvac {
         self.use_ideal_cached = self.use_ideal_capacity(env);
         self.last_sim_time = Some(env.current_time);
 
+        // Grid outage: a de-energized bus removes the unit's supply power —
+        // force off (FSM to Deadband, since step() delivers capacity from
+        // the FSM mode) and clear any solver-driven ideal target so no
+        // capacity is delivered (WH precedent). Islanded homes keep an
+        // energized bus and are not affected. See docs/outage-behavior.md.
+        if !env.grid.bus_energized() {
+            self.cached_ideal_target = None;
+            self.ideal_capacity_w = 0.0;
+            self.ideal_capacity_degraded = false;
+            self.set_mode(ThermostatMode::Deadband, env.current_time);
+            return OperatingMode::Off;
+        }
+
         let mode = self.update_mode(env).unwrap_or(ThermostatMode::Deadband);
 
         // Compute the ideal solver target independently of FSM hysteresis.
@@ -708,7 +721,7 @@ impl Equipment for IdealHvac {
         // Rule R1: Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
         // zero. Wired uniformly so the cross-equipment consistency check
         // (port/CoreOutput/telemetry) stays uniform across the fleet.
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
         if fan_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
@@ -844,6 +857,10 @@ impl Equipment for IdealHvac {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1146,6 +1163,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1238,6 +1256,67 @@ mod tests {
 
         let target = eq.ideal_target();
         assert!(target.is_none());
+    }
+
+    /// Grid outage (de-energized bus): forced off with the solver ideal
+    /// target cleared — no capacity is delivered and no power drawn.
+    /// Islanded homes keep conditioning; control resumes on restoration.
+    #[test]
+    fn grid_outage_forces_ideal_hvac_off_and_islanded_home_keeps_heating() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "on".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env_cold = env(18.0, 60, 0);
+        eq.init(&cfg, &env_cold).unwrap();
+
+        // Baseline: heating with an ideal target.
+        assert_eq!(
+            eq.update_control(&env_cold),
+            hares_types::OperatingMode::Heating
+        );
+        assert!(eq.ideal_target().is_some());
+
+        // Utility outage: forced off, target cleared, zero step outputs.
+        let mut env_outage = env(18.0, 60, 60);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(
+            eq.update_control(&env_outage),
+            hares_types::OperatingMode::Off
+        );
+        assert!(eq.ideal_target().is_none());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.load_power_w, 0.0);
+        assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
+
+        // Islanded: bus energized by a backup source → heating call returns.
+        let mut env_islanded = env(18.0, 60, 120);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        assert_eq!(
+            eq.update_control(&env_islanded),
+            hares_types::OperatingMode::Heating
+        );
+        assert!(eq.ideal_target().is_some());
+
+        // Restoration: control resumes.
+        assert_eq!(
+            eq.update_control(&env(18.0, 60, 180)),
+            hares_types::OperatingMode::Heating
+        );
     }
 
     #[test]

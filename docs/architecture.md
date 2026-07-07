@@ -133,7 +133,8 @@ Every equipment model and solver receives the same read-only snapshot each times
 pub struct EnvironmentState {
     pub zones: Vec<ZoneState>,              // indoor temp, humidity, volume per zone
     pub weather: WeatherState,              // outdoor conditions, solar irradiance per surface
-    pub grid: GridState,                    // voltage, frequency
+    pub grid: GridState,                    // utility voltage, frequency, island bus voltage
+                                            // (outage/islanding: see outage-behavior.md)
     pub custom_domains: Vec<DomainUpdate>,  // solver outputs from previous step
     pub current_time: DateTime<FixedOffset>,
     pub time_res: Duration,

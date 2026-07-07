@@ -581,14 +581,14 @@ impl Equipment for HeatPumpWH {
             return OperatingMode::Off;
         }
 
-        // Grid outage (voltage 0): compressor and backup element have no
+        // Grid outage (de-energized bus): compressor and backup element have no
         // supply power, so no heat can be pumped or dissipated into the tank.
         // Gating here (the root of dispatch) keeps the energy balance
         // consistent: previously only the *reported* electric draw was zeroed
         // while the tank still received full compressor/element heat.
         // On/off timers keep advancing in `step`, so min-off-time is honoured
         // naturally when the grid is restored.
-        if env.grid.voltage_pu == 0.0 {
+        if !env.grid.bus_energized() {
             self.compressor_on = false;
             self.backup_on = false;
             return OperatingMode::Off;
@@ -778,10 +778,10 @@ impl Equipment for HeatPumpWH {
             .accumulate(draw_volume_l, env.current_time.hour());
 
         // OCHRE WaterHeater.py:662: fan runs when compressor is on; parasitic when off.
-        // Grid outage (voltage 0): the standby parasitic draw is also lost —
+        // Grid outage (de-energized bus): the standby parasitic draw is also lost —
         // compressor/backup are already forced off at the root in
         // `update_control`.
-        let fan_parasitic_w = if env.grid.voltage_pu == 0.0 {
+        let fan_parasitic_w = if !env.grid.bus_energized() {
             0.0
         } else if self.compressor_on {
             self.fan_power_w
@@ -797,7 +797,7 @@ impl Equipment for HeatPumpWH {
         // refinement hook.
         let reactive_power_kvar = self
             .zip
-            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.voltage_pu);
+            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.bus_voltage_pu());
 
         if electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -965,6 +965,10 @@ impl Equipment for HeatPumpWH {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1347,6 +1351,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1877,6 +1882,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -2676,6 +2682,7 @@ mod mutual_exclusion_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -2961,6 +2968,7 @@ mod dr_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -3275,6 +3283,7 @@ mod new_feature_tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

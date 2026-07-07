@@ -23,7 +23,7 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, loop_id_from_config, update_heating_control,
+        equipment_id_from_config, loop_id_from_config, outage_forces_off, update_heating_control,
         zone_id_from_config_or_default,
     },
 };
@@ -270,6 +270,16 @@ impl Equipment for ElectricBoiler {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        // Grid outage: a de-energized bus removes supply power for the
+        // elements/burner controls and the blower/circulator, so the unit
+        // cannot run (and cannot deliver heat) regardless of thermostat
+        // calls or overrides. Gated before override handling; islanded
+        // (battery/generator-backed) homes keep an energized bus and are
+        // not affected. See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         if let Some(mode) = apply_simple_mode_override_in_control(
             &mut self.hvac,
             &mut self.mode_override,
@@ -323,8 +333,12 @@ impl Equipment for ElectricBoiler {
         // Per-component reactive (see `hvac::reactive`): the resistance
         // element at the unit ZIP (pf 1.0 → Q ≡ 0), the circulation pump
         // motor at pf 0.84.
-        let reactive_power_kvar = self.zip.reactive_kvar(element_kw, env.grid.voltage_pu)
-            + self.pump_zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(element_kw, env.grid.bus_voltage_pu())
+            + self
+                .pump_zip
+                .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -395,6 +409,10 @@ impl Equipment for ElectricBoiler {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -621,6 +639,16 @@ impl Equipment for GasBoiler {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        // Grid outage: a de-energized bus removes supply power for the
+        // elements/burner controls and the blower/circulator, so the unit
+        // cannot run (and cannot deliver heat) regardless of thermostat
+        // calls or overrides. Gated before override handling; islanded
+        // (battery/generator-backed) homes keep an energized bus and are
+        // not affected. See docs/outage-behavior.md.
+        if outage_forces_off(&mut self.hvac, env) {
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         if let Some(mode) = apply_simple_mode_override_in_control(
             &mut self.hvac,
             &mut self.mode_override,
@@ -687,7 +715,9 @@ impl Equipment for GasBoiler {
                 consumption_w: fuel_input_w,
             })?;
         }
-        let reactive_power_kvar = self.zip.reactive_kvar(electric_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self
+            .zip
+            .reactive_kvar(electric_kw, env.grid.bus_voltage_pu());
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -778,6 +808,10 @@ impl Equipment for GasBoiler {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1081,6 +1115,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1156,6 +1191,69 @@ mod tests {
         assert!(
             (eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() - THERMAL_OUTPUT_W).abs() < 1e-9
         );
+    }
+
+    /// Grid outage (de-energized bus): boilers cannot run — elements/burner
+    /// controls and the circulation pump are electric, so no heat enters the
+    /// hydronic loop and (for gas) no fuel is burned. Islanded homes keep an
+    /// energized bus and keep heating; control resumes on restoration.
+    #[test]
+    fn grid_outage_forces_boilers_off_and_islanded_home_keeps_heating() {
+        // Electric boiler.
+        let cfg = eb_config(8_000.0, 1.0);
+        let mut eb = ElectricBoiler::new(cfg.clone());
+        let env_nominal = env(18.0);
+        eb.init(&cfg, &env_nominal).unwrap();
+
+        let mut env_outage = env(18.0);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eb.update_control(&env_outage), OperatingMode::Off);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eb.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+        assert_eq!(ports.fluid[0].total_flow_kg_s, 0.0);
+
+        // Islanded: bus energized by a backup source → heating proceeds.
+        let mut env_islanded = env(18.0);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        env_islanded.current_time += ChronoDuration::minutes(1);
+        assert_eq!(eb.update_control(&env_islanded), OperatingMode::Heating);
+        ports.zero();
+        eb.step(&env_islanded, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(ports.electrical.net_active_w() > 0.0);
+        assert!(ports.fluid[0].total_flow_kg_s > 0.0);
+
+        // Gas boiler: burner controls + circulator are electric → also off,
+        // no fuel burned.
+        let gcfg = gb_config(10_000.0, 0.8);
+        let mut gb = GasBoiler::new(gcfg.clone());
+        gb.init(&gcfg, &env_nominal).unwrap();
+        assert_eq!(gb.update_control(&env_outage), OperatingMode::Off);
+        ports.zero();
+        gb.step(&env_outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.fuel.get(hares_types::FuelType::Gas), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+        assert_eq!(ports.fluid[0].total_flow_kg_s, 0.0);
+
+        // Restoration: gas boiler resumes.
+        let mut env_restored = env(18.0);
+        env_restored.current_time += ChronoDuration::minutes(2);
+        assert_eq!(gb.update_control(&env_restored), OperatingMode::Heating);
+        ports.zero();
+        gb.step(&env_restored, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(ports.fuel.get(hares_types::FuelType::Gas) > 0.0);
     }
 
     #[test]

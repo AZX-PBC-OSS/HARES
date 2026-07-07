@@ -961,12 +961,32 @@ impl PyCoreOutput {
     }
 }
 
+/// Render a resolved [`ZipLoad`] as a Python dict with one key per struct
+/// field (`zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0`), matching the
+/// `defaults/zip_parameters.toml` row names and the `"zip"` override keys.
+pub(crate) fn zip_to_pydict<'py>(
+    py: Python<'py>,
+    zip: &hares_types::zip::ZipLoad,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("zp", zip.zp)?;
+    out.set_item("ip", zip.ip)?;
+    out.set_item("pp", zip.pp)?;
+    out.set_item("zq", zip.zq)?;
+    out.set_item("iq", zip.iq)?;
+    out.set_item("pq", zip.pq)?;
+    out.set_item("pf", zip.pf)?;
+    out.set_item("v0", zip.v0)?;
+    Ok(out)
+}
+
 #[pyclass(name = "Equipment", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyEquipment {
     descriptor: RustEquipmentDescriptor,
     core_output: RustCoreOutput,
     telemetry: RustTelemetry,
+    resolved_zip: Option<hares_types::zip::ZipLoad>,
 }
 
 impl PyEquipment {
@@ -974,11 +994,13 @@ impl PyEquipment {
         descriptor: RustEquipmentDescriptor,
         core_output: RustCoreOutput,
         telemetry: RustTelemetry,
+        resolved_zip: Option<hares_types::zip::ZipLoad>,
     ) -> Self {
         Self {
             descriptor,
             core_output,
             telemetry,
+            resolved_zip,
         }
     }
 }
@@ -998,6 +1020,23 @@ impl PyEquipment {
     #[getter]
     fn core_output(&self) -> PyCoreOutput {
         PyCoreOutput::new(self.core_output.clone())
+    }
+
+    /// The primary resolved ZIP/power-factor model this equipment applies to
+    /// its (primary-component) real power for reactive purposes, as a dict
+    /// with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/``pf``/``v0``.
+    ///
+    /// For DER with live var control (battery, EV, PV) the ``pf`` value is
+    /// the *current* effective power factor (config baseline, later mutated
+    /// by a ``PowerFactorSetpoint``). ``None`` means the equipment has no
+    /// electrical ZIP concept; ``pf == 0.0`` is the "reactive disabled"
+    /// sentinel. Pure inspection — never influences the simulation.
+    #[getter]
+    fn resolved_zip<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.resolved_zip
+            .as_ref()
+            .map(|zip| zip_to_pydict(py, zip))
+            .transpose()
     }
 
     /// Non-authoritative diagnostic telemetry map for this equipment.

@@ -549,7 +549,13 @@ impl Equipment for Ventilation {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let is_running = self.mode != OperatingMode::Off && self.dr_level != DRLevel::GridEmergency;
+        // Grid outage: a de-energized bus removes the fan supply, so the unit
+        // cannot run (no airflow, no recovery, no draw) — gated at the root
+        // of the on/off decision (WH precedent). Islanded homes keep an
+        // energized bus and are not affected. See docs/outage-behavior.md.
+        let is_running = self.mode != OperatingMode::Off
+            && self.dr_level != DRLevel::GridEmergency
+            && env.grid.bus_energized();
 
         if !is_running {
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
@@ -690,7 +696,7 @@ impl Equipment for Ventilation {
 
         // Fan electrical power [kW]
         let fan_kw = power_w_to_kw(effective_fan_power_w);
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.voltage_pu);
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
@@ -752,6 +758,10 @@ impl Equipment for Ventilation {
             self.effective_sensible_effectiveness,
             self.effective_latent_effectiveness,
         ))
+    }
+
+    fn resolved_zip(&self) -> Option<ZipLoad> {
+        Some(self.zip)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -929,6 +939,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -1072,6 +1083,51 @@ mod tests {
             (t_supply - 14.0).abs() < 0.5,
             "HRV supply at 0°C outdoor / 20°C indoor / 70% eff should be ~14°C, got {t_supply}"
         );
+    }
+
+    /// Grid outage (de-energized bus): the fans have no supply — no airflow,
+    /// no recovery, no draw. Islanded homes keep ventilating; operation
+    /// resumes on restoration.
+    #[test]
+    fn grid_outage_stops_ventilation_and_islanded_home_keeps_running() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        // Baseline: fan draws power.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert!(ports.electrical.load_power_w > 0.0);
+
+        // Utility outage: zero draw, zero recovery.
+        let mut e_outage = env(0.0, 20.0);
+        e_outage.grid.voltage_pu = 0.0;
+        ports.zero();
+        hrv.step(&e_outage, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert_eq!(ports.electrical.load_power_w, 0.0);
+        assert_eq!(hrv.telemetry().get(tk::FAN_POWER_W), Some(0.0));
+        assert_eq!(hrv.telemetry().get(tk::SENSIBLE_RECOVERY_W), Some(0.0));
+
+        // Islanded: bus energized by a backup source → fans run.
+        let mut e_islanded = env(0.0, 20.0);
+        e_islanded.grid.voltage_pu = 0.0;
+        e_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        ports.zero();
+        hrv.step(&e_islanded, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert!(ports.electrical.load_power_w > 0.0);
+
+        // Restoration: operation resumes.
+        ports.zero();
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert!(ports.electrical.load_power_w > 0.0);
     }
 
     #[test]
@@ -2076,6 +2132,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

@@ -283,6 +283,12 @@ impl Equipment for HpCooler {
         self.inner.core_output()
     }
 
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the compressor ZIP resolved by the inner
+        // AirConditioner (the user "zip" sidecar is propagated to it).
+        self.inner.resolved_zip()
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
@@ -642,7 +648,9 @@ impl Equipment for GshpCooler {
         // The inner AirConditioner already pushed the compressor/fan/crankcase
         // reactive and reported it in its CoreOutput; the pump contribution is
         // added on top so the port and CoreOutput stay consistent.
-        let pump_q = self.pump_zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
+        let pump_q = self
+            .pump_zip
+            .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
         if pump_kw > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(pump_kw),
@@ -685,6 +693,13 @@ impl Equipment for GshpCooler {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the compressor ZIP resolved by the inner
+        // AirConditioner (the user "zip" sidecar is propagated to it); the
+        // loop-pump component ZIP is secondary.
+        self.inner.resolved_zip()
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -965,7 +980,9 @@ impl Equipment for WshpCooler {
         // Per-component reactive (see `hvac::reactive`): the water-loop pump
         // is a circulation pump motor (pf 0.84), not a cooling compressor.
         // See GshpCooler::step for the full rationale.
-        let pump_q = self.pump_zip.reactive_kvar(pump_kw, env.grid.voltage_pu);
+        let pump_q = self
+            .pump_zip
+            .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
         if pump_kw > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(pump_kw),
@@ -1004,6 +1021,13 @@ impl Equipment for WshpCooler {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+        // Primary component: the compressor ZIP resolved by the inner
+        // AirConditioner (the user "zip" sidecar is propagated to it); the
+        // loop-pump component ZIP is secondary.
+        self.inner.resolved_zip()
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1066,6 +1090,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

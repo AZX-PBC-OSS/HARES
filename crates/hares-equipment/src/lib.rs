@@ -256,6 +256,29 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// Whether this equipment can act as an islanding source that keeps the
+    /// home bus energized during a utility outage.
+    ///
+    /// The dwelling ORs this across all equipment at the start of each
+    /// timestep; when the utility voltage is 0.0 pu and any source reports
+    /// `true`, the bus is held at nominal voltage
+    /// (`GridState::island_bus_voltage_pu = Some(1.0)`) so loads keep
+    /// running — see `GridState::bus_energized`.
+    ///
+    /// Default `false` (loads are never island sources). Overridden by:
+    /// - Battery: grid-connected, dischargeable (SOC above its floor,
+    ///   temperature/DR permit discharge).
+    /// - Generator: enabled (self-consumption on, or a positive setpoint).
+    /// - EV: plugged in at home and actively discharging (V2L/V2G) — a
+    ///   plugged-in EV that is not discharging cannot form a bus.
+    ///
+    /// Modeling note: island capability (a grid-forming inverter / transfer
+    /// switch) is assumed present whenever the source can deliver power;
+    /// there is no separate opt-in flag yet.
+    fn island_source_available(&self) -> bool {
+        false
+    }
+
     /// Returns an actor seed if this equipment wants a built-in actor
     /// auto-registered during dwelling initialization.
     fn actor_seed(&self) -> Option<ActorSeed> {
@@ -269,6 +292,36 @@ pub trait Equipment: Send + Sync {
     /// propagated to `ThermalSolverConfig.ventilation` before each thermal
     /// solver integration step.  Returns `None` for non-ventilation equipment.
     fn effective_ventilation_effectiveness(&self) -> Option<(f64, f64)> {
+        None
+    }
+
+    /// The primary resolved ZIP/power-factor model this equipment applies to
+    /// its (primary-component) real power for reactive purposes.
+    ///
+    /// Semantics per equipment family:
+    /// - **Typed equipment** (HVAC, water heaters, ventilation, scheduled and
+    ///   event loads): the ZIP resolved at init through the config sidecar →
+    ///   class-defaults → constant-power precedence chain
+    ///   ([`crate::config::resolve_zip`], with Rule R1 projection where it
+    ///   applies). For HVAC with per-component reactive splitting this is the
+    ///   *primary* component's ZIP — the one a user `"zip"` override retargets
+    ///   (compressor for DX equipment, blower for gas furnace, pump for gas
+    ///   boiler, element for electric furnace/boiler/baseboard). Secondary
+    ///   component ZIPs (`hvac::reactive`) are not exposed here.
+    /// - **DER with live var control** (battery, EV, PV): a constant-power
+    ///   reactive-only ZIP synthesized from the *current* effective power
+    ///   factor (config baseline, later mutated by `PowerFactorSetpoint`),
+    ///   mirroring exactly how their baseline Q is computed. A pending
+    ///   `q_setpoint_kvar` absolute override is runtime control state, not
+    ///   part of the ZIP model, and is not reflected here.
+    /// - **`None`** (the default): the equipment has no electrical ZIP
+    ///   concept (e.g. generator with Q ≡ 0 by design, protocol bridge,
+    ///   indirect tank with no electric draw).
+    ///
+    /// `pf = 0.0` in the returned ZIP is the "reactive disabled" sentinel
+    /// (see [`hares_types::zip::ZipLoad`]). This is a pure inspection
+    /// surface: it never influences stepping or Q computation.
+    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
         None
     }
 
@@ -525,6 +578,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),

@@ -13,6 +13,10 @@ from typing import Any
 
 import pytest
 
+# These tests use in-process fakes (no HELICS networking), so any hang is a
+# logic bug; the thread method also catches blocking inside C extensions.
+pytestmark = pytest.mark.timeout(60, method="thread")
+
 
 class _FakeBroker:
     def __init__(self, core_type: str, name: str, init_string: str) -> None:

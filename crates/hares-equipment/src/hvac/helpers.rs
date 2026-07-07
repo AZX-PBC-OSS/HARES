@@ -158,6 +158,29 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
     }
 }
 
+/// Grid-outage gate shared by all HVAC `update_control` implementations
+/// (water-heater precedent: force off at the **root of dispatch**, never by
+/// zeroing only the reported draw).
+///
+/// Returns `true` and zeroes the duty cycle when the home bus is
+/// de-energized ([`hares_types::GridState::bus_energized`] is `false`):
+/// no supply power exists, so the equipment cannot run regardless of
+/// thermostat calls, `ModeOverride`, or DR state — callers must place this
+/// check *before* mode-override handling and return `OperatingMode::Off`.
+/// Battery-/generator-backed (islanded) homes keep an energized bus, so
+/// this gate stays open for them by construction.
+///
+/// Timers and thermostat hysteresis resume normally once power returns;
+/// callers with compressor off-timers must advance them as for any forced
+/// off (mirroring the heat-pump water heater's outage behaviour).
+pub fn outage_forces_off(hvac: &mut HvacEquipment, env: &EnvironmentState) -> bool {
+    if env.grid.bus_energized() {
+        return false;
+    }
+    hvac.runtime.duty_cycle = 0.0;
+    true
+}
+
 /// Shared `update_control` logic for simple heating equipment.
 ///
 /// Runs the thermostat FSM and returns the resulting `OperatingMode`.

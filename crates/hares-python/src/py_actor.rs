@@ -181,6 +181,12 @@ fn environment_to_py_dict<'py>(py: Python<'py>, env: &EnvironmentState) -> Bound
     let grid = PyDict::new(py);
     let _ = grid.set_item("voltage_pu", env.grid.voltage_pu);
     let _ = grid.set_item("frequency_hz", env.grid.frequency_hz);
+    // Outage/islanding observability (VPP / resilience RL): `voltage_pu` is
+    // the utility service voltage (0.0 = outage); `bus_voltage_pu` is what
+    // equipment actually sees (nonzero when a backup source islands the
+    // home). See GridState in hares-types.
+    let _ = grid.set_item("bus_voltage_pu", env.grid.bus_voltage_pu());
+    let _ = grid.set_item("islanded", env.grid.islanded());
     let _ = dict.set_item("grid", grid);
 
     let _ = dict.set_item("current_time", env.current_time.to_rfc3339());

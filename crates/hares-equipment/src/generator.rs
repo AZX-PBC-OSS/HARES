@@ -1136,6 +1136,18 @@ impl Equipment for Generator {
         self.init_typed(config)
     }
 
+    fn island_source_available(&self) -> bool {
+        // A generator islands the home whenever it is enabled: either
+        // self-consumption control is active (it will pick up the house load
+        // — a utility outage is precisely when it runs) or an explicit
+        // positive setpoint commands output. Fuel supply is modeled as
+        // unlimited (no on-site tank model), so availability does not
+        // deplete. See `Equipment::island_source_available`.
+        self.rated_power_kw > 0.0
+            && (self.self_consumption_enabled
+                || self.power_setpoint_kw.unwrap_or(0.0) > IDLE_KW_THRESHOLD)
+    }
+
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         // Derive a provisional mode from the pending setpoint or current output
         // so callers see an up-to-date value before the next step() runs.
@@ -1636,6 +1648,10 @@ impl Equipment for Generator {
         &self.core_output
     }
 
+    // `resolved_zip()` keeps the default `None`: generator reactive power is
+    // Q ≡ 0 by design (genset excitation control is out of scope), so there
+    // is no ZIP model to expose.
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &GeneratorCheckpoint {
@@ -2072,6 +2088,7 @@ mod tests {
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
@@ -3935,6 +3952,48 @@ mod tests {
                 .descriptor()
                 .control_capabilities
                 .contains(ControlCapabilities::SELF_CONSUMPTION)
+        );
+    }
+
+    /// A generator is an island source whenever it is enabled: it keeps the
+    /// home bus energized during a utility outage (an outage is precisely
+    /// when it runs) and is never gated off by a dead bus. Disabling
+    /// self-consumption (with no setpoint) removes availability.
+    #[test]
+    fn generator_is_island_source_and_runs_during_outage() {
+        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        assert!(
+            generator.island_source_available(),
+            "enabled generator can island the home"
+        );
+
+        // Utility outage: the generator picks up the house load — no gating.
+        let mut env_outage = base_env();
+        env_outage.grid.voltage_pu = 0.0;
+        env_outage.grid.island_bus_voltage_pu = Some(1.0);
+        let mut slots = ports_for(&generator);
+        slots.electrical.load_power_w = 8.0;
+        generator
+            .step(&env_outage, Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert!(
+            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            "generator serves the load during the outage, got {}",
+            generator.current_power_kw
+        );
+
+        // Disabled (no self-consumption, no setpoint): not an island source.
+        generator
+            .apply_control(&ControlSignal::SelfConsumption {
+                enabled: false,
+                solar_only_charging: false,
+            })
+            .unwrap();
+        assert!(
+            !generator.island_source_available(),
+            "disabled generator cannot island the home"
         );
     }
 

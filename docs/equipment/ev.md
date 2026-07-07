@@ -122,3 +122,11 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 The EV declares `REACTIVE` core capability and `REACTIVE_SETPOINT | POWER_FACTOR_SETPOINT` control capabilities. `CoreOutput.flows.reactive_power_kvar` is `Some(q)` with signed Q matching the port.
 
 For background on why and how other equipment handles reactive power, see [power-factor.md](./power-factor.md).
+
+## Grid Outage Behaviour
+
+Home charging (and battery preconditioning) stops when the home bus is
+de-energized — the EVSE has no supply; away charging is off-site and
+unaffected. V2L/V2G **discharge is never gated**: a discharging EV is a
+source and islands the home (with a one-step lag). See
+[outage-behavior.md](../outage-behavior.md).

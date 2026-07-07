@@ -131,6 +131,7 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
         grid: GridState {
             voltage_pu: 1.0,
             frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
         },
         custom_domains: vec![DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,

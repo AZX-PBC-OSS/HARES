@@ -175,10 +175,14 @@ graph LR
 
 ## Grid Outage Behaviour
 
-Outages are signalled by `env.grid.voltage_pu == 0.0` and are gated **at the
-root of dispatch** (control/element level), never by merely zeroing the
-reported electric draw — tank energy change always equals delivered heat
-minus losses:
+Water heaters gate on a **de-energized bus** (`!env.grid.bus_energized()`),
+never on the raw utility voltage: a home islanded on a battery/generator
+keeps an energized bus and its water heating (see
+[outage-behavior.md](../outage-behavior.md) for the system-wide semantics
+that generalize this table to all equipment families). Gating happens
+**at the root of dispatch** (control/element level), never by merely
+zeroing the reported electric draw — tank energy change always equals
+delivered heat minus losses:
 
 | WH Type | During outage | Notes |
 |---------|---------------|-------|

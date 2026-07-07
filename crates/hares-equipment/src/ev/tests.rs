@@ -57,6 +57,7 @@ fn sample_env() -> EnvironmentState {
         grid: GridState {
             voltage_pu: 1.0,
             frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
@@ -3679,4 +3680,93 @@ fn ev_unplugged_produces_zero_reactive() {
         .expect("REACTIVE cap → Some even when 0");
     approx_eq(q_co, 0.0);
     approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+}
+
+/// Grid outage (de-energized bus): the home EVSE is dead — charging and the
+/// battery heater stop, SOC holds, and no vars are produced. An islanded
+/// home (backup source holding the bus at nominal) can keep charging from
+/// the on-site source.
+#[test]
+fn grid_outage_stops_home_charging_and_islanded_bus_allows_it() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Baseline: charges at home.
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(ports.electrical.load_power_w > 0.0, "baseline charging");
+    let soc_after_baseline = ev.telemetry().get(tk::SOC).unwrap();
+
+    // Utility outage, no backup: no draw, no vars, SOC unchanged.
+    let mut env_outage = sample_env();
+    env_outage.grid.voltage_pu = 0.0;
+    ports.zero();
+    ev.step(&env_outage, Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(ports.electrical.load_power_w, 0.0);
+    assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+    assert!(
+        (ev.telemetry().get(tk::SOC).unwrap() - soc_after_baseline).abs() < 1e-12,
+        "SOC must not change while the EVSE is dead"
+    );
+
+    // Islanded: bus energized by a backup source → charging resumes.
+    let mut env_islanded = sample_env();
+    env_islanded.grid.voltage_pu = 0.0;
+    env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+    ports.zero();
+    ev.step(&env_islanded, Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert!(
+        ports.electrical.load_power_w > 0.0,
+        "islanded bus allows charging from the on-site source"
+    );
+}
+
+/// An EV in V2L/V2G discharge is a source: its discharge is NOT gated by a
+/// dead bus, and while discharging it reports island-source availability so
+/// the dwelling can hold the bus energized.
+#[test]
+fn v2l_discharge_not_gated_by_outage_and_counts_as_island_source() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert!(
+        !ev.island_source_available(),
+        "a plugged-in EV that is not discharging cannot island the home"
+    );
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -2.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    // Utility outage with a dead bus: discharge continues — the EV is the
+    // source.
+    let mut env_outage = sample_env();
+    env_outage.grid.voltage_pu = 0.0;
+    let mut ports = PortSlots::default();
+    ev.step(&env_outage, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let power = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    assert!(
+        power < 0.0,
+        "V2L discharge must not be gated by the outage, got {power}"
+    );
+    assert!(
+        ev.island_source_available(),
+        "a discharging EV reports island-source availability"
+    );
 }

@@ -308,3 +308,12 @@ Shared psychrometric cooling coil solver used by AC and heat pump cooler:
 - Supply leakage to unconditioned zones reduces delivered capacity
 - Return leakage increases infiltration load
 - Duct wall conduction accounts for temperature delta between supply air and unconditioned space
+
+## Grid Outage Behaviour
+
+All HVAC families force off at the control level when the home bus is
+de-energized (`!env.grid.bus_energized()`): compressors, ER backup,
+blowers/circulators, crankcase heaters — and gas furnaces/boilers cannot
+fire either (their blowers, pumps, and burner controls are electric).
+Islanded (battery/generator-backed) homes keep an energized bus and keep
+conditioning. See [outage-behavior.md](../outage-behavior.md).
