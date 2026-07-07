@@ -61,8 +61,6 @@ use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::ControlCapabilities;
-#[cfg(test)]
-use hares_types::LoopId;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::validate_port_core_electrical_consistency;
 use hares_types::{
@@ -72,6 +70,8 @@ use hares_types::{
     ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
     validate_fluid_type_consistency,
 };
+#[cfg(test)]
+use hares_types::{ElectricPower, LoopId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
@@ -7580,7 +7580,7 @@ mod tests {
                     fuel: FuelType::Electric,
                     stage: ExecutionStage::Thermal,
                     control_capabilities: ControlCapabilities::MODE_OVERRIDE,
-                    core_capabilities: CoreCapabilities::HAS_MODE,
+                    core_capabilities: CoreCapabilities::HAS_MODE | CoreCapabilities::ELECTRIC,
                     telemetry_fields: vec![],
                     zone_type: None,
                 },
@@ -7626,8 +7626,20 @@ mod tests {
             &mut self,
             _env: &hares_types::EnvironmentState,
             _dt: Duration,
-            _ports: &mut PortSlots,
+            ports: &mut PortSlots,
         ) -> std::result::Result<(), hares_types::HaresError> {
+            if self
+                .core_output
+                .state
+                .operating_mode
+                .is_some_and(|m| m.is_active())
+            {
+                self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(0.001));
+                ports.accumulate(&PortContribution::Electrical {
+                    active_power_w: 1.0,
+                    reactive_power_kvar: 0.0,
+                })?;
+            }
             Ok(())
         }
 

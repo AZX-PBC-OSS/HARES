@@ -10,6 +10,7 @@ pub mod environment;
 pub mod equipment;
 pub mod error;
 pub mod fluid;
+pub(crate) mod mode_flow_guard;
 pub mod panic_hook;
 pub mod ports;
 pub mod schedule;

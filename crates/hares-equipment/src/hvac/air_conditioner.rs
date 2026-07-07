@@ -1093,6 +1093,14 @@ impl CoolingCore {
         );
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
+        let original_mode = self.operating_mode;
+        let has_nonzero_flow = electric_kw > 0.0;
+        let post_dse_sensible_w = sensible_cooling_w * dse;
+        let post_dse_latent_w = latent_cooling_w * dse;
+        self.operating_mode = original_mode.resolve_idle(
+            has_nonzero_flow,
+            Some(-(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse),
+        );
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry.set(
@@ -1184,9 +1192,7 @@ impl CoolingCore {
         .max(0) as f64
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
-        let post_dse_sensible_w = sensible_cooling_w * dse;
-        let post_dse_latent_w = latent_cooling_w * dse;
-        let active_setpoint_c = match self.operating_mode {
+        let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
             _ => sp.cooling_c,

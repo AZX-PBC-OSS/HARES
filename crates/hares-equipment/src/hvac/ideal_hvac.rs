@@ -730,9 +730,13 @@ impl Equipment for IdealHvac {
         }
 
         let operating_mode = match self.thermostat_fsm.mode {
-            ThermostatMode::Heating => OperatingMode::Heating,
-            ThermostatMode::Cooling => OperatingMode::Cooling,
+            ThermostatMode::Heating if capacity_w > 0.0 => OperatingMode::Heating,
+            ThermostatMode::Cooling if capacity_w < 0.0 => OperatingMode::Cooling,
+            ThermostatMode::Deadband if capacity_w > 0.0 => OperatingMode::Heating,
+            ThermostatMode::Deadband if capacity_w < 0.0 => OperatingMode::Cooling,
             ThermostatMode::Deadband => OperatingMode::Off,
+            _ if fan_power_w > 0.0 => OperatingMode::On,
+            _ => OperatingMode::Standby,
         };
 
         self.telemetry.set(tk::THERMAL_OUTPUT_W, capacity_w);

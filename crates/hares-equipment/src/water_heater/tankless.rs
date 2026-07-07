@@ -454,6 +454,8 @@ impl Equipment for TanklessWH {
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_kvar_for_core);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
+        let has_nonzero_flow = electric_kw_for_core > 0.0 || fuel_input_w > 0.0;
+        let mode = mode.resolve_idle(has_nonzero_flow, None);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {

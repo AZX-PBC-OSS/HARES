@@ -236,6 +236,50 @@ impl OperatingMode {
     pub fn as_code(&self) -> f64 {
         *self as u8 as f64
     }
+
+    /// Active modes represent equipment that is running — drawing power,
+    /// producing thermal output, or moving energy. Off and Standby are excluded.
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::Off | Self::Standby)
+    }
+
+    /// Heating variants deliver positive (into-zone) thermal power.
+    pub fn is_heating_variant(&self) -> bool {
+        matches!(
+            self,
+            Self::Heating
+                | Self::HeatingHP
+                | Self::HeatingER
+                | Self::HeatingHPAndER
+                | Self::HeatPumpWH
+                | Self::BackupElement
+        )
+    }
+
+    /// Cooling variants deliver negative (out-of-zone) thermal power.
+    pub fn is_cooling_variant(&self) -> bool {
+        matches!(self, Self::Cooling)
+    }
+
+    /// Resolve mode ambiguity at the contract boundary for equipment that is
+    /// idle or has parasitic loads, using available flow data to pick the
+    /// closest semantically-correct variant.
+    ///
+    /// - `Off` with non-zero flow → best match among `On`, `Heating`, `Cooling`
+    ///   depending on the sign and magnitude of `thermal_output_w`.
+    /// - Active mode (Heating, Cooling, etc.) with zero flow → `Standby`.
+    /// - Otherwise returns `self` unchanged.
+    pub fn resolve_idle(self, has_nonzero_flow: bool, thermal_output_w: Option<f64>) -> Self {
+        match self {
+            Self::Off if has_nonzero_flow => match thermal_output_w {
+                Some(t) if t > 0.0 => Self::Heating,
+                Some(t) if t < 0.0 => Self::Cooling,
+                _ => Self::On,
+            },
+            m if m.is_active() && !has_nonzero_flow => Self::Standby,
+            other => other,
+        }
+    }
 }
 
 impl TryFrom<u8> for OperatingMode {
@@ -981,6 +1025,14 @@ impl ElectricPower {
     pub fn signed_kw(&self) -> f64 {
         self.net_consumption_kw()
     }
+
+    /// True when the net power magnitude is zero — no load and no generation.
+    pub fn is_zero(&self) -> bool {
+        matches!(
+            self,
+            Self::Consumption(0.0) | Self::Generation(0.0) | Self::Bidirectional(0.0)
+        )
+    }
 }
 
 /// State of charge, constrained to [0.0, 1.0].
@@ -1192,6 +1244,12 @@ pub fn validate_core_contract(
                 }
             }
         }
+
+        // --- mode-vs-flows consistency checks ---
+        crate::mode_flow_guard::check_mode_flow_consistency(desc, co)
+            .map_err(|v| HaresError::Equipment(v.message))?;
+        crate::mode_flow_guard::invariant_recheck_mode_flow_consistency(desc, co);
+
         return Ok(());
     }
 
@@ -2919,6 +2977,259 @@ mod tests {
             msg.contains("non-finite value in state.setpoint_c"),
             "unexpected error: {msg}"
         );
+    }
+
+    fn mode_flow_test_descriptor(name: &str) -> EquipmentDescriptor {
+        EquipmentDescriptor {
+            id: EquipmentId(8),
+            name: name.to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_MODE,
+            telemetry_fields: vec![],
+            zone_type: None,
+        }
+    }
+
+    fn battery_test_descriptor(name: &str) -> EquipmentDescriptor {
+        EquipmentDescriptor {
+            id: EquipmentId(9),
+            name: name.to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            telemetry_fields: vec![],
+            zone_type: None,
+        }
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_active_mode_zero_power() {
+        let desc = mode_flow_test_descriptor("Active Zero");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                thermal_output_w: Some(0.0),
+                fuel_w: None,
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Heating),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("active mode with zero flows must error");
+        assert!(
+            err.to_string().contains("active") && err.to_string().contains("zero flows"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_off_mode_with_power() {
+        let desc = mode_flow_test_descriptor("Off With Power");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(0.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Off),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("Off mode with non-zero electric must error");
+        assert!(
+            err.to_string().contains("Off") && err.to_string().contains("non-zero"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_cooling_with_positive_thermal() {
+        let desc = mode_flow_test_descriptor("Cooling With Heat");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(1000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Cooling),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("Cooling mode with positive thermal must error");
+        assert!(
+            err.to_string().contains("Cooling") || err.to_string().contains("heating"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_allows_heating_with_positive_thermal() {
+        let desc = mode_flow_test_descriptor("Heating OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(1000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Heating),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("heating with positive thermal must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_charging_with_generation() {
+        let desc = battery_test_descriptor("Charge Gen Conflict");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(1.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Charging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("Charging mode with Generation must error");
+        assert!(
+            err.to_string().contains("Charging") && err.to_string().contains("generation"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_discharging_with_consumption() {
+        let desc = battery_test_descriptor("Discharge Consume Conflict");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Discharging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("Discharging mode with Consumption must error");
+        assert!(
+            err.to_string().contains("Discharging") && err.to_string().contains("consumption"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_allows_charging_with_consumption() {
+        let desc = battery_test_descriptor("Charge OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Charging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("Charging with Consumption must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_allows_discharging_with_generation() {
+        let desc = battery_test_descriptor("Discharge OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(1.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Discharging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("Discharging with Generation must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_allows_standby_with_small_power() {
+        let desc = battery_test_descriptor("Standby OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.001)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Standby),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("Standby with small electric draw must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_allows_defrost_with_positive_thermal() {
+        let desc = mode_flow_test_descriptor("Defrost OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(500.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Defrost),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("Defrost with positive thermal must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_allows_on_mode_with_positive_thermal() {
+        let desc = mode_flow_test_descriptor("On OK");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(800.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::On),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect("On mode with positive thermal must pass");
     }
 
     /// Minimal electric-equipment descriptor for port/core consistency tests.

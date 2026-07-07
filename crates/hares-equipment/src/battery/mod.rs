@@ -1423,7 +1423,7 @@ impl Equipment for Battery {
             }
         }
 
-        // -- Update mode --
+        // -- Update mode based on cell electrochemical power --
         self.mode = if actual_power_kw > IDLE_POWER_THRESHOLD_KW {
             OperatingMode::Charging
         } else if actual_power_kw < -IDLE_POWER_THRESHOLD_KW {

@@ -612,3 +612,306 @@ fn core_output_all_finite_is_accepted() {
     };
     validate_core_contract(&desc, &out).expect("all-finite CoreOutput must be accepted");
 }
+
+fn mode_test_descriptor(name: &str) -> EquipmentDescriptor {
+    EquipmentDescriptor {
+        id: EquipmentId(201),
+        name: name.to_string(),
+        end_use: EndUse::OTHER,
+        equipment_type: "Test".into(),
+        zone: None,
+        fuel: FuelType::Electric,
+        stage: ExecutionStage::Independent,
+        control_capabilities: ControlCapabilities::empty(),
+        core_capabilities: CoreCapabilities::ELECTRIC
+            | CoreCapabilities::THERMAL
+            | CoreCapabilities::HAS_MODE,
+        telemetry_fields: vec![],
+        zone_type: None,
+    }
+}
+
+fn battery_inv_descriptor(name: &str) -> EquipmentDescriptor {
+    EquipmentDescriptor {
+        id: EquipmentId(202),
+        name: name.to_string(),
+        end_use: EndUse::OTHER,
+        equipment_type: "Test".into(),
+        zone: None,
+        fuel: FuelType::Electric,
+        stage: ExecutionStage::Independent,
+        control_capabilities: ControlCapabilities::empty(),
+        core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+        telemetry_fields: vec![],
+        zone_type: None,
+    }
+}
+
+/// Active modes with at least one flow matching the mode's expected sign
+/// must pass. Thermal sign and charge/discharge direction are respected.
+#[test]
+fn random_active_mode_with_nonzero_flow_passes() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xCAFEFEED_u64);
+
+    let modes_with_flows: &[(OperatingMode, bool, Option<f64>)] = &[
+        (OperatingMode::Heating, true, Some(1.0)),
+        (OperatingMode::HeatingHP, true, Some(1.0)),
+        (OperatingMode::HeatingER, true, Some(1.0)),
+        (OperatingMode::HeatingHPAndER, true, Some(1.0)),
+        (OperatingMode::HeatPumpWH, true, Some(1.0)),
+        (OperatingMode::BackupElement, true, Some(1.0)),
+        (OperatingMode::Cooling, true, Some(-1.0)),
+        (OperatingMode::Defrost, true, Some(1.0)),
+        (OperatingMode::On, true, Some(1.0)),
+        (OperatingMode::Charging, false, None),
+        (OperatingMode::Discharging, false, None),
+    ];
+
+    for i in 0..256 {
+        let entry = &modes_with_flows[(rng.next_u64() as usize) % modes_with_flows.len()];
+        let mode = entry.0;
+        let expect_thermal = entry.1;
+        let sign = entry.2;
+        let thermal: Option<f64> = sign.map(|s| s * sample_range(&mut rng, 0.1, 100.0));
+
+        let electric: Option<ElectricPower> = match mode {
+            OperatingMode::Charging => Some(ElectricPower::Consumption(sample_range(
+                &mut rng, 0.1, 50.0,
+            ))),
+            OperatingMode::Discharging => {
+                Some(ElectricPower::Generation(sample_range(&mut rng, 0.1, 50.0)))
+            }
+            _ => Some(ElectricPower::Consumption(sample_range(
+                &mut rng, 0.1, 100.0,
+            ))),
+        };
+
+        let desc = if matches!(mode, OperatingMode::Charging | OperatingMode::Discharging) {
+            battery_inv_descriptor(&format!("Active Pass {i}"))
+        } else {
+            mode_test_descriptor(&format!("Active Pass {i}"))
+        };
+
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: electric,
+                thermal_output_w: if expect_thermal { thermal } else { None },
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(mode),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out)
+            .unwrap_or_else(|e| panic!("active mode {mode:?} with non-zero flow must pass: {e}"));
+    }
+}
+
+/// Active modes with all flows zero/unset must be rejected.
+#[test]
+fn random_active_mode_zero_flows_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xDEAD_F10D_u64);
+
+    let active_modes = [
+        OperatingMode::Heating,
+        OperatingMode::Cooling,
+        OperatingMode::Defrost,
+        OperatingMode::Charging,
+        OperatingMode::Discharging,
+        OperatingMode::HeatingHP,
+        OperatingMode::HeatingER,
+        OperatingMode::HeatingHPAndER,
+        OperatingMode::HeatPumpWH,
+        OperatingMode::BackupElement,
+        OperatingMode::On,
+    ];
+
+    for i in 0..64 {
+        let mode = active_modes[(rng.next_u64() as usize) % active_modes.len()];
+        let use_explicit_zero = rng.next_u64() % 2 == 0;
+
+        let out = if use_explicit_zero {
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    thermal_output_w: Some(0.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    operating_mode: Some(mode),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        } else {
+            CoreOutput {
+                state: CoreState {
+                    operating_mode: Some(mode),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        };
+
+        // Use battery desc for Charging/Discharging, thermal desc otherwise.
+        let desc = match mode {
+            OperatingMode::Charging | OperatingMode::Discharging => {
+                battery_inv_descriptor(&format!("BatAFail {i}"))
+            }
+            _ => mode_test_descriptor(&format!("ThermAFail {i}")),
+        };
+
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "active mode {mode:?} with zero flows must be rejected"
+        ));
+    }
+}
+
+/// Off mode with any non-zero flow must be rejected.
+#[test]
+fn random_off_mode_nonzero_flows_rejected() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x0FFBAD_u64);
+
+    for i in 0..64 {
+        let desc = mode_test_descriptor(&format!("OffFail {i}"));
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(sample_range(
+                    &mut rng, 0.001, 50.0,
+                ))),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Off),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &out).expect_err(&format!(
+            "Off mode with non-zero flow must be rejected (trial {i})"
+        ));
+    }
+}
+
+/// Cooling mode with positive thermal must be rejected; Heating mode with
+/// positive thermal must be accepted. Randomized thermal magnitudes.
+#[test]
+fn random_thermal_sign_vs_mode_enforced() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xACDC_0001_u64);
+
+    for i in 0..64 {
+        let desc = mode_test_descriptor(&format!("ThermSign {i}"));
+
+        // Cooling + positive thermal → reject
+        let bad = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(sample_range(&mut rng, 0.001, 200.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Cooling),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &bad).expect_err(&format!(
+            "Cooling + positive thermal must be rejected (trial {i})"
+        ));
+
+        // HeatingHP + positive thermal → accept
+        let good = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(sample_range(&mut rng, 0.001, 200.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::HeatingHP),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &good)
+            .unwrap_or_else(|e| panic!("HeatingHP + positive thermal must pass (trial {i}): {e}"));
+
+        // Heating + negative thermal → reject
+        let bad_cool = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(-sample_range(&mut rng, 0.001, 200.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Heating),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &bad_cool).expect_err(&format!(
+            "Heating + negative thermal must be rejected (trial {i})"
+        ));
+
+        // Cooling + negative thermal → accept
+        let good_cool = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(-sample_range(&mut rng, 0.001, 200.0)),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Cooling),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &good_cool)
+            .unwrap_or_else(|e| panic!("Cooling + negative thermal must pass (trial {i}): {e}"));
+    }
+}
+
+/// Charging with Generation and Discharging with Consumption must be rejected.
+#[test]
+fn random_charge_discharge_direction_enforced() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xBAAA_0002_u64);
+
+    for i in 0..64 {
+        let desc = battery_inv_descriptor(&format!("Batt {i}"));
+
+        // Charging + Generation → reject
+        let bad_charge = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(sample_range(&mut rng, 0.1, 50.0))),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Charging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &bad_charge).expect_err(&format!(
+            "Charging + Generation must be rejected (trial {i})"
+        ));
+
+        // Discharging + Consumption → reject
+        let bad_discharge = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(sample_range(
+                    &mut rng, 0.1, 50.0,
+                ))),
+                ..Default::default()
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Discharging),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        validate_core_contract(&desc, &bad_discharge).expect_err(&format!(
+            "Discharging + Consumption must be rejected (trial {i})"
+        ));
+    }
+}

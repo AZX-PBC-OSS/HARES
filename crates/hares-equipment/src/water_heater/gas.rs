@@ -695,6 +695,8 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
+        let has_nonzero_flow = fan_electric_w > 0.0 || fuel_input_w > 0.0;
+        let mode = mode.resolve_idle(has_nonzero_flow, None);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {

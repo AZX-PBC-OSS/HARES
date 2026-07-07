@@ -568,6 +568,7 @@ impl Equipment for Ventilation {
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
+            self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
@@ -602,6 +603,7 @@ impl Equipment for Ventilation {
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
+            self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
@@ -724,6 +726,7 @@ impl Equipment for Ventilation {
         self.telemetry.set(tk::SUPPLY_TEMP_C, t_supply_c);
         self.telemetry
             .set(tk::BYPASS_ACTIVE, if bypass_active { 1.0 } else { 0.0 });
+        self.mode = self.mode.resolve_idle(true, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -2164,5 +2167,88 @@ mod tests {
             (q_vent - expected_q).abs() < 1e-9,
             "ventilation Q/P must equal tan(acos({pf}))"
         );
+    }
+
+    #[test]
+    fn mode_on_with_grid_outage_reconciles_to_standby() {
+        let cfg = hrv_config();
+        let mut v = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        v.init(&cfg, &e).expect("init");
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+
+        let mut e_outage = env(0.0, 20.0);
+        e_outage.grid.voltage_pu = 0.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        v.step(&e_outage, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let co = v.core_output();
+        assert_eq!(
+            co.state.operating_mode,
+            Some(OperatingMode::Standby),
+            "active On mode with zero flow (grid outage) must reconcile to Standby"
+        );
+        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn mode_on_with_zero_schedule_reconciles_to_standby() {
+        let cfg = EquipmentConfig::from_typed(
+            "HRV-zero-sched".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: Some(50.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: Some(0.0),
+            },
+        )
+        .unwrap();
+
+        let mut v = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        v.init(&cfg, &e).expect("init");
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        v.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let co = v.core_output();
+        assert_eq!(
+            co.state.operating_mode,
+            Some(OperatingMode::Standby),
+            "active On mode with zero schedule fraction must reconcile to Standby"
+        );
+        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+            .expect("validate_core_contract");
     }
 }

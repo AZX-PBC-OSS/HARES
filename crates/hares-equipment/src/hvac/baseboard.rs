@@ -210,6 +210,11 @@ impl Equipment for ElectricBaseboard {
             self.run_time_s += dt.as_secs_f64();
         }
 
+        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
+
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
@@ -750,6 +755,41 @@ mod tests {
         assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
         assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("validate_core_contract");
+    }
+
+    #[test]
+    fn zero_capacity_dispatch_reconciles_heating_to_standby() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 0.0,
+            degraded: false,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let co = eq.core_output();
+        assert_eq!(
+            co.state.operating_mode,
+            Some(OperatingMode::Standby),
+            "zero-capacity ideal dispatch must reconcile Heating→Standby"
+        );
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
             .expect("validate_core_contract");
     }

@@ -283,6 +283,10 @@ impl Equipment for ElectricFurnace {
         // OCHRE HVAC.py:575: main_power = total_input - fan.
         // Electric furnace: main = heating elements = electric_kw - fan_kw.
         let main_power_kw = (electric_kw - fan_kw).max(0.0);
+        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
         let rtf = if self.operating_mode != OperatingMode::Off {
             self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
         } else {
@@ -658,6 +662,10 @@ impl Equipment for GasFurnace {
         // Gas furnace: main = gas input converted to kW. Fan is separate (electric).
         // OCHRE uses gas_therms_per_hour / kwh_to_therms; HARES uses fuel_input_w / 1000.
         let main_power_kw = power_w_to_kw(fuel_input_w);
+        let has_nonzero_flow = fan_kw > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
         let rtf = if self.operating_mode != OperatingMode::Off {
             self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
         } else {
@@ -722,8 +730,6 @@ impl Equipment for GasFurnace {
         .max(0) as f64
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
-        // Heating-only equipment: setpoint_c is always the heating setpoint (per
-        // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {

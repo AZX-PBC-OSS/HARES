@@ -1338,6 +1338,12 @@ impl HeatPumpHeaterCore {
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry
             .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
+        let original_mode = self.operating_mode;
+        let has_nonzero_flow =
+            scaled_electric_kw > 0.0 || delivered_thermal_w != 0.0 || scaled_fuel_w > 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(delivered_thermal_w));
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry
@@ -1487,7 +1493,7 @@ impl HeatPumpHeaterCore {
             None
         };
         let sp = self.hvac.effective_setpoints();
-        let active_setpoint_c = match self.operating_mode {
+        let active_setpoint_c = match original_mode {
             OperatingMode::Heating => sp.heating_c + self.dr_setpoint_offset_c,
             OperatingMode::Cooling => sp.cooling_c,
             _ => sp.heating_c + self.dr_setpoint_offset_c,

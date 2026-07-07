@@ -921,6 +921,7 @@ impl Equipment for HeatPumpWH {
         self.telemetry
             .set(tk::WALL_SENSIBLE_GAIN_W, sensible_to_wall_w);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
+        let mode = mode.resolve_idle(electric_power_w > 0.0, None);
         self.telemetry.set(
             tk::OPERATING_MODE,
             match mode {

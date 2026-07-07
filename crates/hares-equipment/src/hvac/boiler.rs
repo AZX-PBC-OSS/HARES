@@ -374,6 +374,10 @@ impl Equipment for ElectricBoiler {
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
+        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
@@ -770,6 +774,10 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
+        let has_nonzero_flow = electric_kw > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
+        self.operating_mode = self
+            .operating_mode
+            .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
