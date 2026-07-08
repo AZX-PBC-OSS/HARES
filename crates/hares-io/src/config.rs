@@ -7,13 +7,13 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::site_location::SiteLocationOverride;
 
 /// Output file format.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// CSV (default, for OCHRE compatibility).
@@ -32,7 +32,7 @@ pub enum OutputFormat {
 /// # Reference design
 /// EnergyPlus's `ReportFreq` enum:
 /// `vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc:347-355`
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RotationPolicy {
     /// Single output file (default).
@@ -58,7 +58,7 @@ pub enum ConfigError {
 }
 
 /// Simulation configuration controlling temporal loop, output, and RNG.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SimulationConfig {
     /// Simulation start time as **local wall-clock time**.
     ///
@@ -71,13 +71,10 @@ pub struct SimulationConfig {
     /// (with any offset), not `19:00 UTC`.
     pub start_time: DateTime<FixedOffset>,
     /// Total simulation length in seconds.
-    #[serde(deserialize_with = "deserialize_duration_seconds")]
+    #[serde(with = "duration_seconds")]
     pub duration: Duration,
     /// Timestep size in seconds (default: 60 s).
-    #[serde(
-        default = "default_time_res",
-        deserialize_with = "deserialize_duration_seconds"
-    )]
+    #[serde(default = "default_time_res", with = "duration_seconds")]
     pub time_res: Duration,
     /// Output verbosity level 0-8 (default: 0).
     #[serde(default)]
@@ -199,12 +196,18 @@ fn default_write_output() -> bool {
     true
 }
 
-fn deserialize_duration_seconds<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let seconds = i64::deserialize(deserializer)?;
-    Ok(Duration::seconds(seconds))
+mod duration_seconds {
+    use chrono::Duration;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i64(duration.num_seconds())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        let seconds = i64::deserialize(deserializer)?;
+        Ok(Duration::seconds(seconds))
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +378,91 @@ rotation = "daily"
 "#;
         let cfg = SimulationConfig::from_toml(toml).expect("parse config");
         assert_eq!(cfg.rotation, RotationPolicy::Daily);
+    }
+
+    #[test]
+    fn simulation_config_implements_serialize() {
+        fn _assert_serialize<T: serde::Serialize>() {}
+        _assert_serialize::<SimulationConfig>();
+    }
+
+    #[test]
+    fn round_trip_minimal_config() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse minimal config");
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let round_tripped =
+            SimulationConfig::from_toml(&serialized).expect("re-parse serialized config");
+        assert_eq!(
+            cfg, round_tripped,
+            "minimal config differs after TOML round-trip"
+        );
+    }
+
+    #[test]
+    fn round_trip_full_config() {
+        let toml = r#"
+start_time = "2024-06-15T12:00:00+00:00"
+duration = 7200
+time_res = 300
+output_verbosity = 5
+output_path = "/tmp/sim_output.csv"
+write_output = false
+output_format = "parquet"
+output_chunk_size = 5000
+setpoint_deadband_c = 1.5
+master_seed = 42
+retain_batches = true
+civil_timezone = "America/Denver"
+rotation = "daily"
+
+[site_location]
+latitude_deg = 39.7392
+longitude_deg = -104.9903
+elevation_m = 1609.0
+utc_offset_h = -7.0
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse full config");
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let round_tripped =
+            SimulationConfig::from_toml(&serialized).expect("re-parse serialized config");
+        assert_eq!(
+            cfg, round_tripped,
+            "full config differs after TOML round-trip"
+        );
+    }
+
+    #[test]
+    fn round_trip_output_path() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+output_path = "/some/path/output.csv"
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse");
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let round_tripped = SimulationConfig::from_toml(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg.output_path, round_tripped.output_path,
+            "OutputPath does not round-trip"
+        );
+    }
+
+    #[test]
+    fn round_trip_output_path_none() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse");
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let round_tripped = SimulationConfig::from_toml(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg.output_path, round_tripped.output_path,
+            "None OutputPath does not round-trip"
+        );
     }
 }
