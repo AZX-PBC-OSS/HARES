@@ -12,7 +12,8 @@ use hares_core::{
     SimulationResults, StepResult,
 };
 use hares_io::{
-    OutputFormat, ResStockBuilding, ResStockVersion, SimulationConfig, parse_resstock_metadata,
+    OutputFormat, ResStockBuilding, ResStockVersion, SampleWeightClass, SimulationConfig,
+    classify_sample_weight, parse_resstock_metadata,
 };
 use hares_types::ControlSignal;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
@@ -70,6 +71,18 @@ pub enum FleetError {
     AllSteppableDwellingsFailed { count: usize },
     #[error("failed to build local rayon thread pool: {0}")]
     ThreadPoolBuild(String),
+    #[error("fleet has no dwelling with positive sample_weight")]
+    ZeroWeightFleet,
+    #[error("sample_weights length ({provided}) must match fleet size ({expected})")]
+    SampleWeightLengthMismatch { expected: usize, provided: usize },
+    #[error(
+        "dwelling {bldg_id} has invalid sample_weight {value} (must be finite and non-negative)"
+    )]
+    InvalidSampleWeight { bldg_id: i64, value: f64 },
+    #[error(
+        "dwelling at index {index} has invalid sample_weight {value} (must be finite and non-negative)"
+    )]
+    InvalidAggregationWeight { index: usize, value: f64 },
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -223,18 +236,49 @@ impl Fleet {
 
     /// Patches sample weights for all fleet entries.
     ///
-    /// The weights vector length must match the number of entries.
-    #[must_use]
-    pub fn with_sample_weights(mut self, weights: Vec<f64>) -> Self {
-        assert_eq!(
-            weights.len(),
-            self.entries.len(),
-            "weights length must match fleet size"
-        );
+    /// Each weight is validated with the same rule the ResStock ingestion path
+    /// uses ([`hares_io::classify_sample_weight`]): a NaN, infinite, or negative
+    /// weight is rejected because it would silently corrupt fleet-level weighted
+    /// aggregation, and a zero weight is accepted with a warning (it contributes
+    /// nothing but the dwelling may still be useful for standalone simulation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FleetError::SampleWeightLengthMismatch`] if `weights.len()`
+    /// does not match the number of entries, or
+    /// [`FleetError::InvalidSampleWeight`] if any weight is non-finite or
+    /// negative.
+    pub fn with_sample_weights(mut self, weights: Vec<f64>) -> Result<Self> {
+        if weights.len() != self.entries.len() {
+            return Err(FleetError::SampleWeightLengthMismatch {
+                expected: self.entries.len(),
+                provided: weights.len(),
+            });
+        }
         for (entry, weight) in self.entries.iter_mut().zip(weights) {
+            match classify_sample_weight(weight) {
+                SampleWeightClass::Invalid => {
+                    tracing::error!(
+                        bldg_id = entry.config.bldg_id,
+                        sample_weight = weight,
+                        "dwelling has invalid sample_weight (NaN, infinite, or negative)"
+                    );
+                    return Err(FleetError::InvalidSampleWeight {
+                        bldg_id: entry.config.bldg_id,
+                        value: weight,
+                    });
+                }
+                SampleWeightClass::Zero => {
+                    tracing::warn!(
+                        bldg_id = entry.config.bldg_id,
+                        "dwelling has zero sample_weight"
+                    );
+                }
+                SampleWeightClass::Positive => {}
+            }
             entry.sample_weight = weight;
         }
-        self
+        Ok(self)
     }
 
     /// Returns the number of dwellings in the fleet.
@@ -1142,6 +1186,71 @@ mod tests {
                 SimStatus::Ok | SimStatus::Flagged(_)
             ));
             assert!(outcome.sample_weight > 0.0);
+        }
+    }
+
+    #[test]
+    fn with_sample_weights_accepts_zero_and_positive() {
+        let fleet = Fleet::from_buildings(build_missing_configs(3))
+            .with_sample_weights(vec![1.0, 0.0, 2.5])
+            .expect("finite non-negative weights are accepted");
+        let weights: Vec<f64> = fleet.entries.iter().map(|e| e.sample_weight).collect();
+        assert_eq!(weights, vec![1.0, 0.0, 2.5]);
+    }
+
+    #[test]
+    fn with_sample_weights_rejects_nan() {
+        let err = Fleet::from_buildings(build_missing_configs(2))
+            .with_sample_weights(vec![1.0, f64::NAN])
+            .expect_err("NaN weight must be rejected");
+        match err {
+            FleetError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 2);
+                assert!(value.is_nan());
+            }
+            other => panic!("expected InvalidSampleWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_sample_weights_rejects_negative() {
+        let err = Fleet::from_buildings(build_missing_configs(2))
+            .with_sample_weights(vec![1.0, -3.0])
+            .expect_err("negative weight must be rejected");
+        match err {
+            FleetError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 2);
+                assert_eq!(value, -3.0);
+            }
+            other => panic!("expected InvalidSampleWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_sample_weights_rejects_infinite() {
+        let err = Fleet::from_buildings(build_missing_configs(1))
+            .with_sample_weights(vec![f64::INFINITY])
+            .expect_err("infinite weight must be rejected");
+        match err {
+            FleetError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 1);
+                assert!(value.is_infinite());
+            }
+            other => panic!("expected InvalidSampleWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_sample_weights_rejects_length_mismatch() {
+        let err = Fleet::from_buildings(build_missing_configs(2))
+            .with_sample_weights(vec![1.0])
+            .expect_err("length mismatch must be rejected");
+        match err {
+            FleetError::SampleWeightLengthMismatch { expected, provided } => {
+                assert_eq!(expected, 2);
+                assert_eq!(provided, 1);
+            }
+            other => panic!("expected SampleWeightLengthMismatch, got {other:?}"),
         }
     }
 

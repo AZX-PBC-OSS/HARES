@@ -188,7 +188,10 @@ fn bench_aggregation(c: &mut Criterion) {
 
                         let mut ret = None;
                         for _ in 0..iters {
-                            ret = Some(aggregate(outcomes, *resolution));
+                            ret = Some(
+                                aggregate(outcomes, *resolution)
+                                    .expect("benchmark aggregation should succeed"),
+                            );
                         }
                         criterion::black_box(ret);
 

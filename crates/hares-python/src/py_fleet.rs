@@ -97,16 +97,6 @@ impl PyFleet {
             ));
         }
 
-        if let Some(ref weights) = sample_weights {
-            if weights.len() != configs.len() {
-                return Err(PyValueError::new_err(format!(
-                    "sample_weights length ({}) must match configs length ({})",
-                    weights.len(),
-                    configs.len()
-                )));
-            }
-        }
-
         let dwelling_configs: Vec<_> = configs
             .iter()
             .map(|c| c.to_dwelling_config())
@@ -114,8 +104,11 @@ impl PyFleet {
 
         let fleet = Fleet::from_buildings(dwelling_configs);
 
+        // `with_sample_weights` validates both the length and each weight
+        // (rejecting NaN/infinite/negative), so the Python layer defers to it
+        // rather than duplicating the checks.
         let fleet = if let Some(weights) = sample_weights {
-            fleet.with_sample_weights(weights)
+            fleet.with_sample_weights(weights).map_err(to_py_err)?
         } else {
             fleet
         };
@@ -227,7 +220,8 @@ impl PyFleet {
             ));
         }
 
-        let aggregated = aggregate(&success, resolution);
+        let aggregated = aggregate(&success, resolution)
+            .map_err(|e| PyValueError::new_err(format!("fleet aggregation failed: {e}")))?;
         let mut results = fleet_results_to_py(aggregated);
         results.failures = failures;
         results.n_succeeded = success.len();

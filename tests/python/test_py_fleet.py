@@ -123,6 +123,24 @@ def test_from_buildings_raises_on_weight_length_mismatch(tmp_path: Path) -> None
         PyFleet.from_buildings([config], sample_weights=[1.0, 2.0])
 
 
+@pytest.mark.parametrize("bad_weight", [float("nan"), float("inf"), -1.0])
+def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float) -> None:
+    """Verify from_buildings rejects NaN/infinite/negative sample weights.
+
+    A non-finite or negative weight would silently corrupt fleet-level weighted
+    aggregation, so it must be rejected at construction rather than propagating
+    into the simulation results.
+    """
+    PyFleet, DwellingConfig = _pyfleet_class()
+    hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
+
+    config1 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
+    config2 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=2)
+
+    with pytest.raises(ValueError, match="invalid sample_weight"):
+        PyFleet.from_buildings([config1, config2], sample_weights=[1.0, bad_weight])
+
+
 def test_from_buildings_empty_list_raises(tmp_path: Path) -> None:
     """Verify from_buildings([]) with empty list raises ValueError."""
     PyFleet, DwellingConfig = _pyfleet_class()

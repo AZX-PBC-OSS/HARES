@@ -12,6 +12,7 @@ pub mod psm3;
 pub mod pv_sizing;
 pub mod resstock;
 pub mod resstock_csv;
+pub mod sample_weight;
 pub mod schedule;
 pub mod schedule_resolve;
 pub mod site_location;
@@ -71,6 +72,7 @@ pub use resstock::{
     parse_weather_station_fips,
 };
 pub use resstock_csv::parse_resstock_csv;
+pub use sample_weight::{SampleWeightClass, classify_sample_weight};
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use schedule_resolve::check_hvac_setpoint_invariants;

@@ -14,6 +14,7 @@ use arrow::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResStockVersion {
@@ -55,6 +56,8 @@ pub enum ResStockError {
     NullRequired { column: String, row: usize },
     #[error("missing required characteristic: {0}")]
     MissingCharacteristic(String),
+    #[error("invalid sample_weight {value} for building {bldg_id}")]
+    InvalidSampleWeight { bldg_id: i64, value: f64 },
     #[error("parquet error: {0}")]
     ParquetError(String),
     #[error("arrow error: {0}")]
@@ -276,6 +279,24 @@ pub fn parse_resstock_metadata(
             let sample_weight = weight_arr.value(row_idx);
             let upgrade = upgrade_arr.value(row_idx);
 
+            match crate::classify_sample_weight(sample_weight) {
+                crate::SampleWeightClass::Invalid => {
+                    tracing::error!(
+                        bldg_id = bldg_id,
+                        sample_weight = sample_weight,
+                        "Building has invalid sample_weight (NaN, infinite, or negative)",
+                    );
+                    return Err(ResStockError::InvalidSampleWeight {
+                        bldg_id,
+                        value: sample_weight,
+                    });
+                }
+                crate::SampleWeightClass::Zero => {
+                    warn!(bldg_id = bldg_id, "Building has zero sample_weight",);
+                }
+                crate::SampleWeightClass::Positive => {}
+            }
+
             let mut characteristics = HashMap::new();
             for (name, col) in &string_cols {
                 if let Some(value) = string_value_at(col, row_idx) {
@@ -296,6 +317,48 @@ pub fn parse_resstock_metadata(
                 weather_fips: None,
                 characteristics,
             });
+        }
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let zero_count = rows.iter().filter(|r| r.sample_weight == 0.0).count();
+        let nan_count = rows.iter().filter(|r| r.sample_weight.is_nan()).count();
+        let positive_weights: Vec<f64> = rows
+            .iter()
+            .map(|r| r.sample_weight)
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .collect();
+        if !positive_weights.is_empty() {
+            let min = positive_weights
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let max = positive_weights
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let mean = positive_weights.iter().sum::<f64>() / positive_weights.len() as f64;
+            tracing::info!(
+                target: "observe",
+                version = %version,
+                total_rows = rows.len(),
+                zero_weight_count = zero_count,
+                nan_weight_count = nan_count,
+                weight_min = min,
+                weight_max = max,
+                weight_mean = mean,
+                "ResStock weight distribution statistics",
+            );
+        } else {
+            tracing::info!(
+                target: "observe",
+                version = %version,
+                total_rows = rows.len(),
+                zero_weight_count = zero_count,
+                nan_weight_count = nan_count,
+                "ResStock weight distribution (no positive weights)",
+            );
         }
     }
 
@@ -769,5 +832,142 @@ mod tests {
     fn parse_weather_station_fips_handles_missing_hpxml_file() {
         let fips = parse_weather_station_fips(Path::new("/nonexistent/hpxml.xml"));
         assert_eq!(fips, None);
+    }
+
+    fn nan_weight_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bldg_id", DataType::Int64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![f64::NAN])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch")
+    }
+
+    #[test]
+    fn reject_nan_sample_weight() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("nan_weight.parquet");
+        write_parquet(&pq, &nan_weight_batch());
+
+        let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
+        match err {
+            ResStockError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 1);
+                assert!(value.is_nan());
+            }
+            other => panic!("expected InvalidSampleWeight, got {other}"),
+        }
+    }
+
+    fn negative_weight_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bldg_id", DataType::Int64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![2])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![-1.0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch")
+    }
+
+    #[test]
+    fn reject_negative_sample_weight() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("neg_weight.parquet");
+        write_parquet(&pq, &negative_weight_batch());
+
+        let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
+        match err {
+            ResStockError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 2);
+                assert_eq!(value, -1.0);
+            }
+            other => panic!("expected InvalidSampleWeight, got {other}"),
+        }
+    }
+
+    fn infinite_weight_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bldg_id", DataType::Int64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![3])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![f64::INFINITY])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch")
+    }
+
+    #[test]
+    fn reject_infinite_sample_weight() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("inf_weight.parquet");
+        write_parquet(&pq, &infinite_weight_batch());
+
+        let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
+        match err {
+            ResStockError::InvalidSampleWeight { bldg_id, value } => {
+                assert_eq!(bldg_id, 3);
+                assert!(value.is_infinite());
+            }
+            other => panic!("expected InvalidSampleWeight, got {other}"),
+        }
+    }
+
+    fn zero_weight_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bldg_id", DataType::Int64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![4])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![0.0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch")
+    }
+
+    #[test]
+    fn zero_weight_allowed() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("zero_weight.parquet");
+        write_parquet(&pq, &zero_weight_batch());
+
+        let rows =
+            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bldg_id, 4);
+        assert_eq!(rows[0].sample_weight, 0.0);
     }
 }

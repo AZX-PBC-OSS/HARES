@@ -147,7 +147,9 @@ fn run_fleet_integration(failures: &mut Vec<String>) {
         })
         .collect();
 
-    let fleet = Fleet::from_buildings(configs).with_sample_weights(vec![1.0, 2.0, 0.5]);
+    let fleet = Fleet::from_buildings(configs)
+        .with_sample_weights(vec![1.0, 2.0, 0.5])
+        .expect("valid positive sample weights");
     let outcomes = fleet.simulate(1);
 
     let successful: Vec<DwellingOutcome> = outcomes
@@ -177,7 +179,8 @@ fn run_fleet_integration(failures: &mut Vec<String>) {
     }
 
     if !successful.is_empty() {
-        let results = aggregation::aggregate(&successful, AggregationResolution::Hourly);
+        let results =
+            aggregation::aggregate(&successful, AggregationResolution::Hourly).expect("aggregate");
 
         if results.per_dwelling_metrics.len() != successful.len() {
             failures.push(format!(
@@ -265,7 +268,8 @@ fn run_weighted_sum_with_weights(failures: &mut Vec<String>) {
         )),
     );
 
-    let fleet = aggregation::aggregate(&[d1, d2, d3, failed], AggregationResolution::FifteenMin);
+    let fleet = aggregation::aggregate(&[d1, d2, d3, failed], AggregationResolution::FifteenMin)
+        .expect("aggregate");
 
     if fleet.per_dwelling_metrics.len() != 4 {
         failures.push(format!(
@@ -386,7 +390,8 @@ fn run_hourly_resample_suffix_rules(failures: &mut Vec<String>) {
         )),
     );
 
-    let fleet = aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly);
+    let fleet =
+        aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly).expect("aggregate");
     if fleet.aggregate_timeseries.num_rows() != 1 {
         failures.push(format!(
             "expected 1 aggregate row, got {}",
@@ -464,7 +469,8 @@ fn run_weighted_mean_vs_sum(failures: &mut Vec<String>) {
     let d2 = make_dwelling(2.0, 20.0, 30.0, 0.5);
     let d3 = make_dwelling(3.0, 30.0, 25.0, 0.2);
 
-    let fleet = aggregation::aggregate(&[d1, d2, d3], AggregationResolution::Hourly);
+    let fleet =
+        aggregation::aggregate(&[d1, d2, d3], AggregationResolution::Hourly).expect("aggregate");
     if fleet.aggregate_timeseries.num_rows() != 1 {
         failures.push(format!(
             "weighted mean vs sum: expected 1 row, got {}",
@@ -532,7 +538,8 @@ fn run_null_propagates_to_aggregate(failures: &mut Vec<String>) {
         )),
     );
 
-    let fleet = aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly);
+    let fleet =
+        aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly).expect("aggregate");
     if fleet.aggregate_timeseries.num_rows() != 1 {
         failures.push(format!(
             "null propagation: expected 1 row, got {}",

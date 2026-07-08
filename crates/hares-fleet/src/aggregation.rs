@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, SecondsFormat, Timelike};
 
-use crate::fleet::{DwellingOutcome, SimStatus};
+use crate::fleet::{DwellingOutcome, FleetError, SimStatus};
 
 /// Output timeseries resolution for fleet aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,8 +127,10 @@ impl Accumulator {
 }
 
 /// Aggregate dwelling outcomes into per-dwelling metrics and weighted fleet timeseries.
-#[must_use]
-pub fn aggregate(results: &[DwellingOutcome], resolution: AggregationResolution) -> FleetResults {
+pub fn aggregate(
+    results: &[DwellingOutcome],
+    resolution: AggregationResolution,
+) -> Result<FleetResults, FleetError> {
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
@@ -145,9 +147,25 @@ pub fn aggregate(results: &[DwellingOutcome], resolution: AggregationResolution)
         .collect();
 
     let mut successful = Vec::new();
-    for outcome in results {
+    for (index, outcome) in results.iter().enumerate() {
         if matches!(outcome.status, SimStatus::Failed(_)) {
             continue;
+        }
+
+        // Defense-in-depth: a single non-finite or negative weight corrupts
+        // `weighted_values`/`total_weight` for every column it touches,
+        // regardless of whether other dwellings have valid weights. Reject it
+        // here even though the primary ingestion boundaries (ResStock parquet
+        // parsing and `Fleet::with_sample_weights`) already validate, so any
+        // future path that constructs a `DwellingOutcome` directly cannot
+        // silently poison the aggregate.
+        if hares_io::classify_sample_weight(outcome.sample_weight)
+            == hares_io::SampleWeightClass::Invalid
+        {
+            return Err(FleetError::InvalidAggregationWeight {
+                index,
+                value: outcome.sample_weight,
+            });
         }
 
         let Some((schema, rows)) = extract_rows(outcome) else {
@@ -175,12 +193,51 @@ pub fn aggregate(results: &[DwellingOutcome], resolution: AggregationResolution)
         successful.push((outcome.sample_weight, column_names, buckets));
     }
 
+    // Every weight in `successful` is now finite and non-negative, so the only
+    // remaining degenerate case is a fleet where all contributing weights are
+    // zero — the population estimate would be undefined.
+    let has_positive_weight = successful.iter().any(|(w, _, _)| *w > 0.0);
+    if !successful.is_empty() && !has_positive_weight {
+        return Err(FleetError::ZeroWeightFleet);
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let n_successful = successful.len();
+        // Weights are guaranteed finite and non-negative by the validation
+        // above, so filtering on `> 0.0` is sufficient to isolate contributors.
+        let positive_weights: Vec<f64> = successful
+            .iter()
+            .map(|(w, _, _)| *w)
+            .filter(|w| *w > 0.0)
+            .collect();
+        if !positive_weights.is_empty() {
+            let min = positive_weights
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let max = positive_weights
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let mean = positive_weights.iter().sum::<f64>() / positive_weights.len() as f64;
+            tracing::info!(
+                target: "observe",
+                n_dwellings = n_successful,
+                weight_min = min,
+                weight_max = max,
+                weight_mean = mean,
+                "fleet aggregation weight distribution",
+            );
+        }
+    }
+
     let aggregate_timeseries = build_aggregate_batch(successful);
 
-    FleetResults {
+    Ok(FleetResults {
         per_dwelling_metrics,
         aggregate_timeseries,
-    }
+    })
 }
 
 fn extract_rows(outcome: &DwellingOutcome) -> Option<(Arc<Schema>, Vec<RecordBatch>)> {
@@ -359,6 +416,20 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
                         total_weight[idx] += *sample_weight;
                     }
                     None => has_null[idx] = true,
+                }
+            }
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            for (idx, &tw) in total_weight.iter().enumerate() {
+                if !tw.is_finite() || tw < 0.0 {
+                    tracing::error!(
+                        column = idx,
+                        total_weight = tw,
+                        bucket = bucket,
+                        "fleet aggregation invariant violated: total_weight is non-finite or negative",
+                    );
                 }
             }
         }
@@ -543,7 +614,8 @@ mod tests {
             )),
         );
 
-        let fleet = aggregate(&[d1, d2, d3, failed], AggregationResolution::FifteenMin);
+        let fleet =
+            aggregate(&[d1, d2, d3, failed], AggregationResolution::FifteenMin).expect("aggregate");
         assert_eq!(fleet.per_dwelling_metrics.len(), 4);
         assert_eq!(
             fleet
@@ -641,7 +713,7 @@ mod tests {
             )),
         );
 
-        let fleet = aggregate(&[d1, d2], AggregationResolution::Hourly);
+        let fleet = aggregate(&[d1, d2], AggregationResolution::Hourly).expect("aggregate");
         assert_eq!(fleet.aggregate_timeseries.num_rows(), 1);
 
         let power = fleet
@@ -708,7 +780,7 @@ mod tests {
         let d2 = make_dwelling(2.0, 20.0, 30.0, 0.5);
         let d3 = make_dwelling(3.0, 30.0, 25.0, 0.2);
 
-        let fleet = aggregate(&[d1, d2, d3], AggregationResolution::Hourly);
+        let fleet = aggregate(&[d1, d2, d3], AggregationResolution::Hourly).expect("aggregate");
         assert_eq!(fleet.aggregate_timeseries.num_rows(), 1);
 
         let col = |idx: usize| -> f64 {
@@ -739,11 +811,11 @@ mod tests {
 
     #[test]
     fn aggregate_empty_dwellings_returns_empty_results() {
-        let fleet = aggregate(&[], AggregationResolution::FifteenMin);
+        let fleet = aggregate(&[], AggregationResolution::FifteenMin).expect("aggregate");
         assert!(fleet.per_dwelling_metrics.is_empty());
         assert_eq!(fleet.aggregate_timeseries.num_rows(), 0);
 
-        let fleet_hourly = aggregate(&[], AggregationResolution::Hourly);
+        let fleet_hourly = aggregate(&[], AggregationResolution::Hourly).expect("aggregate");
         assert!(fleet_hourly.per_dwelling_metrics.is_empty());
         assert_eq!(fleet_hourly.aggregate_timeseries.num_rows(), 0);
     }
@@ -776,7 +848,7 @@ mod tests {
         let d1 = make_dwelling(1.0);
         let d2 = make_dwelling(2.0);
 
-        let fleet = aggregate(&[d1, d2], AggregationResolution::FifteenMin);
+        let fleet = aggregate(&[d1, d2], AggregationResolution::FifteenMin).expect("aggregate");
         assert_eq!(fleet.per_dwelling_metrics.len(), 2);
         assert_eq!(fleet.aggregate_timeseries.num_rows(), 2);
 
@@ -805,5 +877,173 @@ mod tests {
         // SOC (-): weighted mean = (0.7*1 + 0.7*2)/(1+2) = 0.7, (0.8*1 + 0.8*2)/(1+2) = 0.8
         assert!((col(4, 0) - 0.7).abs() < 1e-9);
         assert!((col(4, 1) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregation_with_zero_weights() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        let zero_dwelling = outcome(
+            0.0,
+            SimStatus::Ok,
+            sample_metrics(0.0, 0.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(100.0)])],
+            )),
+        );
+        let normal_dwelling = outcome(
+            2.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 2.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(10.0)])],
+            )),
+        );
+
+        let fleet = aggregate(
+            &[zero_dwelling, normal_dwelling],
+            AggregationResolution::Hourly,
+        )
+        .expect("aggregate with mixed zero and positive weights");
+
+        let values = fleet
+            .aggregate_timeseries
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("power column");
+        // Zero-weight dwelling contributes 0, so power = 10.0 * 2.0 = 20.0
+        assert!((values.value(0) - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_rejects_single_invalid_weight_among_valid() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        // One valid dwelling and one NaN-weighted dwelling. The all-invalid
+        // guard would pass this (a positive weight exists), so aggregation must
+        // reject the individual NaN before it poisons the weighted sums.
+        let valid = outcome(
+            1.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(10.0)])],
+            )),
+        );
+        let poisoned = outcome(
+            f64::NAN,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(20.0)])],
+            )),
+        );
+
+        let err = aggregate(&[valid, poisoned], AggregationResolution::Hourly).unwrap_err();
+        match err {
+            FleetError::InvalidAggregationWeight { index, value } => {
+                assert_eq!(index, 1);
+                assert!(value.is_nan());
+            }
+            other => panic!("expected InvalidAggregationWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_rejects_negative_weight() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        let valid = outcome(
+            1.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(10.0)])],
+            )),
+        );
+        let negative = outcome(
+            -2.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(20.0)])],
+            )),
+        );
+
+        let err = aggregate(&[valid, negative], AggregationResolution::Hourly).unwrap_err();
+        match err {
+            FleetError::InvalidAggregationWeight { index, value } => {
+                assert_eq!(index, 1);
+                assert_eq!(value, -2.0);
+            }
+            other => panic!("expected InvalidAggregationWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_invalid_weight_index_counts_all_input_outcomes() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        // A failed dwelling precedes the invalid-weight dwelling. The reported
+        // index counts every input outcome (not just successful ones), so the
+        // caller can locate the offending dwelling in the original slice.
+        let failed = outcome(
+            1.0,
+            SimStatus::Failed("boom".to_string()),
+            sample_metrics(0.0, 0.0),
+            None,
+        );
+        let poisoned = outcome(
+            f64::INFINITY,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(20.0)])],
+            )),
+        );
+
+        let err = aggregate(&[failed, poisoned], AggregationResolution::Hourly).unwrap_err();
+        match err {
+            FleetError::InvalidAggregationWeight { index, value } => {
+                assert_eq!(index, 1);
+                assert!(value.is_infinite());
+            }
+            other => panic!("expected InvalidAggregationWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_rejects_all_zero_weights() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        let d1 = outcome(
+            0.0,
+            SimStatus::Ok,
+            sample_metrics(0.0, 0.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(1.0)])],
+            )),
+        );
+        let d2 = outcome(
+            0.0,
+            SimStatus::Ok,
+            sample_metrics(0.0, 0.0),
+            Some(batch(
+                &[t0],
+                vec![("Total Electric Power (kW)", vec![Some(2.0)])],
+            )),
+        );
+
+        let err = aggregate(&[d1, d2], AggregationResolution::Hourly).unwrap_err();
+        assert!(matches!(err, FleetError::ZeroWeightFleet));
     }
 }
