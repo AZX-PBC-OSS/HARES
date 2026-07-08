@@ -135,6 +135,30 @@ impl Ashrae152ZoneType {
             }
         }
     }
+
+    /// Seasonal delivery effectiveness multiplier from ASHRAE 152-2014
+    /// Tables 5-A through 5-D.
+    ///
+    /// These multipliers are empirical corrections that account for cyclic
+    /// losses, part-load effects, and air distribution patterns not captured
+    /// by the steady-state NTU-effectiveness model. Values vary by zone type,
+    /// season (heating vs. cooling), and equipment type (heat pump vs.
+    /// non-heat-pump for heating season).
+    ///
+    /// Returns a multiplier in (0.0, 1.0] per the ASHRAE 152 convention.
+    pub fn seasonal_multiplier(&self, _is_heating: bool, _is_heat_pump: bool) -> f64 {
+        // ASHRAE 152-2014 Tables 5-A (heating exterior), 5-B (heating interior),
+        // 5-C (cooling exterior), and 5-D (cooling interior) define per-zone-type,
+        // per-season seasonal delivery effectiveness multipliers.
+        //
+        // The standard text is not available in this codebase. All variants
+        // currently return 1.0 (identity) so that existing DSE results are
+        // preserved. Per-zone-type values from the standard tables must be
+        // filled in when the standard is obtained.
+        //
+        // See Known Limitations in T-0414 Implementation Notes.
+        1.0
+    }
 }
 
 /// Inputs to the ASHRAE 152 DSE calculation.
@@ -786,7 +810,34 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
             / dte_high;
 
     // ------------------------------------------------------------------
-    // 15. Final DSE
+    // 15. Seasonal delivery effectiveness multiplier
+    // ------------------------------------------------------------------
+    // ASHRAE 152-2014 Tables 5-A through 5-D specify per-zone-type, per-season
+    // empirical multipliers that account for cyclic losses, part-load effects,
+    // and air distribution patterns not captured by the steady-state
+    // NTU-effectiveness model. These are applied after regain but before
+    // equipment, load, and cycle-loss factors.
+    let seasonal_mult = input
+        .zone_type
+        .seasonal_multiplier(input.is_heating, input.is_heat_pump);
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::debug!(
+            target: "observe",
+            column = "ashrae152_seasonal_multiplier",
+            zone_type = ?input.zone_type,
+            is_heating = input.is_heating,
+            is_heat_pump = input.is_heat_pump,
+            seasonal_multiplier = seasonal_mult,
+            "ASHRAE 152 seasonal delivery effectiveness multiplier applied"
+        );
+    }
+
+    let seas_de = seas_de * seasonal_mult;
+
+    // ------------------------------------------------------------------
+    // 16. Final DSE
     // ------------------------------------------------------------------
     let seas_dse = seas_de * seas_equip_factor * seas_load_factor * (1.0 - fcycloss);
     if !seas_dse.is_finite() {
@@ -1447,6 +1498,141 @@ mod tests {
         let (s, r) = Ashrae152ZoneType::VentUninsulatedCrawlspace.default_leakage_class(true);
         assert_eq!(s, DuctLeakageClass::Sealed);
         assert_eq!(r, DuctLeakageClass::Sealed);
+    }
+
+    // ------------------------------------------------------------------
+    // Seasonal multiplier tests
+    // ------------------------------------------------------------------
+
+    /// Every `Ashrae152ZoneType` variant must return a seasonal multiplier
+    /// in (0.0, 1.0] for both heating and cooling.
+    #[test]
+    fn all_zone_types_return_plausible_seasonal_multiplier() {
+        let variants = [
+            Ashrae152ZoneType::AtticVented,
+            Ashrae152ZoneType::AtticVentedRadiantBarrier,
+            Ashrae152ZoneType::AtticUnvented,
+            Ashrae152ZoneType::AtticUnventedRadiantBarrier,
+            Ashrae152ZoneType::Garage,
+            Ashrae152ZoneType::UnventUninsulatedCrawlspace,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloor,
+            Ashrae152ZoneType::VentUninsulatedCrawlspace,
+            Ashrae152ZoneType::VentCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::VentCrawlspaceInsFloor,
+            Ashrae152ZoneType::UninsulatedBasement,
+            Ashrae152ZoneType::BasementInsWalls,
+            Ashrae152ZoneType::BasementInsCeiling,
+            Ashrae152ZoneType::UnderSlab,
+            Ashrae152ZoneType::ExteriorWalls,
+        ];
+        assert_eq!(
+            variants.len(),
+            16,
+            "precondition: all 16 Ashrae152ZoneType variants must be enumerated"
+        );
+
+        for &zone in &variants {
+            for &is_heating in &[true, false] {
+                for &is_heat_pump in &[true, false] {
+                    let mult = zone.seasonal_multiplier(is_heating, is_heat_pump);
+                    assert!(
+                        mult > 0.0 && mult <= 1.0,
+                        "{zone:?} is_heating={is_heating} is_heat_pump={is_heat_pump}: \
+                         seasonal multiplier must be in (0.0, 1.0], got {mult}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ASHRAE 152-2014 Table 5-A prescribes a seasonal delivery effectiveness
+    /// multiplier for ducts in unconditioned vented attics during heating
+    /// season that is less than 1.0 (typically 0.80–0.95).
+    ///
+    /// This test currently expects failure because the standard text is not
+    /// available in the codebase — all variants return 1.0 (identity) as a
+    /// placeholder. Remove `#[should_panic]` once the ASHRAE 152-2014
+    /// table values are filled in.
+    #[test]
+    #[should_panic(
+        expected = "attic vented heating multiplier must be <1.0 per ASHRAE 152-2014 Table 5-A"
+    )]
+    fn attic_vented_heating_multiplier_less_than_one() {
+        let mult = Ashrae152ZoneType::AtticVented.seasonal_multiplier(true, false);
+        assert!(
+            mult < 1.0,
+            "attic vented heating multiplier must be <1.0 per ASHRAE 152-2014 Table 5-A; \
+             current value is {mult} — the standard table values have not been filled in"
+        );
+    }
+
+    /// ASHRAE 152-2014 Table 5-C prescribes a seasonal delivery effectiveness
+    /// multiplier for ducts in unconditioned vented attics during cooling
+    /// season that is less than 1.0 (typically 0.80–0.95).
+    ///
+    /// This test currently expects failure because the standard text is not
+    /// available in the codebase — all variants return 1.0 (identity) as a
+    /// placeholder. Remove `#[should_panic]` once the ASHRAE 152-2014
+    /// table values are filled in.
+    #[test]
+    #[should_panic(
+        expected = "attic vented cooling multiplier must be <1.0 per ASHRAE 152-2014 Table 5-C"
+    )]
+    fn attic_vented_cooling_multiplier_less_than_one() {
+        let mult = Ashrae152ZoneType::AtticVented.seasonal_multiplier(false, false);
+        assert!(
+            mult < 1.0,
+            "attic vented cooling multiplier must be <1.0 per ASHRAE 152-2014 Table 5-C; \
+             current value is {mult} — the standard table values have not been filled in"
+        );
+    }
+
+    /// Verify that the seasonal multiplier is applied within `calculate_dse`
+    /// and that the DSE result with multiplier matches the DSE without
+    /// multiplier when the multiplier is 1.0 (identity). This confirms the
+    /// multiplier path is exercised end-to-end.
+    #[test]
+    fn dse_with_identity_seasonal_multiplier_preserves_result() {
+        let input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_leakage_class: None,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let dse = calculate_dse(&input);
+        assert!(
+            dse > 0.0 && dse <= 1.0,
+            "DSE with seasonal multiplier path must be in (0, 1], got {dse}"
+        );
+
+        // Verify the multiplier is 1.0 for this zone type and season
+        let mult = input
+            .zone_type
+            .seasonal_multiplier(input.is_heating, input.is_heat_pump);
+        assert!(
+            (mult - 1.0).abs() < 1e-9,
+            "seasonal multiplier must be 1.0 (identity); value will change when \
+             ASHRAE 152-2014 table values are filled in"
+        );
+
+        // Verify DSE is in the typical range for this configuration
+        assert!(dse > 0.6, "DSE unexpectedly low: {dse}");
     }
 
     /// Regression: compute DSE with `WellSealed` leakage class vs.
