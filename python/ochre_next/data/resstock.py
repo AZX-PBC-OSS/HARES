@@ -6,8 +6,11 @@ import asyncio
 import dataclasses
 import enum
 import io
+import logging
 import os
+import random
 import tempfile
+import time
 import urllib.request
 import warnings
 import xml.etree.ElementTree as ET
@@ -18,6 +21,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import httpx
     import polars as pl
+
+log = logging.getLogger(__name__)
 
 _OEDI_BASE = (
     "https://oedi-data-lake.s3.amazonaws.com/"
@@ -135,16 +140,129 @@ def _weather_url(cfg: _VersionConfig, state: str, fips: str) -> str:
     return _OEDI_BASE + cfg.base_path + rel
 
 
-def _download_file(url: str, dest: Path) -> None:
-    """Download url to dest using httpx, boto3, or urllib (in that order)."""
+# --- Retry / backoff for OEDI S3 downloads ------------------------------------
+#
+# Network interruptions during OEDI S3 downloads are transient: a connection
+# reset, a read timeout, or a 5xx/429 from the endpoint typically succeeds on a
+# subsequent attempt.  Each download path therefore retries transient failures
+# with exponential backoff before giving up, while permanent failures (a 404 for
+# a missing building, a malformed URL) fail fast without wasting attempts.
+
+# HTTP statuses worth retrying: request timeout, rate limiting, and the 5xx
+# family the S3 fronting layer returns under load or during partial outages.
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+# Number of attempts per download (1 initial try + 2 retries) before giving up.
+_MAX_DOWNLOAD_ATTEMPTS: int = 3
+
+# Exponential backoff base in seconds: attempt N waits base**N + jitter.
+_RETRY_BACKOFF_BASE_S: float = 2.0
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """Return True if *exc* represents a network-level transient failure worth retrying.
+
+    Walks the ``__cause__`` chain so a transient error wrapped by another
+    transient error is still detected.  A non-transient error anywhere in the
+    chain (a programming/value error) short-circuits to ``False`` so genuine
+    bugs are not retried into oblivion.
+    """
+    found_transient = False
+    current: BaseException | None = exc
+    while current is not None:
+        # Non-transient anywhere in the chain -> do not retry.
+        if isinstance(current, (ValueError, TypeError, KeyError, AttributeError,
+                                LookupError, ImportError, NotImplementedError)):
+            return False
+        # httpx-style HTTP status code via a response object.
+        http_status = getattr(getattr(current, "response", None), "status_code", None)
+        if isinstance(http_status, int) and http_status in _TRANSIENT_HTTP_STATUSES:
+            found_transient = True
+        # botocore-style ClientError carries response as a dict with HTTP status.
+        response_dict = getattr(current, "response", None)
+        if isinstance(response_dict, dict):
+            meta_http = response_dict.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if isinstance(meta_http, int) and meta_http in _TRANSIENT_HTTP_STATUSES:
+                found_transient = True
+            error_code = response_dict.get("Error", {}).get("Code", "")
+            if error_code in ("SlowDown", "InternalError", "ServiceUnavailable",
+                              "RequestTimeout", "Throttling"):
+                found_transient = True
+        # Standard-library network / timeout exceptions.  ``socket.error`` and
+        # ``urllib.error.URLError`` are both subclasses of ``OSError``.
+        if isinstance(current, (TimeoutError, ConnectionError, OSError)):
+            found_transient = True
+        # httpx errors (ConnectError, TimeoutException, ReadError, ...) do not
+        # inherit from the stdlib network exceptions, so match on the class name.
+        cls_name = type(current).__qualname__
+        if any(term in cls_name
+               for term in ("Timeout", "Connect", "Network", "Read", "RemoteProtocol")):
+            found_transient = True
+        current = current.__cause__
+    return found_transient
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Return the backoff delay in seconds before retrying *attempt* (0-indexed).
+
+    Exponential backoff with full jitter: ``base**attempt + U[0, 1)``.  The
+    jitter decorrelates concurrent fleet retries so they do not stampede the S3
+    endpoint in lockstep after a shared transient failure.
+    """
+    return _RETRY_BACKOFF_BASE_S**attempt + random.uniform(0.0, 1.0)
+
+
+def _next_retry_delay(exc: Exception, attempt: int, max_attempts: int, url: str) -> float:
+    """Return the backoff delay before the next retry, or re-raise *exc*.
+
+    Re-raises *exc* when it is non-transient (fail fast) or when the final
+    attempt has already been made (retries exhausted), so callers can write a
+    plain ``sleep(_next_retry_delay(...))`` retry loop that terminates by
+    propagating the original error with its traceback intact.
+    """
+    if not _is_transient_error(exc):
+        raise exc
+    if attempt >= max_attempts - 1:
+        log.error(
+            "OEDI download failed after %d attempts: url=%s error=%s",
+            max_attempts, url, exc,
+        )
+        raise exc
+    delay = _backoff_delay(attempt)
+    log.warning(
+        "OEDI download attempt %d/%d failed, retrying in %.1fs: url=%s error=%s",
+        attempt + 1, max_attempts, delay, url, exc,
+    )
+    return delay
+
+
+def _download_file(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS) -> None:
+    """Download url to dest using httpx, boto3, or urllib (in that order).
+
+    Transient failures are retried with exponential backoff.  The temporary
+    ``.tmp`` file is removed only once all retries are exhausted, so a mid-stream
+    failure does not force the caller to restart from a clean slate prematurely.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
-        _try_download(url, tmp)
+        _download_with_retry(url, tmp, max_attempts=max_attempts)
         tmp.replace(dest)
     except Exception:
+        # Reached only after retries are exhausted (or a non-transient error);
+        # discard the partial download so it never masquerades as a valid file.
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _download_with_retry(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS) -> None:
+    """Call ``_try_download`` with exponential-backoff retries on transient errors."""
+    for attempt in range(max_attempts):
+        try:
+            _try_download(url, dest)
+            return
+        except Exception as exc:
+            time.sleep(_next_retry_delay(exc, attempt, max_attempts, url))
 
 
 def _try_download(url: str, dest: Path) -> None:
@@ -183,16 +301,26 @@ def _try_download(url: str, dest: Path) -> None:
 
 
 def _extract_zip(zip_path: Path, dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as zf:
-        for member in zf.namelist():
-            # Sanitize member paths to prevent zip-slip (path traversal).
-            safe_name = Path(member).name
-            if not safe_name:
-                continue
-            target = dest / safe_name
-            with zf.open(member) as src, target.open("wb") as dst:
-                dst.write(src.read())
+        _extract_zip_members(zf, dest)
+
+
+def _extract_zip_members(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract *zf* into *dest*, flattening member paths to their basename.
+
+    Flattening both matches the ResStock bundle layout (``home.xml`` and
+    ``in.schedules.csv`` at the archive root) and neutralises zip-slip: a member
+    named ``../../etc/passwd`` collapses to ``passwd`` inside *dest*.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    for member in zf.namelist():
+        # Sanitize member paths to prevent zip-slip (path traversal).
+        safe_name = Path(member).name
+        if not safe_name:
+            continue
+        target = dest / safe_name
+        with zf.open(member) as src, target.open("wb") as dst:
+            dst.write(src.read())
 
 
 def _parse_weather_station(hpxml_path: Path) -> tuple[str, str] | None:
@@ -507,15 +635,37 @@ async def _download_building_async(
     bldg_id: int,
     upgrade_id: int,
     bldg_dir: Path,
+    *,
+    max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
 ) -> None:
-    """Download and extract a single building ZIP using an async httpx client."""
+    """Download and extract a single building ZIP using an async httpx client.
+
+    Transient failures are retried with exponential backoff before propagating.
+    """
     url = _zip_url(cfg, bldg_id, upgrade_id)
     bldg_dir.mkdir(parents=True, exist_ok=True)
-    resp = await client.get(url)
-    resp.raise_for_status()
-    data = resp.content
+    data = await _download_bytes_async(client, url, max_attempts=max_attempts)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        zf.extractall(bldg_dir)
+        _extract_zip_members(zf, bldg_dir)
+
+
+async def _download_bytes_async(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
+) -> bytes:
+    """GET *url* into memory with exponential-backoff retries on transient errors."""
+    for attempt in range(max_attempts):
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:
+            await asyncio.sleep(_next_retry_delay(exc, attempt, max_attempts, url))
+    # Unreachable for max_attempts >= 1: the final iteration either returns the
+    # body or re-raises via _next_retry_delay.  Guard the degenerate input.
+    raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
 
 
 async def _fetch_fleet_async(
@@ -544,35 +694,76 @@ async def _fetch_fleet_async(
                 else:
                     tasks.append(_download_building_async(client, cfg, bid, upgrade_id, bldg_dir))
 
-            await asyncio.gather(*tasks)
+            # return_exceptions=True so one building's exhausted-retry failure
+            # does not abort the entire fleet download.
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+        failed_ids: set[int] = set()
+        for bid, outcome in zip(bldg_ids, outcomes):
+            if isinstance(outcome, BaseException):
+                failed_ids.add(bid)
+                log.error(
+                    "ResStock building %d download failed, skipping: url=%s error=%s",
+                    bid, _zip_url(cfg, bid, upgrade_id), outcome,
+                )
 
         for bid in bldg_ids:
-            bldg_dir = _building_cache_dir(base_cache, version, bid)
-            hpxml_path = bldg_dir / "home.xml"
-            schedule_path = bldg_dir / "in.schedules.csv"
-            weather_path = _fetch_weather(
-                cfg, hpxml_path, base_cache, version,
-                weather_format=weather_format,
-            )
-            results.append(ResStockBuilding(
-                bldg_id=bid,
-                sample_weight=weights.get(bid, 1.0),
-                hpxml_path=hpxml_path,
-                schedule_path=schedule_path,
-                weather_path=weather_path,
-            ))
+            if bid in failed_ids:
+                continue
+            try:
+                bldg_dir = _building_cache_dir(base_cache, version, bid)
+                hpxml_path = bldg_dir / "home.xml"
+                schedule_path = bldg_dir / "in.schedules.csv"
+                weather_path = _fetch_weather(
+                    cfg, hpxml_path, base_cache, version,
+                    weather_format=weather_format,
+                )
+                results.append(ResStockBuilding(
+                    bldg_id=bid,
+                    sample_weight=weights.get(bid, 1.0),
+                    hpxml_path=hpxml_path,
+                    schedule_path=schedule_path,
+                    weather_path=weather_path,
+                ))
+            except Exception as exc:
+                # A post-download failure (e.g. weather fetch) for one building
+                # must not sink the rest of the fleet either.
+                log.error(
+                    "ResStock building %d post-download processing failed, skipping: error=%s",
+                    bid, exc,
+                )
+
+        n_failed = len(bldg_ids) - len(results)
+        log.info(
+            "ResStock fleet download complete: %d succeeded, %d failed (of %d requested)",
+            len(results), n_failed, len(bldg_ids),
+        )
         return results
 
     except ImportError:
         pass
 
-    # Synchronous fallback when httpx is not available
+    # Synchronous fallback when httpx is not available -- resilient per building
+    # so a single failure does not abort the whole fleet.
     for bid in bldg_ids:
-        b = fetch_resstock_building(
-            bid, version=version, upgrade_id=upgrade_id,
-            cache_dir=base_cache, weather_format=weather_format,
-        )
+        try:
+            b = fetch_resstock_building(
+                bid, version=version, upgrade_id=upgrade_id,
+                cache_dir=base_cache, weather_format=weather_format,
+            )
+        except Exception as exc:
+            log.error(
+                "ResStock building %d download failed, skipping: url=%s error=%s",
+                bid, _zip_url(cfg, bid, upgrade_id), exc,
+            )
+            continue
         results.append(dataclasses.replace(b, sample_weight=weights.get(bid, 1.0)))
+
+    n_failed = len(bldg_ids) - len(results)
+    log.info(
+        "ResStock fleet download complete: %d succeeded, %d failed (of %d requested)",
+        len(results), n_failed, len(bldg_ids),
+    )
     return results
 
 
