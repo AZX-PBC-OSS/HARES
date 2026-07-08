@@ -42,6 +42,25 @@ pub enum Ashrae152ZoneType {
     ExteriorWalls,
 }
 
+impl Ashrae152ZoneType {
+    /// Default duct insulation R-values (IP units: ft²·h·°F/Btu) from
+    /// ASHRAE 152-2014 Tables 5-A through 5-D.
+    ///
+    /// Returns `(supply_r_ip, return_r_ip)` — the default uninsulated R-values
+    /// for supply and return ducts located in this zone type, keyed by
+    /// heating vs. cooling season.
+    pub fn default_insulation_r_ip(&self, _is_heating: bool) -> (f64, f64) {
+        // ASHRAE 152-2014 Tables 5-A through 5-D define per-zone-type default
+        // uninsulated duct R-values for heating and cooling seasons.
+        // The standard text is not available in this codebase; R-1.7 is the
+        // universal bare-sheet-metal-duct fallback used in OCHRE and the prior
+        // HARES implementation. Per-zone-type values should be filled in when
+        // the standard is obtained.
+        // See Known Limitations in T-0412 Implementation Notes.
+        (1.7, 1.7)
+    }
+}
+
 /// Inputs to the ASHRAE 152 DSE calculation.
 ///
 /// All dimensional fields are **SI units**; conversion to IP happens internally.
@@ -378,16 +397,54 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // ------------------------------------------------------------------
     // 2. R-value transform
     // ------------------------------------------------------------------
+    let (default_supply_r_ip, default_return_r_ip) =
+        input.zone_type.default_insulation_r_ip(input.is_heating);
+
     let supply_r = if supply_nom_r_ip <= 0.0 {
-        1.7
+        default_supply_r_ip
     } else {
         2.2438 + 0.5619 * supply_nom_r_ip
     };
     let return_r = if return_nom_r_ip <= 0.0 {
-        1.7
+        default_return_r_ip
     } else {
         2.0388 + 0.7053 * return_nom_r_ip
     };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // ASHRAE 152-2014 §5: resolved effective R-value must be positive —
+        // a non-positive value implies a degenerate duct configuration.
+        assert!(
+            supply_r > 0.0,
+            "resolved supply effective R-value must be positive, got {supply_r}"
+        );
+        assert!(
+            return_r > 0.0,
+            "resolved return effective R-value must be positive, got {return_r}"
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let supply_used_default = supply_nom_r_ip <= 0.0;
+        let return_used_default = return_nom_r_ip <= 0.0;
+        if supply_used_default || return_used_default {
+            tracing::debug!(
+                zone_type = ?input.zone_type,
+                is_heating = input.is_heating,
+                default_supply_r_ip,
+                default_return_r_ip,
+                supply_nom_r_ip,
+                return_nom_r_ip,
+                resolved_supply_r = supply_r,
+                resolved_return_r = return_r,
+                supply_used_default,
+                return_used_default,
+                "ASHRAE 152 duct insulation R-value default applied"
+            );
+        }
+    }
 
     // ------------------------------------------------------------------
     // 3. Climate station lookup
@@ -924,6 +981,182 @@ mod tests {
         assert!(
             (60.0..=120.0).contains(&clg_f),
             "Denver cooling design temp {clg_f}°F outside 60..120 °F range"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Zone-type default insulation R-value tests
+    // ------------------------------------------------------------------
+
+    /// Every `Ashrae152ZoneType` variant must return a finite,
+    /// strictly-positive `(supply_r_ip, return_r_ip)` tuple from
+    /// `default_insulation_r_ip` for both heating and cooling.
+    ///
+    /// Once ASHRAE 152-2014 Tables 5-A through 5-D per-zone-type defaults
+    /// are filled in, each variant should return distinct values appropriate
+    /// for its zone type. The current implementation returns R-1.7 for all
+    /// variants because the standard text is not available in the codebase.
+    /// The assertion shape here ensures each variant is covered and forward-
+    /// compatible with per-zone-type values.
+    #[test]
+    fn all_zone_types_return_nonzero_insulation_defaults() {
+        let variants = [
+            Ashrae152ZoneType::AtticVented,
+            Ashrae152ZoneType::AtticVentedRadiantBarrier,
+            Ashrae152ZoneType::AtticUnvented,
+            Ashrae152ZoneType::AtticUnventedRadiantBarrier,
+            Ashrae152ZoneType::Garage,
+            Ashrae152ZoneType::UnventUninsulatedCrawlspace,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloor,
+            Ashrae152ZoneType::VentUninsulatedCrawlspace,
+            Ashrae152ZoneType::VentCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::VentCrawlspaceInsFloor,
+            Ashrae152ZoneType::UninsulatedBasement,
+            Ashrae152ZoneType::BasementInsWalls,
+            Ashrae152ZoneType::BasementInsCeiling,
+            Ashrae152ZoneType::UnderSlab,
+            Ashrae152ZoneType::ExteriorWalls,
+        ];
+        assert_eq!(
+            variants.len(),
+            16,
+            "precondition: all 16 Ashrae152ZoneType variants must be enumerated"
+        );
+
+        for &zone in &variants {
+            for &is_heating in &[true, false] {
+                let (supply_r, return_r) = zone.default_insulation_r_ip(is_heating);
+                assert!(
+                    supply_r.is_finite() && supply_r > 0.0,
+                    "{zone:?} is_heating={is_heating}: supply R-value must be finite and \
+                     positive, got {supply_r}"
+                );
+                assert!(
+                    return_r.is_finite() && return_r > 0.0,
+                    "{zone:?} is_heating={is_heating}: return R-value must be finite and \
+                     positive, got {return_r}"
+                );
+            }
+        }
+    }
+
+    /// When `supply_r_nominal_m2_k_w` is 0.0 (or negative), the resolved
+    /// effective R-value must be a finite positive value from the zone-type
+    /// default path, and the DSE result must be valid. Verifies that the
+    /// zero-nominal-R path produces valid DSE and that different zone types
+    /// yield different results (driven by zone temperature differences).
+    ///
+    /// Note: currently does not verify that the default R-value itself varies
+    /// by zone type, since all variants return the same R-1.7 bare-duct
+    /// fallback (see Known Limitations in the ticket). Once per-zone-type
+    /// constants from ASHRAE 152 Tables 5-A through 5-D are filled in,
+    /// this test should be extended to assert that two zone types with
+    /// deliberately different table defaults produce different
+    /// `default_insulation_r_ip` tuples.
+    #[test]
+    fn zero_nominal_r_uses_zone_type_default() {
+        let input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 0.0, // ≤ 0 → default path
+            return_leakage_frac: 0.06,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 0.0, // ≤ 0 → default path
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        // The DSE must be valid — a zero default R-value would produce NaN.
+        let dse = calculate_dse(&input);
+        assert!(
+            dse > 0.0 && dse <= 1.0,
+            "DSE with default insulation must be in (0, 1], got {dse}"
+        );
+
+        // Verify that different zone types affect the result even when
+        // both use the default R-value path (because zone temperatures differ).
+        // BasementInsCeiling has a very different zone temperature formula than
+        // AtticVented — the DSE should differ meaningfully.
+        let basement_input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::BasementInsCeiling,
+            ..input
+        };
+        let dse_basement = calculate_dse(&basement_input);
+        assert!(
+            dse_basement > 0.0 && dse_basement <= 1.0,
+            "basement DSE with default insulation must be in (0, 1], got {dse_basement}"
+        );
+        // Basement ducts are in a more moderate environment (ground-coupled)
+        // than attic ducts, so DSE should be higher (less loss).
+        assert!(
+            dse_basement > dse,
+            "basement DSE ({dse_basement}) should exceed attic DSE ({dse}) — \
+             basements are ground-moderated, attics are ambient-coupled"
+        );
+    }
+
+    /// Regression: a cold-climate home (Minneapolis, ~45°N) with ducts in an
+    /// unconditioned vented attic and no explicit insulation must produce
+    /// a lower heating DSE than a mild-climate home (Phoenix, ~33°N) with the
+    /// same duct configuration. The colder attic drives more conduction loss.
+    #[test]
+    fn cold_climate_attic_dse_lower_than_mild_climate() {
+        let base = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            // filled per test case
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 18.58, // ~200 ft² — larger area amplifies conduction effect
+            supply_r_nominal_m2_k_w: 0.0, // default path
+            return_leakage_frac: 0.06,
+            return_area_m2: 9.29,
+            return_r_nominal_m2_k_w: 0.0, // default path
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+
+        let cold = DuctDseInput {
+            latitude_deg: 45.0,
+            longitude_deg: -93.0,
+            ..base
+        };
+        let mild = DuctDseInput {
+            latitude_deg: 33.45,
+            longitude_deg: -112.02,
+            ..base
+        };
+
+        let dse_cold = calculate_dse(&cold);
+        let dse_mild = calculate_dse(&mild);
+
+        assert!(
+            dse_cold > 0.0 && dse_cold <= 1.0,
+            "cold-climate DSE out of bounds: {dse_cold}"
+        );
+        assert!(
+            dse_mild > 0.0 && dse_mild <= 1.0,
+            "mild-climate DSE out of bounds: {dse_mild}"
+        );
+        assert!(
+            dse_cold < dse_mild,
+            "cold-climate attic DSE ({dse_cold}) should be lower than mild-climate \
+             attic DSE ({dse_mild}) — colder attic → more conduction loss"
         );
     }
 }
