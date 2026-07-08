@@ -15,6 +15,27 @@
 //! - `ochre/defaults/PV/*` -> `defaults/pv/*.toml`
 //! - `ochre/defaults/Water Heating/*` -> `defaults/water_heating/*.toml` and `defaults/water_heating/default_paramters.csv`
 //! - appliance and event schedule defaults -> `defaults/loads/*.toml`
+//!
+//! ## Optional vs mandatory defaults files
+//!
+//! Only `zip_parameters.toml` is mandatory — loading fails with
+//! [`DefaultsError::MissingFile`] if it is absent. All other defaults files are
+//! optional, allowing simulations to proceed with reduced functionality (e.g.
+//! single-speed equipment when multispeed CSV is unavailable) rather than
+//! failing hard on incomplete data.
+//!
+//! Three CSV-based defaults files warn on missing file
+//! (`HVAC Multispeed Parameters.csv`, `water_heating/default_paramters.csv`,
+//! and `ev/vehicle_mapping.csv`). All other optional defaults files
+//! (TOML directories, generator efficiency curve, PV panel defaults) return an
+//! empty collection or `None` silently.
+//!
+//! Set the environment variable `HARES_STRICT_DEFAULTS=1` to elevate a missing
+//! `HVAC Multispeed Parameters.csv` from a warning to a hard error
+//! ([`DefaultsError::MissingFile`]) — useful for CI and test environments that
+//! must validate complete data sets. The water heating and EV CSV loaders warn
+//! but are not escalated by `HARES_STRICT_DEFAULTS`. All other optional loaders
+//! are unaffected.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -439,6 +460,8 @@ impl DefaultsStore {
     pub fn load(defaults_dir: &Path) -> Result<Self, DefaultsError> {
         let mut store = Self::default();
 
+        let strict_defaults = std::env::var("HARES_STRICT_DEFAULTS").is_ok();
+
         let zip_path = defaults_dir.join("zip_parameters.toml");
         if !zip_path.exists() {
             return Err(DefaultsError::MissingFile(zip_path));
@@ -447,8 +470,10 @@ impl DefaultsStore {
 
         store.hvac_cooling = load_hvac_curves_dir(&defaults_dir.join("hvac_cooling"))?;
         store.hvac_heating = load_hvac_curves_dir(&defaults_dir.join("hvac_heating"))?;
-        store.hvac_multispeed =
-            load_hvac_multispeed_csv(&defaults_dir.join("HVAC Multispeed Parameters.csv"))?;
+        store.hvac_multispeed = load_hvac_multispeed_csv(
+            &defaults_dir.join("HVAC Multispeed Parameters.csv"),
+            strict_defaults,
+        )?;
 
         // Load envelope LUT from CSV files (non-fatal if missing).
         let envelope_dir = defaults_dir.join("envelope");
@@ -1215,10 +1240,46 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
     Ok(HvacCurveSet { variants })
 }
 
-fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>, DefaultsError> {
+/// Load multispeed HVAC parameters from `defaults/HVAC Multispeed Parameters.csv`.
+///
+/// ## Optional vs mandatory defaults files
+///
+/// | File | Status | Behaviour when missing |
+/// |---|---|---|
+/// | `zip_parameters.toml` | **Mandatory** | Returns [`DefaultsError::MissingFile`] |
+/// | `HVAC Multispeed Parameters.csv` | Optional | Warns; multispeed lookup returns `None` |
+/// | `water_heating/default_paramters.csv` | Optional | Warns; lookup returns `None` |
+/// | `ev/vehicle_mapping.csv` | Optional | Warns; lookup returns `None` |
+/// | `envelope/` LUT CSVs | Optional | Warns; falls back to material layers |
+/// | `hvac_cooling/*.toml`, `hvac_heating/*.toml` | Optional | Empty directory produces empty lookup (non-fatal) |
+///
+/// When the environment variable `HARES_STRICT_DEFAULTS` is set, a missing
+/// `HVAC Multispeed Parameters.csv` (which would normally warn) becomes a
+/// [`DefaultsError::MissingFile`] — useful for CI and test environments that
+/// must validate complete data sets.
+fn load_hvac_multispeed_csv(
+    path: &Path,
+    strict: bool,
+) -> Result<Vec<HvacMultispeedParameters>, DefaultsError> {
     const MAX_HVAC_STAGES: usize = 4;
 
     if !path.exists() {
+        if strict {
+            return Err(DefaultsError::MissingFile(path.to_path_buf()));
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "HVAC multispeed parameters file not found; \
+             multispeed parameter lookup unavailable",
+        );
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            column = "multispeed_csv_missing",
+            path = %path.display(),
+            multispeed_csv_missing = true,
+            "multispeed CSV file missing",
+        );
         return Ok(Vec::new());
     }
 
@@ -1313,6 +1374,22 @@ fn load_hvac_multispeed_csv(path: &Path) -> Result<Vec<HvacMultispeedParameters>
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
         check_hspf_cop_monotonicity(&rows);
+    }
+
+    if rows.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            "HVAC multispeed CSV file exists but produced no valid rows; \
+             multispeed parameter lookup unavailable",
+        );
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            column = "multispeed_csv_empty",
+            path = %path.display(),
+            multispeed_csv_empty = true,
+            "multispeed CSV parsed but produced no valid rows",
+        );
     }
 
     Ok(rows)
@@ -1467,6 +1544,11 @@ fn normalize_equipment_key(raw: &str) -> String {
 /// Returns `None` if the file does not exist (non-fatal — callers fall back).
 fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
     if !path.exists() {
+        tracing::warn!(
+            path = %path.display(),
+            "water heating defaults CSV not found; \
+             water heater default parameters unavailable",
+        );
         return None;
     }
     let mut rdr = match csv::ReaderBuilder::new()
@@ -1560,6 +1642,11 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
 fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
     let path = ev_dir.join("vehicle_mapping.csv");
     if !path.exists() {
+        tracing::warn!(
+            path = %path.display(),
+            "EV vehicle mapping CSV not found; \
+             vehicle-to-type mapping unavailable",
+        );
         return None;
     }
     let mut rdr = match csv::ReaderBuilder::new()
@@ -2449,6 +2536,61 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         assert_eq!(row.capacity_ratios, vec![0.72, 1.0]);
         assert_eq!(row.cops, vec![4.33748, 3.99889]);
         assert_eq!(row.shrs, vec![0.71597, 0.72878]);
+    }
+
+    #[test]
+    fn missing_multispeed_csv_lookup_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        // No "HVAC Multispeed Parameters.csv" file — simulate missing file.
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(
+            store.hvac_multispeed.is_empty(),
+            "multispeed vec should be empty when CSV is missing"
+        );
+        assert_eq!(
+            store.hvac_multispeed_parameters("ASHP Cooler", "SEER", 2, 16.0),
+            None,
+            "multispeed lookup should return None when CSV is missing"
+        );
+    }
+
+    #[test]
+    fn strict_missing_multispeed_csv_returns_missing_file_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        // No CSV file created — with HARES_STRICT_DEFAULTS set, this should error.
+        // SAFETY: nextest runs each test in its own process, so env var mutation
+        // is isolated.
+        unsafe { std::env::set_var("HARES_STRICT_DEFAULTS", "1") };
+        let result = DefaultsStore::load(dir.path());
+        unsafe { std::env::remove_var("HARES_STRICT_DEFAULTS") };
+        assert!(
+            matches!(result, Err(DefaultsError::MissingFile(_))),
+            "expected MissingFile error with HARES_STRICT_DEFAULTS, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn multispeed_csv_header_only_produces_empty_result() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        // Header row only — no data rows, so all rows are skipped.
+        std::fs::write(
+            dir.path().join("HVAC Multispeed Parameters.csv"),
+            "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+        )
+        .unwrap();
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert!(
+            store.hvac_multispeed.is_empty(),
+            "multispeed vec should be empty when CSV has only headers"
+        );
+        assert_eq!(
+            store.hvac_multispeed_parameters("ASHP Cooler", "SEER", 2, 16.0),
+            None,
+            "multispeed lookup should return None when CSV produced no valid rows"
+        );
     }
 
     #[test]
