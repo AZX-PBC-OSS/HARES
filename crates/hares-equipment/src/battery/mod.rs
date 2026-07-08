@@ -1433,27 +1433,37 @@ impl Equipment for Battery {
             OperatingMode::Standby
         };
 
-        // -- Rainflow tracking --
-        self.rainflow.push(self.soc);
-
-        // -- Degradation per-timestep accumulation --
-        // Use pre-step SOC snapshot so that degradation sees the SOC the cell
-        // was at *before* the charge/discharge delta, matching the physical
-        // voltage the cell experienced during the interval.
-        {
-            let cell_temp_k = self.cell_temp_c + 273.15;
-            let v_oc_before = self.ocv_table.voltage_at_soc(soc_before);
-            self.degradation
-                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before);
-        }
-
-        // -- Daily degradation update --
+        // -- Daily degradation update (midnight boundary) --
+        // OCHRE Battery.py:315-346: calculate_degradation() runs *before*
+        // degradation_data.append() so the midnight timestep belongs to the
+        // *next* day's degradation window.  HARES mirrors this ordering:
+        // the day-boundary check and update_daily() run *before* the current
+        // step's rainflow.push() and degradation.accumulate(), ensuring
+        // day N's accumulators are finalised before day N+1 begins
+        // accumulating.
         let current_day = Self::day_ordinal(env);
         if current_day != self.last_daily_update_day {
-            let cell_temp_k = self.cell_temp_c + 273.15;
             let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
-            self.degradation
-                .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
+
+            // Capture pre-update state for observer diagnostics.
+            #[cfg(feature = "observe")]
+            let (q_li1_before, cell_temp_for_tafel) =
+                { (self.degradation.q_li1, self.degradation.daily_mean_temp_k()) };
+
+            self.degradation.update_daily(&self.u_neg_table, sum_sq_dod);
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    day = self.last_daily_update_day,
+                    sum_sq_dod,
+                    q_li1_before,
+                    q_li1_after = self.degradation.q_li1,
+                    cell_temp_for_tafel,
+                    "Battery daily degradation boundary",
+                );
+            }
+
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -1472,7 +1482,61 @@ impl Equipment for Battery {
             );
             self.degradation.reset_day_tracking(self.soc);
             self.rainflow.reset_daily();
+
+            // Invariant: after reset, per-day accumulators must be zero.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                const EPS: f64 = 1e-15;
+                debug_assert!(
+                    self.degradation.b1_accum.abs() < EPS,
+                    "b1_accum must be zero after update_daily, got {}",
+                    self.degradation.b1_accum
+                );
+                debug_assert!(
+                    self.degradation.b2_accum().abs() < EPS,
+                    "b2_accum must be zero after update_daily, got {}",
+                    self.degradation.b2_accum()
+                );
+                debug_assert!(
+                    self.degradation.b3_accum().abs() < EPS,
+                    "b3_accum must be zero after update_daily, got {}",
+                    self.degradation.b3_accum()
+                );
+                debug_assert!(
+                    self.rainflow.sum_squared_dod_daily().abs() < EPS,
+                    "sum_squared_dod_daily must be zero after reset_daily, got {}",
+                    self.rainflow.sum_squared_dod_daily()
+                );
+            }
+
             self.last_daily_update_day = current_day;
+        }
+
+        // Invariant: after the boundary block, last_daily_update_day must
+        // equal current_day (either the block ran and advanced it, or no
+        // boundary was crossed).
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.last_daily_update_day == current_day,
+                "last_daily_update_day ({}) must equal current_day ({}) after boundary block",
+                self.last_daily_update_day,
+                current_day
+            );
+        }
+
+        // -- Rainflow tracking (current step belongs to the new day) --
+        self.rainflow.push(self.soc);
+
+        // -- Degradation per-timestep accumulation (current step, new day) --
+        // Use pre-step SOC snapshot so that degradation sees the SOC the cell
+        // was at *before* the charge/discharge delta, matching the physical
+        // voltage the cell experienced during the interval.
+        {
+            let cell_temp_k = self.cell_temp_c + 273.15;
+            let v_oc_before = self.ocv_table.voltage_at_soc(soc_before);
+            self.degradation
+                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before);
         }
 
         // -- Update telemetry --
@@ -1989,7 +2053,9 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::CAPACITY_FADE_PCT.to_string(),
             unit: "%".to_string(),
-            description: "Cumulative capacity degradation".to_string(),
+            description: "Cumulative capacity degradation (updated once per day at midnight; "
+                .to_string()
+                + "reflects the previous day's cumulative degradation between updates)",
         },
         TelemetryField {
             name: tk::TERMINAL_VOLTAGE_V.to_string(),
@@ -4050,7 +4116,7 @@ mod tests {
             rf.push(0.8);
             rf.push(0.2); // completes the reversal → half-cycle range 0.6
             let sum_sq = rf.sum_squared_dod_daily(); // 0.5 × 0.6² = 0.18
-            state.update_daily(&u_neg, cell_temp_k, sum_sq);
+            state.update_daily(&u_neg, sum_sq);
             state.reset_day_tracking(soc);
             let _ = day; // suppress lint
         }
@@ -4092,7 +4158,7 @@ mod tests {
                 state.accumulate(dt_s, cell_temp_k, v_oc, 0.5); // constant SOC = 0.5
             }
             let sum_sq = 0.0; // no cycles
-            state.update_daily(&u_neg, cell_temp_k, sum_sq);
+            state.update_daily(&u_neg, sum_sq);
             state.reset_day_tracking(0.5);
         }
 
@@ -4127,7 +4193,7 @@ mod tests {
                 for _ in 0..steps_per_day {
                     state.accumulate(dt_s, temp_k, v_oc, 0.5);
                 }
-                state.update_daily(&u_neg, temp_k, sum_sq);
+                state.update_daily(&u_neg, sum_sq);
                 state.reset_day_tracking(0.5);
             }
             state
@@ -4296,7 +4362,7 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_5.accumulate(dt_s, cell_temp_k, v_oc, soc);
             }
-            state_5.update_daily(&u_neg, cell_temp_k, 0.0);
+            state_5.update_daily(&u_neg, 0.0);
             state_5.reset_day_tracking(soc);
         }
 
@@ -4317,7 +4383,7 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_60.accumulate(dt_s, cell_temp_k, v_oc, soc);
             }
-            state_60.update_daily(&u_neg, cell_temp_k, 0.0);
+            state_60.update_daily(&u_neg, 0.0);
             state_60.reset_day_tracking(soc);
         }
 
@@ -6422,5 +6488,215 @@ mod tests {
 
         // Double round-trip: bytes identical.
         assert_eq!(state, restored.save_state().unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Midnight boundary ordering regression tests (T-0416)
+    // -----------------------------------------------------------------------
+
+    /// Build an environment starting at midnight (00:00) on the given date.
+    /// Starting at midnight means each 288-step block (at 300 s/step) is
+    /// exactly one day, and the day boundary fires at the start of the
+    /// 289th step.
+    fn env_at_midnight(year: i32, month: u32, day: u32) -> EnvironmentState {
+        let mut env = warm_env();
+        env.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(year, month, day, 0, 0, 0)
+            .single()
+            .expect("valid UTC timestamp");
+        env
+    }
+
+    /// Integration-level drift elimination: run the battery through multiple
+    /// midnight boundaries at different timestep resolutions and verify that
+    /// `q_li1` is independent of `steps_per_day`.
+    ///
+    /// The pre-fix bug caused a 1/N_steps drift because the first timestep
+    /// of each new day contaminated the previous day's accumulators and was
+    /// then lost.  At 288 steps/day this was ~0.35% per day.  Post-fix,
+    /// every timestep belongs to the correct day, so the result is
+    /// resolution-independent.
+    ///
+    /// Note: the Smith 2017 sqrt-of-time model is path-dependent (each day's
+    /// increment depends on the running cumulative q_li1), so day-to-day
+    /// *symmetry* and order-*commutativity* of q_li1 do not hold.  The
+    /// property we test here — resolution independence — is the correct
+    /// invariant for the accumulation-ordering fix.
+    #[test]
+    fn q_li1_independent_of_steps_per_day_across_midnight_boundaries() {
+        let dt_300 = Duration::from_secs(300);
+        let dt_3600 = Duration::from_secs(3600);
+        let steps_300 = 288usize; // 5-min steps
+        let steps_3600 = 24usize; // 1-hour steps
+        let days = 5u32;
+
+        let run = |dt: Duration, steps_per_day: usize| -> f64 {
+            let config = battery_config(&[
+                (KEY_INITIAL_SOC, 0.5),
+                (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+                (KEY_STANDBY_POWER_W, 0.0),
+                (KEY_MIN_SOC, 0.0),
+                (KEY_MAX_SOC, 1.0),
+                (KEY_CELL_UA_W_PER_K, 0.0),
+            ]);
+            let mut env = env_at_midnight(2026, 3, 19);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            bat.cell_temp_c = 25.0;
+            bat.self_consumption_enabled = false;
+            bat.power_setpoint_kw = None;
+
+            let mut ports = default_ports();
+            for _ in 0..days {
+                for _ in 0..steps_per_day {
+                    ports.zero();
+                    bat.step(&env, dt, &mut ports).unwrap();
+                    env.current_time += ChronoDuration::seconds(dt.as_secs() as i64);
+                }
+            }
+            bat.degradation.q_li1
+        };
+
+        let q_300 = run(dt_300, steps_300);
+        let q_3600 = run(dt_3600, steps_3600);
+
+        // Both resolutions must produce the same q_li1 (within floating-point
+        // tolerance).  The pre-fix bug would produce a ~0.35% deficit at
+        // 288 steps/day relative to 24 steps/day.
+        let rel_diff = ((q_300 - q_3600).abs() / q_3600.abs()).abs();
+        assert!(
+            rel_diff < 1e-6,
+            "q_li1 must be independent of steps_per_day: 288 steps={q_300:.10e}, 24 steps={q_3600:.10e}, rel_diff={rel_diff:.2e}"
+        );
+    }
+
+    /// The daily mean temperature must be used for the Tafel correction, not
+    /// the first-of-new-day temperature.
+    ///
+    /// Runs two days at 35 °C followed by one step at 10 °C.  The Tafel
+    /// correction for the second day must use ~35 °C (the daily mean), not
+    /// 10 °C (the cell temperature at the first step of day 3, which is what
+    /// the pre-fix code passed to `update_daily`).
+    ///
+    /// We verify this by comparing against a reference that runs the same
+    /// profile through `DegradationState` directly (which now computes the
+    /// daily mean internally).
+    #[test]
+    fn daily_mean_temperature_used_for_tafel_correction() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_CELL_UA_W_PER_K, 0.0),
+        ]);
+        let mut env = env_at_midnight(2026, 3, 19);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+        bat.self_consumption_enabled = false;
+        bat.power_setpoint_kw = None;
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288usize;
+        let mut ports = default_ports();
+
+        // Day 1: 35 °C (day_age=0, dq_li1=0 — skip branch).
+        bat.cell_temp_c = 35.0;
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Day 2: 35 °C (day_age=1, produces non-zero q_li1).
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Switch to 10 °C for day 3 — the pre-fix bug would use this
+        // temperature for day 2's Tafel correction.
+        bat.cell_temp_c = 10.0;
+        // One step into day 3 triggers the boundary update for day 2.
+        ports.zero();
+        bat.step(&env, dt, &mut ports).unwrap();
+
+        let q_li1_battery = bat.degradation.q_li1;
+
+        // Reference: compute q_li1 with the correct daily mean (35 °C).
+        let u_neg = UNegTable::default_li_nmc();
+        let v_oc = OcvTable::default_li_nmc().voltage_at_soc(0.5);
+        let mut ds_ref = DegradationState::default();
+        ds_ref.reset_day_tracking(0.5);
+        let dt_s = 300.0_f64;
+        let temp_k_day = 308.15; // 35 °C
+        for _ in 0..2 {
+            for _ in 0..steps_per_day {
+                ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5);
+            }
+            ds_ref.update_daily(&u_neg, 0.0);
+            ds_ref.reset_day_tracking(0.5);
+        }
+
+        let q_li1_ref = ds_ref.q_li1;
+
+        assert!(
+            (q_li1_battery - q_li1_ref).abs() < q_li1_ref.abs() * 1e-6,
+            "q_li1 from Battery ({q_li1_battery:.10e}) must match reference using daily mean T=35°C ({q_li1_ref:.10e}); \
+             pre-fix would use T=10°C from the first step of day 3"
+        );
+    }
+
+    /// The first timestep after a midnight boundary must not be lost from
+    /// the new day's accumulation.
+    ///
+    /// This test runs exactly 1 step on day 1 and 1 step on day 2, then
+    /// checks that b1_accum after the day-2 step is non-zero (the step was
+    /// accumulated into the correct day).  Pre-fix, the day-2 step would be
+    /// accumulated into day 1's b1_accum, then lost when update_daily()
+    /// reset it, leaving day 2's b1_accum at zero.
+    #[test]
+    fn first_timestep_of_new_day_is_not_lost() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_CELL_UA_W_PER_K, 0.0),
+        ]);
+        let mut env = env_at_midnight(2026, 3, 19);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = 25.0;
+        bat.self_consumption_enabled = false;
+        bat.power_setpoint_kw = None;
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288usize;
+        let mut ports = default_ports();
+
+        // Day 1: full day of steps.
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Day 2: one step — this triggers the boundary update for day 1,
+        // then accumulates into day 2's b1_accum.
+        ports.zero();
+        bat.step(&env, dt, &mut ports).unwrap();
+
+        // After the step, b1_accum must be non-zero — the first step of
+        // the new day was accumulated into the correct day, not lost.
+        assert!(
+            bat.degradation.b1_accum.abs() > 0.0,
+            "first timestep of new day must accumulate into b1_accum, got {}",
+            bat.degradation.b1_accum
+        );
     }
 }

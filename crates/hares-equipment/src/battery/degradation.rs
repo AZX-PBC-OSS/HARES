@@ -172,6 +172,16 @@ pub(crate) struct DegradationState {
     /// Σ b3_ref · exp(−Ea_b3/R · (1/T − 1/T_ref)) · exp(α_b3·F/R · (V_oc/T − V_ref/T_ref)) · (1 + θ·DOD) · dt_day
     b3_accum: f64,
 
+    // ---- Daily temperature tracking (reset each day) ----
+    // Smith 2017 Eq.4: the Tafel correction for mechanism 1 (tafel_b1) is applied
+    // once per day to the accumulated b1 term.  It must use a representative
+    // daily temperature, not the temperature at the first timestep of the
+    // following day (which was the pre-fix bug).  We accumulate the running sum
+    // of cell temperature across all timesteps of the day and compute the mean
+    // at the midnight boundary in `update_daily()`.
+    sum_cell_temp_k: f64,
+    n_temp_samples: u64,
+
     // ---- Cumulative lithium losses ----
     pub(crate) q_li1: f64,
     pub(crate) q_li2: f64,
@@ -198,6 +208,8 @@ impl Default for DegradationState {
             b1_accum: 0.0,
             b2_accum: 0.0,
             b3_accum: 0.0,
+            sum_cell_temp_k: 0.0,
+            n_temp_samples: 0,
             q_li1: 0.0,
             q_li2: 0.0,
             q_li3: 0.0,
@@ -217,6 +229,18 @@ impl DegradationState {
         self.capacity_fade
     }
 
+    /// Cycle-aging Arrhenius accumulator (Σ exp(−Ea_b2/R · (1/T − 1/T_ref)) · dt_day).
+    /// Exposed for invariant checks after the midnight reset.
+    pub(crate) fn b2_accum(&self) -> f64 {
+        self.b2_accum
+    }
+
+    /// BOL-transient accumulator (Σ b3_ref · arr · tafel · (1+θ·DOD) · dt_day).
+    /// Exposed for invariant checks after the midnight reset.
+    pub(crate) fn b3_accum(&self) -> f64 {
+        self.b3_accum
+    }
+
     /// Called every simulation timestep to accumulate sub-daily degradation terms.
     ///
     /// `dt_s`        -- timestep in seconds
@@ -228,6 +252,14 @@ impl DegradationState {
         let dt_day = dt_s / SECONDS_PER_DAY;
         let t = cell_temp_k;
         let inv_diff = 1.0 / t - 1.0 / T_REF;
+
+        // Track running temperature for the daily mean used by the Tafel
+        // correction in update_daily().  Each step's contribution to b1_accum
+        // is already weighted by that step's Arrhenius factor, but the Tafel
+        // correction (tafel_b1) is a single daily multiplier — the mean cell
+        // temperature is the physically appropriate representative value.
+        self.sum_cell_temp_k += cell_temp_k;
+        self.n_temp_samples += 1;
 
         // Update daily SOC extremes for DOD computation.
         if soc > self.soc_max_today {
@@ -264,22 +296,35 @@ impl DegradationState {
         self.soc_at_max_dod = soc;
     }
 
+    /// Representative daily cell temperature: the arithmetic mean of all
+    /// per-step cell temperatures accumulated during the day.
+    ///
+    /// Falls back to `T_REF` (25 °C) when no samples have been recorded —
+    /// this only occurs if `update_daily()` is called before any
+    /// `accumulate()` call, which does not happen in normal operation.
+    pub(crate) fn daily_mean_temp_k(&self) -> f64 {
+        if self.n_temp_samples > 0 {
+            self.sum_cell_temp_k / self.n_temp_samples as f64
+        } else {
+            deg_const::T_REF
+        }
+    }
+
     /// Called once per day (at midnight) to compute lithium-loss increments and
     /// update the cumulative capacity fade.
     ///
     /// `u_neg_table`        -- negative electrode potential lookup table
-    /// `cell_temp_k`        -- representative cell temperature for the day (K)
     /// `sum_squared_dod`    -- Σ(count_i × DOD_i²) from today's rainflow cycles,
     ///                        where count_i is 0.5 for half-cycles and 1.0 for full cycles.
-    pub(crate) fn update_daily(
-        &mut self,
-        u_neg_table: &UNegTable,
-        cell_temp_k: f64,
-        sum_squared_dod: f64,
-    ) {
+    ///
+    /// The representative daily cell temperature for the Tafel correction is
+    /// computed internally from the running mean accumulated by `accumulate()`,
+    /// eliminating the previous bug where the caller could pass the
+    /// first-of-new-day temperature.
+    pub(crate) fn update_daily(&mut self, u_neg_table: &UNegTable, sum_squared_dod: f64) {
         use deg_const::*;
 
-        let t_day = cell_temp_k;
+        let t_day = self.daily_mean_temp_k();
         let dod_max = self.dod_max_today;
 
         // ---- Step 1: Tafel and DOD corrections for mechanism 1 ----
@@ -341,6 +386,8 @@ impl DegradationState {
         self.b1_accum = 0.0;
         self.b2_accum = 0.0;
         self.b3_accum = 0.0;
+        self.sum_cell_temp_k = 0.0;
+        self.n_temp_samples = 0;
         self.day_age += 1;
         // soc extremes and dod_max are reset by the caller via reset_day_tracking().
     }
@@ -472,6 +519,66 @@ mod tests {
         );
     }
 
+    /// Midnight boundary: a half-cycle started before midnight must survive
+    /// `reset_daily()` and complete correctly after midnight, with the
+    /// extracted cycle attributed to the *new* day's `sum_squared_dod_daily()`.
+    ///
+    /// Sequence: pre-midnight [0.2, 0.8] (charging ramp, no reversal —
+    /// buffer has 2 points, no extraction).  After reset_daily(), push 0.2
+    /// which reverses direction, completing a half-cycle with DOD=0.6.
+    ///
+    /// This verifies the Finding 2 fix: the reversal buffer is preserved
+    /// across reset_daily(), and the completed cycle's DOD contributes to
+    /// the new day's sum_squared_dod_daily(), not the old day's.
+    #[test]
+    fn rainflow_half_cycle_straddles_midnight_correctly() {
+        let mut rc = RainflowCounter::default();
+
+        // Pre-midnight: start a charging ramp.  Monotonic, so reversals = [0.2, 0.8].
+        rc.push(0.2);
+        rc.push(0.8);
+
+        // No cycles extracted yet — need 3 points for extraction.
+        let pre_midnight_cycles = rc.total_cycles();
+        assert_eq!(
+            pre_midnight_cycles, 0.0,
+            "no cycles should be extracted from a 2-point ramp"
+        );
+
+        // Midnight: reset daily DOD list but preserve the reversal buffer.
+        rc.reset_daily();
+        assert_eq!(
+            rc.reversals.len(),
+            2,
+            "reversal buffer must survive reset_daily"
+        );
+        assert_eq!(
+            rc.sum_squared_dod_daily(),
+            0.0,
+            "sum_squared_dod_daily must be zero after reset_daily"
+        );
+
+        // Post-midnight: reverse direction, completing the half-cycle.
+        // [0.2, 0.8, 0.2]: X=|0.2-0.8|=0.6, Y=|0.8-0.2|=0.6. X >= Y, n=3
+        // → half-cycle extracted with range 0.6, count 0.5.
+        rc.push(0.2);
+
+        let post_midnight_cycles = rc.total_cycles();
+        assert!(
+            post_midnight_cycles > pre_midnight_cycles,
+            "completing the straddling cycle must increment total_cycles: before={}, after={}",
+            pre_midnight_cycles,
+            post_midnight_cycles
+        );
+        // The extracted cycle's DOD must be attributed to the new day.
+        let expected_sum_sq = 0.5 * 0.6_f64 * 0.6_f64;
+        assert!(
+            (rc.sum_squared_dod_daily() - expected_sum_sq).abs() < 1e-12,
+            "sum_squared_dod_daily must be {expected_sum_sq:.4} (0.5×0.6²) after the straddling cycle, got {}",
+            rc.sum_squared_dod_daily()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Degradation model tests (Smith et al. 2017, IEEE 7963578)
     // -----------------------------------------------------------------------
@@ -485,7 +592,7 @@ mod tests {
         let dt_s = SECONDS_PER_DAY;
         for _ in 0..days {
             ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
-            ds.update_daily(&u_neg, cell_temp_k, 0.0);
+            ds.update_daily(&u_neg, 0.0);
             ds.reset_day_tracking(soc);
         }
         ds
@@ -504,7 +611,7 @@ mod tests {
         let dt_s = SECONDS_PER_DAY;
         for _ in 0..days {
             ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
-            ds.update_daily(&u_neg, cell_temp_k, sum_squared_dod_per_day);
+            ds.update_daily(&u_neg, sum_squared_dod_per_day);
             ds.reset_day_tracking(soc);
         }
         ds
@@ -641,7 +748,7 @@ mod tests {
         let mut prev_q_li1 = 0.0_f64;
         for day in 0..3 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, T_REF, 0.0);
+            ds.update_daily(&u_neg, 0.0);
 
             assert_eq!(
                 ds.day_age,
@@ -695,7 +802,7 @@ mod tests {
 
         for day in 0..10_u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, T_REF, 0.0);
+            ds.update_daily(&u_neg, 0.0);
             let q_li1 = ds.q_li1;
             assert!(
                 q_li1 >= prev_q_li1,
@@ -755,7 +862,7 @@ mod tests {
 
         // Accumulate day 1 at SOC 0.8 so extremes are non-trivial.
         ds.accumulate(dt_s, T_REF, V_REF, 0.8);
-        ds.update_daily(&u_neg, T_REF, 0.0);
+        ds.update_daily(&u_neg, 0.0);
 
         // Capture lifetime state before crossing the day boundary.
         let fade_after_day1 = ds.capacity_fade_fraction();
@@ -807,7 +914,7 @@ mod tests {
         // (capacity_fade itself is negative during the BOL transient.)
         let q_li1_after_day1 = ds.q_li1;
         ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-        ds.update_daily(&u_neg, T_REF, 0.0);
+        ds.update_daily(&u_neg, 0.0);
         assert!(
             ds.q_li1 >= q_li1_after_day1,
             "q_li1 after day 2 ({:.10}) must be >= day 1 ({q_li1_after_day1:.10})",
@@ -902,7 +1009,7 @@ mod tests {
 
         for day in 0..7u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, T_REF, sum_sq_dod_per_day);
+            ds.update_daily(&u_neg, sum_sq_dod_per_day);
 
             let fade = ds.capacity_fade_fraction();
 
@@ -974,7 +1081,7 @@ mod tests {
 
         for day in 0..30u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, T_REF, sum_sq_dod_per_day);
+            ds.update_daily(&u_neg, sum_sq_dod_per_day);
             let dq_li3 = ds.q_li3 - prev_q_li3;
 
             // q_li3 is monotonically decreasing (negative increments) during convergence.
@@ -1063,7 +1170,7 @@ mod tests {
                 ds.accumulate(dt_s, cell_temp_k, v_oc, 0.5);
             }
             let b3_accum_before_update = ds.b3_accum;
-            ds.update_daily(&u_neg, cell_temp_k, 0.0);
+            ds.update_daily(&u_neg, 0.0);
 
             // After day 1, q_li3 should be negative (BOL transient effect).
             if day == 0 {
@@ -1094,6 +1201,190 @@ mod tests {
             ds.q_li3 < 0.0,
             "q_li3 should remain negative at equilibrium, got {}",
             ds.q_li3
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Midnight boundary ordering tests (T-0416)
+    // -----------------------------------------------------------------------
+
+    /// Helper: run N days of pure calendar aging at a fixed temperature and
+    /// SOC, using a specified number of sub-daily timesteps.  Returns the
+    /// final DegradationState.
+    ///
+    /// This mirrors the call ordering that `Battery::step()` uses
+    /// post-fix: boundary check → update_daily → reset → accumulate.
+    fn run_calendar_aging_steps(
+        days: u32,
+        steps_per_day: usize,
+        cell_temp_k: f64,
+        v_oc: f64,
+        soc: f64,
+    ) -> DegradationState {
+        let u_neg = make_u_neg_table();
+        let mut ds = DegradationState::default();
+        ds.reset_day_tracking(soc);
+        let dt_s = SECONDS_PER_DAY / steps_per_day as f64;
+        for _ in 0..days {
+            for _ in 0..steps_per_day {
+                ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            }
+            ds.update_daily(&u_neg, 0.0);
+            ds.reset_day_tracking(soc);
+        }
+        ds
+    }
+
+    /// The per-step accumulation ordering fix eliminates the 1/N_steps drift.
+    ///
+    /// Before the fix, the first timestep of each new day was accumulated into
+    /// the previous day's b1/b2/b3 accumulators before update_daily() ran,
+    /// then lost when update_daily() reset them.  The lost fraction was
+    /// 1/steps_per_day of each day's accumulation.
+    ///
+    /// After the fix, update_daily() runs *before* the current step's
+    /// accumulate(), so every step belongs to the correct day.  The cumulative
+    /// q_li1 after N days must be independent of steps_per_day.
+    ///
+    /// This test runs 30 days of calendar aging at 25 °C with 1, 24, and 288
+    /// steps/day and asserts that q_li1 is identical across all resolutions.
+    #[test]
+    fn calendar_aging_independent_of_steps_per_day() {
+        let cell_temp_k = T_REF;
+        let v_oc = V_REF;
+        let soc = 0.5;
+        let days = 30;
+
+        let ds_1 = run_calendar_aging_steps(days, 1, cell_temp_k, v_oc, soc);
+        let ds_24 = run_calendar_aging_steps(days, 24, cell_temp_k, v_oc, soc);
+        let ds_288 = run_calendar_aging_steps(days, 288, cell_temp_k, v_oc, soc);
+
+        let q1 = ds_1.q_li1;
+        let q24 = ds_24.q_li1;
+        let q288 = ds_288.q_li1;
+
+        // All three must agree to within floating-point tolerance.  The
+        // pre-fix bug would produce a ~0.35% deficit at 288 steps/day
+        // relative to 1 step/day.
+        assert!(
+            (q1 - q288).abs() < q1.abs() * 1e-6,
+            "q_li1 must be independent of steps_per_day: 1 step={q1:.10e}, 288 steps={q288:.10e}, diff={:.10e}",
+            (q1 - q288).abs()
+        );
+        assert!(
+            (q24 - q288).abs() < q24.abs() * 1e-6,
+            "q_li1 must be independent of steps_per_day: 24 steps={q24:.10e}, 288 steps={q288:.10e}, diff={:.10e}",
+            (q24 - q288).abs()
+        );
+    }
+
+    /// The cumulative q_li1 after N days must equal the sum of independently
+    /// computed per-day q_li1 increments.
+    ///
+    /// Each day's increment is computed using the same sqrt-of-time formula
+    /// but tracking the running q_li1 from previous days.  The sum of these
+    /// increments must match the N-day cumulative q_li1, proving that no
+    /// timestep's contribution is lost or double-counted at the midnight
+    /// boundary.
+    #[test]
+    fn cumulative_q_li1_equals_sum_of_daily_increments() {
+        let u_neg = make_u_neg_table();
+        let cell_temp_k = T_REF;
+        let v_oc = V_REF;
+        let soc = 0.5;
+        let days = 10u32;
+        let steps_per_day = 288usize;
+        let dt_s = SECONDS_PER_DAY / steps_per_day as f64;
+
+        // Compute per-day increments, tracking the running q_li1.
+        // The Smith 2017 sqrt-of-time formula is path-dependent:
+        //   dq = b1_eff / sqrt(day_age)        when q_li1 ≈ 0
+        //   dq = 0.5 * b1_eff^2 / q_li1        when q_li1 > 0
+        let mut running_q_li1 = 0.0_f64;
+        let mut daily_increments: Vec<f64> = Vec::with_capacity(days as usize);
+        for day in 0..days {
+            // Simulate one day's accumulation in a fresh state with the
+            // correct day_age and running q_li1.
+            let mut ds = DegradationState {
+                day_age: day,
+                q_li1: running_q_li1,
+                ..Default::default()
+            };
+            ds.reset_day_tracking(soc);
+            for _ in 0..steps_per_day {
+                ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            }
+            ds.update_daily(&u_neg, 0.0);
+            let increment = ds.q_li1 - running_q_li1;
+            daily_increments.push(increment);
+            running_q_li1 = ds.q_li1;
+        }
+
+        // Run the full multi-day sequence in one DegradationState.
+        let ds_cumulative = run_calendar_aging_steps(days, steps_per_day, cell_temp_k, v_oc, soc);
+
+        let sum_increments: f64 = daily_increments.iter().sum();
+        assert!(
+            (ds_cumulative.q_li1 - sum_increments).abs() < ds_cumulative.q_li1.abs() * 1e-10,
+            "cumulative q_li1 ({:.10e}) must equal sum of daily increments ({:.10e}), diff={:.10e}",
+            ds_cumulative.q_li1,
+            sum_increments,
+            (ds_cumulative.q_li1 - sum_increments).abs()
+        );
+    }
+
+    /// Reference validation: independently compute q_li1 for a multi-day
+    /// calendar-aging sequence using the Smith 2017 Eq.2–4 formulas and
+    /// compare against DegradationState's output.
+    ///
+    /// The reference computes each day's increment as:
+    ///   dq_li1 = b1_eff / sqrt(day_age)   (first day, q_li1 ≈ 0)
+    ///   dq_li1 = 0.5 * b1_eff² / q_li1    (subsequent days)
+    ///
+    /// where b1_eff = B1_REF * arr(T) * tafel(u_neg, T) * exp(gamma * dod^beta)
+    ///
+    /// At T_REF, dod=0, constant SOC=0.5: arr=1, dod_corr=1, so
+    /// b1_eff = B1_REF * tafel_b1(0.5, T_REF).
+    #[test]
+    fn q_li1_matches_independent_smith2017_reference() {
+        let cell_temp_k = T_REF;
+        let v_oc = V_REF;
+        let soc = 0.5;
+        let days = 30u32;
+        let steps_per_day = 288usize;
+
+        // --- HARES DegradationState ---
+        let ds = run_calendar_aging_steps(days, steps_per_day, cell_temp_k, v_oc, soc);
+
+        // --- Independent reference computation ---
+        // At T_REF, dod=0: arr=1, dod_corr=exp(gamma * 0^beta)=exp(0)=1.
+        // b1_eff = B1_REF * tafel_b1(soc, T_REF).
+        let tafel = tafel_b1_factor(soc, cell_temp_k);
+        let b1_eff = B1_REF * tafel;
+
+        let mut ref_q_li1 = 0.0_f64;
+        for day in 0..days {
+            let day_age = day as f64;
+            let dq_li1 = if ref_q_li1.abs() < 1e-5 && day > 0 {
+                b1_eff / day_age.sqrt()
+            } else if ref_q_li1.abs() >= 1e-5 {
+                0.5 * b1_eff.powi(2) / ref_q_li1
+            } else {
+                0.0 // day_age == 0: first day, skip
+            };
+            ref_q_li1 += dq_li1;
+        }
+
+        // The discrete integrator accumulates b1_accum over all timesteps,
+        // then applies the Tafel correction once at midnight.  At T_REF with
+        // constant temperature, b1_accum = B1_REF * 1.0 (full day) regardless
+        // of step count, so the reference and HARES should agree closely.
+        let rel_err = ((ds.q_li1 - ref_q_li1).abs() / ref_q_li1.abs()).abs();
+        assert!(
+            rel_err < 1e-6,
+            "q_li1 HARES ({:.10e}) vs reference ({:.10e}): relative error {rel_err:.2e} must be < 1e-6",
+            ds.q_li1,
+            ref_q_li1
         );
     }
 }

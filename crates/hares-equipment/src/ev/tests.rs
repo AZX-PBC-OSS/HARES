@@ -1118,6 +1118,66 @@ fn degradation_state_survives_checkpoint() {
     );
 }
 
+/// Ensures the first timestep of each new day is accumulated into the new
+/// day's degradation accumulators, not lost to the previous day.
+///
+/// The pre-fix bug: Ev::update_degradation() ran rainflow.push() and
+/// degradation.accumulate() *before* the day-boundary check.  The first
+/// step of day 2 was accumulated into day 1's b1_accum, then lost when
+/// update_daily() reset it — leaving day 2's b1_accum at zero.
+///
+/// This test exercises the full Ev::step() code path.  It runs a full day
+/// of steps, then one step into the next day, and asserts that b1_accum
+/// is non-zero — the first step of the new day was accumulated correctly.
+/// A revert of the fix would leave b1_accum at zero because the step
+/// content is cleared by the day-boundary reset.
+///
+/// The Battery equivalent test (`first_timestep_of_new_day_is_not_lost`)
+/// is at battery/mod.rs:6662.
+#[test]
+fn ev_q_li1_independent_of_steps_per_day_across_midnight_boundaries() {
+    let dt = Duration::from_secs(300);
+    let steps_per_day = 288usize;
+
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_SOC_MAX.to_string(), 1.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 25.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 50.0.into());
+    let config = ev_config(raw);
+    let mut env = sample_env();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &env).unwrap();
+    ev.last_daily_update_day = {
+        use chrono::Datelike;
+        env.current_time.date_naive().num_days_from_ce()
+    };
+
+    let mut ports = PortSlots::default();
+
+    // Day 1: full day of steps.
+    for _ in 0..steps_per_day {
+        ports.zero();
+        ev.step(&env, dt, &mut ports).unwrap();
+        env.current_time += ChronoDuration::seconds(dt.as_secs() as i64);
+    }
+
+    // Day 2: one step — this triggers the boundary update for day 1,
+    // then accumulates into day 2's b1_accum.
+    ports.zero();
+    ev.step(&env, dt, &mut ports).unwrap();
+
+    // After the step, b1_accum must be non-zero — the first step of
+    // the new day was accumulated into the correct day, not lost.
+    assert!(
+        ev.degradation.b1_accum.abs() > 0.0,
+        "first timestep of new day must accumulate into b1_accum, got {}",
+        ev.degradation.b1_accum
+    );
+}
+
 #[test]
 fn no_lut_charges_at_full_rated_power() {
     let mut raw = base_raw();

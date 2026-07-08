@@ -725,24 +725,28 @@ impl Ev {
     }
 
     fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {
-        let cell_temp_k = self.battery_temp_c + 273.15;
-        let v_oc = self.ocv_table.voltage_at_soc(self.soc);
-        self.rainflow.push(self.soc);
-        self.degradation
-            .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
-
+        // OCHRE Battery.py:315-346: calculate_degradation() runs *before*
+        // degradation_data.append() so the midnight timestep belongs to the
+        // *next* day's degradation window.  HARES mirrors this ordering:
+        // the day-boundary check and update_daily() run *before* the current
+        // step's rainflow.push() and degradation.accumulate().
         let current_day = {
             use chrono::Datelike;
             env.current_time.date_naive().num_days_from_ce()
         };
         if current_day != self.last_daily_update_day {
             let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
-            self.degradation
-                .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
+            self.degradation.update_daily(&self.u_neg_table, sum_sq_dod);
             self.degradation.reset_day_tracking(self.soc);
             self.rainflow.reset_daily();
             self.last_daily_update_day = current_day;
         }
+
+        let cell_temp_k = self.battery_temp_c + 273.15;
+        let v_oc = self.ocv_table.voltage_at_soc(self.soc);
+        self.rainflow.push(self.soc);
+        self.degradation
+            .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
     }
 
     fn run_charging_physics(
