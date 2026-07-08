@@ -4,7 +4,10 @@
 //! ASHRAE 152 standard. The public [`calculate_dse`] function returns a DSE
 //! value clamped to `(0.0, 1.0]`.
 
+use std::f64::consts::PI;
 use std::sync::OnceLock;
+
+use super::constants::SECONDS_PER_DAY;
 
 // ---------------------------------------------------------------------------
 // Unit conversion constants
@@ -16,6 +19,16 @@ const W_TO_BTU_H: f64 = 3.41214;
 const M3S_TO_CFM: f64 = 2118.88;
 /// SI R-value (m²·K/W) → IP R-value (ft²·h·°F/Btu)
 const SI_R_TO_IP_R: f64 = 5.67826;
+
+/// Soil volumetric heat capacity [J/(m³·K)] for average moist soil.
+///
+/// Ingersoll, Zobel & Ingersoll (1954), *Heat Conduction with Engineering,
+/// Geological, and Other Applications*, §2.4: ρc = 2.56 MJ/(m³·K).
+/// This value is also cited in Kavanaugh & Rafferty (1997), *Ground-Source
+/// Heat Pumps*, ASHRAE, Ch. 3, and is the standard reference for ground-
+/// coupled heat exchanger design. Used to compute soil thermal diffusivity
+/// from conductivity: α = k / (ρc).
+const SOIL_VOLUMETRIC_HEAT_CAPACITY_J_M3_K: f64 = 2_560_000.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -206,6 +219,22 @@ pub struct DuctDseInput {
     pub fan_flow_low_m3_s: Option<f64>,
     /// `true` for a heat-pump heating system (affects equipment factor).
     pub is_heat_pump: bool,
+    /// Burial depth of duct below slab grade [m].
+    ///
+    /// Only relevant for [`Ashrae152ZoneType::UnderSlab`]. When `Some` and
+    /// positive, enables a bounded exponential interpolation between the
+    /// conditioned-space reference temperature and the deep ground temperature.
+    /// This interpolation is **unvalidated** — the exponential decay shape has
+    /// not been verified against ASHRAE Standard 152-2014 and is a
+    /// mathematical placeholder pending tabular correction factors (T-1965).
+    /// When `None` or zero, zone temperature falls back to `gnd`.
+    pub burial_depth_m: Option<f64>,
+    /// Soil thermal conductivity [W/(m·K)].
+    ///
+    /// Only relevant for [`Ashrae152ZoneType::UnderSlab`]. Used to compute
+    /// soil thermal diffusivity α = k/(ρc). When `None` or non-positive,
+    /// the correction is not applied and zone temperature falls back to `gnd`.
+    pub soil_conductivity_w_m_k: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,138 +346,233 @@ fn nearest_station(lat: f64, lon: f64) -> &'static ClimateStation {
 }
 
 // ---------------------------------------------------------------------------
+// Buried-duct soil temperature correction
+// ---------------------------------------------------------------------------
+
+/// Interpolated soil temperature at duct burial depth beneath a conditioned slab.
+///
+/// Returns a monotonic, bounded exponential interpolation between the
+/// conditioned-space reference temperature (68°F heating, 78°F cooling) and
+/// the deep ground temperature:
+///
+/// ```text
+/// T(z) = T_gnd + (T_conditioned − T_gnd) × exp(−z / D_char)
+/// ```
+///
+/// where `D_char = √(α·τ/π)` is a characteristic depth computed from the
+/// soil thermal diffusivity α = k / (ρc) and an annual period τ = 365 days.
+/// This produces a physically bounded but **unvalidated** interpolation: soil
+/// temperature at shallow depth approaches `T_conditioned`, while soil at
+/// depth approaches `T_gnd`, with an exponential decay shape that is not
+/// derived from the steady-state conduction equation for this boundary
+/// condition.
+///
+/// **This function is a mathematical placeholder.** The exponential decay
+/// shape and characteristic depth have not been verified against ASHRAE
+/// Standard 152-2014. Tabular buried-duct correction factors from the
+/// standard (if they exist) would replace this interpolation; see T-1965.
+///
+/// All temperatures in °F. Depth in metres; conductivity in W/(m·K).
+///
+/// # References
+///
+/// - Ingersoll, L.R., Zobel, O.J. & Ingersoll, A.C. (1954), *Heat Conduction
+///   with Engineering, Geological, and Other Applications*, §2.4 — ρc =
+///   2.56 MJ/(m³·K) for average moist soil.
+fn soil_temp_at_burial_depth_f(
+    t_conditioned_f: f64,
+    gnd_temp_f: f64,
+    burial_depth_m: f64,
+    soil_conductivity_w_m_k: f64,
+) -> f64 {
+    if burial_depth_m <= 0.0 || soil_conductivity_w_m_k <= 0.0 {
+        return gnd_temp_f;
+    }
+    // α = k / (ρc) — thermal diffusivity [m²/s]
+    let alpha_m2_per_s = soil_conductivity_w_m_k / SOIL_VOLUMETRIC_HEAT_CAPACITY_J_M3_K;
+    // τ = 365 days [s] — annual period for damping depth
+    let tau_s = 365.0 * SECONDS_PER_DAY;
+    // Unvalidated characteristic depth: √(α·τ/π) with τ = 365 days.
+    // The exponential decay shape is not derived from steady-state
+    // conduction for this boundary condition. See T-0415 Known Limitations.
+    let damping_depth_m = (alpha_m2_per_s * tau_s / PI).sqrt();
+    let attenuation = (-burial_depth_m / damping_depth_m).exp();
+    gnd_temp_f + (t_conditioned_f - gnd_temp_f) * attenuation
+}
+
+// ---------------------------------------------------------------------------
 // Zone temperature formulas
 // ---------------------------------------------------------------------------
+
+/// Climate station temperatures passed to [`zone_temps`].
+struct StationTemps {
+    /// Heating design dry-bulb temperature [°F]
+    h_des: f64,
+    /// Heating seasonal dry-bulb temperature [°F]
+    h_seas: f64,
+    /// Cooling design dry-bulb temperature [°F]
+    c_des: f64,
+    /// Cooling seasonal dry-bulb temperature [°F]
+    c_seas: f64,
+    /// Ground temperature — mean of heating and cooling design [°F]
+    gnd: f64,
+}
 
 /// All temperatures in °F.
 /// Returns `(htg_des, htg_seas, clg_des, clg_seas, supply_regain, return_regain)`.
 fn zone_temps(
     zone: Ashrae152ZoneType,
-    h_des: f64,
-    h_seas: f64,
-    c_des: f64,
-    c_seas: f64,
-    gnd: f64,
+    station: &StationTemps,
+    burial_depth_m: Option<f64>,
+    soil_conductivity_w_m_k: Option<f64>,
 ) -> (f64, f64, f64, f64, f64, f64) {
+    // When burial parameters are present for an UnderSlab duct, compute
+    // an interpolated soil temperature at burial depth (bounded by the
+    // conditioned-space reference temperature and deep ground temperature).
+    // When absent, fall back to gnd.
+    let under_slab_zone_temp = |t_conditioned_f: f64| -> f64 {
+        match (burial_depth_m, soil_conductivity_w_m_k) {
+            (Some(depth), Some(k)) if depth > 0.0 && k > 0.0 => {
+                soil_temp_at_burial_depth_f(t_conditioned_f, station.gnd, depth, k)
+            }
+            _ => station.gnd,
+        }
+    };
+
     match zone {
         Ashrae152ZoneType::AtticVented => (
-            h_des + 10.0,
-            h_seas + 7.0,
-            c_des + 22.0,
-            c_seas + 13.0,
+            station.h_des + 10.0,
+            station.h_seas + 7.0,
+            station.c_des + 22.0,
+            station.c_seas + 13.0,
             0.1,
             0.1,
         ),
         Ashrae152ZoneType::AtticVentedRadiantBarrier => (
-            h_des + 10.0,
-            h_seas + 7.0,
-            0.65 * (c_des + 22.0) + 0.35 * 78.0,
-            0.7 * (c_seas + 13.0) + 0.3 * 78.0,
+            station.h_des + 10.0,
+            station.h_seas + 7.0,
+            0.65 * (station.c_des + 22.0) + 0.35 * 78.0,
+            0.7 * (station.c_seas + 13.0) + 0.3 * 78.0,
             0.1,
             0.1,
         ),
         Ashrae152ZoneType::AtticUnvented => (
-            h_des + 10.0,
-            h_seas + 7.0,
-            c_des + 36.0,
-            c_seas + 16.0,
+            station.h_des + 10.0,
+            station.h_seas + 7.0,
+            station.c_des + 36.0,
+            station.c_seas + 16.0,
             0.1,
             0.1,
         ),
         Ashrae152ZoneType::AtticUnventedRadiantBarrier => (
-            h_des + 10.0,
-            h_seas + 7.0,
-            0.65 * (c_des + 36.0) + 0.35 * 78.0,
-            0.7 * (c_seas + 16.0) + 0.3 * 78.0,
+            station.h_des + 10.0,
+            station.h_seas + 7.0,
+            0.65 * (station.c_des + 36.0) + 0.35 * 78.0,
+            0.7 * (station.c_seas + 16.0) + 0.3 * 78.0,
             0.1,
             0.1,
         ),
         Ashrae152ZoneType::Garage => (
-            h_des + 13.0,
-            h_seas + 11.0,
-            c_des + 7.0,
-            c_seas + 7.0,
+            station.h_des + 13.0,
+            station.h_seas + 11.0,
+            station.c_des + 7.0,
+            station.c_seas + 7.0,
             0.1,
             0.1,
         ),
         Ashrae152ZoneType::UnventUninsulatedCrawlspace => (
-            (2.0 * h_des + 3.0 * 68.0) / 5.0,
-            (2.0 * h_seas + 3.0 * 68.0) / 5.0,
-            (2.0 * c_des + 3.0 * 78.0) / 5.0,
-            (2.0 * c_seas + 3.0 * 78.0) / 5.0,
+            (2.0 * station.h_des + 3.0 * 68.0) / 5.0,
+            (2.0 * station.h_seas + 3.0 * 68.0) / 5.0,
+            (2.0 * station.c_des + 3.0 * 78.0) / 5.0,
+            (2.0 * station.c_seas + 3.0 * 78.0) / 5.0,
             0.6,
             0.6,
         ),
         Ashrae152ZoneType::UnventCrawlspaceInsFloorWall => (
-            (3.0 * h_des + 68.0) / 4.0,
-            (3.0 * h_seas + 68.0) / 4.0,
-            (3.0 * c_des + 78.0) / 4.0,
-            (3.0 * c_seas + 78.0) / 4.0,
+            (3.0 * station.h_des + 68.0) / 4.0,
+            (3.0 * station.h_seas + 68.0) / 4.0,
+            (3.0 * station.c_des + 78.0) / 4.0,
+            (3.0 * station.c_seas + 78.0) / 4.0,
             0.6,
             0.6,
         ),
         Ashrae152ZoneType::UnventCrawlspaceInsFloor => (
-            (5.0 * h_des + 68.0) / 6.0,
-            (5.0 * h_seas + 68.0) / 6.0,
-            (5.0 * c_des + 78.0) / 6.0,
-            (5.0 * c_seas + 78.0) / 6.0,
+            (5.0 * station.h_des + 68.0) / 6.0,
+            (5.0 * station.h_seas + 68.0) / 6.0,
+            (5.0 * station.c_des + 78.0) / 6.0,
+            (5.0 * station.c_seas + 78.0) / 6.0,
             0.3,
             0.3,
         ),
         Ashrae152ZoneType::VentUninsulatedCrawlspace => (
-            (h_des + 68.0) / 2.0,
-            (h_seas + 68.0) / 2.0,
-            (c_des + 78.0) / 2.0,
-            (c_seas + 78.0) / 2.0,
+            (station.h_des + 68.0) / 2.0,
+            (station.h_seas + 68.0) / 2.0,
+            (station.c_des + 78.0) / 2.0,
+            (station.c_seas + 78.0) / 2.0,
             0.6,
             0.6,
         ),
         Ashrae152ZoneType::VentCrawlspaceInsFloorWall => (
-            (5.0 * h_des + 68.0) / 6.0,
-            (5.0 * h_seas + 68.0) / 6.0,
-            (5.0 * c_des + 78.0) / 6.0,
-            (5.0 * c_seas + 78.0) / 6.0,
+            (5.0 * station.h_des + 68.0) / 6.0,
+            (5.0 * station.h_seas + 68.0) / 6.0,
+            (5.0 * station.c_des + 78.0) / 6.0,
+            (5.0 * station.c_seas + 78.0) / 6.0,
             0.63,
             0.63,
         ),
         Ashrae152ZoneType::VentCrawlspaceInsFloor => (
-            (8.0 * h_des + 68.0) / 9.0,
-            (8.0 * h_seas + 68.0) / 9.0,
-            (8.0 * c_des + 78.0) / 9.0,
-            (8.0 * c_seas + 78.0) / 9.0,
+            (8.0 * station.h_des + 68.0) / 9.0,
+            (8.0 * station.h_seas + 68.0) / 9.0,
+            (8.0 * station.c_des + 78.0) / 9.0,
+            (8.0 * station.c_seas + 78.0) / 9.0,
             0.3,
             0.3,
         ),
         Ashrae152ZoneType::UninsulatedBasement => (
-            (5.0 * gnd + 2.0 * h_des + 3.0 * 68.0) / 10.0,
-            (5.0 * gnd + 2.0 * h_seas + 3.0 * 68.0) / 10.0,
-            (5.0 * gnd + 2.0 * c_des + 3.0 * 78.0) / 10.0,
-            (5.0 * gnd + 2.0 * c_seas + 3.0 * 78.0) / 10.0,
+            (5.0 * station.gnd + 2.0 * station.h_des + 3.0 * 68.0) / 10.0,
+            (5.0 * station.gnd + 2.0 * station.h_seas + 3.0 * 68.0) / 10.0,
+            (5.0 * station.gnd + 2.0 * station.c_des + 3.0 * 78.0) / 10.0,
+            (5.0 * station.gnd + 2.0 * station.c_seas + 3.0 * 78.0) / 10.0,
             0.5,
             0.5,
         ),
         Ashrae152ZoneType::BasementInsWalls => (
-            (gnd + 68.0) / 2.0,
-            (gnd + 68.0) / 2.0,
-            (8.0 * gnd + c_des + 78.0) / 10.0,
-            (8.0 * gnd + c_seas + 78.0) / 10.0,
+            (station.gnd + 68.0) / 2.0,
+            (station.gnd + 68.0) / 2.0,
+            (8.0 * station.gnd + station.c_des + 78.0) / 10.0,
+            (8.0 * station.gnd + station.c_seas + 78.0) / 10.0,
             0.6,
             0.6,
         ),
         Ashrae152ZoneType::BasementInsCeiling => (
-            (3.0 * gnd + h_des) / 4.0,
-            (3.0 * gnd + h_seas) / 4.0,
-            (3.0 * gnd + c_des) / 4.0,
-            (3.0 * gnd + c_seas) / 4.0,
+            (3.0 * station.gnd + station.h_des) / 4.0,
+            (3.0 * station.gnd + station.h_seas) / 4.0,
+            (3.0 * station.gnd + station.c_des) / 4.0,
+            (3.0 * station.gnd + station.c_seas) / 4.0,
             0.6,
             0.6,
         ),
-        Ashrae152ZoneType::UnderSlab => (gnd, gnd, gnd, gnd, 0.2, 0.2),
+        Ashrae152ZoneType::UnderSlab => {
+            // Conditioned space reference temperatures per ASHRAE 152:
+            // 68°F for heating, 78°F for cooling.
+            let soil_htg_des = under_slab_zone_temp(68.0);
+            let soil_htg_seas = under_slab_zone_temp(68.0);
+            let soil_clg_des = under_slab_zone_temp(78.0);
+            let soil_clg_seas = under_slab_zone_temp(78.0);
+            (
+                soil_htg_des,
+                soil_htg_seas,
+                soil_clg_des,
+                soil_clg_seas,
+                0.2,
+                0.2,
+            )
+        }
         Ashrae152ZoneType::ExteriorWalls => (
-            (h_des + 68.0) / 2.0,
-            (h_seas + 68.0) / 2.0,
-            (c_des + 78.0) / 2.0,
-            (c_seas + 78.0) / 2.0,
+            (station.h_des + 68.0) / 2.0,
+            (station.h_seas + 68.0) / 2.0,
+            (station.c_des + 78.0) / 2.0,
+            (station.c_seas + 78.0) / 2.0,
             0.2,
             0.2,
         ),
@@ -590,15 +714,61 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // ------------------------------------------------------------------
     let (_htg_des, htg_seas, _clg_des, clg_seas, supply_regain, return_regain) = zone_temps(
         input.zone_type,
-        heating_des_init,
-        heating_seas_init,
-        cooling_des_init,
-        cooling_seas_init,
-        ground_temp,
+        &StationTemps {
+            h_des: heating_des_init,
+            h_seas: heating_seas_init,
+            c_des: cooling_des_init,
+            c_seas: cooling_seas_init,
+            gnd: ground_temp,
+        },
+        input.burial_depth_m,
+        input.soil_conductivity_w_m_k,
     );
 
     let ambient_temp = if input.is_heating { 68.0_f64 } else { 78.0_f64 };
     let seas_temp = if input.is_heating { htg_seas } else { clg_seas };
+
+    #[cfg(feature = "observe")]
+    {
+        if matches!(input.zone_type, Ashrae152ZoneType::UnderSlab) {
+            let correction_applied =
+                input.burial_depth_m.is_some() && input.soil_conductivity_w_m_k.is_some();
+            if correction_applied {
+                let depth = input.burial_depth_m.unwrap_or(0.0);
+                let k = input.soil_conductivity_w_m_k.unwrap_or(0.0);
+                let correction_delta_f = seas_temp - ground_temp;
+                tracing::debug!(
+                    target: "observe",
+                    column = "ashrae152_under_slab_soil_correction",
+                    zone_type = ?input.zone_type,
+                    is_heating = input.is_heating,
+                    burial_depth_m = depth,
+                    soil_conductivity_w_m_k = k,
+                    corrected_zone_temp_f = seas_temp,
+                    raw_ground_temp_f = ground_temp,
+                    correction_delta_f,
+                    "ASHRAE 152 under-slab soil temperature correction applied: \
+                     zone temp = {:.1}°F, gnd = {:.1}°F, delta = {:.1}°F",
+                    seas_temp, ground_temp, correction_delta_f
+                );
+            } else {
+                tracing::debug!(
+                    target: "observe",
+                    column = "ashrae152_under_slab_soil_correction",
+                    zone_type = ?input.zone_type,
+                    is_heating = input.is_heating,
+                    correction_applied = false,
+                    burial_depth_provided = input.burial_depth_m.is_some(),
+                    soil_conductivity_provided = input.soil_conductivity_w_m_k.is_some(),
+                    raw_ground_temp_f = ground_temp,
+                    "ASHRAE 152 under-slab soil temperature correction not applied — \
+                     burial depth and/or soil conductivity not provided; \
+                     using raw ground temperature gnd = {:.1}°F",
+                    ground_temp
+                );
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // 5. Supply / return zone temperatures
@@ -874,11 +1044,15 @@ mod tests {
         let h_seas = 40.0_f64;
         let (_htg_des, htg_seas, _clg_des, _clg_seas, _sr, _rr) = zone_temps(
             Ashrae152ZoneType::AtticVented,
-            10.0,
-            h_seas,
-            90.0,
-            75.0,
-            50.0,
+            &StationTemps {
+                h_des: 10.0,
+                h_seas,
+                c_des: 90.0,
+                c_seas: 75.0,
+                gnd: 50.0,
+            },
+            None,
+            None,
         );
         assert!(
             (htg_seas - 47.0).abs() < 1e-9,
@@ -928,6 +1102,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse = calculate_dse(&input);
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
@@ -958,6 +1134,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse = calculate_dse(&input);
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
@@ -985,6 +1163,8 @@ mod tests {
             capacity_low_w: Some(7_000.0),
             fan_flow_low_m3_s: Some(0.330),
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse = calculate_dse(&input);
         assert!(
@@ -1015,6 +1195,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse_h = calculate_dse(&heating_input);
         assert!(dse_h > 0.0 && dse_h <= 1.0, "heating DSE: {dse_h}");
@@ -1039,6 +1221,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse_c = calculate_dse(&cooling_input);
         assert!(dse_c > 0.0 && dse_c <= 1.0, "cooling DSE: {dse_c}");
@@ -1118,6 +1302,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse = calculate_dse(&input);
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
@@ -1265,6 +1451,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         // The DSE must be valid — a zero default R-value would produce NaN.
         let dse = calculate_dse(&input);
@@ -1322,6 +1510,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
 
         let cold = DuctDseInput {
@@ -1614,6 +1804,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
         let dse = calculate_dse(&input);
         assert!(
@@ -1661,6 +1853,8 @@ mod tests {
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
         };
 
         let well_sealed = DuctDseInput {
@@ -1701,6 +1895,210 @@ mod tests {
         assert!(
             dse_none > 0.0 && dse_none <= 1.0,
             "raw-fraction fallback DSE out of bounds: {dse_none}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // UnderSlab soil temperature correction tests
+    // ------------------------------------------------------------------
+
+    /// At 0.5 m burial depth with soil conductivity = 1.5 W/(m·K),
+    /// the soil temperature beneath a conditioned slab should lie between
+    /// the conditioned-space temperature and deep ground temperature.
+    /// For a slab at 68°F (heating reference) with gnd = 50°F, the soil
+    /// temp at depth should be warmer than gnd but cooler than 68°F.
+    /// For a slab at 78°F (cooling reference), the soil should be warmer
+    /// than gnd but cooler than 78°F.
+    #[test]
+    fn under_slab_soil_temp_with_burial_correction() {
+        let depth = 0.5;
+        let k = 1.5;
+        let gnd = 50.0;
+
+        // Heating: conditioned space is 68°F, soil temp should be between gnd and 68
+        let soil_heating = soil_temp_at_burial_depth_f(68.0, gnd, depth, k);
+        assert!(
+            soil_heating > gnd && soil_heating < 68.0,
+            "heating: expected {gnd} < soil < 68°F, got {soil_heating}"
+        );
+
+        // Cooling: conditioned space is 78°F, soil temp should be between gnd and 78
+        let soil_cooling = soil_temp_at_burial_depth_f(78.0, gnd, depth, k);
+        assert!(
+            soil_cooling > gnd && soil_cooling < 78.0,
+            "cooling: expected {gnd} < soil < 78°F, got {soil_cooling}"
+        );
+
+        // Deeper burial → closer to gnd
+        let soil_deep = soil_temp_at_burial_depth_f(68.0, gnd, 3.0, k);
+        assert!(
+            (soil_deep - gnd).abs() < (soil_heating - gnd).abs(),
+            "deeper burial should be closer to gnd: shallow delta = {}, deep delta = {}",
+            soil_heating - gnd,
+            soil_deep - gnd
+        );
+    }
+
+    /// Degenerate inputs (zero/negative burial depth or conductivity)
+    /// return the ground temperature unchanged.
+    #[test]
+    fn under_slab_soil_temp_degenerate_inputs_return_gnd() {
+        let gnd = 60.0;
+        let result = soil_temp_at_burial_depth_f(68.0, gnd, 0.0, 1.5);
+        assert!(
+            (result - gnd).abs() < 1e-9,
+            "zero burial depth should return gnd, got {result}"
+        );
+        let result = soil_temp_at_burial_depth_f(68.0, gnd, 0.5, 0.0);
+        assert!(
+            (result - gnd).abs() < 1e-9,
+            "zero conductivity should return gnd, got {result}"
+        );
+    }
+
+    /// When burial params are None, UnderSlab zone temps must fall back
+    /// to gnd for all four temperatures, matching the pre-correction behavior.
+    #[test]
+    fn under_slab_none_burial_params_falls_back_to_gnd() {
+        let station = StationTemps {
+            h_des: 10.0,
+            h_seas: 40.0,
+            c_des: 90.0,
+            c_seas: 75.0,
+            gnd: 50.0,
+        };
+
+        let result = zone_temps(Ashrae152ZoneType::UnderSlab, &station, None, None);
+        assert!(
+            (result.0 - station.gnd).abs() < 1e-9,
+            "heating design temp should be gnd without burial params, got {}",
+            result.0
+        );
+        assert!(
+            (result.1 - station.gnd).abs() < 1e-9,
+            "heating seasonal temp should be gnd without burial params, got {}",
+            result.1
+        );
+        assert!(
+            (result.2 - station.gnd).abs() < 1e-9,
+            "cooling design temp should be gnd without burial params, got {}",
+            result.2
+        );
+        assert!(
+            (result.3 - station.gnd).abs() < 1e-9,
+            "cooling seasonal temp should be gnd without burial params, got {}",
+            result.3
+        );
+        assert!(
+            (result.4 - 0.2).abs() < 1e-9,
+            "supply regain should remain 0.2"
+        );
+        assert!(
+            (result.5 - 0.2).abs() < 1e-9,
+            "return regain should remain 0.2"
+        );
+    }
+
+    /// With burial depth = 0.5 m, soil conductivity = 1.5 W/(m·K),
+    /// the UnderSlab zone temps differ from gnd in the expected direction:
+    /// approaching the conditioned-space temperature (68°F heating,
+    /// 78°F cooling) at shallow depth, and decaying toward gnd at depth.
+    #[test]
+    fn under_slab_with_burial_correction_modifies_zone_temps() {
+        let station = StationTemps {
+            h_des: 10.0,
+            h_seas: 40.0,
+            c_des: 90.0,
+            c_seas: 75.0,
+            gnd: 50.0,
+        };
+        let depth = Some(0.5);
+        let k = Some(1.5);
+
+        let result = zone_temps(Ashrae152ZoneType::UnderSlab, &station, depth, k);
+
+        // Heating: soil temp should be between gnd and 68°F (conditioned space)
+        assert!(
+            result.0 > station.gnd && result.0 < 68.0,
+            "heating design: expected gnd < soil < 68°F, got {}",
+            result.0
+        );
+        assert!(
+            result.1 > station.gnd && result.1 < 68.0,
+            "heating seasonal: expected gnd < soil < 68°F, got {}",
+            result.1
+        );
+        // Cooling: soil temp should be between gnd and 78°F (conditioned space)
+        assert!(
+            result.2 > station.gnd && result.2 < 78.0,
+            "cooling design: expected gnd < soil < 78°F, got {}",
+            result.2
+        );
+        assert!(
+            result.3 > station.gnd && result.3 < 78.0,
+            "cooling seasonal: expected gnd < soil < 78°F, got {}",
+            result.3
+        );
+    }
+
+    /// DSE for an UnderSlab duct with and without burial correction
+    /// must produce valid results in (0, 1] for both heating and cooling.
+    #[test]
+    fn under_slab_dse_valid_both_seasons() {
+        let base = DuctDseInput {
+            zone_type: Ashrae152ZoneType::UnderSlab,
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.1,
+            supply_leakage_class: None,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_leakage_class: None,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+            burial_depth_m: None,
+            soil_conductivity_w_m_k: None,
+        };
+
+        let uncorrected_dse = calculate_dse(&base);
+        assert!(
+            uncorrected_dse > 0.0 && uncorrected_dse <= 1.0,
+            "uncorrected under-slab DSE out of bounds: {uncorrected_dse}"
+        );
+
+        let corrected = DuctDseInput {
+            burial_depth_m: Some(0.5),
+            soil_conductivity_w_m_k: Some(1.5),
+            ..base
+        };
+        let corrected_dse = calculate_dse(&corrected);
+        assert!(
+            corrected_dse > 0.0 && corrected_dse <= 1.0,
+            "corrected under-slab DSE out of bounds: {corrected_dse}"
+        );
+
+        // Cooling season must also produce valid DSE
+        let cooling = DuctDseInput {
+            is_heating: false,
+            latitude_deg: 33.45,
+            longitude_deg: -112.02,
+            capacity_w: 10_550.0,
+            fan_flow_m3_s: 0.472,
+            ..corrected
+        };
+        let cooling_dse = calculate_dse(&cooling);
+        assert!(
+            cooling_dse > 0.0 && cooling_dse <= 1.0,
+            "corrected cooling under-slab DSE out of bounds: {cooling_dse}"
         );
     }
 }

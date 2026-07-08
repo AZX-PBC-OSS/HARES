@@ -467,6 +467,8 @@ pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
         capacity_low_w: ctx.capacity_low_w,
         fan_flow_low_m3_s: ctx.fan_flow_low_m3_s,
         is_heat_pump: ctx.is_heat_pump,
+        burial_depth_m: None,
+        soil_conductivity_w_m_k: None,
     };
 
     hares_physics::ashrae152::calculate_dse(&input)

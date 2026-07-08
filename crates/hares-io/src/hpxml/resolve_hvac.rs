@@ -515,6 +515,8 @@ fn compute_duct_config(
         capacity_low_w: None,
         fan_flow_low_m3_s: None,
         is_heat_pump,
+        burial_depth_m: None,
+        soil_conductivity_w_m_k: None,
     };
 
     let raw_dse = calculate_dse(&input);
