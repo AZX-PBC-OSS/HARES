@@ -345,6 +345,126 @@ class TestFetchResStockBuilding:
         assert "upgrade=3" in zip_urls[0]
         assert "up03.zip" in zip_urls[0]
 
+    def _write_metadata(
+        self, tmp_path: Path, bldg_ids: list[int], weights: list[float]
+    ) -> Path:
+        p = tmp_path / "metadata.parquet"
+        p.write_bytes(_make_metadata_parquet(bldg_ids, weights=weights))
+        return p
+
+    def test_fetch_resstock_building_with_metadata_weight(self, tmp_path: Path):
+        from ochre_next.data.resstock import fetch_resstock_building
+
+        meta = self._write_metadata(tmp_path, [1, 7], weights=[9.0, 33.3])
+        zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
+            result = fetch_resstock_building(
+                7, version="2024.2", cache_dir=tmp_path, metadata_path=meta
+            )
+
+        assert result.sample_weight == pytest.approx(33.3)
+
+    def test_fetch_resstock_building_weight_override(self, tmp_path: Path):
+        from ochre_next.data.resstock import fetch_resstock_building
+
+        # Metadata says 33.3, but an explicit sample_weight must take precedence.
+        meta = self._write_metadata(tmp_path, [7], weights=[33.3])
+        zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
+            result = fetch_resstock_building(
+                7,
+                version="2024.2",
+                cache_dir=tmp_path,
+                metadata_path=meta,
+                sample_weight=5.0,
+            )
+
+        assert result.sample_weight == pytest.approx(5.0)
+
+    def test_fetch_resstock_building_no_metadata_warns(self, tmp_path: Path):
+        from ochre_next.data.resstock import fetch_resstock_building
+
+        zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+            pytest.warns(UserWarning, match="sample_weight defaults"),
+        ):
+            result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+        assert result.sample_weight == 1.0
+
+    def test_fetch_resstock_building_weight_matches_fleet(self, tmp_path: Path):
+        from ochre_next.data.resstock import (
+            fetch_resstock_building,
+            fetch_resstock_fleet,
+        )
+
+        meta = self._write_metadata(tmp_path, [1, 7], weights=[9.0, 33.3])
+        zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
+            single = fetch_resstock_building(
+                7, version="2024.2", cache_dir=tmp_path / "single", metadata_path=meta
+            )
+            # Force the synchronous fallback so weight resolution is exercised
+            # deterministically regardless of the optional httpx dependency.
+            with mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}):
+                fleet = fetch_resstock_fleet(
+                    meta,
+                    bldg_ids=[7],
+                    version="2024.2",
+                    cache_dir=tmp_path / "fleet",
+                )
+
+        assert len(fleet) == 1
+        assert single.sample_weight == pytest.approx(fleet[0].sample_weight)
+        assert single.sample_weight == pytest.approx(33.3)
+
 
 # ---------------------------------------------------------------------------
 # 4. fetch_resstock_fleet
@@ -580,6 +700,7 @@ def _fake_fleet_building(tmp_path: Path):
         cache_dir: Path | None = None,
         weather_override: Path | None = None,
         weather_format=None,
+        sample_weight: float | None = None,
         **kwargs: object,
     ) -> ResStockBuilding:
         bdir = (cache_dir or tmp_path) / version / f"bldg{bldg_id:07d}"
@@ -592,7 +713,7 @@ def _fake_fleet_building(tmp_path: Path):
         w.write_text("weather\n")
         return ResStockBuilding(
             bldg_id=bldg_id,
-            sample_weight=1.0,
+            sample_weight=1.0 if sample_weight is None else sample_weight,
             hpxml_path=h,
             schedule_path=s,
             weather_path=w,
@@ -767,7 +888,9 @@ class _FakeHTTPStatusError(Exception):
 
 
 class _FakeAsyncResponse:
-    def __init__(self, *, content: bytes = b"", status_error: Exception | None = None) -> None:
+    def __init__(
+        self, *, content: bytes = b"", status_error: Exception | None = None
+    ) -> None:
         self.content = content
         self._status_error = status_error
 
@@ -870,11 +993,13 @@ class TestDownloadRetry:
         zip_bytes = _make_zip()
         cfg = resstock._version_config("2024.2")
         bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient([
-            _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-            _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-            _FakeAsyncResponse(content=zip_bytes),
-        ])
+        client = _FakeAsyncClient(
+            [
+                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
+                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
+                _FakeAsyncResponse(content=zip_bytes),
+            ]
+        )
 
         with mock.patch.object(
             resstock.asyncio, "sleep", new_callable=mock.AsyncMock
@@ -894,12 +1019,16 @@ class TestDownloadRetry:
 
         cfg = resstock._version_config("2024.2")
         bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient([
-            _FakeAsyncResponse(status_error=_FakeHTTPStatusError(404)),
-        ])
+        client = _FakeAsyncClient(
+            [
+                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(404)),
+            ]
+        )
 
         with (
-            mock.patch.object(resstock.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep,
+            mock.patch.object(
+                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
+            ) as sleep,
             pytest.raises(_FakeHTTPStatusError),
         ):
             asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
@@ -937,13 +1066,17 @@ class TestFleetResilience:
             mock.patch.object(resstock, "fetch_resstock_building", side_effect=flaky),
         ):
             results = resstock.fetch_resstock_fleet(
-                meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path,
+                meta,
+                bldg_ids=[1, 2, 3],
+                cache_dir=tmp_path,
             )
 
         returned_ids = {r.bldg_id for r in results}
         assert returned_ids == {1, 3}
 
-    def test_fleet_async_download_continues_after_building_failure(self, tmp_path: Path):
+    def test_fleet_async_download_continues_after_building_failure(
+        self, tmp_path: Path
+    ):
         """The async gather tolerates one building's exhausted-retry failure."""
         import asyncio
         import types
@@ -975,12 +1108,20 @@ class TestFleetResilience:
 
         with (
             mock.patch.dict(sys.modules, {"httpx": fake_httpx}),
-            mock.patch.object(resstock, "_download_building_async", side_effect=fake_download),
-            mock.patch.object(resstock, "_fetch_weather", return_value=tmp_path / "w.csv"),
+            mock.patch.object(
+                resstock, "_download_building_async", side_effect=fake_download
+            ),
+            mock.patch.object(
+                resstock, "_fetch_weather", return_value=tmp_path / "w.csv"
+            ),
         ):
             results = asyncio.run(
                 resstock._fetch_fleet_async(
-                    [1, 2, 3], cfg, "2024.2", tmp_path, 0,
+                    [1, 2, 3],
+                    cfg,
+                    "2024.2",
+                    tmp_path,
+                    0,
                     {1: 1.0, 2: 1.0, 3: 1.0},
                 )
             )
@@ -1060,7 +1201,9 @@ class TestZipIntegrity:
                 dest.write_bytes(zip_bytes)
 
         with (
-            mock.patch("ochre_next.data.resstock._download_file", side_effect=flaky_download),
+            mock.patch(
+                "ochre_next.data.resstock._download_file", side_effect=flaky_download
+            ),
             mock.patch("ochre_next.data.resstock.time.sleep"),
         ):
             from ochre_next.data.resstock import _download_and_extract_zip
@@ -1091,12 +1234,22 @@ class TestZipIntegrity:
             return zip_bytes
 
         with (
-            mock.patch.object(resstock, "_download_bytes_async", side_effect=flaky_download),
-            mock.patch.object(resstock.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep_mock,
+            mock.patch.object(
+                resstock, "_download_bytes_async", side_effect=flaky_download
+            ),
+            mock.patch.object(
+                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
+            ) as sleep_mock,
         ):
-            asyncio.run(resstock._download_building_async(
-                None, cfg, 1, 0, bldg_dir,  # client unused when _download_bytes_async is mocked
-            ))
+            asyncio.run(
+                resstock._download_building_async(
+                    None,
+                    cfg,
+                    1,
+                    0,
+                    bldg_dir,  # client unused when _download_bytes_async is mocked
+                )
+            )
 
         assert (bldg_dir / "home.xml").exists()
         assert call_count[0] == 2
@@ -1216,7 +1369,9 @@ class TestWeatherCacheIntegrity:
         weather_dest = cache_dir / version / "weather" / "G0800130_TMY3.csv"
         weather_dest.parent.mkdir(parents=True, exist_ok=True)
         weather_dest.write_text("fake,weather\n0,1\n")
-        sha256_path(weather_dest).write_text("0000000000000000000000000000000000000000\n")
+        sha256_path(weather_dest).write_text(
+            "0000000000000000000000000000000000000000\n"
+        )
 
         download_calls: list[Path] = []
         fresh_content = b"col1,col2\n3.0,4.0\n"
@@ -1347,7 +1502,9 @@ class TestWeatherEpwIntegrity:
                 dest.write_bytes(zip_bytes)
 
         with (
-            mock.patch.object(weather, "_download_large_file", side_effect=flaky_download),
+            mock.patch.object(
+                weather, "_download_large_file", side_effect=flaky_download
+            ),
             mock.patch.object(weather.time, "sleep"),
         ):
             weather._ensure_tmy3_zip_extracted(epw_dir, tmp_path)
@@ -1482,4 +1639,3 @@ class TestBuildingCacheIntegrity:
 
         assert validate_cache_integrity(result.hpxml_path) is True
         assert validate_cache_integrity(result.schedule_path) is True
-

@@ -111,7 +111,9 @@ def _parse_version(version: str) -> ResStockVersion:
         return ResStockVersion(version)
     except ValueError:
         valid = [v.value for v in ResStockVersion]
-        raise ValueError(f"Unknown ResStock version {version!r}. Valid: {valid}") from None
+        raise ValueError(
+            f"Unknown ResStock version {version!r}. Valid: {valid}"
+        ) from None
 
 
 def _version_config(version: str) -> _VersionConfig:
@@ -177,8 +179,18 @@ def _is_transient_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None:
         # Non-transient anywhere in the chain -> do not retry.
-        if isinstance(current, (ValueError, TypeError, KeyError, AttributeError,
-                                LookupError, ImportError, NotImplementedError)):
+        if isinstance(
+            current,
+            (
+                ValueError,
+                TypeError,
+                KeyError,
+                AttributeError,
+                LookupError,
+                ImportError,
+                NotImplementedError,
+            ),
+        ):
             return False
         # httpx-style HTTP status code via a response object.
         http_status = getattr(getattr(current, "response", None), "status_code", None)
@@ -191,8 +203,13 @@ def _is_transient_error(exc: BaseException) -> bool:
             if isinstance(meta_http, int) and meta_http in _TRANSIENT_HTTP_STATUSES:
                 found_transient = True
             error_code = response_dict.get("Error", {}).get("Code", "")
-            if error_code in ("SlowDown", "InternalError", "ServiceUnavailable",
-                              "RequestTimeout", "Throttling"):
+            if error_code in (
+                "SlowDown",
+                "InternalError",
+                "ServiceUnavailable",
+                "RequestTimeout",
+                "Throttling",
+            ):
                 found_transient = True
         # Standard-library network / timeout exceptions.  ``socket.error`` and
         # ``urllib.error.URLError`` are both subclasses of ``OSError``.
@@ -201,8 +218,10 @@ def _is_transient_error(exc: BaseException) -> bool:
         # httpx errors (ConnectError, TimeoutException, ReadError, ...) do not
         # inherit from the stdlib network exceptions, so match on the class name.
         cls_name = type(current).__qualname__
-        if any(term in cls_name
-               for term in ("Timeout", "Connect", "Network", "Read", "RemoteProtocol")):
+        if any(
+            term in cls_name
+            for term in ("Timeout", "Connect", "Network", "Read", "RemoteProtocol")
+        ):
             found_transient = True
         current = current.__cause__
     return found_transient
@@ -218,7 +237,9 @@ def _backoff_delay(attempt: int) -> float:
     return _RETRY_BACKOFF_BASE_S**attempt + random.uniform(0.0, 1.0)
 
 
-def _next_retry_delay(exc: Exception, attempt: int, max_attempts: int, url: str) -> float:
+def _next_retry_delay(
+    exc: Exception, attempt: int, max_attempts: int, url: str
+) -> float:
     """Return the backoff delay before the next retry, or re-raise *exc*.
 
     Re-raises *exc* when it is non-transient (fail fast) or when the final
@@ -231,13 +252,19 @@ def _next_retry_delay(exc: Exception, attempt: int, max_attempts: int, url: str)
     if attempt >= max_attempts - 1:
         log.error(
             "OEDI download failed after %d attempts: url=%s error=%s",
-            max_attempts, url, exc,
+            max_attempts,
+            url,
+            exc,
         )
         raise exc
     delay = _backoff_delay(attempt)
     log.warning(
         "OEDI download attempt %d/%d failed, retrying in %.1fs: url=%s error=%s",
-        attempt + 1, max_attempts, delay, url, exc,
+        attempt + 1,
+        max_attempts,
+        delay,
+        url,
+        exc,
     )
     return delay
 
@@ -264,9 +291,7 @@ def _verify_zip(zip_path: Path) -> None:
                     f"Corrupted ZIP {zip_path.name}: bad member {bad!r}"
                 )
     except zipfile.BadZipFile as exc:
-        raise ZipIntegrityError(
-            f"Not a valid ZIP file {zip_path.name}"
-        ) from exc
+        raise ZipIntegrityError(f"Not a valid ZIP file {zip_path.name}") from exc
 
 
 def _download_and_extract_zip(url: str, dest_dir: Path) -> None:
@@ -288,7 +313,11 @@ def _download_and_extract_zip(url: str, dest_dir: Path) -> None:
                     log.warning(
                         "ZIP integrity check failed attempt %d/%d for %s, "
                         "retrying in %.1fs: %s",
-                        attempt + 1, _MAX_DOWNLOAD_ATTEMPTS, url, delay, exc,
+                        attempt + 1,
+                        _MAX_DOWNLOAD_ATTEMPTS,
+                        url,
+                        delay,
+                        exc,
                     )
                     time.sleep(delay)
                     continue
@@ -301,7 +330,9 @@ def _download_and_extract_zip(url: str, dest_dir: Path) -> None:
             return
 
 
-def _download_file(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS) -> None:
+def _download_file(
+    url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS
+) -> None:
     """Download url to dest using httpx, boto3, or urllib (in that order).
 
     Transient failures are retried with exponential backoff.  The temporary
@@ -320,7 +351,9 @@ def _download_file(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_AT
         raise
 
 
-def _download_with_retry(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS) -> None:
+def _download_with_retry(
+    url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS
+) -> None:
     """Call ``_try_download`` with exponential-backoff retries on transient errors."""
     for attempt in range(max_attempts):
         try:
@@ -351,7 +384,7 @@ def _try_download(url: str, dest: Path) -> None:
 
         prefix = "https://oedi-data-lake.s3.amazonaws.com/"
         if url.startswith(prefix):
-            key = url[len(prefix):]
+            key = url[len(prefix) :]
         else:
             raise ValueError(f"Cannot parse S3 key from {url!r}")
         s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
@@ -430,16 +463,56 @@ def _fips_from_weather_name(name: str) -> tuple[str, str] | None:
 
 
 _STATE_FIPS: dict[str, str] = {
-    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA",
-    "08": "CO", "09": "CT", "10": "DE", "11": "DC", "12": "FL",
-    "13": "GA", "15": "HI", "16": "ID", "17": "IL", "18": "IN",
-    "19": "IA", "20": "KS", "21": "KY", "22": "LA", "23": "ME",
-    "24": "MD", "25": "MA", "26": "MI", "27": "MN", "28": "MS",
-    "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH",
-    "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND",
-    "39": "OH", "40": "OK", "41": "OR", "42": "PA", "44": "RI",
-    "45": "SC", "46": "SD", "47": "TN", "48": "TX", "49": "UT",
-    "50": "VT", "51": "VA", "53": "WA", "54": "WV", "55": "WI",
+    "01": "AL",
+    "02": "AK",
+    "04": "AZ",
+    "05": "AR",
+    "06": "CA",
+    "08": "CO",
+    "09": "CT",
+    "10": "DE",
+    "11": "DC",
+    "12": "FL",
+    "13": "GA",
+    "15": "HI",
+    "16": "ID",
+    "17": "IL",
+    "18": "IN",
+    "19": "IA",
+    "20": "KS",
+    "21": "KY",
+    "22": "LA",
+    "23": "ME",
+    "24": "MD",
+    "25": "MA",
+    "26": "MI",
+    "27": "MN",
+    "28": "MS",
+    "29": "MO",
+    "30": "MT",
+    "31": "NE",
+    "32": "NV",
+    "33": "NH",
+    "34": "NJ",
+    "35": "NM",
+    "36": "NY",
+    "37": "NC",
+    "38": "ND",
+    "39": "OH",
+    "40": "OK",
+    "41": "OR",
+    "42": "PA",
+    "44": "RI",
+    "45": "SC",
+    "46": "SD",
+    "47": "TN",
+    "48": "TX",
+    "49": "UT",
+    "50": "VT",
+    "51": "VA",
+    "53": "WA",
+    "54": "WV",
+    "55": "WI",
     "56": "WY",
 }
 
@@ -448,32 +521,58 @@ _STATE_FIPS: dict[str, str] = {
 # Each list contains the integer zone numbers (1-8) that appear in that state.
 # Used for coarse cross-zone validation between building HPXML and weather EPW.
 _IECC_STATE_ZONES: dict[str, frozenset[int]] = {
-    "AL": frozenset({2, 3}),       "AK": frozenset({7, 8}),
-    "AZ": frozenset({2, 3, 4, 5}), "AR": frozenset({3, 4}),
-    "CA": frozenset({2, 3, 4, 5, 6}), "CO": frozenset({4, 5, 6, 7}),
-    "CT": frozenset({5}),          "DE": frozenset({4}),
-    "FL": frozenset({1, 2}),       "GA": frozenset({2, 3, 4}),
-    "HI": frozenset({1}),         "ID": frozenset({5, 6}),
-    "IL": frozenset({4, 5}),       "IN": frozenset({4, 5}),
-    "IA": frozenset({5, 6}),       "KS": frozenset({3, 4, 5}),
-    "KY": frozenset({4}),          "LA": frozenset({2, 3}),
-    "ME": frozenset({6, 7}),       "MD": frozenset({4}),
-    "MA": frozenset({5}),         "MI": frozenset({5, 6, 7}),
-    "MN": frozenset({6, 7}),       "MS": frozenset({2, 3}),
-    "MO": frozenset({4, 5}),       "MT": frozenset({6, 7}),
-    "NE": frozenset({5, 6}),       "NV": frozenset({3, 4, 5}),
-    "NH": frozenset({5, 6}),       "NJ": frozenset({4, 5}),
-    "NM": frozenset({3, 4, 5}),    "NY": frozenset({4, 5, 6}),
-    "NC": frozenset({3, 4, 5}),       "ND": frozenset({6, 7}),
-    "OH": frozenset({4, 5}),       "OK": frozenset({3, 4}),
-    "OR": frozenset({4, 5}),       "PA": frozenset({4, 5}),
-    "RI": frozenset({5}),          "SC": frozenset({2, 3}),
-    "SD": frozenset({5, 6}),       "TN": frozenset({3, 4}),
-    "TX": frozenset({1, 2, 3, 4}), "UT": frozenset({5, 6, 7}),
-    "VT": frozenset({5, 6}),       "VA": frozenset({3, 4, 5}),
-    "WA": frozenset({4, 5, 6}),    "WV": frozenset({4, 5}),
-    "WI": frozenset({6, 7}),       "WY": frozenset({6, 7}),
-    "DC": frozenset({4}),          "PR": frozenset({1}),
+    "AL": frozenset({2, 3}),
+    "AK": frozenset({7, 8}),
+    "AZ": frozenset({2, 3, 4, 5}),
+    "AR": frozenset({3, 4}),
+    "CA": frozenset({2, 3, 4, 5, 6}),
+    "CO": frozenset({4, 5, 6, 7}),
+    "CT": frozenset({5}),
+    "DE": frozenset({4}),
+    "FL": frozenset({1, 2}),
+    "GA": frozenset({2, 3, 4}),
+    "HI": frozenset({1}),
+    "ID": frozenset({5, 6}),
+    "IL": frozenset({4, 5}),
+    "IN": frozenset({4, 5}),
+    "IA": frozenset({5, 6}),
+    "KS": frozenset({3, 4, 5}),
+    "KY": frozenset({4}),
+    "LA": frozenset({2, 3}),
+    "ME": frozenset({6, 7}),
+    "MD": frozenset({4}),
+    "MA": frozenset({5}),
+    "MI": frozenset({5, 6, 7}),
+    "MN": frozenset({6, 7}),
+    "MS": frozenset({2, 3}),
+    "MO": frozenset({4, 5}),
+    "MT": frozenset({6, 7}),
+    "NE": frozenset({5, 6}),
+    "NV": frozenset({3, 4, 5}),
+    "NH": frozenset({5, 6}),
+    "NJ": frozenset({4, 5}),
+    "NM": frozenset({3, 4, 5}),
+    "NY": frozenset({4, 5, 6}),
+    "NC": frozenset({3, 4, 5}),
+    "ND": frozenset({6, 7}),
+    "OH": frozenset({4, 5}),
+    "OK": frozenset({3, 4}),
+    "OR": frozenset({4, 5}),
+    "PA": frozenset({4, 5}),
+    "RI": frozenset({5}),
+    "SC": frozenset({2, 3}),
+    "SD": frozenset({5, 6}),
+    "TN": frozenset({3, 4}),
+    "TX": frozenset({1, 2, 3, 4}),
+    "UT": frozenset({5, 6, 7}),
+    "VT": frozenset({5, 6}),
+    "VA": frozenset({3, 4, 5}),
+    "WA": frozenset({4, 5, 6}),
+    "WV": frozenset({4, 5}),
+    "WI": frozenset({6, 7}),
+    "WY": frozenset({6, 7}),
+    "DC": frozenset({4}),
+    "PR": frozenset({1}),
 }
 
 
@@ -635,6 +734,77 @@ def _fetch_weather(
     return weather_dest
 
 
+def _weight_column(df: pl.DataFrame) -> str | None:
+    """Return the ResStock sample-weight column name, or None if absent.
+
+    ResStock metadata parquets name the weight column ``in.sample_weight`` (or
+    a close variant); it is the per-building population multiplier used to
+    re-weight individual simulations up to the national stock.
+    """
+    return next((c for c in df.columns if "sample_weight" in c.lower()), None)
+
+
+def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float | None:
+    """Return *bldg_id*'s sample weight from a metadata parquet, or None.
+
+    Returns None when the parquet has no recognisable weight column or the
+    building is not present in it, so the caller can decide how to handle a
+    missing weight. Uses the same column-detection logic as the fleet path so
+    the single-building and fleet weights are guaranteed to agree.
+    """
+    import polars as pl
+
+    df = pl.read_parquet(metadata_path)
+    weight_col = _weight_column(df)
+    if weight_col is None:
+        return None
+    id_col = _bldg_id_col(df)
+    matched = df.filter(pl.col(id_col) == bldg_id)
+    if matched.height == 0:
+        return None
+    return float(matched[weight_col][0])
+
+
+def _resolve_sample_weight(
+    bldg_id: int,
+    metadata_path: str | Path | None,
+    sample_weight: float | None,
+) -> float:
+    """Resolve the sample weight for a single building.
+
+    Precedence: an explicit *sample_weight* wins over *metadata_path*; a
+    metadata lookup wins over the default. When neither yields a weight the
+    value defaults to 1.0 and a ``UserWarning`` is emitted, because an
+    unweighted result cannot be correctly aggregated to population level.
+    """
+    if sample_weight is not None:
+        weight = sample_weight
+    elif metadata_path is not None:
+        looked_up = _lookup_sample_weight(metadata_path, bldg_id)
+        if looked_up is None:
+            warnings.warn(
+                f"Building {bldg_id} not found in metadata {metadata_path!r}; "
+                f"sample_weight defaults to 1.0. Population-level aggregation of "
+                f"this building will not be correctly weighted.",
+                UserWarning,
+                stacklevel=3,
+            )
+            weight = 1.0
+        else:
+            weight = looked_up
+    else:
+        warnings.warn(
+            "No metadata_path or sample_weight provided; sample_weight defaults "
+            "to 1.0. Population-level aggregation of this building will not be "
+            "correctly weighted.",
+            UserWarning,
+            stacklevel=3,
+        )
+        weight = 1.0
+    log.debug("Resolved sample weight for building %d: %s", bldg_id, weight)
+    return weight
+
+
 def fetch_resstock_building(
     bldg_id: int,
     version: str = "2024.2",
@@ -642,6 +812,8 @@ def fetch_resstock_building(
     cache_dir: Path | None = None,
     weather_override: Path | None = None,
     weather_format: WeatherFormat | None = None,
+    metadata_path: str | Path | None = None,
+    sample_weight: float | None = None,
     _checksum_failures: list[int] | None = None,
 ) -> ResStockBuilding:
     """Download a ResStock building bundle from OEDI S3 and return local paths.
@@ -657,6 +829,15 @@ def fetch_resstock_building(
         versions like 2025.1), ``WeatherFormat.CSV`` to force the
         simplified S3 CSV, or ``None`` (default) to use the version's
         native format.
+    metadata_path:
+        Local path to a ResStock metadata parquet. When provided, the
+        building's ``sample_weight`` is looked up from it by building ID so
+        the returned weight matches the fleet path.
+    sample_weight:
+        Explicit population sample weight. Takes precedence over
+        *metadata_path*. When neither is given the weight defaults to 1.0 and
+        a ``UserWarning`` is emitted, because an unweighted result cannot be
+        correctly aggregated to population level.
     """
     base_cache = cache_dir if cache_dir is not None else _default_cache_dir()
     cfg = _version_config(version)
@@ -664,10 +845,16 @@ def fetch_resstock_building(
     hpxml_path = bldg_dir / "home.xml"
     schedule_path = bldg_dir / "in.schedules.csv"
 
-    if (hpxml_path.exists() and hpxml_path.stat().st_size > 0
-            and schedule_path.exists() and schedule_path.stat().st_size > 0):
-        if not (_validate_cache_integrity(hpxml_path)
-                and _validate_cache_integrity(schedule_path)):
+    if (
+        hpxml_path.exists()
+        and hpxml_path.stat().st_size > 0
+        and schedule_path.exists()
+        and schedule_path.stat().st_size > 0
+    ):
+        if not (
+            _validate_cache_integrity(hpxml_path)
+            and _validate_cache_integrity(schedule_path)
+        ):
             if _checksum_failures is not None:
                 _checksum_failures[0] += 1
             _remove_cache_with_sidecar(hpxml_path)
@@ -689,13 +876,18 @@ def fetch_resstock_building(
                     _validate_zone_for_state(building_zone, station[0])
     else:
         weather_path = _fetch_weather(
-            cfg, hpxml_path, base_cache, version,
+            cfg,
+            hpxml_path,
+            base_cache,
+            version,
             weather_format=weather_format,
         )
 
+    resolved_weight = _resolve_sample_weight(bldg_id, metadata_path, sample_weight)
+
     return ResStockBuilding(
         bldg_id=bldg_id,
-        sample_weight=1.0,
+        sample_weight=resolved_weight,
         hpxml_path=hpxml_path,
         schedule_path=schedule_path,
         weather_path=weather_path,
@@ -731,8 +923,7 @@ async def _download_building_async(
                 bad = zf.testzip()
                 if bad is not None:
                     raise ZipIntegrityError(
-                        f"Corrupted building ZIP for bldg {bldg_id}: "
-                        f"bad member {bad!r}"
+                        f"Corrupted building ZIP for bldg {bldg_id}: bad member {bad!r}"
                     )
                 _extract_zip_members(zf, bldg_dir)
             for member_name in ("home.xml", "in.schedules.csv"):
@@ -750,7 +941,11 @@ async def _download_building_async(
                 log.warning(
                     "ZIP integrity check failed attempt %d/%d for bldg %d, "
                     "retrying in %.1fs: %s",
-                    attempt + 1, max_attempts, bldg_id, delay, exc,
+                    attempt + 1,
+                    max_attempts,
+                    bldg_id,
+                    delay,
+                    exc,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -797,10 +992,15 @@ async def _fetch_fleet_async(
                 bldg_dir = _building_cache_dir(base_cache, version, bid)
                 hpxml_path = bldg_dir / "home.xml"
                 schedule_path = bldg_dir / "in.schedules.csv"
-                if hpxml_path.exists() and hpxml_path.stat().st_size > 0 \
-                        and schedule_path.exists() and schedule_path.stat().st_size > 0:
-                    if _validate_cache_integrity(hpxml_path) \
-                            and _validate_cache_integrity(schedule_path):
+                if (
+                    hpxml_path.exists()
+                    and hpxml_path.stat().st_size > 0
+                    and schedule_path.exists()
+                    and schedule_path.stat().st_size > 0
+                ):
+                    if _validate_cache_integrity(
+                        hpxml_path
+                    ) and _validate_cache_integrity(schedule_path):
                         tasks.append(_noop())
                     else:
                         n_checksum_failures += 1
@@ -808,11 +1008,17 @@ async def _fetch_fleet_async(
                         _remove_cache_with_sidecar(schedule_path)
                         tasks.append(
                             _download_building_async(
-                                client, cfg, bid, upgrade_id, bldg_dir,
+                                client,
+                                cfg,
+                                bid,
+                                upgrade_id,
+                                bldg_dir,
                             )
                         )
                 else:
-                    tasks.append(_download_building_async(client, cfg, bid, upgrade_id, bldg_dir))
+                    tasks.append(
+                        _download_building_async(client, cfg, bid, upgrade_id, bldg_dir)
+                    )
 
             # return_exceptions=True so one building's exhausted-retry failure
             # does not abort the entire fleet download.
@@ -824,7 +1030,9 @@ async def _fetch_fleet_async(
                 failed_ids.add(bid)
                 log.error(
                     "ResStock building %d download failed, skipping: url=%s error=%s",
-                    bid, _zip_url(cfg, bid, upgrade_id), outcome,
+                    bid,
+                    _zip_url(cfg, bid, upgrade_id),
+                    outcome,
                 )
 
         for bid in bldg_ids:
@@ -835,29 +1043,38 @@ async def _fetch_fleet_async(
                 hpxml_path = bldg_dir / "home.xml"
                 schedule_path = bldg_dir / "in.schedules.csv"
                 weather_path = _fetch_weather(
-                    cfg, hpxml_path, base_cache, version,
+                    cfg,
+                    hpxml_path,
+                    base_cache,
+                    version,
                     weather_format=weather_format,
                 )
-                results.append(ResStockBuilding(
-                    bldg_id=bid,
-                    sample_weight=weights.get(bid, 1.0),
-                    hpxml_path=hpxml_path,
-                    schedule_path=schedule_path,
-                    weather_path=weather_path,
-                ))
+                results.append(
+                    ResStockBuilding(
+                        bldg_id=bid,
+                        sample_weight=weights.get(bid, 1.0),
+                        hpxml_path=hpxml_path,
+                        schedule_path=schedule_path,
+                        weather_path=weather_path,
+                    )
+                )
             except Exception as exc:
                 # A post-download failure (e.g. weather fetch) for one building
                 # must not sink the rest of the fleet either.
                 log.error(
                     "ResStock building %d post-download processing failed, skipping: error=%s",
-                    bid, exc,
+                    bid,
+                    exc,
                 )
 
         n_failed = len(bldg_ids) - len(results)
         log.info(
             "ResStock fleet download complete: %d succeeded, %d failed, "
             "%d checksum failures (of %d requested)",
-            len(results), n_failed, n_checksum_failures, len(bldg_ids),
+            len(results),
+            n_failed,
+            n_checksum_failures,
+            len(bldg_ids),
         )
         return results
 
@@ -870,23 +1087,32 @@ async def _fetch_fleet_async(
     for bid in bldg_ids:
         try:
             b = fetch_resstock_building(
-                bid, version=version, upgrade_id=upgrade_id,
-                cache_dir=base_cache, weather_format=weather_format,
+                bid,
+                version=version,
+                upgrade_id=upgrade_id,
+                cache_dir=base_cache,
+                weather_format=weather_format,
+                sample_weight=weights.get(bid, 1.0),
                 _checksum_failures=n_checksum_failures,
             )
         except Exception as exc:
             log.error(
                 "ResStock building %d download failed, skipping: url=%s error=%s",
-                bid, _zip_url(cfg, bid, upgrade_id), exc,
+                bid,
+                _zip_url(cfg, bid, upgrade_id),
+                exc,
             )
             continue
-        results.append(dataclasses.replace(b, sample_weight=weights.get(bid, 1.0)))
+        results.append(b)
 
     n_failed = len(bldg_ids) - len(results)
     log.info(
         "ResStock fleet download complete: %d succeeded, %d failed, "
         "%d checksum failures (of %d requested)",
-        len(results), n_failed, n_checksum_failures[0], len(bldg_ids),
+        len(results),
+        n_failed,
+        n_checksum_failures[0],
+        len(bldg_ids),
     )
     return results
 
@@ -937,10 +1163,7 @@ def fetch_resstock_fleet(
         for col, val in filter.items():
             df = df.filter(pl.col(col) == val)
 
-    weight_col = next(
-        (c for c in df.columns if "sample_weight" in c.lower()),
-        None,
-    )
+    weight_col = _weight_column(df)
 
     if bldg_ids is not None:
         id_col = _bldg_id_col(df)
