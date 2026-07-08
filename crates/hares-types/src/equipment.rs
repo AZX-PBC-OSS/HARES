@@ -1142,7 +1142,16 @@ pub struct CoreOutput {
     pub performance: CorePerformance,
 }
 
-// Range-validation observer counters — zero-cost when `observe` is disabled.
+// Range-validation observability — zero-cost when `observe` is disabled.
+//
+// Two layers, mirroring `mode_flow_guard`:
+// - Atomic counters give cheap lifetime totals ("how many").
+// - A fixed-capacity ring of `RangeViolationEvent`s answers "which field,
+//   what value, which equipment" for every rejection and warning. The ring
+//   is a const-initialised static array of `Copy` events, so recording never
+//   heap-allocates; when full, the oldest event is overwritten because
+//   diagnostics favour recency over completeness (the counters still hold
+//   the lifetime totals).
 #[cfg(feature = "observe")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1152,21 +1161,118 @@ static RANGE_REJECTION_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "observe")]
 static RANGE_WARNING_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Severity of a recorded physical-range violation.
 #[cfg(feature = "observe")]
-fn record_range_rejection() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeViolationSeverity {
+    /// Physically impossible value; [`validate_core_contract`] returned `Err`.
+    Rejection,
+    /// Implausible but physically possible value; validation passed with a
+    /// `tracing::warn!`.
+    Warning,
+}
+
+/// One recorded physical-range violation from [`validate_core_contract`].
+#[cfg(feature = "observe")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RangeViolationEvent {
+    /// `CoreOutput` field path, e.g. `"performance.cop"`.
+    pub field: &'static str,
+    /// The offending value.
+    pub value: f64,
+    /// [`EquipmentId`] inner value of the equipment that produced the value.
+    pub equipment_id: u32,
+    pub severity: RangeViolationSeverity,
+}
+
+/// Ring capacity. 256 comfortably exceeds any plausible violation burst
+/// between diagnostic polls while keeping the static footprint small
+/// (256 × 32 B = 8 KiB); fixed so recording never allocates.
+#[cfg(feature = "observe")]
+const RANGE_EVENT_CAPACITY: usize = 256;
+
+#[cfg(feature = "observe")]
+struct RangeEventRing {
+    events: [Option<RangeViolationEvent>; RANGE_EVENT_CAPACITY],
+    /// Index of the next write slot.
+    next: usize,
+    /// Number of valid events; saturates at capacity.
+    len: usize,
+}
+
+#[cfg(feature = "observe")]
+impl RangeEventRing {
+    const fn new() -> Self {
+        Self {
+            events: [None; RANGE_EVENT_CAPACITY],
+            next: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, event: RangeViolationEvent) {
+        self.events[self.next] = Some(event);
+        self.next = (self.next + 1) % RANGE_EVENT_CAPACITY;
+        if self.len < RANGE_EVENT_CAPACITY {
+            self.len += 1;
+        }
+    }
+
+    fn snapshot(&self) -> Vec<RangeViolationEvent> {
+        // Oldest-first: once the ring has wrapped, the oldest entry sits at
+        // `next` (the slot about to be overwritten); before wrapping it is 0.
+        let start = if self.len == RANGE_EVENT_CAPACITY {
+            self.next
+        } else {
+            0
+        };
+        (0..self.len)
+            .filter_map(|i| self.events[(start + i) % RANGE_EVENT_CAPACITY])
+            .collect()
+    }
+}
+
+#[cfg(feature = "observe")]
+static RANGE_EVENTS: std::sync::Mutex<RangeEventRing> =
+    std::sync::Mutex::new(RangeEventRing::new());
+
+#[cfg(feature = "observe")]
+fn lock_range_events() -> std::sync::MutexGuard<'static, RangeEventRing> {
+    // A poisoned lock only means another thread panicked mid-push; the ring
+    // holds Copy data and stays structurally valid, so recover the guard
+    // rather than propagating the poison.
+    RANGE_EVENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "observe")]
+fn record_range_rejection(field: &'static str, value: f64, equipment_id: u32) {
     RANGE_REJECTION_COUNT.fetch_add(1, Ordering::Relaxed);
+    lock_range_events().push(RangeViolationEvent {
+        field,
+        value,
+        equipment_id,
+        severity: RangeViolationSeverity::Rejection,
+    });
 }
 
 #[cfg(not(feature = "observe"))]
-fn record_range_rejection() {}
+fn record_range_rejection(_field: &'static str, _value: f64, _equipment_id: u32) {}
 
 #[cfg(feature = "observe")]
-fn record_range_warning() {
+fn record_range_warning(field: &'static str, value: f64, equipment_id: u32) {
     RANGE_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+    lock_range_events().push(RangeViolationEvent {
+        field,
+        value,
+        equipment_id,
+        severity: RangeViolationSeverity::Warning,
+    });
 }
 
 #[cfg(not(feature = "observe"))]
-fn record_range_warning() {}
+fn record_range_warning(_field: &'static str, _value: f64, _equipment_id: u32) {}
 
 /// Validates that CoreOutput and declared capabilities agree in both directions.
 ///
@@ -1285,7 +1391,7 @@ pub fn validate_core_contract(
         // input, both positive quantities when operating.
         if let Some(c) = co.performance.cop {
             if c < 0.0 {
-                record_range_rejection();
+                record_range_rejection("performance.cop", c, desc.id.0);
                 return Err(HaresError::Equipment(format!(
                     "core_output contract violation for '{}' ({:?}): \
                      performance.cop={c} must be >= 0.0; \
@@ -1295,12 +1401,33 @@ pub fn validate_core_contract(
                 )));
             }
             if c == 0.0 {
-                record_range_warning();
+                record_range_warning("performance.cop", c, desc.id.0);
                 tracing::warn!(
                     equipment = %desc.name,
+                    equipment_id = desc.id.0,
                     cop = c,
                     "performance.cop=0: equipment may be off or in transition; \
                      consider reporting cop=None when no performance metric is available"
+                );
+            }
+            // Upper plausibility bound. HARES equipment models clamp reported
+            // COP to [0, 8] (air conditioner, AHRI 210/240-2023 rated cooling
+            // COP ≈ 2.3–4.1) and [0, 10] (ASHP heater), and the Carnot limit
+            // (ASHRAE HoF 2021 Ch.2: COP_max = T_h / (T_h − T_c)) is ≈ 8–15 at
+            // typical residential heating lifts of 20–40 K. COP > 20 therefore
+            // indicates a bug (inverted EIR, percent-as-ratio, unit mix-up)
+            // rather than real equipment — but it is not physically impossible
+            // (Carnot COP diverges as the lift approaches zero), so warn
+            // rather than reject.
+            if c > 20.0 {
+                record_range_warning("performance.cop", c, desc.id.0);
+                tracing::warn!(
+                    equipment = %desc.name,
+                    equipment_id = desc.id.0,
+                    cop = c,
+                    "performance.cop={c} exceeds the plausible bound of 20.0 for \
+                     residential vapor-compression equipment; may indicate an \
+                     inverted EIR curve or a percent-as-ratio bug"
                 );
             }
         }
@@ -1308,7 +1435,7 @@ pub fn validate_core_contract(
         // Main power consumed cannot be negative.
         if let Some(p) = co.performance.main_power_kw {
             if p < 0.0 {
-                record_range_rejection();
+                record_range_rejection("performance.main_power_kw", p, desc.id.0);
                 return Err(HaresError::Equipment(format!(
                     "core_output contract violation for '{}' ({:?}): \
                      performance.main_power_kw={p} must be >= 0.0; \
@@ -1321,7 +1448,7 @@ pub fn validate_core_contract(
         // Sensible cooling by documented convention is ≤ 0 (heat removed from zone).
         if let Some(sc) = co.flows.sensible_cooling_w {
             if sc > 0.0 {
-                record_range_rejection();
+                record_range_rejection("flows.sensible_cooling_w", sc, desc.id.0);
                 return Err(HaresError::Equipment(format!(
                     "core_output contract violation for '{}' ({:?}): \
                      flows.sensible_cooling_w={sc} must be <= 0.0; \
@@ -1335,7 +1462,7 @@ pub fn validate_core_contract(
         // Latent cooling by documented convention is ≤ 0 (moisture condensed from zone air).
         if let Some(lc) = co.flows.latent_cooling_w {
             if lc > 0.0 {
-                record_range_rejection();
+                record_range_rejection("flows.latent_cooling_w", lc, desc.id.0);
                 return Err(HaresError::Equipment(format!(
                     "core_output contract violation for '{}' ({:?}): \
                      flows.latent_cooling_w={lc} must be <= 0.0; \
@@ -1353,10 +1480,11 @@ pub fn validate_core_contract(
         // ASHRAE 55-2020 §5.3: typical occupied range 20-30°C.
         if let Some(sp) = co.state.setpoint_c {
             if !(-50.0..=80.0).contains(&sp) {
-                record_range_warning();
+                record_range_warning("state.setpoint_c", sp, desc.id.0);
                 if sp > 100.0 {
                     tracing::warn!(
                         equipment = %desc.name,
+                        equipment_id = desc.id.0,
                         setpoint_c = sp,
                         "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
                          and may indicate a Fahrenheit-to-Celsius conversion bug"
@@ -1364,6 +1492,7 @@ pub fn validate_core_contract(
                 } else {
                     tracing::warn!(
                         equipment = %desc.name,
+                        equipment_id = desc.id.0,
                         setpoint_c = sp,
                         "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
                     );
@@ -1371,16 +1500,26 @@ pub fn validate_core_contract(
             }
         }
 
-        // thermal_output_w: [-100 kW, 100 kW] is a residential-scale soft range.
-        // Large commercial heat pumps can legitimately exceed this — warn only.
+        // thermal_output_w: [-100 kW, 100 kW] soft plausibility range, warn-only.
+        // The largest residential heat pumps and furnaces deliver ≈ 35–40 kW
+        // (120–140 kBtu/h); 100 kW leaves ~2.5× headroom for central
+        // multi-family plant while still catching W-vs-kW unit bugs (×1000)
+        // and performance-curve blow-ups. HARES's scope is residential load
+        // simulation — commercial HVAC equipment that could legitimately
+        // exceed this range is out of scope by design (constitution, "Scope:
+        // residential load profile simulation"), so no per-equipment-class
+        // allowlist is needed; any value past the bound is a diagnostic
+        // signal, never a block.
         if let Some(t) = co.flows.thermal_output_w {
             if !(-100_000.0..=100_000.0).contains(&t) {
-                record_range_warning();
+                record_range_warning("flows.thermal_output_w", t, desc.id.0);
                 tracing::warn!(
                     equipment = %desc.name,
+                    equipment_id = desc.id.0,
                     thermal_output_w = t,
-                    "thermal_output_w={t} W outside residential range [-100, 100] kW; \
-                     may be valid for large commercial equipment"
+                    "thermal_output_w={t} W outside residential plausibility range \
+                     [-100, 100] kW; may indicate a W-vs-kW unit bug or a \
+                     performance-curve blow-up"
                 );
             }
         }
@@ -1494,6 +1633,23 @@ pub fn range_rejection_counter() -> u64 {
 #[cfg(feature = "observe")]
 pub fn range_warning_counter() -> u64 {
     RANGE_WARNING_COUNT.load(Ordering::Relaxed)
+}
+
+/// Returns every recorded range-violation diagnostic event, oldest first.
+///
+/// The backing ring holds the most recent 256 events; older events are
+/// overwritten. Use [`range_rejection_counter`] / [`range_warning_counter`]
+/// for lifetime totals.
+#[cfg(feature = "observe")]
+pub fn range_violation_events() -> Vec<RangeViolationEvent> {
+    lock_range_events().snapshot()
+}
+
+/// Clears recorded range-violation events. The lifetime counters are
+/// unaffected.
+#[cfg(feature = "observe")]
+pub fn clear_range_violation_events() {
+    *lock_range_events() = RangeEventRing::new();
 }
 
 /// Tolerance for [`validate_port_core_electrical_consistency`]: ~1e-6
@@ -3602,11 +3758,151 @@ mod tests {
                 ..Default::default()
             },
             performance: CorePerformance {
-                cop: Some(3.5),
+                // 20.0 is the inclusive upper edge of the COP plausibility band.
+                cop: Some(20.0),
                 main_power_kw: Some(0.0),
             },
         };
         validate_core_contract(&desc, &out).expect("valid ranges at boundaries must pass");
+    }
+
+    #[test]
+    fn validate_core_contract_allows_implausibly_high_cop() {
+        // COP > 20 is implausible (warn-level diagnostic) but not physically
+        // impossible — validation must pass.
+        let desc = range_test_descriptor("High COP");
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(25.0),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out)
+            .expect("implausibly high COP must warn, not reject");
+    }
+
+    /// Diagnostic-event capture: only compiled with the `observe` feature,
+    /// matching the CI pass `cargo nextest run --workspace -F observe`.
+    /// nextest runs each test in its own process, so the process-global ring
+    /// and counters are isolated per test; assertions are nevertheless written
+    /// to hold even under a shared-process runner (filter by a unique
+    /// equipment id, assert containment rather than exact buffer equality).
+    #[cfg(feature = "observe")]
+    mod observe_capture {
+        use super::*;
+
+        fn observed_descriptor(name: &str, id: u32) -> EquipmentDescriptor {
+            let mut desc = range_test_descriptor(name);
+            desc.id = EquipmentId(id);
+            desc
+        }
+
+        fn output_with_cop(cop: f64) -> CoreOutput {
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(1.0)),
+                    thermal_output_w: Some(3000.0),
+                    ..Default::default()
+                },
+                state: CoreState {
+                    setpoint_c: Some(20.0),
+                    ..Default::default()
+                },
+                performance: CorePerformance {
+                    cop: Some(cop),
+                    ..Default::default()
+                },
+            }
+        }
+
+        #[test]
+        fn rejection_records_event_with_field_value_and_equipment_id() {
+            let desc = observed_descriptor("Observe Reject", 9001);
+            let rejections_before = range_rejection_counter();
+            validate_core_contract(&desc, &output_with_cop(-2.3))
+                .expect_err("negative COP must be rejected");
+            assert!(
+                range_rejection_counter() > rejections_before,
+                "rejection counter must increment"
+            );
+            let events = range_violation_events();
+            assert!(
+                events.contains(&RangeViolationEvent {
+                    field: "performance.cop",
+                    value: -2.3,
+                    equipment_id: 9001,
+                    severity: RangeViolationSeverity::Rejection,
+                }),
+                "expected a rejection event for performance.cop=-2.3, got {events:?}"
+            );
+        }
+
+        #[test]
+        fn warning_records_event_with_field_value_and_equipment_id() {
+            let desc = observed_descriptor("Observe Warn", 9002);
+            let mut out = output_with_cop(3.0);
+            out.state.setpoint_c = Some(150.0);
+            let warnings_before = range_warning_counter();
+            validate_core_contract(&desc, &out)
+                .expect("out-of-range setpoint is warn-only and must pass");
+            assert!(
+                range_warning_counter() > warnings_before,
+                "warning counter must increment"
+            );
+            let events = range_violation_events();
+            assert!(
+                events.contains(&RangeViolationEvent {
+                    field: "state.setpoint_c",
+                    value: 150.0,
+                    equipment_id: 9002,
+                    severity: RangeViolationSeverity::Warning,
+                }),
+                "expected a warning event for state.setpoint_c=150, got {events:?}"
+            );
+        }
+
+        #[test]
+        fn event_ring_caps_length_and_evicts_oldest() {
+            clear_range_violation_events();
+            let desc = observed_descriptor("Observe Ring", 9003);
+            // Push capacity + 10 rejections with distinguishable values.
+            let total = 266usize;
+            for i in 0..total {
+                let value = -(1.0 + i as f64);
+                validate_core_contract(&desc, &output_with_cop(value))
+                    .expect_err("negative COP must be rejected");
+            }
+            let events = range_violation_events();
+            // The ring never exceeds its fixed capacity (256)...
+            assert!(
+                events.len() <= 256,
+                "ring must cap at capacity, got {} events",
+                events.len()
+            );
+            // ...the newest event survives...
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.value == -(total as f64) && e.equipment_id == 9003),
+                "newest event must be present"
+            );
+            // ...and the oldest was evicted (266 pushes > 256 slots; eviction
+            // is monotonic, so interleaved events from other sources only
+            // evict more, never less).
+            assert!(
+                !events.iter().any(|e| e.value == -1.0 && e.equipment_id == 9003),
+                "oldest event must have been evicted"
+            );
+        }
     }
 
     /// Minimal electric-equipment descriptor for port/core consistency tests.

@@ -452,6 +452,43 @@ output_path = "/some/path/output.csv"
     }
 
     #[test]
+    fn output_format_implements_serialize() {
+        fn _assert_serialize<T: serde::Serialize>() {}
+        _assert_serialize::<OutputFormat>();
+    }
+
+    #[test]
+    fn output_format_csv_serializes_to_csv() {
+        let serialized = serde_json::to_string(&OutputFormat::Csv).expect("serialize");
+        assert_eq!(serialized, "\"csv\"");
+    }
+
+    #[test]
+    fn output_format_parquet_serializes_to_parquet() {
+        let serialized = serde_json::to_string(&OutputFormat::Parquet).expect("serialize");
+        assert_eq!(serialized, "\"parquet\"");
+    }
+
+    #[test]
+    fn output_format_round_trips_through_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            output_format: OutputFormat,
+        }
+        for original in [OutputFormat::Csv, OutputFormat::Parquet] {
+            let wrapper = Wrapper {
+                output_format: original,
+            };
+            let serialized = toml::to_string(&wrapper).expect("serialize");
+            let deserialized: Wrapper = toml::from_str(&serialized).expect("deserialize");
+            assert_eq!(
+                original, deserialized.output_format,
+                "OutputFormat does not round-trip through TOML"
+            );
+        }
+    }
+
+    #[test]
     fn round_trip_output_path_none() {
         let toml = r#"
 start_time = "2024-01-01T00:00:00+00:00"

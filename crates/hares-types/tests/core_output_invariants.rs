@@ -1083,3 +1083,35 @@ fn extreme_setpoint_c_still_passes_validation() {
         });
     }
 }
+
+/// COP above the plausibility bound (20) is a warning only — validation still
+/// passes. Physically reachable in principle (Carnot COP diverges as the
+/// temperature lift approaches zero), so it must never break simulation.
+#[test]
+fn extreme_cop_still_passes_validation() {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xC0_FEED_5555_u64);
+    for i in 0..64 {
+        let desc = full_descriptor(&format!("ExtCOP {i}"));
+        // Above plausible range: (20, 500]
+        let cop = sample_range(&mut rng, 20.001, 500.0);
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(0.0),
+                thermal_output_w: Some(3000.0),
+                ..Default::default()
+            },
+            state: CoreState {
+                setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            performance: CorePerformance {
+                cop: Some(cop),
+                ..Default::default()
+            },
+        };
+        validate_core_contract(&desc, &out).unwrap_or_else(|e| {
+            panic!("implausibly high cop={cop} must not be rejected (trial {i}): {e}")
+        });
+    }
+}
