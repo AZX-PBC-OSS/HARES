@@ -580,6 +580,7 @@ def _fake_fleet_building(tmp_path: Path):
         cache_dir: Path | None = None,
         weather_override: Path | None = None,
         weather_format=None,
+        **kwargs: object,
     ) -> ResStockBuilding:
         bdir = (cache_dir or tmp_path) / version / f"bldg{bldg_id:07d}"
         bdir.mkdir(parents=True, exist_ok=True)
@@ -986,4 +987,499 @@ class TestFleetResilience:
 
         returned_ids = {r.bldg_id for r in results}
         assert returned_ids == {1, 3}
+
+
+# ---------------------------------------------------------------------------
+# 10. ZIP integrity checks (testzip)
+# ---------------------------------------------------------------------------
+
+
+class TestZipIntegrity:
+    def test_valid_zip_passes_testzip(self, tmp_path: Path):
+        """_verify_zip returns without error for a valid ZIP."""
+        from ochre_next.data.resstock import _verify_zip
+
+        zip_path = tmp_path / "good.zip"
+        zip_bytes = _make_zip()
+        zip_path.write_bytes(zip_bytes)
+
+        # Should not raise
+        _verify_zip(zip_path)
+
+    def test_truncated_zip_raises(self, tmp_path: Path):
+        """_verify_zip raises ZipIntegrityError for a truncated ZIP."""
+        from ochre_next.data.resstock import ZipIntegrityError, _verify_zip
+
+        zip_path = tmp_path / "bad.zip"
+        zip_bytes = _make_zip()
+        truncated = zip_bytes[: len(zip_bytes) // 2]
+        zip_path.write_bytes(truncated)
+
+        with pytest.raises(ZipIntegrityError):
+            _verify_zip(zip_path)
+
+    def test_empty_file_raises(self, tmp_path: Path):
+        """_verify_zip raises ZipIntegrityError for an empty file."""
+        from ochre_next.data.resstock import ZipIntegrityError, _verify_zip
+
+        zip_path = tmp_path / "empty.zip"
+        zip_path.write_bytes(b"")
+
+        with pytest.raises(ZipIntegrityError):
+            _verify_zip(zip_path)
+
+    def test_download_and_extract_valid_zip(self, tmp_path: Path):
+        """_download_and_extract_zip downloads a valid ZIP and extracts it."""
+        from ochre_next.data.resstock import _download_and_extract_zip
+
+        zip_bytes = _make_zip()
+        dest_dir = tmp_path / "extracted"
+        url = "https://example.com/building.zip"
+
+        with mock.patch(
+            "ochre_next.data.resstock._download_file",
+            side_effect=_fake_download(zip_bytes, tmp_path),
+        ):
+            _download_and_extract_zip(url, dest_dir)
+
+        assert (dest_dir / "home.xml").exists()
+        assert (dest_dir / "in.schedules.csv").exists()
+
+    def test_download_and_extract_retries_on_corrupt_zip(self, tmp_path: Path):
+        """_download_and_extract_zip retries when verify fails."""
+        zip_bytes = _make_zip()
+        dest_dir = tmp_path / "extracted"
+        url = "https://example.com/building.zip"
+        call_count = [0]
+
+        def flaky_download(url_: str, dest: Path) -> None:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                dest.write_bytes(zip_bytes[: len(zip_bytes) // 2])
+            else:
+                dest.write_bytes(zip_bytes)
+
+        with (
+            mock.patch("ochre_next.data.resstock._download_file", side_effect=flaky_download),
+            mock.patch("ochre_next.data.resstock.time.sleep"),
+        ):
+            from ochre_next.data.resstock import _download_and_extract_zip
+
+            _download_and_extract_zip(url, dest_dir)
+
+        assert (dest_dir / "home.xml").exists()
+        assert call_count[0] == 2
+
+    def test_async_download_retries_on_corrupt_zip(self, tmp_path: Path):
+        """_download_building_async retries on ZIP corruption."""
+        import asyncio
+
+        from ochre_next.data import resstock
+
+        zip_bytes = _make_zip()
+        cfg = resstock._version_config("2024.2")
+        bldg_dir = tmp_path / "bldg0000001"
+        truncated = zip_bytes[: len(zip_bytes) // 2]
+
+        # Return truncated data first, then valid ZIP
+        call_count = [0]
+
+        async def flaky_download(client, url, *, max_attempts=3):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return truncated
+            return zip_bytes
+
+        with (
+            mock.patch.object(resstock, "_download_bytes_async", side_effect=flaky_download),
+            mock.patch.object(resstock.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep_mock,
+        ):
+            asyncio.run(resstock._download_building_async(
+                None, cfg, 1, 0, bldg_dir,  # client unused when _download_bytes_async is mocked
+            ))
+
+        assert (bldg_dir / "home.xml").exists()
+        assert call_count[0] == 2
+        assert sleep_mock.await_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# 11. SHA256 sidecar cache integrity
+# ---------------------------------------------------------------------------
+
+
+class TestSha256Sidecar:
+    def test_sidecar_hash_matches(self, tmp_path: Path):
+        """_validate_cache_integrity returns True when sidecar matches."""
+        from ochre_next.data._checksum import (
+            compute_sha256_hex,
+            sha256_path,
+        )
+        from ochre_next.data.resstock import _validate_cache_integrity
+
+        f = tmp_path / "data.csv"
+        f.write_text("col1,col2\n1.0,2.0\n")
+        digest = compute_sha256_hex(f)
+        sha256_path(f).write_text(digest + "\n")
+
+        assert _validate_cache_integrity(f) is True
+
+    def test_sidecar_hash_mismatch(self, tmp_path: Path):
+        """_validate_cache_integrity returns False when sidecar mismatches."""
+        from ochre_next.data._checksum import sha256_path
+        from ochre_next.data.resstock import _validate_cache_integrity
+
+        f = tmp_path / "data.csv"
+        f.write_text("col1,col2\n1.0,2.0\n")
+        sha256_path(f).write_text("deadbeef\n")
+
+        assert _validate_cache_integrity(f) is False
+
+    def test_no_sidecar_returns_true(self, tmp_path: Path):
+        """_validate_cache_integrity returns True when no sidecar exists."""
+        from ochre_next.data.resstock import _validate_cache_integrity
+
+        f = tmp_path / "data.csv"
+        f.write_text("col1,col2\n1.0,2.0\n")
+
+        assert _validate_cache_integrity(f) is True
+
+    def test_remove_cache_with_sidecar(self, tmp_path: Path):
+        """_remove_cache_with_sidecar deletes both file and sidecar."""
+        from ochre_next.data._checksum import sha256_path
+        from ochre_next.data.resstock import _remove_cache_with_sidecar
+
+        f = tmp_path / "data.csv"
+        f.write_text("data")
+        sha256_path(f).write_text("hash\n")
+
+        _remove_cache_with_sidecar(f)
+
+        assert not f.exists()
+        assert not sha256_path(f).exists()
+
+
+# ---------------------------------------------------------------------------
+# 12. Weather CSV SHA256 sidecar cache hit / mismatch
+# ---------------------------------------------------------------------------
+
+
+class TestWeatherCacheIntegrity:
+    def test_csv_cache_reused_when_sidecar_matches(self, tmp_path: Path):
+        """Weather CSV with valid sidecar is reused without re-download."""
+        from ochre_next.data.resstock import _write_sha256_sidecar
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_minimal_hpxml("G0800130"))
+        cache_dir = tmp_path / "cache"
+        version = "2024.2"
+        weather_dest = cache_dir / version / "weather" / "G0800130_TMY3.csv"
+        weather_dest.parent.mkdir(parents=True, exist_ok=True)
+        weather_dest.write_text("fake,weather\n0,1\n")
+        _write_sha256_sidecar(weather_dest)
+
+        download_calls: list[str] = []
+
+        def recording_download(url: str, dest: Path) -> None:
+            download_calls.append(url)
+
+        with mock.patch(
+            "ochre_next.data.resstock._download_file",
+            side_effect=recording_download,
+        ):
+            from ochre_next.data.resstock import (
+                WeatherFormat,
+                _fetch_weather,
+                _version_config,
+            )
+
+            cfg = _version_config(version)
+            result = _fetch_weather(
+                cfg=cfg,
+                hpxml_path=hpxml,
+                cache_dir=cache_dir,
+                version=version,
+                weather_format=WeatherFormat.CSV,
+            )
+
+        assert result == weather_dest
+        assert len(download_calls) == 0
+
+    def test_csv_re_downloaded_when_sidecar_mismatch(self, tmp_path: Path):
+        """Weather CSV with mismatched sidecar triggers re-download."""
+        from ochre_next.data._checksum import sha256_path
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_minimal_hpxml("G0800130"))
+        cache_dir = tmp_path / "cache"
+        version = "2024.2"
+        weather_dest = cache_dir / version / "weather" / "G0800130_TMY3.csv"
+        weather_dest.parent.mkdir(parents=True, exist_ok=True)
+        weather_dest.write_text("fake,weather\n0,1\n")
+        sha256_path(weather_dest).write_text("0000000000000000000000000000000000000000\n")
+
+        download_calls: list[Path] = []
+        fresh_content = b"col1,col2\n3.0,4.0\n"
+
+        def recording_download(url: str, dest: Path) -> None:
+            dest.write_bytes(fresh_content)
+            download_calls.append(dest)
+
+        with mock.patch(
+            "ochre_next.data.resstock._download_file",
+            side_effect=recording_download,
+        ):
+            from ochre_next.data.resstock import (
+                WeatherFormat,
+                _fetch_weather,
+                _version_config,
+            )
+
+            cfg = _version_config(version)
+            _fetch_weather(
+                cfg=cfg,
+                hpxml_path=hpxml,
+                cache_dir=cache_dir,
+                version=version,
+                weather_format=WeatherFormat.CSV,
+            )
+
+        assert len(download_calls) == 1
+        from ochre_next.data.resstock import _validate_cache_integrity
+
+        assert _validate_cache_integrity(weather_dest) is True
+
+    def test_no_sidecar_with_content_reuses_cache(self, tmp_path: Path):
+        """A file with content >0 but no sidecar uses the cache."""
+        from ochre_next.data.resstock import (
+            WeatherFormat,
+            _fetch_weather,
+            _version_config,
+        )
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_minimal_hpxml("G0800130"))
+        cache_dir = tmp_path / "cache"
+        version = "2024.2"
+        weather_dest = cache_dir / version / "weather" / "G0800130_TMY3.csv"
+        weather_dest.parent.mkdir(parents=True, exist_ok=True)
+        weather_dest.write_text("old,data\n0,0\n")
+
+        download_calls: list[str] = []
+
+        def recording_download(url: str, dest: Path) -> None:
+            download_calls.append(url)
+
+        with mock.patch(
+            "ochre_next.data.resstock._download_file",
+            side_effect=recording_download,
+        ):
+            cfg = _version_config(version)
+            result = _fetch_weather(
+                cfg=cfg,
+                hpxml_path=hpxml,
+                cache_dir=cache_dir,
+                version=version,
+                weather_format=WeatherFormat.CSV,
+            )
+
+        assert result == weather_dest
+        assert len(download_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# 13. Weather EPW ZIP integrity and sidecar tests
+# ---------------------------------------------------------------------------
+
+
+class TestWeatherEpwIntegrity:
+    def test_epw_cache_hit_with_valid_sidecar(self, tmp_path: Path):
+        """get_epw_for_fips reuses cached EPW when SHA256 sidecar matches."""
+        from ochre_next.data._checksum import compute_sha256_hex, sha256_path
+        from ochre_next.data.weather import get_epw_for_fips
+
+        epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
+        epw_dir.mkdir(parents=True)
+        epw_path = epw_dir / "G0800130.epw"
+        epw_path.write_text("LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n")
+        digest = compute_sha256_hex(epw_path)
+        sha256_path(epw_path).write_text(digest + "\n")
+
+        result = get_epw_for_fips("G0800130", cache_dir=tmp_path)
+        assert result == epw_path
+
+    def test_epw_cache_mismatch_triggers_removal(self, tmp_path: Path):
+        """get_epw_for_fips removes corrupted EPW when sidecar mismatches."""
+        from ochre_next.data._checksum import sha256_path
+        from ochre_next.data.weather import get_epw_for_fips
+
+        epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
+        epw_dir.mkdir(parents=True)
+        epw_path = epw_dir / "G0800130.epw"
+        epw_path.write_text("LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n")
+        sha256_path(epw_path).write_text("0000000000000000000000000000000000000000\n")
+
+        with mock.patch(
+            "ochre_next.data.weather._ensure_tmy3_zip_extracted",
+            side_effect=lambda epw_d, cache_d: epw_path.write_text(
+                "LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n"
+            ),
+        ):
+            result = get_epw_for_fips("G0800130", cache_dir=tmp_path)
+
+        assert result == epw_path
+        assert result.exists()
+
+    def test_tmy3_zip_testzip_retries(self, tmp_path: Path):
+        """_ensure_tmy3_zip_extracted retries ZIP download on corruption."""
+        from ochre_next.data import weather
+
+        epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
+        zip_bytes = _make_zip()
+        truncated = zip_bytes[: len(zip_bytes) // 2]
+        download_attempts = [0]
+
+        def flaky_download(url: str, dest: Path) -> None:
+            download_attempts[0] += 1
+            if download_attempts[0] == 1:
+                dest.write_bytes(truncated)
+            else:
+                dest.write_bytes(zip_bytes)
+
+        with (
+            mock.patch.object(weather, "_download_large_file", side_effect=flaky_download),
+            mock.patch.object(weather.time, "sleep"),
+        ):
+            weather._ensure_tmy3_zip_extracted(epw_dir, tmp_path)
+
+        marker = epw_dir / ".extracted"
+        assert marker.exists()
+        assert download_attempts[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# 14. Building ZIP cache integrity (sidecar validation on cache hit)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildingCacheIntegrity:
+    def test_sidecars_written_after_download_and_extract(self, tmp_path: Path):
+        """_download_and_extract_zip writes .sha256 sidecars for extracted files."""
+        from ochre_next.data._checksum import sha256_path, validate_cache_integrity
+        from ochre_next.data.resstock import _download_and_extract_zip
+
+        zip_bytes = _make_zip()
+        dest_dir = tmp_path / "extracted"
+
+        with mock.patch(
+            "ochre_next.data.resstock._download_file",
+            side_effect=_fake_download(zip_bytes, tmp_path),
+        ):
+            _download_and_extract_zip("https://example.com/b.zip", dest_dir)
+
+        hpxml_path = dest_dir / "home.xml"
+        schedule_path = dest_dir / "in.schedules.csv"
+        assert hpxml_path.exists()
+        assert schedule_path.exists()
+        assert sha256_path(hpxml_path).exists()
+        assert sha256_path(schedule_path).exists()
+        assert validate_cache_integrity(hpxml_path) is True
+        assert validate_cache_integrity(schedule_path) is True
+
+    def test_cached_building_reused_when_sidecars_valid(self, tmp_path: Path):
+        """fetch_resstock_building skips re-download when cached files pass SHA256."""
+        from ochre_next.data._checksum import write_sha256_sidecar
+        from ochre_next.data.resstock import fetch_resstock_building
+
+        bldg_dir = tmp_path / "2024.2" / "bldg0000001"
+        bldg_dir.mkdir(parents=True)
+        hpxml_path = bldg_dir / "home.xml"
+        schedule_path = bldg_dir / "in.schedules.csv"
+        hpxml_path.write_text(_minimal_hpxml("G0800130"))
+        schedule_path.write_text("hour,val\n0,1\n")
+        write_sha256_sidecar(hpxml_path)
+        write_sha256_sidecar(schedule_path)
+
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n")
+
+        download_calls: list[str] = []
+
+        def record_download(url: str, dest: Path) -> None:
+            download_calls.append(url)
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=record_download,
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
+            result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+        assert result.bldg_id == 1
+        # No ZIP download should have occurred — cache hit.
+        zip_urls = [u for u in download_calls if u.endswith(".zip")]
+        assert len(zip_urls) == 0
+
+    def test_corrupted_building_cache_detected_and_redownloaded(self, tmp_path: Path):
+        """fetch_resstock_building re-downloads when cached files fail SHA256."""
+        from ochre_next.data.resstock import fetch_resstock_building
+
+        zip_bytes = _make_zip(
+            hpxml_content=_minimal_hpxml("G0800130"),
+            schedule_content="hour,val\n0,1\n",
+        )
+        bldg_dir = tmp_path / "2024.2" / "bldg0000001"
+        bldg_dir.mkdir(parents=True)
+        hpxml_path = bldg_dir / "home.xml"
+        schedule_path = bldg_dir / "in.schedules.csv"
+
+        # Write corrupted files with mismatched sidecars.
+        import hashlib
+
+        hpxml_path.write_text("corrupted xml <<<")
+        hpxml_path.with_suffix(".xml.sha256").write_text(
+            hashlib.sha256(b"corrupted xml <<<").hexdigest() + "\n"
+        )
+        schedule_path.write_text("corrupted csv <<<")
+        schedule_path.with_suffix(".csv.sha256").write_text(
+            "0000000000000000000000000000000000000000\n"
+        )
+
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n")
+
+        download_calls: list[str] = []
+
+        def record_download(url: str, dest: Path) -> None:
+            download_calls.append(url)
+            # Write fresh content to dest for extraction.
+            _fake_download(zip_bytes, tmp_path)(url, dest)
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=record_download,
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
+            result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+        assert result.bldg_id == 1
+        assert result.hpxml_path.exists()
+        # Should have re-downloaded (one ZIP download).
+        zip_urls = [u for u in download_calls if u.endswith(".zip")]
+        assert len(zip_urls) == 1
+        # After re-download, sidecars should be valid.
+        from ochre_next.data._checksum import validate_cache_integrity
+
+        assert validate_cache_integrity(result.hpxml_path) is True
+        assert validate_cache_integrity(result.schedule_path) is True
 

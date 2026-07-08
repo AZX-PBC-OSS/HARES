@@ -18,6 +18,12 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ochre_next.data._checksum import (
+    remove_cache_with_sidecar as _remove_cache_with_sidecar,
+    validate_cache_integrity as _validate_cache_integrity,
+    write_sha256_sidecar as _write_sha256_sidecar,
+)
+
 if TYPE_CHECKING:
     import httpx
     import polars as pl
@@ -234,6 +240,65 @@ def _next_retry_delay(exc: Exception, attempt: int, max_attempts: int, url: str)
         attempt + 1, max_attempts, delay, url, exc,
     )
     return delay
+
+
+# --- ZIP integrity verification -----------------------------------------------
+
+
+class ZipIntegrityError(ValueError):
+    """ZIP file failed integrity check — ``testzip()`` found a bad member."""
+
+
+def _verify_zip(zip_path: Path) -> None:
+    """Verify *zip_path* integrity via CRC check.
+
+    Raises ``ZipIntegrityError`` if any member has a bad CRC or the file is not
+    a valid ZIP.  ``testzip()`` returns the name of the first bad member, or
+    ``None`` when all members pass.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                raise ZipIntegrityError(
+                    f"Corrupted ZIP {zip_path.name}: bad member {bad!r}"
+                )
+    except zipfile.BadZipFile as exc:
+        raise ZipIntegrityError(
+            f"Not a valid ZIP file {zip_path.name}"
+        ) from exc
+
+
+def _download_and_extract_zip(url: str, dest_dir: Path) -> None:
+    """Download a building ZIP, verify CRC integrity, and extract.
+
+    Retries the full download-and-verify cycle when the ZIP is corrupted (the
+    CRC check is separate from the network-level retries inside
+    ``_download_file``, which handle transient connection failures).
+    """
+    for attempt in range(_MAX_DOWNLOAD_ATTEMPTS):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_dest = Path(tmp) / "building.zip"
+            _download_file(url, zip_dest)
+            try:
+                _verify_zip(zip_dest)
+            except ZipIntegrityError as exc:
+                if attempt < _MAX_DOWNLOAD_ATTEMPTS - 1:
+                    delay = _backoff_delay(attempt)
+                    log.warning(
+                        "ZIP integrity check failed attempt %d/%d for %s, "
+                        "retrying in %.1fs: %s",
+                        attempt + 1, _MAX_DOWNLOAD_ATTEMPTS, url, delay, exc,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+            _extract_zip(zip_dest, dest_dir)
+            for member_name in ("home.xml", "in.schedules.csv"):
+                member_path = dest_dir / member_name
+                if member_path.exists():
+                    _write_sha256_sidecar(member_path)
+            return
 
 
 def _download_file(url: str, dest: Path, *, max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS) -> None:
@@ -555,11 +620,16 @@ def _fetch_weather(
     # CSV: download the simplified ResStock CSV from S3.
     weather_dest = cache_dir / version / "weather" / f"{fips}_{cfg.weather_suffix}.csv"
     if weather_dest.exists() and weather_dest.stat().st_size > 0:
-        if building_zone is not None:
-            _validate_zone_for_state(building_zone, state)
-        return weather_dest
+        if _validate_cache_integrity(weather_dest):
+            if building_zone is not None:
+                _validate_zone_for_state(building_zone, state)
+            return weather_dest
+        # SHA256 mismatch — discard corrupted file and sidecar, re-download.
+        _remove_cache_with_sidecar(weather_dest)
     url = _weather_url(cfg, state, fips)
     _download_file(url, weather_dest)
+    _write_sha256_sidecar(weather_dest)
+    log.debug("Weather file %s downloaded, SHA256 stored", fips)
     if building_zone is not None:
         _validate_zone_for_state(building_zone, state)
     return weather_dest
@@ -572,6 +642,7 @@ def fetch_resstock_building(
     cache_dir: Path | None = None,
     weather_override: Path | None = None,
     weather_format: WeatherFormat | None = None,
+    _checksum_failures: list[int] | None = None,
 ) -> ResStockBuilding:
     """Download a ResStock building bundle from OEDI S3 and return local paths.
 
@@ -593,13 +664,19 @@ def fetch_resstock_building(
     hpxml_path = bldg_dir / "home.xml"
     schedule_path = bldg_dir / "in.schedules.csv"
 
-    if not (hpxml_path.exists() and hpxml_path.stat().st_size > 0
+    if (hpxml_path.exists() and hpxml_path.stat().st_size > 0
             and schedule_path.exists() and schedule_path.stat().st_size > 0):
+        if not (_validate_cache_integrity(hpxml_path)
+                and _validate_cache_integrity(schedule_path)):
+            if _checksum_failures is not None:
+                _checksum_failures[0] += 1
+            _remove_cache_with_sidecar(hpxml_path)
+            _remove_cache_with_sidecar(schedule_path)
+            url = _zip_url(cfg, bldg_id, upgrade_id)
+            _download_and_extract_zip(url, bldg_dir)
+    else:
         url = _zip_url(cfg, bldg_id, upgrade_id)
-        with tempfile.TemporaryDirectory() as tmp:
-            zip_dest = Path(tmp) / "building.zip"
-            _download_file(url, zip_dest)
-            _extract_zip(zip_dest, bldg_dir)
+        _download_and_extract_zip(url, bldg_dir)
 
     if weather_override is not None:
         weather_path = weather_override
@@ -640,13 +717,44 @@ async def _download_building_async(
 ) -> None:
     """Download and extract a single building ZIP using an async httpx client.
 
-    Transient failures are retried with exponential backoff before propagating.
+    Transient network failures are handled by ``_download_bytes_async``
+    (inner retries).  ZIP CRC corruption detected by ``testzip()`` triggers
+    a full re-download (outer retries) because the corruption is at the
+    content level, not the transport level.
     """
     url = _zip_url(cfg, bldg_id, upgrade_id)
     bldg_dir.mkdir(parents=True, exist_ok=True)
-    data = await _download_bytes_async(client, url, max_attempts=max_attempts)
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        _extract_zip_members(zf, bldg_dir)
+    for attempt in range(max_attempts):
+        data = await _download_bytes_async(client, url, max_attempts=max_attempts)
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise ZipIntegrityError(
+                        f"Corrupted building ZIP for bldg {bldg_id}: "
+                        f"bad member {bad!r}"
+                    )
+                _extract_zip_members(zf, bldg_dir)
+            for member_name in ("home.xml", "in.schedules.csv"):
+                member_path = bldg_dir / member_name
+                if member_path.exists():
+                    _write_sha256_sidecar(member_path)
+            return
+        except (ZipIntegrityError, zipfile.BadZipFile) as exc:
+            if not isinstance(exc, ZipIntegrityError):
+                exc = ZipIntegrityError(
+                    f"Corrupted building ZIP for bldg {bldg_id}: {exc}"
+                )
+            if attempt < max_attempts - 1:
+                delay = _backoff_delay(attempt)
+                log.warning(
+                    "ZIP integrity check failed attempt %d/%d for bldg %d, "
+                    "retrying in %.1fs: %s",
+                    attempt + 1, max_attempts, bldg_id, delay, exc,
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise
 
 
 async def _download_bytes_async(
@@ -678,6 +786,7 @@ async def _fetch_fleet_async(
     weather_format: WeatherFormat | None = None,
 ) -> list[ResStockBuilding]:
     results: list[ResStockBuilding] = []
+    n_checksum_failures = 0
 
     try:
         import httpx  # type: ignore[import-not-found]
@@ -690,7 +799,18 @@ async def _fetch_fleet_async(
                 schedule_path = bldg_dir / "in.schedules.csv"
                 if hpxml_path.exists() and hpxml_path.stat().st_size > 0 \
                         and schedule_path.exists() and schedule_path.stat().st_size > 0:
-                    tasks.append(_noop())
+                    if _validate_cache_integrity(hpxml_path) \
+                            and _validate_cache_integrity(schedule_path):
+                        tasks.append(_noop())
+                    else:
+                        n_checksum_failures += 1
+                        _remove_cache_with_sidecar(hpxml_path)
+                        _remove_cache_with_sidecar(schedule_path)
+                        tasks.append(
+                            _download_building_async(
+                                client, cfg, bid, upgrade_id, bldg_dir,
+                            )
+                        )
                 else:
                     tasks.append(_download_building_async(client, cfg, bid, upgrade_id, bldg_dir))
 
@@ -735,8 +855,9 @@ async def _fetch_fleet_async(
 
         n_failed = len(bldg_ids) - len(results)
         log.info(
-            "ResStock fleet download complete: %d succeeded, %d failed (of %d requested)",
-            len(results), n_failed, len(bldg_ids),
+            "ResStock fleet download complete: %d succeeded, %d failed, "
+            "%d checksum failures (of %d requested)",
+            len(results), n_failed, n_checksum_failures, len(bldg_ids),
         )
         return results
 
@@ -745,11 +866,13 @@ async def _fetch_fleet_async(
 
     # Synchronous fallback when httpx is not available -- resilient per building
     # so a single failure does not abort the whole fleet.
+    n_checksum_failures: list[int] = [0]
     for bid in bldg_ids:
         try:
             b = fetch_resstock_building(
                 bid, version=version, upgrade_id=upgrade_id,
                 cache_dir=base_cache, weather_format=weather_format,
+                _checksum_failures=n_checksum_failures,
             )
         except Exception as exc:
             log.error(
@@ -761,8 +884,9 @@ async def _fetch_fleet_async(
 
     n_failed = len(bldg_ids) - len(results)
     log.info(
-        "ResStock fleet download complete: %d succeeded, %d failed (of %d requested)",
-        len(results), n_failed, len(bldg_ids),
+        "ResStock fleet download complete: %d succeeded, %d failed, "
+        "%d checksum failures (of %d requested)",
+        len(results), n_failed, n_checksum_failures[0], len(bldg_ids),
     )
     return results
 

@@ -6,9 +6,19 @@ BuildStock_TMY3_FIPS.zip dataset (https://data.nrel.gov/submissions/156).
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 import zipfile
 from pathlib import Path
+
+from ochre_next.data._checksum import (
+    remove_cache_with_sidecar as _remove_cache_with_sidecar,
+    validate_cache_integrity as _validate_cache_integrity,
+    write_sha256_sidecar as _write_sha256_sidecar,
+)
+
+log = logging.getLogger(__name__)
 
 
 # NREL Data Catalog: TMY3 EPW files by county FIPS code.
@@ -54,7 +64,9 @@ def get_epw_for_fips(
     epw_path = epw_dir / f"{fips}.epw"
 
     if epw_path.exists() and epw_path.stat().st_size > 0:
-        return epw_path
+        if _validate_cache_integrity(epw_path):
+            return epw_path
+        _remove_cache_with_sidecar(epw_path)
 
     # Check if we've already extracted the ZIP but this specific FIPS is missing
     marker = epw_dir / ".extracted"
@@ -77,15 +89,42 @@ def get_epw_for_fips(
 
 
 def _ensure_tmy3_zip_extracted(epw_dir: Path, cache_dir: Path) -> None:
-    """Download and extract BuildStock_TMY3_FIPS.zip if not already done."""
+    """Download and extract BuildStock_TMY3_FIPS.zip if not already done.
+
+    Verifies ZIP CRC integrity before extraction.  Re-downloads the ZIP
+    (with exponential backoff) when the CRC check detects corruption.
+    After extraction, writes a ``.sha256`` sidecar for each extracted EPW
+    file so subsequent cache hits can detect disk bit-rot.
+    """
     marker = epw_dir / ".extracted"
     if marker.exists():
         return
 
     zip_path = cache_dir / "BuildStock_TMY3_FIPS.zip"
 
-    if not zip_path.exists() or zip_path.stat().st_size == 0:
-        _download_large_file(_TMY3_EPW_ZIP_URL, zip_path)
+    for attempt in range(3):
+        if not zip_path.exists() or zip_path.stat().st_size == 0:
+            _download_large_file(_TMY3_EPW_ZIP_URL, zip_path)
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise zipfile.BadZipFile(
+                        f"Corrupted TMY3 EPW ZIP: bad member {bad!r}"
+                    )
+            break  # ZIP is valid
+        except (zipfile.BadZipFile, OSError) as exc:
+            if attempt < 2:
+                delay = 2.0**attempt
+                log.warning(
+                    "TMY3 ZIP integrity check failed attempt %d/3: %s. "
+                    "Re-downloading in %.1fs.",
+                    attempt + 1, exc, delay,
+                )
+                zip_path.unlink(missing_ok=True)
+                time.sleep(delay)
+                continue
+            raise
 
     # Extract all EPW files to the cache directory.
     # Write each file to a .tmp path and atomically rename to avoid
@@ -102,6 +141,7 @@ def _ensure_tmy3_zip_extracted(epw_dir: Path, cache_dir: Path) -> None:
                     with zf.open(member) as src, tmp_target.open("wb") as dst:
                         dst.write(src.read())
                     tmp_target.replace(target)
+                    _write_sha256_sidecar(target)
 
     # Write marker so we don't re-extract
     marker.write_text("ok")
