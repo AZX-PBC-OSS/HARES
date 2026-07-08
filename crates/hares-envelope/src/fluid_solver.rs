@@ -236,7 +236,16 @@ impl DomainSolver for FluidSolver {
             self.total_requested_flow_kg_s.clear();
             self.total_allocated_flow_kg_s.clear();
             self.flow_deficit_kg_s.clear();
-            self.branch_flow_fractions.clear();
+            // Clear the per-loop fraction Vecs in place rather than clearing
+            // the map: `HashMap::clear` drops each Vec, so the next step's
+            // `entry().or_default().push()` would heap-allocate a fresh buffer
+            // every timestep (hot-path discipline: no per-timestep heap
+            // allocation). Retained entries keep their capacity; a loop absent
+            // this step is left as an empty Vec, which reads the same as a
+            // missing entry for all diagnostic consumers.
+            for fractions in self.branch_flow_fractions.values_mut() {
+                fractions.clear();
+            }
             self.supply_temp_clamped.clear();
             self.return_temp_clamped.clear();
             self.raw_supply_temp_c.clear();

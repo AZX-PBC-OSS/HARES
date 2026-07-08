@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+#[cfg(feature = "observe")]
+use hares_types::TelemetryField;
+
 #[cfg(test)]
 use crate::HvacSetpointConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -729,18 +732,6 @@ impl CoolingCore {
                 self.rated_shr = self.stage_shrs[0].clamp(0.0, 1.0);
             }
 
-            // Per-stage SHR telemetry for diagnostic CSV output.
-            // Gated on `observe` feature — these fields are diagnostic-only
-            // and document which SEER-scaled SHR profile was applied to each
-            // MSHP Cooler instance, enabling verification that distinct SHR
-            // profiles are in use across SEER tiers.
-            #[cfg(feature = "observe")]
-            {
-                for (i, shr) in self.stage_shrs.iter().enumerate() {
-                    self.telemetry.set(&format!("cooler_shr_stage_{i}"), *shr);
-                }
-            }
-
             self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
 
             // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
@@ -805,6 +796,32 @@ impl CoolingCore {
         self.fan_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
         self.telemetry = default_telemetry();
+        // Per-stage SHR telemetry for diagnostic CSV output.
+        // Gated on `observe` feature — these channels are diagnostic-only and
+        // document which SEER-scaled SHR profile was applied to each cooler
+        // instance, enabling verification that distinct SHR profiles are in
+        // use across SEER tiers. Registered here, after the telemetry reset
+        // above, via insert() so the keys exist before any Telemetry::set
+        // call (Telemetry::set panics on unregistered keys under
+        // debug_assertions/check_invariants). The descriptor's declared
+        // telemetry fields are rebuilt to include the per-stage channels so
+        // the descriptor contract (telemetry key count == declared field
+        // count) holds; rebuilding from the base list keeps re-init
+        // idempotent.
+        #[cfg(feature = "observe")]
+        {
+            self.descriptor.telemetry_fields = telemetry_fields();
+            for (i, shr) in self.stage_shrs.iter().enumerate() {
+                self.telemetry.insert(format!("cooler_shr_stage_{i}"), *shr);
+                self.descriptor.telemetry_fields.push(TelemetryField {
+                    name: format!("cooler_shr_stage_{i}"),
+                    unit: "-".to_string(),
+                    description: format!(
+                        "Rated sensible heat ratio applied to cooling speed stage {i} (diagnostic)"
+                    ),
+                });
+            }
+        }
         self.core_output = CoreOutput::default();
         Ok(())
     }

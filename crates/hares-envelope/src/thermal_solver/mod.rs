@@ -727,6 +727,16 @@ impl ThermalSolver {
             last_coupled_state,
             latent_buf,
             exterior_surface_temps,
+            // Pre-allocate the observe-gated per-zone jacket-loss buffer at
+            // init (hot-path discipline: no per-timestep heap allocation).
+            // `prepare_inputs` refills it in place each step, reusing the
+            // allocation via `std::mem::take` before the struct is replaced.
+            #[cfg(feature = "observe")]
+            component_gains: EnvelopeComponentGains {
+                jacket_loss_by_zone: Vec::with_capacity(n_zones_for_latent),
+                ..EnvelopeComponentGains::default()
+            },
+            #[cfg(not(feature = "observe"))]
             component_gains: EnvelopeComponentGains::default(),
             interior_surf_temps_buf: Vec::with_capacity(max_interior_surfaces),
             interior_surf_base_buf: Vec::with_capacity(max_interior_surfaces),
@@ -1069,6 +1079,25 @@ impl ThermalSolver {
         );
         self.infiltration_by_zone_buf.sort_by_key(|(z, _)| *z);
 
+        // Reuse the previous step's `jacket_loss_by_zone` allocation: take the
+        // Vec out of the old `component_gains` before the struct is replaced,
+        // refill it in place, and move it into the new struct. Constructing it
+        // as `Vec::new()` and extending after assignment allocated a fresh
+        // buffer every timestep (hot-path discipline: no per-timestep heap
+        // allocation).
+        #[cfg(feature = "observe")]
+        let jacket_loss_by_zone = {
+            let mut buf = std::mem::take(&mut self.component_gains.jacket_loss_by_zone);
+            buf.clear();
+            buf.extend(
+                ports
+                    .thermal
+                    .iter()
+                    .map(|a| (a.zone, a.sensible_for_category(ThermalCategory::JacketLoss))),
+            );
+            buf
+        };
+
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
             opaque_solar_lwr_w,
@@ -1133,19 +1162,8 @@ impl ThermalSolver {
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             window_solar_diag: self.window_solar_diag_buf.clone(),
             #[cfg(feature = "observe")]
-            jacket_loss_by_zone: Vec::new(),
+            jacket_loss_by_zone,
         };
-
-        #[cfg(feature = "observe")]
-        {
-            self.component_gains.jacket_loss_by_zone.clear();
-            self.component_gains.jacket_loss_by_zone.extend(
-                ports
-                    .thermal
-                    .iter()
-                    .map(|a| (a.zone, a.sensible_for_category(ThermalCategory::JacketLoss))),
-            );
-        }
 
         std::mem::swap(
             &mut self.infiltration_by_zone_buf,

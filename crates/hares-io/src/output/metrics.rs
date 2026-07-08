@@ -2098,11 +2098,16 @@ mod tests {
     #[test]
     #[cfg(feature = "observe")]
     fn compute_equipment_counts_counts_equipment_excluding_aggregates() {
-        // Schema with 2 HVAC_HEATING equipment, 1 BATTERY, and aggregate columns.
+        // Schema with 2 HVAC_HEATING equipment, 1 BATTERY equipment, and
+        // end-use aggregate columns ("{Display} End Use Electric Power (kW)").
+        // "Battery" is both an equipment name and an EndUse display name, so
+        // the battery aggregate exercises the case where an aggregate prefix
+        // could be mistaken for an equipment instance.
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
             "Gas Furnace Electric Power (kW)",
+            "Battery Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
             "Battery End Use Electric Power (kW)",
         ]);
@@ -2115,7 +2120,7 @@ mod tests {
         assert_eq!(
             counts.get("battery"),
             Some(&1),
-            "must count 1 Battery equipment"
+            "must count 1 Battery equipment; the Battery aggregate column must not be counted"
         );
         // Aggregate columns (e.g. "HVAC Heating") must not be counted.
         assert!(
