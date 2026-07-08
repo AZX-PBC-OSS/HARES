@@ -62,9 +62,9 @@ impl Telemetry {
     /// Update an existing key's value without allocating.
     ///
     /// All keys must be pre-populated via `insert()` at init time.
-    /// Missing keys are a logic error: in debug/test builds this triggers a
-    /// `debug_assert!` panic; in release builds it emits a `tracing::error!`
-    /// and the write is silently dropped (no-op).
+    /// Missing keys are a logic error: under `debug_assertions` or the
+    /// `check_invariants` feature this panics; in plain release builds it
+    /// emits a `tracing::error!` and the write is silently dropped (no-op).
     #[inline]
     pub fn set(&mut self, key: &str, value: f64) {
         if !value.is_finite() {

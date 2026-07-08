@@ -27,6 +27,13 @@ pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
 
+// `mode_flow_guard` itself stays crate-private: the consistency checks are
+// internal plumbing for `validate_core_contract`. Only the observability
+// counter is intended public API, so it is re-exported individually rather
+// than widening the module's visibility.
+#[cfg(feature = "observe")]
+pub use mode_flow_guard::mode_flow_inconsistency_counter;
+
 /// Crate-level result alias.
 pub type Result<T> = std::result::Result<T, HaresError>;
 pub use ports::*;

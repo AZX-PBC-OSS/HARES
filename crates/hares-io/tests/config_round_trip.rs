@@ -659,6 +659,28 @@ where
     assert!(serde_json::from_value::<T>(value).is_err());
 }
 
+fn assert_toml_round_trip<T>(cfg: T)
+where
+    T: EquipmentTypedConfig + PartialEq + Clone + std::fmt::Debug,
+{
+    let serialized = toml::to_string(&cfg).unwrap();
+    let deserialized: T = toml::from_str(&serialized).unwrap();
+    assert_eq!(cfg, deserialized);
+}
+
+fn assert_toml_deny_unknown<T>(cfg: T)
+where
+    T: EquipmentTypedConfig,
+{
+    let serialized = toml::to_string(&cfg).unwrap();
+    let mut value: toml::Value = toml::from_str(&serialized).unwrap();
+    if let toml::Value::Table(ref mut table) = value {
+        table.insert("nonexistent_key".to_string(), toml::Value::Integer(42));
+    }
+    let modified = toml::to_string(&value).unwrap();
+    assert!(toml::from_str::<T>(&modified).is_err());
+}
+
 fn smoke_case<T>(registry: &EquipmentRegistry, name: &str, cfg: T, env: &EnvironmentState)
 where
     T: EquipmentTypedConfig,
@@ -669,7 +691,7 @@ where
 }
 
 macro_rules! typed_config_tests {
-    ($round_trip:ident, $deny_unknown:ident, $ty:ty, $sample_fn:ident) => {
+    ($round_trip:ident, $deny_unknown:ident, $toml_round_trip:ident, $toml_deny_unknown:ident, $ty:ty, $sample_fn:ident) => {
         #[test]
         fn $round_trip() {
             assert_round_trip($sample_fn());
@@ -679,54 +701,80 @@ macro_rules! typed_config_tests {
         fn $deny_unknown() {
             assert_deny_unknown($sample_fn());
         }
+
+        #[test]
+        fn $toml_round_trip() {
+            assert_toml_round_trip($sample_fn());
+        }
+
+        #[test]
+        fn $toml_deny_unknown() {
+            assert_toml_deny_unknown($sample_fn());
+        }
     };
 }
 
 typed_config_tests!(
     round_trip_gas_furnace_config,
     deny_unknown_field_gas_furnace_config,
+    toml_round_trip_gas_furnace_config,
+    toml_deny_unknown_gas_furnace_config,
     GasFurnaceConfig,
     sample_gas_furnace_config
 );
 typed_config_tests!(
     round_trip_electric_furnace_config,
     deny_unknown_field_electric_furnace_config,
+    toml_round_trip_electric_furnace_config,
+    toml_deny_unknown_electric_furnace_config,
     ElectricFurnaceConfig,
     sample_electric_furnace_config
 );
 typed_config_tests!(
     round_trip_gas_boiler_config,
     deny_unknown_field_gas_boiler_config,
+    toml_round_trip_gas_boiler_config,
+    toml_deny_unknown_gas_boiler_config,
     GasBoilerConfig,
     sample_gas_boiler_config
 );
 typed_config_tests!(
     round_trip_electric_boiler_config,
     deny_unknown_field_electric_boiler_config,
+    toml_round_trip_electric_boiler_config,
+    toml_deny_unknown_electric_boiler_config,
     ElectricBoilerConfig,
     sample_electric_boiler_config
 );
 typed_config_tests!(
     round_trip_electric_baseboard_config,
     deny_unknown_field_electric_baseboard_config,
+    toml_round_trip_electric_baseboard_config,
+    toml_deny_unknown_electric_baseboard_config,
     ElectricBaseboardConfig,
     sample_electric_baseboard_config
 );
 typed_config_tests!(
     round_trip_ideal_hvac_config,
     deny_unknown_field_ideal_hvac_config,
+    toml_round_trip_ideal_hvac_config,
+    toml_deny_unknown_ideal_hvac_config,
     IdealHvacConfig,
     sample_ideal_hvac_config
 );
 typed_config_tests!(
     round_trip_central_air_conditioner_config,
     deny_unknown_field_central_air_conditioner_config,
+    toml_round_trip_central_air_conditioner_config,
+    toml_deny_unknown_central_air_conditioner_config,
     CentralAirConditionerConfig,
     sample_central_ac_config
 );
 typed_config_tests!(
     round_trip_room_ac_config,
     deny_unknown_field_room_ac_config,
+    toml_round_trip_room_ac_config,
+    toml_deny_unknown_room_ac_config,
     RoomAcConfig,
     sample_room_ac_config
 );
@@ -747,63 +795,103 @@ fn heat_pump_config_ignores_unknown_fields() {
     );
 }
 
+#[test]
+fn toml_round_trip_heat_pump_config() {
+    assert_toml_round_trip(sample_heat_pump_config());
+}
+
+#[test]
+fn toml_heat_pump_config_ignores_unknown_fields() {
+    let serialized = toml::to_string(&sample_heat_pump_config()).unwrap();
+    let mut value: toml::Value = toml::from_str(&serialized).unwrap();
+    if let toml::Value::Table(ref mut table) = value {
+        table.insert("unknown_key".to_string(), toml::Value::Integer(42));
+    }
+    let modified = toml::to_string(&value).unwrap();
+    let result: Result<HeatPumpConfig, _> = toml::from_str(&modified);
+    assert!(
+        result.is_ok(),
+        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored in TOML"
+    );
+}
+
 typed_config_tests!(
     round_trip_dehumidifier_config,
     deny_unknown_field_dehumidifier_config,
+    toml_round_trip_dehumidifier_config,
+    toml_deny_unknown_dehumidifier_config,
     DehumidifierConfig,
     sample_dehumidifier_config
 );
 typed_config_tests!(
     round_trip_gas_water_heater_config,
     deny_unknown_field_gas_water_heater_config,
+    toml_round_trip_gas_water_heater_config,
+    toml_deny_unknown_gas_water_heater_config,
     GasWaterHeaterConfig,
     sample_gas_water_heater_config
 );
 typed_config_tests!(
     round_trip_electric_resistance_water_heater_config,
     deny_unknown_field_electric_resistance_water_heater_config,
+    toml_round_trip_electric_resistance_water_heater_config,
+    toml_deny_unknown_electric_resistance_water_heater_config,
     ElectricResistanceWaterHeaterConfig,
     sample_electric_resistance_water_heater_config
 );
 typed_config_tests!(
     round_trip_tankless_water_heater_config,
     deny_unknown_field_tankless_water_heater_config,
+    toml_round_trip_tankless_water_heater_config,
+    toml_deny_unknown_tankless_water_heater_config,
     TanklessWaterHeaterConfig,
     sample_tankless_water_heater_config
 );
 typed_config_tests!(
     round_trip_heat_pump_water_heater_config,
     deny_unknown_field_heat_pump_water_heater_config,
+    toml_round_trip_heat_pump_water_heater_config,
+    toml_deny_unknown_heat_pump_water_heater_config,
     HeatPumpWaterHeaterConfig,
     sample_heat_pump_water_heater_config
 );
 typed_config_tests!(
     round_trip_battery_config,
     deny_unknown_field_battery_config,
+    toml_round_trip_battery_config,
+    toml_deny_unknown_battery_config,
     BatteryConfig,
     sample_battery_config
 );
 typed_config_tests!(
     round_trip_ev_config,
     deny_unknown_field_ev_config,
+    toml_round_trip_ev_config,
+    toml_deny_unknown_ev_config,
     EvConfig,
     sample_ev_config
 );
 typed_config_tests!(
     round_trip_pv_config,
     deny_unknown_field_pv_config,
+    toml_round_trip_pv_config,
+    toml_deny_unknown_pv_config,
     PvConfig,
     sample_pv_config
 );
 typed_config_tests!(
     round_trip_generator_config,
     deny_unknown_field_generator_config,
+    toml_round_trip_generator_config,
+    toml_deny_unknown_generator_config,
     GeneratorConfig,
     sample_generator_config
 );
 typed_config_tests!(
     round_trip_ventilation_config,
     deny_unknown_field_ventilation_config,
+    toml_round_trip_ventilation_config,
+    toml_deny_unknown_ventilation_config,
     VentilationConfig,
     sample_ventilation_config
 );

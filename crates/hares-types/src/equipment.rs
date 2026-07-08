@@ -3786,8 +3786,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        validate_core_contract(&desc, &out)
-            .expect("implausibly high COP must warn, not reject");
+        validate_core_contract(&desc, &out).expect("implausibly high COP must warn, not reject");
     }
 
     /// Diagnostic-event capture: only compiled with the `observe` feature,
@@ -3899,7 +3898,9 @@ mod tests {
             // is monotonic, so interleaved events from other sources only
             // evict more, never less).
             assert!(
-                !events.iter().any(|e| e.value == -1.0 && e.equipment_id == 9003),
+                !events
+                    .iter()
+                    .any(|e| e.value == -1.0 && e.equipment_id == 9003),
                 "oldest event must have been evicted"
             );
         }

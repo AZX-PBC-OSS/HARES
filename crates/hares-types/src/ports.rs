@@ -795,12 +795,17 @@ impl PortSlots {
                     // The guard exists to catch sign errors, NaN/Inf propagation,
                     // and the factor-1000 unit regression pattern where a kW value
                     // silently enters the W port.
-                    debug_assert!(
+                    //
+                    // `assert!`, not `debug_assert!`: a `debug_assert!` compiles
+                    // out in release builds even when `check_invariants` is
+                    // enabled, which would silently void the feature-gated half
+                    // of the cfg on this block.
+                    assert!(
                         self.electrical.load_power_w >= 0.0,
                         "electrical load_power_w must be non-negative, got {}",
                         self.electrical.load_power_w
                     );
-                    debug_assert!(
+                    assert!(
                         self.electrical.generation_power_w <= 0.0,
                         "electrical generation_power_w must be non-positive, got {}",
                         self.electrical.generation_power_w
