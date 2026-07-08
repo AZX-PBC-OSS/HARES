@@ -435,15 +435,29 @@ pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
         return 1.0;
     }
 
+    let (supply_class, return_class) = zone_type.default_leakage_class(ctx.is_heating);
+    let supply_class = if supply_leak == 0.0 {
+        Some(supply_class)
+    } else {
+        None
+    };
+    let return_class = if return_leak == 0.0 {
+        Some(return_class)
+    } else {
+        None
+    };
+
     let input = hares_physics::ashrae152::DuctDseInput {
         zone_type,
         latitude_deg: lat,
         longitude_deg: lon,
         house_volume_m3: house_vol,
         supply_leakage_frac: supply_leak,
+        supply_leakage_class: supply_class,
         supply_area_m2: supply_area,
         supply_r_nominal_m2_k_w: supply_r,
         return_leakage_frac: return_leak,
+        return_leakage_class: return_class,
         return_area_m2: return_area,
         return_r_nominal_m2_k_w: return_r,
         is_heating: ctx.is_heating,
@@ -490,9 +504,11 @@ mod tests {
         hvac::heating_config::{ElectricBoilerConfig, GasFurnaceConfig},
     };
 
+    use crate::config::{ConfigPayload, ConfigValue};
+
     use super::{
-        equipment_id_from_config, loop_id_from_config, parse_fuel_type, parse_zone_id_key,
-        zone_id_from_config, zone_id_from_config_or_default,
+        DuctDseContext, equipment_id_from_config, loop_id_from_config, parse_fuel_type,
+        parse_zone_id_key, resolve_duct_dse, zone_id_from_config, zone_id_from_config_or_default,
     };
 
     #[test]
@@ -732,6 +748,71 @@ mod tests {
         assert!(
             explicit,
             "zone_id_explicit must be true when zone_id is present in config"
+        );
+    }
+
+    #[test]
+    fn zero_explicit_leakage_defaults_to_zone_type_class() {
+        use std::collections::HashMap;
+
+        let ctx = DuctDseContext {
+            is_heating: true,
+            capacity_w: 12_000.0,
+            fan_flow_m3_s: 0.5,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+
+        let make_config = |zone_type: &str| -> EquipmentConfig {
+            EquipmentConfig::with_payload(
+                "test".to_string(),
+                "Gas Furnace".to_string(),
+                ConfigPayload::Raw {
+                    data: HashMap::from([
+                        (
+                            "duct_zone_type".to_string(),
+                            ConfigValue::Text(zone_type.to_string()),
+                        ),
+                        ("duct_latitude_deg".to_string(), ConfigValue::Float(40.0)),
+                        ("duct_longitude_deg".to_string(), ConfigValue::Float(-105.0)),
+                        (
+                            "duct_house_volume_m3".to_string(),
+                            ConfigValue::Float(400.0),
+                        ),
+                        (
+                            "duct_supply_leakage_frac".to_string(),
+                            ConfigValue::Float(0.0),
+                        ),
+                        (
+                            "duct_return_leakage_frac".to_string(),
+                            ConfigValue::Float(0.0),
+                        ),
+                        ("duct_supply_area_m2".to_string(), ConfigValue::Float(20.0)),
+                        ("duct_supply_r_m2_k_w".to_string(), ConfigValue::Float(0.5)),
+                        ("duct_return_area_m2".to_string(), ConfigValue::Float(12.0)),
+                        ("duct_return_r_m2_k_w".to_string(), ConfigValue::Float(0.5)),
+                    ]),
+                },
+            )
+        };
+
+        let attic_dse = resolve_duct_dse(&make_config("attic_unvented"), &ctx);
+        let basement_dse = resolve_duct_dse(&make_config("unins_basement"), &ctx);
+
+        assert!(
+            attic_dse < basement_dse,
+            "attic DSE ({attic_dse}) must be < basement DSE ({basement_dse}) — \
+             attic defaults to Unsealed (more leakage), basement to WellSealed (less leakage)"
+        );
+        assert!(
+            (0.0..1.0).contains(&attic_dse),
+            "attic DSE {attic_dse} must be in (0,1) — class-default leakage must not be zero"
+        );
+        assert!(
+            (0.0..1.0).contains(&basement_dse),
+            "basement DSE {basement_dse} must be in (0,1) — class-default leakage must not be zero"
         );
     }
 }

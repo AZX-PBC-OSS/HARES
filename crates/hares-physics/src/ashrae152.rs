@@ -21,6 +21,46 @@ const SI_R_TO_IP_R: f64 = 5.67826;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// ASHRAE 152-2014 Table 5 duct leakage class.
+///
+/// Each variant maps to a leakage rate in CFM per 100 ft² of duct surface area
+/// measured at 25 Pa test pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuctLeakageClass {
+    /// ~2 CFM/100 ft² at 25 Pa — ASHRAE 152-2014 Table 5.
+    WellSealed,
+    /// ~6 CFM/100 ft² at 25 Pa — ASHRAE 152-2014 Table 5.
+    Sealed,
+    /// ~12 CFM/100 ft² at 25 Pa — ASHRAE 152-2014 Table 5.
+    Unsealed,
+}
+
+impl DuctLeakageClass {
+    /// Leakage rate in CFM per 100 ft² at 25 Pa test pressure.
+    ///
+    /// ASHRAE 152-2014 Table 5.
+    pub fn cfm_per_100ft2_at_25pa(self) -> f64 {
+        match self {
+            DuctLeakageClass::WellSealed => 2.0,
+            DuctLeakageClass::Sealed => 6.0,
+            DuctLeakageClass::Unsealed => 12.0,
+        }
+    }
+
+    /// Convert a leakage class to a leakage fraction given duct surface area
+    /// and fan airflow rate.
+    ///
+    /// ASHRAE 152-2014 §5: leakage fraction = leakage flow at test pressure
+    /// divided by fan airflow. Leakage flow = LC × (duct_area_ft2 / 100).
+    pub fn to_leakage_fraction(self, duct_area_ft2: f64, fan_flow_cfm: f64) -> f64 {
+        if fan_flow_cfm <= 0.0 || duct_area_ft2 <= 0.0 {
+            return 0.0;
+        }
+        let leakage_flow_cfm = self.cfm_per_100ft2_at_25pa() * duct_area_ft2 / 100.0;
+        (leakage_flow_cfm / fan_flow_cfm).clamp(0.0, 1.0)
+    }
+}
+
 /// Location of the duct zone relative to the conditioned space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ashrae152ZoneType {
@@ -59,6 +99,42 @@ impl Ashrae152ZoneType {
         // See Known Limitations in T-0412 Implementation Notes.
         (1.7, 1.7)
     }
+
+    /// Default duct leakage class for supply and return ducts.
+    ///
+    /// ASHRAE 152-2014 Table 5 defines leakage classes that do not vary by
+    /// season; `_is_heating` is accepted for API parity with
+    /// `default_insulation_r_ip` and is ignored.
+    ///
+    /// Returns `(supply_class, return_class)`. Attic ducts default to
+    /// `Unsealed` (most exposed), crawlspace and exterior ducts to `Sealed`,
+    /// and basement/slab ducts to `WellSealed` (most protected).
+    pub fn default_leakage_class(&self, _is_heating: bool) -> (DuctLeakageClass, DuctLeakageClass) {
+        match self {
+            Ashrae152ZoneType::AtticVented
+            | Ashrae152ZoneType::AtticVentedRadiantBarrier
+            | Ashrae152ZoneType::AtticUnvented
+            | Ashrae152ZoneType::AtticUnventedRadiantBarrier => {
+                (DuctLeakageClass::Unsealed, DuctLeakageClass::Unsealed)
+            }
+            Ashrae152ZoneType::Garage
+            | Ashrae152ZoneType::UnventUninsulatedCrawlspace
+            | Ashrae152ZoneType::UnventCrawlspaceInsFloorWall
+            | Ashrae152ZoneType::UnventCrawlspaceInsFloor
+            | Ashrae152ZoneType::VentUninsulatedCrawlspace
+            | Ashrae152ZoneType::VentCrawlspaceInsFloorWall
+            | Ashrae152ZoneType::VentCrawlspaceInsFloor
+            | Ashrae152ZoneType::ExteriorWalls => {
+                (DuctLeakageClass::Sealed, DuctLeakageClass::Sealed)
+            }
+            Ashrae152ZoneType::UninsulatedBasement
+            | Ashrae152ZoneType::BasementInsWalls
+            | Ashrae152ZoneType::BasementInsCeiling
+            | Ashrae152ZoneType::UnderSlab => {
+                (DuctLeakageClass::WellSealed, DuctLeakageClass::WellSealed)
+            }
+        }
+    }
 }
 
 /// Inputs to the ASHRAE 152 DSE calculation.
@@ -74,12 +150,20 @@ pub struct DuctDseInput {
     pub house_volume_m3: f64,
     /// Supply duct leakage as a fraction of fan flow (0–1).
     pub supply_leakage_frac: f64,
+    /// Optional ASHRAE 152 leakage class override for supply ducts.
+    /// When present, the leakage fraction is derived from this class,
+    /// duct surface area, and fan airflow.
+    pub supply_leakage_class: Option<DuctLeakageClass>,
     /// Supply duct surface area (m²).
     pub supply_area_m2: f64,
     /// Supply duct nominal R-value (m²·K/W); ≤ 0 → uninsulated default.
     pub supply_r_nominal_m2_k_w: f64,
     /// Return duct leakage as a fraction of fan flow (0–1).
     pub return_leakage_frac: f64,
+    /// Optional ASHRAE 152 leakage class override for return ducts.
+    /// When present, the leakage fraction is derived from this class,
+    /// duct surface area, and fan airflow.
+    pub return_leakage_class: Option<DuctLeakageClass>,
     /// Return duct surface area (m²).
     pub return_area_m2: f64,
     /// Return duct nominal R-value (m²·K/W); ≤ 0 → uninsulated default.
@@ -535,10 +619,52 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 8. High-speed duct factors
+    // 8. Resolve leakage fractions from leakage class when specified
     // ------------------------------------------------------------------
-    let supply_duct_leakage = fan_flow_cfm * input.supply_leakage_frac;
-    let return_duct_leakage = fan_flow_cfm * input.return_leakage_frac;
+    let resolved_supply_leakage_frac = match input.supply_leakage_class {
+        Some(lc) => lc.to_leakage_fraction(supply_area_ft2, fan_flow_cfm),
+        None => input.supply_leakage_frac,
+    };
+    let resolved_return_leakage_frac = match input.return_leakage_class {
+        Some(lc) => lc.to_leakage_fraction(return_area_ft2, fan_flow_cfm),
+        None => input.return_leakage_frac,
+    };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // ASHRAE 152-2014 §5: resolved leakage fractions must be in [0, 1].
+        assert!(
+            (0.0..=1.0).contains(&resolved_supply_leakage_frac),
+            "resolved supply leakage fraction must be in [0, 1], got {resolved_supply_leakage_frac}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&resolved_return_leakage_frac),
+            "resolved return leakage fraction must be in [0, 1], got {resolved_return_leakage_frac}"
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        if input.supply_leakage_class.is_some() || input.return_leakage_class.is_some() {
+            tracing::debug!(
+                zone_type = ?input.zone_type,
+                is_heating = input.is_heating,
+                supply_leakage_class = ?input.supply_leakage_class,
+                return_leakage_class = ?input.return_leakage_class,
+                resolved_supply_leakage_frac,
+                resolved_return_leakage_frac,
+                raw_supply_leakage_frac = input.supply_leakage_frac,
+                raw_return_leakage_frac = input.return_leakage_frac,
+                "ASHRAE 152 duct leakage class resolved to leakage fraction"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 9. High-speed duct factors
+    // ------------------------------------------------------------------
+    let supply_duct_leakage = fan_flow_cfm * resolved_supply_leakage_frac;
+    let return_duct_leakage = fan_flow_cfm * resolved_return_leakage_frac;
 
     let as_high = (fan_flow_cfm - supply_duct_leakage) / fan_flow_cfm;
     let ar_high = (fan_flow_cfm - return_duct_leakage) / fan_flow_cfm;
@@ -562,14 +688,14 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 9. Low-speed duct factors (multi-speed only)
+    // 10. Low-speed duct factors (multi-speed only)
     // ------------------------------------------------------------------
     let (as_low, ar_low, dte_low, bs_low, br_low) = if input.n_speeds > 1 {
         let cap_low = input.capacity_low_w.unwrap_or(input.capacity_w) * W_TO_BTU_H;
         let flow_low = input.fan_flow_low_m3_s.unwrap_or(input.fan_flow_m3_s) * M3S_TO_CFM;
 
-        let sdl_low = flow_low * input.supply_leakage_frac;
-        let rdl_low = flow_low * input.return_leakage_frac;
+        let sdl_low = flow_low * resolved_supply_leakage_frac;
+        let rdl_low = flow_low * resolved_return_leakage_frac;
 
         let as_l = (flow_low - sdl_low) / flow_low;
         let ar_l = (flow_low - rdl_low) / flow_low;
@@ -586,7 +712,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 10. Uncorrected delivery effectiveness
+    // 11. Uncorrected delivery effectiveness
     // ------------------------------------------------------------------
     let seas_uncorr_de = if input.is_heating {
         if input.n_speeds == 1 {
@@ -618,7 +744,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 11. Load factor
+    // 12. Load factor
     // ------------------------------------------------------------------
     let seas_load_factor = if input.is_heating {
         1.0 - (60.0 * 0.075 * 0.24 * (ambient_temp - heating_seas_init) * (infil - infil_fan_off))
@@ -631,7 +757,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 12. Equipment factor
+    // 13. Equipment factor
     // ------------------------------------------------------------------
     let seas_equip_factor = if input.is_heating {
         if input.n_speeds == 1 {
@@ -652,7 +778,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     };
 
     // ------------------------------------------------------------------
-    // 13. Delivery effectiveness with thermal regain
+    // 14. Delivery effectiveness with thermal regain
     // ------------------------------------------------------------------
     let seas_de = seas_uncorr_de + supply_regain * (1.0 - seas_uncorr_de)
         - (supply_regain - return_regain - br_high * (ar_high * supply_regain - return_regain))
@@ -660,7 +786,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
             / dte_high;
 
     // ------------------------------------------------------------------
-    // 14. Final DSE
+    // 15. Final DSE
     // ------------------------------------------------------------------
     let seas_dse = seas_de * seas_equip_factor * seas_load_factor * (1.0 - fcycloss);
     if !seas_dse.is_finite() {
@@ -737,9 +863,11 @@ mod tests {
             longitude_deg: -104.87,
             house_volume_m3: 340.0, // ~12 000 ft³
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,          // ~100 ft²
             supply_r_nominal_m2_k_w: 1.76, // ~R-10 IP
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65, // ~50 ft²
             return_r_nominal_m2_k_w: 1.76,
             is_heating: true,
@@ -765,9 +893,11 @@ mod tests {
             longitude_deg: -112.02, // Phoenix
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 1.76,
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: false,
@@ -790,9 +920,11 @@ mod tests {
             longitude_deg: -112.02,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 1.76,
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: false,
@@ -818,9 +950,11 @@ mod tests {
             longitude_deg: -104.87,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 1.76,
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: true,
@@ -840,9 +974,11 @@ mod tests {
             longitude_deg: -112.02,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 1.76,
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: false,
@@ -917,9 +1053,11 @@ mod tests {
             longitude_deg: -170.0,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 1.76,
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: true,
@@ -1062,9 +1200,11 @@ mod tests {
             longitude_deg: -104.87,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 9.29,
             supply_r_nominal_m2_k_w: 0.0, // ≤ 0 → default path
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 0.0, // ≤ 0 → default path
             is_heating: true,
@@ -1117,9 +1257,11 @@ mod tests {
             longitude_deg: 0.0,
             house_volume_m3: 340.0,
             supply_leakage_frac: 0.10,
+            supply_leakage_class: None,
             supply_area_m2: 18.58, // ~200 ft² — larger area amplifies conduction effect
             supply_r_nominal_m2_k_w: 0.0, // default path
             return_leakage_frac: 0.06,
+            return_leakage_class: None,
             return_area_m2: 9.29,
             return_r_nominal_m2_k_w: 0.0, // default path
             is_heating: true,
@@ -1157,6 +1299,222 @@ mod tests {
             dse_cold < dse_mild,
             "cold-climate attic DSE ({dse_cold}) should be lower than mild-climate \
              attic DSE ({dse_mild}) — colder attic → more conduction loss"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // DuctLeakageClass tests
+    // ------------------------------------------------------------------
+
+    /// Verify each `DuctLeakageClass` variant returns the correct
+    /// CFM/100 ft²-at-25 Pa value from ASHRAE 152-2014 Table 5.
+    #[test]
+    fn leakage_class_cfm_values_match_ashrae152_table5() {
+        assert!(
+            (DuctLeakageClass::WellSealed.cfm_per_100ft2_at_25pa() - 2.0).abs() < 1e-9,
+            "WellSealed should be 2 CFM/100 ft²"
+        );
+        assert!(
+            (DuctLeakageClass::Sealed.cfm_per_100ft2_at_25pa() - 6.0).abs() < 1e-9,
+            "Sealed should be 6 CFM/100 ft²"
+        );
+        assert!(
+            (DuctLeakageClass::Unsealed.cfm_per_100ft2_at_25pa() - 12.0).abs() < 1e-9,
+            "Unsealed should be 12 CFM/100 ft²"
+        );
+    }
+
+    /// Verify `to_leakage_fraction` computes the correct fraction from
+    /// leakage class, duct surface area (ft²), and fan airflow (CFM).
+    ///
+    /// ASHRAE 152-2014 §5: leakage fraction = (LC × A / 100) / Q.
+    #[test]
+    fn leakage_class_to_fraction_derivation() {
+        // 2 CFM/100ft² × 200 ft² / 100 = 4 CFM leakage
+        // 4 / 400 CFM fan flow = 0.01
+        let frac = DuctLeakageClass::WellSealed.to_leakage_fraction(200.0, 400.0);
+        assert!(
+            (frac - 0.01).abs() < 1e-9,
+            "WellSealed × 200 ft² / 400 CFM should be 0.01, got {frac}"
+        );
+
+        // 6 × 100/100 = 6 CFM; 6 / 600 = 0.01
+        let frac = DuctLeakageClass::Sealed.to_leakage_fraction(100.0, 600.0);
+        assert!(
+            (frac - 0.01).abs() < 1e-9,
+            "Sealed × 100 ft² / 600 CFM should be 0.01, got {frac}"
+        );
+
+        // 12 × 300/100 = 36 CFM; 36 / 1200 = 0.03
+        let frac = DuctLeakageClass::Unsealed.to_leakage_fraction(300.0, 1200.0);
+        assert!(
+            (frac - 0.03).abs() < 1e-9,
+            "Unsealed × 300 ft² / 1200 CFM should be 0.03, got {frac}"
+        );
+    }
+
+    /// `to_leakage_fraction` must return 0.0 when fan flow or duct area is
+    /// non-positive (degenerate input).
+    #[test]
+    fn leakage_class_to_fraction_zero_on_degenerate_input() {
+        assert_eq!(
+            DuctLeakageClass::Unsealed.to_leakage_fraction(100.0, 0.0),
+            0.0,
+            "zero fan flow → zero fraction"
+        );
+        assert_eq!(
+            DuctLeakageClass::Unsealed.to_leakage_fraction(0.0, 500.0),
+            0.0,
+            "zero duct area → zero fraction"
+        );
+        assert_eq!(
+            DuctLeakageClass::Unsealed.to_leakage_fraction(-50.0, 500.0),
+            0.0,
+            "negative duct area → zero fraction"
+        );
+    }
+
+    /// `to_leakage_fraction` must clamp to 1.0 for pathological inputs
+    /// (tiny fan flow relative to large duct area).
+    #[test]
+    fn leakage_class_to_fraction_clamps_to_one() {
+        // 12 × 10000/100 = 1200 CFM; 1200 / 1 = 1200 → clamped to 1.0
+        let frac = DuctLeakageClass::Unsealed.to_leakage_fraction(10000.0, 1.0);
+        assert!((frac - 1.0).abs() < 1e-9, "should clamp to 1.0, got {frac}");
+    }
+
+    /// Verify that every `Ashrae152ZoneType` variant has a default leakage
+    /// class and that the returned tuple is non-None for both heating and
+    /// cooling seasons.
+    #[test]
+    fn all_zone_types_have_default_leakage_class() {
+        let variants = [
+            Ashrae152ZoneType::AtticVented,
+            Ashrae152ZoneType::AtticVentedRadiantBarrier,
+            Ashrae152ZoneType::AtticUnvented,
+            Ashrae152ZoneType::AtticUnventedRadiantBarrier,
+            Ashrae152ZoneType::Garage,
+            Ashrae152ZoneType::UnventUninsulatedCrawlspace,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::UnventCrawlspaceInsFloor,
+            Ashrae152ZoneType::VentUninsulatedCrawlspace,
+            Ashrae152ZoneType::VentCrawlspaceInsFloorWall,
+            Ashrae152ZoneType::VentCrawlspaceInsFloor,
+            Ashrae152ZoneType::UninsulatedBasement,
+            Ashrae152ZoneType::BasementInsWalls,
+            Ashrae152ZoneType::BasementInsCeiling,
+            Ashrae152ZoneType::UnderSlab,
+            Ashrae152ZoneType::ExteriorWalls,
+        ];
+        assert_eq!(
+            variants.len(),
+            16,
+            "precondition: all 16 Ashrae152ZoneType variants must be enumerated"
+        );
+
+        for &zone in &variants {
+            for &is_heating in &[true, false] {
+                let (supply_class, return_class) = zone.default_leakage_class(is_heating);
+                assert!(
+                    supply_class.cfm_per_100ft2_at_25pa() > 0.0,
+                    "{zone:?} is_heating={is_heating}: supply leakage class must have \
+                     positive CFM/100ft² value"
+                );
+                assert!(
+                    return_class.cfm_per_100ft2_at_25pa() > 0.0,
+                    "{zone:?} is_heating={is_heating}: return leakage class must have \
+                     positive CFM/100ft² value"
+                );
+            }
+        }
+    }
+
+    /// Attic zone types default to `Unsealed` (12 CFM/100 ft²),
+    /// basement types default to `WellSealed` (2 CFM/100 ft²).
+    #[test]
+    fn zone_type_leakage_class_defaults_match_expected_exposure() {
+        // Attic ducts → Unsealed (most exposed)
+        let (s, r) = Ashrae152ZoneType::AtticVented.default_leakage_class(true);
+        assert_eq!(s, DuctLeakageClass::Unsealed);
+        assert_eq!(r, DuctLeakageClass::Unsealed);
+
+        // Basement ducts → WellSealed (most protected)
+        let (s, r) = Ashrae152ZoneType::UninsulatedBasement.default_leakage_class(true);
+        assert_eq!(s, DuctLeakageClass::WellSealed);
+        assert_eq!(r, DuctLeakageClass::WellSealed);
+
+        // Crawlspace ducts → Sealed (intermediate)
+        let (s, r) = Ashrae152ZoneType::VentUninsulatedCrawlspace.default_leakage_class(true);
+        assert_eq!(s, DuctLeakageClass::Sealed);
+        assert_eq!(r, DuctLeakageClass::Sealed);
+    }
+
+    /// Regression: compute DSE with `WellSealed` leakage class vs.
+    /// `Unsealed` leakage class for an attic zone type and confirm
+    /// the DSE changes in the expected direction (higher DSE for
+    /// well-sealed = less leakage = less loss).
+    #[test]
+    fn dse_well_sealed_exceeds_unsealed_for_attic() {
+        let base = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.0,
+            supply_leakage_class: None,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.0,
+            return_leakage_class: None,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+
+        let well_sealed = DuctDseInput {
+            supply_leakage_class: Some(DuctLeakageClass::WellSealed),
+            return_leakage_class: Some(DuctLeakageClass::WellSealed),
+            ..base
+        };
+        let unsealed = DuctDseInput {
+            supply_leakage_class: Some(DuctLeakageClass::Unsealed),
+            return_leakage_class: Some(DuctLeakageClass::Unsealed),
+            ..base
+        };
+        let none = DuctDseInput {
+            supply_leakage_frac: 0.10,
+            return_leakage_frac: 0.06,
+            ..base
+        };
+
+        let dse_ws = calculate_dse(&well_sealed);
+        let dse_us = calculate_dse(&unsealed);
+        let dse_none = calculate_dse(&none);
+
+        assert!(
+            dse_ws > 0.0 && dse_ws <= 1.0,
+            "WellSealed DSE out of bounds: {dse_ws}"
+        );
+        assert!(
+            dse_us > 0.0 && dse_us <= 1.0,
+            "Unsealed DSE out of bounds: {dse_us}"
+        );
+        // Well-sealed ducts lose less → higher DSE
+        assert!(
+            dse_ws > dse_us,
+            "WellSealed DSE ({dse_ws}) should exceed Unsealed DSE ({dse_us})"
+        );
+
+        // The raw-fraction fallback path must also produce a valid DSE
+        assert!(
+            dse_none > 0.0 && dse_none <= 1.0,
+            "raw-fraction fallback DSE out of bounds: {dse_none}"
         );
     }
 }

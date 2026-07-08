@@ -483,15 +483,29 @@ fn compute_duct_config(
         );
     }
 
+    let (supply_class, return_class) = zone_type.default_leakage_class(is_heating);
+    let supply_class = if supply_leak == 0.0 && duct_params.supply_leakage_cfm25 == 0.0 {
+        Some(supply_class)
+    } else {
+        None
+    };
+    let return_class = if return_leak == 0.0 && duct_params.return_leakage_cfm25 == 0.0 {
+        Some(return_class)
+    } else {
+        None
+    };
+
     let input = DuctDseInput {
         zone_type,
         latitude_deg: lat,
         longitude_deg: lon,
         house_volume_m3: house_vol,
         supply_leakage_frac: supply_leak,
+        supply_leakage_class: supply_class,
         supply_area_m2: supply_area,
         supply_r_nominal_m2_k_w: supply_r,
         return_leakage_frac: return_leak,
+        return_leakage_class: return_class,
         return_area_m2: return_area,
         return_r_nominal_m2_k_w: return_r,
         is_heating,
@@ -4798,6 +4812,54 @@ mod tests {
         assert!(
             config.dse_heat.unwrap() < 1.0,
             "DSE must reflect duct losses for nonzero leakage fraction"
+        );
+    }
+
+    #[test]
+    fn zero_explicit_leakage_defaults_to_zone_type_class() {
+        let capacity_w = 12_000.0;
+        let make_params = |zone_type: &str| -> DuctDseParams {
+            DuctDseParams {
+                zone_id: Some(1),
+                zone_type: Some(zone_type.to_string()),
+                house_volume_m3: 400.0,
+                supply_leakage_frac: 0.0,
+                supply_leakage_cfm25: 0.0,
+                supply_area_m2: 20.0,
+                supply_r_m2_k_w: 0.5,
+                return_leakage_frac: 0.0,
+                return_leakage_cfm25: 0.0,
+                return_area_m2: 12.0,
+                return_r_m2_k_w: 0.5,
+                latitude_deg: 40.0,
+                longitude_deg: -105.0,
+            }
+        };
+
+        let params_attic = make_params("attic_unvented");
+        let params_basement = make_params("unins_basement");
+
+        let cfg_attic = compute_duct_config(&params_attic, capacity_w, true, 1, false, None);
+        let cfg_basement = compute_duct_config(&params_basement, capacity_w, true, 1, false, None);
+
+        let attic_dse = cfg_attic
+            .dse_heat
+            .expect("attic DSE must be computed when zone-type class default is applied");
+        let basement_dse = cfg_basement
+            .dse_heat
+            .expect("basement DSE must be computed when zone-type class default is applied");
+        assert!(
+            attic_dse < basement_dse,
+            "attic DSE ({attic_dse}) must be < basement DSE ({basement_dse}) — \
+             attic defaults to Unsealed (more leakage), basement to WellSealed (less leakage)"
+        );
+        assert!(
+            (0.0..1.0).contains(&attic_dse),
+            "attic DSE {attic_dse} must be in (0,1) — class-default leakage must not be zero"
+        );
+        assert!(
+            (0.0..1.0).contains(&basement_dse),
+            "basement DSE {basement_dse} must be in (0,1) — class-default leakage must not be zero"
         );
     }
 
