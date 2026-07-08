@@ -1100,23 +1100,24 @@ impl Battery {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::N_SERIES, self.n_series as f64);
         self.telemetry.set(tk::N_PARALLEL, self.n_parallel as f64);
-        self.telemetry
-            .set(tk::AH_CELL, c.ah_cell.unwrap_or(f64::NAN));
-        self.telemetry.set(tk::V_CELL, c.v_cell.unwrap_or(f64::NAN));
+        // Why: 0.0 sentinel for "cell params not configured" — a 0 Ah or 0 V
+        // cell is physically impossible, so no legitimate value can collide.
+        self.telemetry.set(tk::AH_CELL, c.ah_cell.unwrap_or(0.0));
+        self.telemetry.set(tk::V_CELL, c.v_cell.unwrap_or(0.0));
         self.telemetry
             .set(tk::DERIVATION_SOURCE, self.derivation_source.code());
         self.telemetry
             .set(tk::DECLARED_CAPACITY_KWH, self.capacity_kwh);
         // Compute implied capacity from the integer topology when cell params
-        // are available; set NaN sentinel otherwise (same pattern as ah_cell/v_cell).
+        // are available; set to 0.0 otherwise (same pattern as ah_cell/v_cell).
         let implied_kwh = if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
             if ah > 0.0 && vc > 0.0 && self.n_series > 0 && self.n_parallel > 0 {
                 self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0
             } else {
-                f64::NAN
+                0.0
             }
         } else {
-            f64::NAN
+            0.0
         };
         self.telemetry.set(tk::IMPLIED_CAPACITY_KWH, implied_kwh);
         self.core_output = CoreOutput::default();
@@ -1902,6 +1903,12 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut t = Telemetry::with_capacity(20);
+    // Why: ah_cell / v_cell / implied_capacity_kwh / declared_capacity_kwh
+    // default to 0.0 as "not configured / not applicable." A 0 Ah cell or
+    // 0 V cell is physically impossible (no real battery has zero cell
+    // parameters), and a 0 kWh capacity is likewise impossible. These
+    // sentinels cannot collide with legitimate values. After init_typed()
+    // is called, configured fields are overwritten with real values.
     t.insert(tk::SOC, 0.0);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
@@ -1917,11 +1924,11 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::OPERATING_MODE, 0.0);
     t.insert(tk::N_SERIES, 0.0);
     t.insert(tk::N_PARALLEL, 0.0);
-    t.insert(tk::AH_CELL, f64::NAN);
-    t.insert(tk::V_CELL, f64::NAN);
+    t.insert(tk::AH_CELL, 0.0);
+    t.insert(tk::V_CELL, 0.0);
     t.insert(tk::DERIVATION_SOURCE, 0.0);
-    t.insert(tk::IMPLIED_CAPACITY_KWH, f64::NAN);
-    t.insert(tk::DECLARED_CAPACITY_KWH, f64::NAN);
+    t.insert(tk::IMPLIED_CAPACITY_KWH, 0.0);
+    t.insert(tk::DECLARED_CAPACITY_KWH, 0.0);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
     t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -5145,14 +5152,16 @@ mod tests {
             1.0,
             "derivation_source must be Explicit"
         );
-        // ah_cell / v_cell not provided → NaN sentinel
-        assert!(
-            bat.telemetry().get(tk::AH_CELL).unwrap().is_nan(),
-            "ah_cell must be NaN when not provided"
+        // ah_cell / v_cell not provided → 0.0 sentinel
+        assert_eq!(
+            bat.telemetry().get(tk::AH_CELL),
+            Some(0.0),
+            "ah_cell must be 0.0 when not provided"
         );
-        assert!(
-            bat.telemetry().get(tk::V_CELL).unwrap().is_nan(),
-            "v_cell must be NaN when not provided"
+        assert_eq!(
+            bat.telemetry().get(tk::V_CELL),
+            Some(0.0),
+            "v_cell must be 0.0 when not provided"
         );
     }
 

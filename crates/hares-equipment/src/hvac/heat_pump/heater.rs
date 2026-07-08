@@ -549,7 +549,13 @@ impl HeatPumpHeaterCore {
                 DefrostConfig::on_demand(1.0, 0.0)
             },
             hp_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
-                f64::NEG_INFINITY
+                // Why: sentinel — no realistic climate reaches -100°C outdoor
+                // air temperature. GSHP/WSHP heat-pump lockout is based on
+                // entering water/ground temperature (not outdoor air), so the
+                // outdoor-air lockout is never triggered for these variants.
+                // Matches the `100.0` "always allowed" convention for ER
+                // lockout elsewhere in this file.
+                -100.0
             } else {
                 DEFAULT_HP_LOCKOUT_TEMP_C
             },
@@ -561,7 +567,13 @@ impl HeatPumpHeaterCore {
             },
             hp_available: false,
             er_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
-                f64::INFINITY
+                // Why: sentinel — no realistic climate reaches 100°C outdoor
+                // air temperature. GSHP/WSHP ER backup-lockout is based on
+                // entering water/ground temperature (not outdoor air), so the
+                // outdoor-air-driven lockout is never active for these
+                // variants. Matches the `-100.0` "never limited" convention
+                // for the HP lockout sentinel above.
+                100.0
             } else {
                 DEFAULT_ER_LOCKOUT_TEMP_C
             },
@@ -6927,8 +6939,8 @@ mod tests {
         let e = env(18.0, -5.0, 0.002);
         eq.init(&cfg, &e).unwrap();
 
-        assert_eq!(eq.core.hp_lockout_temp_c, f64::NEG_INFINITY);
-        assert_eq!(eq.core.er_lockout_temp_c, f64::INFINITY);
+        assert_eq!(eq.core.hp_lockout_temp_c, -100.0);
+        assert_eq!(eq.core.er_lockout_temp_c, 100.0);
         assert_eq!(eq.core.max_oat_supplemental_c, f64::INFINITY);
         assert_eq!(eq.core.hp_lockout_hysteresis_c, 0.0);
         assert_eq!(eq.core.defrost_config.control, DefrostControl::Disabled);

@@ -43,10 +43,16 @@ impl ChargingComposer {
     }
 
     /// The most recent needed-charge-hours estimate from preferences
-    /// (minimum across all preferences). Returns `f64::INFINITY` if no
-    /// preference provides an estimate.
+    /// (minimum across all preferences). Returns `0.0` if no preference
+    /// provides an estimate (the fold starts at `f64::INFINITY` and
+    /// collapses to the minimum; the getter maps non-finite results to
+    /// `0.0` so the telemetry value is always finite).
     pub fn last_needed_charge_hours(&self) -> f64 {
-        self.last_needed_charge_hours
+        if self.last_needed_charge_hours.is_finite() {
+            self.last_needed_charge_hours
+        } else {
+            0.0
+        }
     }
 
     /// Evaluate all preferences and emit a resolved DispatchRequest.
@@ -489,6 +495,65 @@ mod tests {
 
         assert!(out.is_empty());
         assert_eq!(composer.last_action(), "idle:no_preferences");
+    }
+
+    #[test]
+    fn needed_charge_hours_returns_minimum_across_preferences() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        struct FixedHours(f64);
+        impl ChargingPreference for FixedHours {
+            fn score(&mut self, _ctx: &DecisionContext) -> PreferenceVote {
+                PreferenceVote {
+                    target_soc: Some(0.8),
+                    power_kw: None,
+                    departure_hour: None,
+                    min_soc: None,
+                    max_soc: None,
+                    score: 1.0,
+                    label: "fixed",
+                }
+            }
+            fn needed_charge_hours(&self, _ctx: &DecisionContext) -> f64 {
+                self.0
+            }
+            fn name(&self) -> &'static str {
+                "fixed_hours"
+            }
+        }
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![
+            Box::new(FixedHours(5.0)),
+            Box::new(FixedHours(3.0)),
+            Box::new(FixedHours(7.0)),
+        ];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert!(
+            (composer.last_needed_charge_hours() - 3.0).abs() < 1e-9,
+            "needed_charge_hours must be the minimum (3.0), got {}",
+            composer.last_needed_charge_hours()
+        );
+    }
+
+    #[test]
+    fn needed_charge_hours_returns_zero_when_no_preferences_provide_estimate() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            composer.last_needed_charge_hours(),
+            0.0,
+            "no preferences → 0.0 (not f64::INFINITY)"
+        );
     }
 
     #[test]

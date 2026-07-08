@@ -144,6 +144,11 @@ impl IdealThermostat {
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
         let mut telemetry = Telemetry::with_capacity(4);
+        // Why: telemetry map stores f64 only (not Option<f64>). Sentinels use 0.0
+        // for "unset/no-override" because OverrideState tracks actual setpoint
+        // state with Option<f64> — the telemetry values are an output display
+        // layer. Consumers that need to distinguish "0.0°C override" from
+        // "no override" should read `override_state()` directly.
         telemetry.insert("heating_setpoint_c", 0.0);
         telemetry.insert("cooling_setpoint_c", 0.0);
         telemetry.insert("deadband_c", 0.0);
@@ -294,18 +299,20 @@ impl Actor for IdealThermostat {
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         // Populate telemetry regardless of whether override is active,
         // so consumers can see cleared state after clear_override().
+        // Why: unwrap_or(0.0) for unset setpoints — the actual override
+        // state is tracked by Option<f64> fields on OverrideState. Telemetry
+        // is a display layer; consumers needing to distinguish "0.0°C
+        // override" from "no override" should read override_state() directly.
         self.telemetry.set(
             "heating_setpoint_c",
-            self.override_state.heating_setpoint_c.unwrap_or(f64::NAN),
+            self.override_state.heating_setpoint_c.unwrap_or(0.0),
         );
         self.telemetry.set(
             "cooling_setpoint_c",
-            self.override_state.cooling_setpoint_c.unwrap_or(f64::NAN),
+            self.override_state.cooling_setpoint_c.unwrap_or(0.0),
         );
-        self.telemetry.set(
-            "deadband_c",
-            self.override_state.deadband_c.unwrap_or(f64::NAN),
-        );
+        self.telemetry
+            .set("deadband_c", self.override_state.deadband_c.unwrap_or(0.0));
         // Reset inversion flag each step; set to 1.0 only when rejected below.
         self.telemetry.set("setpoint_inversion_rejected", 0.0);
 

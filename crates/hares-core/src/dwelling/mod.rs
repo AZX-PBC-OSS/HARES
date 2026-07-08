@@ -5966,24 +5966,30 @@ impl Dwelling {
             .find(|eq| is_hvac_or_wh(&eq.descriptor().name))
         {
             if let Some(&idx) = self.output_column_index.get(SCHEDULED_HEATING_SETPOINT_COL) {
+                // allowed: setpoint telemetry keys are populated by HVAC equipment
+                // reconcile logic after the first timestep. Before that, get() returns
+                // None — 0.0 is the safe pre-init sentinel for output-column display.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::SCHEDULE_HEATING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
             if let Some(&idx) = self.output_column_index.get(SCHEDULED_COOLING_SETPOINT_COL) {
+                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::SCHEDULE_COOLING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
             if let Some(&idx) = self.output_column_index.get(RUNTIME_HEATING_SETPOINT_COL) {
+                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::RUNTIME_HEATING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
             if let Some(&idx) = self.output_column_index.get(RUNTIME_COOLING_SETPOINT_COL) {
+                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::RUNTIME_COOLING_SETPOINT_C)

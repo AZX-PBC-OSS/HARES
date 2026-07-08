@@ -337,6 +337,12 @@ impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
         let mut telemetry = Telemetry::with_capacity(11);
+        // Why: telemetry initialises count and flag fields to 0.0 for
+        // "not yet occurred / not active." demand_response_duration_s = 0.0
+        // means "no DemandResponse action with a duration was dispatched
+        // this step" — the constructor validates duration > 0 and the
+        // decide() invariant prevents zero-duration dispatches, so 0.0
+        // cannot collide with a legitimate output value.
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
@@ -347,7 +353,7 @@ impl DrCompliance {
         telemetry.insert("targets_configured", 0.0);
         telemetry.insert("effective_compliance_rate", 0.0);
         telemetry.insert("demand_response_level", 0.0);
-        telemetry.insert("demand_response_duration_s", f64::NAN);
+        telemetry.insert("demand_response_duration_s", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -638,11 +644,15 @@ impl Actor for DrCompliance {
 
         #[cfg(feature = "observe")]
         {
+            // Why: unwrap_or(0.0) for models that don't use a compliance rate
+            // (AlwaysComply, NeverComply return None). Probabilistic always
+            // returns Some(rate), so 0.0 here means "not applicable" — a real
+            // 0% rate would come through as Some(0.0), not None.
             self.telemetry.set(
                 "effective_compliance_rate",
                 self.model
                     .effective_compliance_rate(self.current_dr_level)
-                    .unwrap_or(f64::NAN),
+                    .unwrap_or(0.0),
             );
         }
 
@@ -711,8 +721,11 @@ impl Actor for DrCompliance {
                     if let DrAction::DemandResponse { level, duration_s } = &self.hvac_action {
                         self.telemetry
                             .set("demand_response_level", dr_level_as_f64(*level));
+                        // Why: None duration = indefinite DR event; 0.0
+                        // sentinel means "no finite timer running." The
+                        // constructor rejects duration_s = Some(0.0).
                         self.telemetry
-                            .set("demand_response_duration_s", duration_s.unwrap_or(f64::NAN));
+                            .set("demand_response_duration_s", duration_s.unwrap_or(0.0));
                     }
                 }
                 let t = target.clone();
@@ -764,8 +777,11 @@ impl Actor for DrCompliance {
                     if let DrAction::DemandResponse { level, duration_s } = action {
                         self.telemetry
                             .set("demand_response_level", dr_level_as_f64(*level));
+                        // Why: None duration = indefinite DR event; 0.0
+                        // sentinel means "no finite timer running." The
+                        // constructor rejects duration_s = Some(0.0).
                         self.telemetry
-                            .set("demand_response_duration_s", duration_s.unwrap_or(f64::NAN));
+                            .set("demand_response_duration_s", duration_s.unwrap_or(0.0));
                     }
                 }
                 self.track_dispatched(target, action);
@@ -2418,12 +2434,10 @@ mod tests {
             Some(0.0),
             "demand_response_level must be pre-registered at init"
         );
-        assert!(
-            actor
-                .telemetry
-                .get("demand_response_duration_s")
-                .is_some_and(|v| v.is_nan()),
-            "demand_response_duration_s must be pre-registered at init (NaN = unset)"
+        assert_eq!(
+            actor.telemetry.get("demand_response_duration_s"),
+            Some(0.0),
+            "demand_response_duration_s must be pre-registered at init (0.0 = no DR event)"
         );
     }
 

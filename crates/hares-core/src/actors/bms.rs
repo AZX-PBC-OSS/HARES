@@ -78,8 +78,15 @@ impl BatteryManagementActor {
         min_dwell_steps: usize,
     ) -> Self {
         let mut telemetry = Telemetry::with_capacity(8);
+        // Why: soc = 0.0 as init sentinel means "no SOC reading yet" — the
+        // BMS reads SOC from equipment_core on the first decide() call and
+        // overwrites this. A true 0% SOC is physically possible only for a
+        // deeply depleted battery; the unwrap_or(0.0) fallback in decide()
+        // fires only when equipment_core lacks the battery entry, which
+        // means the battery is unregistered — 0.0 as "unavailable" is safe
+        // because the BMS enters idle:no_soc mode and never dispatches.
         telemetry.insert("bms_action", -1.0);
-        telemetry.insert("soc", f64::NAN);
+        telemetry.insert("soc", 0.0);
         telemetry.insert("pv_kw", 0.0);
         telemetry.insert("load_kw", 0.0);
         telemetry.insert("bms_pv_stale_kw", 0.0);
@@ -1020,8 +1027,10 @@ impl Actor for BatteryManagementActor {
         // Populate telemetry: bms_action uses a numeric code from last_action.
         self.telemetry
             .set("bms_action", bms_action_code(&self.last_action));
-        self.telemetry
-            .set("soc", self.read_soc(env).unwrap_or(f64::NAN));
+        // Why: unwrap_or(0.0) fires only when equipment_core has no entry
+        // for this battery — the BMS enters idle:no_soc and never dispatches,
+        // so the 0.0 sentinel ("unavailable") cannot drive a wrong action.
+        self.telemetry.set("soc", self.read_soc(env).unwrap_or(0.0));
         let pv_stale = env.electrical.actual_pv_kw_or_fallback();
         self.telemetry.set("pv_kw", pv_stale);
         self.telemetry.set("bms_pv_stale_kw", pv_stale);

@@ -104,18 +104,16 @@ fn ideal_thermostat_telemetry_reports_setpoints() {
         .telemetry()
         .expect("IdealThermostat must expose telemetry");
     assert_eq!(tel.get("heating_setpoint_c"), Some(20.0));
-    assert!(
-        tel.get("cooling_setpoint_c").unwrap().is_nan(),
-        "cooling setpoint unset → NaN"
+    assert_eq!(
+        tel.get("cooling_setpoint_c"),
+        Some(0.0),
+        "cooling setpoint unset → 0.0"
     );
-    assert!(
-        tel.get("deadband_c").unwrap().is_nan(),
-        "deadband unset → NaN"
-    );
+    assert_eq!(tel.get("deadband_c"), Some(0.0), "deadband unset → 0.0");
 }
 
 #[test]
-fn ideal_thermostat_cleared_override_reports_nan() {
+fn ideal_thermostat_cleared_override_reports_default() {
     let mut thermostat = IdealThermostat::new("HVAC").with_heating_setpoint(20.0);
     thermostat.clear_override();
 
@@ -126,9 +124,10 @@ fn ideal_thermostat_cleared_override_reports_nan() {
     let tel = thermostat
         .telemetry()
         .expect("IdealThermostat must expose telemetry");
-    assert!(
-        tel.get("heating_setpoint_c").unwrap().is_nan(),
-        "cleared → NaN"
+    assert_eq!(
+        tel.get("heating_setpoint_c"),
+        Some(0.0),
+        "cleared → 0.0 (default)"
     );
 }
 

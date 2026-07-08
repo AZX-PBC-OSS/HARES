@@ -312,13 +312,19 @@ impl EvDriverActor {
         );
 
         let mut telemetry = Telemetry::with_capacity(7);
+        // Why: discharge_min_soc = 0.0 means "no discharge floor active" —
+        // the field is populated per-step from min_soc on dispatched
+        // PowerSetpoint signals. Only V2G/V2H strategies set a non-zero
+        // floor. A discharge floor of 0% SOC (= allow full discharge) is
+        // physically redundant (all strategies allow full discharge by
+        // default), so 0.0 cannot collide with a meaningful constraint.
         telemetry.insert("soc", 1.0);
         telemetry.insert("phase", 0.0);
         telemetry.insert("charge_kw", 0.0);
         telemetry.insert("plugged_in", 1.0);
         telemetry.insert("soc_gate_charging_allowed", 1.0);
         telemetry.insert("needed_charge_hours", 0.0);
-        telemetry.insert("discharge_min_soc", f64::NAN);
+        telemetry.insert("discharge_min_soc", 0.0);
 
         Self {
             name: Arc::from(name),
@@ -384,7 +390,7 @@ impl EvDriverActor {
 
         // Scan newly-emitted dispatch requests for charge/discharge power.
         let mut charge_kw = 0.0;
-        let mut discharge_min_soc = f64::NAN;
+        let mut discharge_min_soc = 0.0;
         for req in &out[before_out..] {
             match &req.signal {
                 ControlSignal::PowerSetpoint {
@@ -393,7 +399,11 @@ impl EvDriverActor {
                     ..
                 } => {
                     charge_kw = *active_power_kw;
-                    discharge_min_soc = min_soc.unwrap_or(f64::NAN);
+                    // Why: None min_soc on a PowerSetpoint means "no discharge
+                    // floor constraint" — only V2G/V2H strategies set min_soc.
+                    // 0.0 = "allow full discharge" is the default operational
+                    // behaviour, so the sentinel is semantically correct.
+                    discharge_min_soc = min_soc.unwrap_or(0.0);
                 }
                 ControlSignal::EvAwayCharge { power_kw } => charge_kw = *power_kw,
                 ControlSignal::EvDrive { .. } => {} // driving, not charging
