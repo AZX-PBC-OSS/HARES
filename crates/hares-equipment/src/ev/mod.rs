@@ -642,6 +642,30 @@ impl Ev {
             }
         }
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw) {
+                if sp_kw > 0.0 {
+                    // When both Ready-By and PowerSetpoint are active, the
+                    // setpoint originates from the scheduler's urgency power
+                    // (ctx.max_charge_kw). It must not exceed the equipment's
+                    // rated power by more than a small tolerance — divergence
+                    // beyond 110% indicates the schedule and equipment
+                    // configuration disagree about the EV's capabilities.
+                    let max_allowed = self.rated_power_kw * 1.1;
+                    if sp_kw > max_allowed {
+                        tracing::warn!(
+                            ready_by_hour = self.ready_by_hour,
+                            power_setpoint_kw = sp_kw,
+                            rated_power_kw = self.rated_power_kw,
+                            "EV: PowerSetpoint exceeds rated power while Ready-By active — \
+                             scheduler urgency power inconsistent with equipment capabilities"
+                        );
+                    }
+                }
+            }
+        }
+
         self.cc_cv_derating = cc_cv_mult;
 
         #[cfg(feature = "observe")]

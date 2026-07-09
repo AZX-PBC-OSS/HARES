@@ -184,12 +184,20 @@ impl ChargingComposer {
     /// All signals use `Schedule` tier — matches the central mapping for
     /// `EvSetReadyBy`, `PowerSetpoint`, and `SOCTarget`. The charging
     /// composer operates within the EV driver's schedule-level framework.
+    ///
+    /// When a vote carries both `departure_hour`/`target_soc` and `power_kw`
+    /// (e.g. an urgency Override from [`super::departure::DepartureDeadline`]),
+    /// both `EvSetReadyBy` and `PowerSetpoint` are emitted so the equipment
+    /// receives the scheduler's full intent rather than having the deadline
+    /// signal silently discard the rate.
     fn emit_vote(
         &self,
         ctx: &DecisionContext,
         vote: &PreferenceVote,
         out: &mut Vec<DispatchRequest>,
     ) {
+        let mut emitted_ready_by = false;
+
         // If there's a departure_hour + target_soc, use EvSetReadyBy
         if let (Some(departure), Some(target)) = (vote.departure_hour, vote.target_soc) {
             out.push(DispatchRequest {
@@ -200,7 +208,7 @@ impl ChargingComposer {
                 },
                 priority: PriorityTier::Schedule,
             });
-            return;
+            emitted_ready_by = true;
         }
 
         // If there's a power_kw, use PowerSetpoint
@@ -274,6 +282,15 @@ impl ChargingComposer {
                     );
                 }
             }
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    ev_override_power_propagated = emitted_ready_by,
+                    power_kw = power,
+                    preference = vote.label,
+                    "PowerSetpoint dispatch with Ready-By coexistence",
+                );
+            }
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
                 signal: ControlSignal::PowerSetpoint {
@@ -284,6 +301,11 @@ impl ChargingComposer {
                 },
                 priority: PriorityTier::Schedule,
             });
+            return;
+        }
+
+        // If Ready-By was already emitted and there is no power_kw, we are done.
+        if emitted_ready_by {
             return;
         }
 
@@ -306,6 +328,7 @@ impl ChargingComposer {
 mod tests {
     use super::*;
     use crate::actor::testing::TestEnvBuilder;
+    use hares_types::{DayFilter, DepartureConstraint};
 
     fn make_ctx(env: &hares_types::EnvironmentState) -> DecisionContext<'_> {
         DecisionContext {
@@ -770,5 +793,327 @@ mod tests {
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn override_with_both_departure_and_power_emits_two_signals() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let vote = PreferenceVote {
+            target_soc: Some(0.9),
+            power_kw: Some(7.2),
+            departure_hour: Some(7.0),
+            min_soc: None,
+            max_soc: None,
+            score: 10.0,
+            label: "departure:urgent",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(OverridePref { vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            2,
+            "expected 2 dispatch requests (EvSetReadyBy + PowerSetpoint), got {}",
+            out.len()
+        );
+
+        let has_ready_by = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }));
+        let has_power = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }));
+
+        assert!(has_ready_by, "expected EvSetReadyBy in output");
+        assert!(has_power, "expected PowerSetpoint in output");
+
+        // Verify the EvSetReadyBy signal has the correct values
+        let ready_by = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }))
+            .unwrap();
+        match &ready_by.signal {
+            ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                assert!((departure_hour - 7.0).abs() < 1e-9);
+                assert!((target_soc - 0.9).abs() < 1e-9);
+            }
+            _ => unreachable!(),
+        }
+
+        // Verify the PowerSetpoint signal carries the correct power
+        let power_req = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }))
+            .unwrap();
+        match &power_req.signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw,
+                min_soc,
+                max_soc,
+                ..
+            } => {
+                assert!((active_power_kw - 7.2).abs() < 1e-9);
+                assert_eq!(*min_soc, None);
+                assert_eq!(*max_soc, None);
+            }
+            _ => unreachable!(),
+        }
+
+        // Both signals should carry the same source and Schedule tier
+        assert_eq!(ready_by.priority, PriorityTier::Schedule);
+        assert_eq!(power_req.priority, PriorityTier::Schedule);
+    }
+
+    #[test]
+    fn override_with_departure_only_emits_ev_set_ready_by() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let vote = PreferenceVote {
+            target_soc: Some(0.9),
+            power_kw: None,
+            departure_hour: Some(7.0),
+            min_soc: None,
+            max_soc: None,
+            score: 10.0,
+            label: "departure:urgent",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(OverridePref { vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            1,
+            "departure-only vote should produce a single dispatch request"
+        );
+        match &out[0].signal {
+            ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                assert!((departure_hour - 7.0).abs() < 1e-9);
+                assert!((target_soc - 0.9).abs() < 1e-9);
+            }
+            other => panic!("expected EvSetReadyBy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scored_votes_merge_departure_and_power_into_two_signals() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // One preference provides departure_hour, another provides power_kw.
+        // resolve() merges them: departure from the first, power from the second.
+        let departure_vote = PreferenceVote {
+            target_soc: Some(0.85),
+            power_kw: None,
+            departure_hour: Some(6.5),
+            min_soc: None,
+            max_soc: None,
+            score: 5.0,
+            label: "departure:planned",
+        };
+        let power_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(3.5),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 2.0,
+            label: "solar:charging",
+        };
+        // A third vote with higher score supplies the target_soc winner but
+        // does NOT supply power or departure — the resolved result should
+        // carry: target_soc from this vote (highest score), departure from
+        // departure_vote (earliest), power from power_vote (most conservative).
+        let high_score_vote = PreferenceVote {
+            target_soc: Some(0.95),
+            power_kw: None,
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 10.0,
+            label: "high_score",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![
+            Box::new(ScoredPref {
+                vote: departure_vote,
+            }),
+            Box::new(ScoredPref { vote: power_vote }),
+            Box::new(ScoredPref {
+                vote: high_score_vote,
+            }),
+        ];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        // Resolved vote: target_soc=0.95 (high_score wins), departure=6.5,
+        // power=3.5 — should produce both EvSetReadyBy + PowerSetpoint.
+        assert_eq!(
+            out.len(),
+            2,
+            "merged departure+power should produce 2 dispatch requests, got {}",
+            out.len()
+        );
+
+        let has_ready_by = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }));
+        let has_power = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }));
+
+        assert!(has_ready_by, "expected EvSetReadyBy in output");
+        assert!(has_power, "expected PowerSetpoint in output");
+
+        // EvSetReadyBy should carry the winning target_soc (0.95) and departure (6.5)
+        let ready_by = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }))
+            .unwrap();
+        match &ready_by.signal {
+            ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                assert!(
+                    (departure_hour - 6.5).abs() < 1e-9,
+                    "departure should be 6.5, got {departure_hour}"
+                );
+                assert!(
+                    (target_soc - 0.95).abs() < 1e-9,
+                    "target_soc should be 0.95 (winning score), got {target_soc}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // PowerSetpoint should carry the power (3.5 kW)
+        let power_req = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }))
+            .unwrap();
+        match &power_req.signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!((active_power_kw - 3.5).abs() < 1e-9);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn departure_deadline_override_emits_both_ev_set_ready_by_and_power_setpoint() {
+        let env = TestEnvBuilder::new().build();
+        // Departure at 7:00 AM (420 min), current time (env default) is midnight
+        // 10°C default → effective_efficiency ≈ 0.81
+        // SOC 0.2 → 0.9 target, needed ≈ 7.2h, 7h available
+        // 7h < 7.2 * 1.2 = 8.6h → urgency fires
+        // Context with max_charge_kw = 7.2
+        let ctx = DecisionContext {
+            current_soc: 0.2,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 0,
+            next_departure_minute: Some(420),
+            time_res_minutes: 1.0,
+        };
+
+        let departure_pref = crate::actors::ev_driver::departure::DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 420,
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            efficiency: 0.9,
+            buffer_hours: 0.0,
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(departure_pref)];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        // The urgency Override sets both departure_hour and power_kw.
+        // The composer must propagate both — not return early after EvSetReadyBy.
+        assert_eq!(
+            out.len(),
+            2,
+            "urgency Override with both fields must produce 2 dispatch requests, got {}",
+            out.len()
+        );
+
+        let has_ready_by = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }));
+        let has_power = out
+            .iter()
+            .any(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }));
+
+        assert!(has_ready_by, "urgency Override must emit EvSetReadyBy");
+        assert!(
+            has_power,
+            "urgency Override must emit PowerSetpoint with max_charge_kw"
+        );
+
+        // The PowerSetpoint must carry max_charge_kw (the scheduler's urgency power)
+        let power_req = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }))
+            .unwrap();
+        match &power_req.signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (active_power_kw - 7.2).abs() < 1e-9,
+                    "urgency PowerSetpoint must be max_charge_kw (7.2), got {active_power_kw}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // EvSetReadyBy must carry the departure hour (7:00 → 7.0 h) and target SOC
+        let ready_by = out
+            .iter()
+            .find(|r| matches!(r.signal, ControlSignal::EvSetReadyBy { .. }))
+            .unwrap();
+        match &ready_by.signal {
+            ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                assert!(
+                    (departure_hour - 7.0).abs() < 1e-9,
+                    "departure_hour should be 7.0, got {departure_hour}"
+                );
+                assert!(
+                    (target_soc - 0.9).abs() < 1e-9,
+                    "target_soc should be 0.9, got {target_soc}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        assert_eq!(ready_by.priority, PriorityTier::Schedule);
+        assert_eq!(power_req.priority, PriorityTier::Schedule);
     }
 }
