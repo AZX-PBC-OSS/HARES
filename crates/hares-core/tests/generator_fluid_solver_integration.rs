@@ -91,7 +91,7 @@ fn generator_fluid_solver_invariant_passes() {
         grid_import_limit_kw: None,
         export_limit_kw: None,
         loop_id: Some(loop_id.0),
-        flow_rate_kg_s: Some(0.2),
+        flow_rate_kg_s: Some(0.35),
         supply_temp_c: Some(70.0),
         return_temp_c: Some(60.0),
         inverter_efficiency: None,

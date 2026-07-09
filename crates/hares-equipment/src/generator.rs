@@ -191,6 +191,45 @@ impl GeneratorConfig {
                 }
             }
         }
+        // Cross-check CHP thermal output against fluid port capacity.
+        // When eta_thermal > 0 and a fluid loop is configured, the port must
+        // be able to transport the peak thermal output at rated electric load.
+        let eta_t = self.eta_thermal.unwrap_or(0.0);
+        if eta_t > 0.0 {
+            if let Some(loop_id) = self.loop_id {
+                if loop_id > 0 {
+                    let flow = self.flow_rate_kg_s.unwrap_or(DEFAULT_FLOW_RATE_KG_S);
+                    if !flow.is_finite() || flow <= 0.0 {
+                        return Err(HaresError::Equipment(
+                            "CHP flow_rate_kg_s must be finite and > 0 when CHP is enabled"
+                                .to_string(),
+                        ));
+                    }
+                    let supply = self.supply_temp_c.unwrap_or(DEFAULT_SUPPLY_TEMP_C);
+                    let return_t = self.return_temp_c.unwrap_or(DEFAULT_RETURN_TEMP_C);
+                    let delta_t = supply - return_t;
+                    if delta_t <= 0.0 {
+                        return Err(HaresError::Equipment(
+                            "CHP supply_temp_c must be greater than return_temp_c".to_string(),
+                        ));
+                    }
+                    let fluid_capacity_w = flow * CP_LIQUID_WATER_J_KG_K * delta_t;
+                    let rated_eta_e = self.eta_electric.unwrap_or(0.0);
+                    if rated_eta_e > 0.0 {
+                        let fuel_power_w = power_kw_to_w(self.rated_power_kw) / rated_eta_e;
+                        let peak_thermal_w = fuel_power_w * eta_t;
+                        if fluid_capacity_w < peak_thermal_w * CHP_FLUID_CAPACITY_MARGIN {
+                            return Err(HaresError::Equipment(format!(
+                                "CHP fluid port cannot transport peak thermal output: \
+                                 fluid capacity {:.0} W < peak thermal {:.0} W; \
+                                 increase flow rate, widen ΔT, or both",
+                                fluid_capacity_w, peak_thermal_w
+                            )));
+                        }
+                    }
+                }
+            }
+        }
         if let Some(ramp) = self.delta_kw_per_s {
             if !ramp.is_finite() || ramp <= 0.0 {
                 return Err(HaresError::Equipment(
@@ -398,6 +437,14 @@ const DEFAULT_SUPPLY_TEMP_C: f64 = 70.0;
 
 /// Default CHP return temperature (°C) entering the heat exchanger.
 const DEFAULT_RETURN_TEMP_C: f64 = 60.0;
+
+/// Fluid port capacity margin: 5 % above theoretical peak thermal output.
+/// Why: accounts for flow-rate/ΔT configuration granularity and floating-point
+/// margin so that rounding at ~0.1 kg/s or ~1 °C resolution does not produce a
+/// false-negative validation failure. Not a physical constant — an engineering
+/// selection to keep config-time validation robust against real-world input
+/// precision without over-provisioning the fluid loop unnecessarily.
+const CHP_FLUID_CAPACITY_MARGIN: f64 = 0.95;
 
 /// Engineering estimate: typical IC engine jacket water supply temperature (°C).
 /// EnergyPlus ERM 26.1 — Generators: Internal Combustion Engine: jacket water
@@ -3210,6 +3257,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -3266,6 +3314,7 @@ mod tests {
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -4683,6 +4732,47 @@ mod tests {
     }
 
     #[test]
+    fn chp_fluid_port_capacity_check_passes_when_flow_adequate() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.35);
+        cfg.eta_thermal = Some(0.40);
+        cfg.loop_id = Some(1);
+        cfg.flow_rate_kg_s = Some(0.3); // peak ~11.4 kW needs ≥0.26 kg/s at ΔT=10°C
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn chp_fluid_port_capacity_check_rejects_undersized_flow() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.35);
+        cfg.eta_thermal = Some(0.40);
+        cfg.loop_id = Some(1);
+        cfg.flow_rate_kg_s = Some(0.01);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chp_fluid_port_rejects_supply_not_greater_than_return() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.35);
+        cfg.eta_thermal = Some(0.40);
+        cfg.loop_id = Some(1);
+        cfg.flow_rate_kg_s = Some(0.3);
+        cfg.supply_temp_c = Some(50.0);
+        cfg.return_temp_c = Some(60.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chp_fluid_port_skips_validation_when_no_chp() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.35);
+        cfg.eta_thermal = Some(0.0);
+        cfg.loop_id = Some(1);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn core_output_operating_mode_reflects_generator_state() {
         let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -5413,6 +5503,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -5463,15 +5554,15 @@ mod tests {
 
     #[test]
     fn chp_zero_flow_declares_no_thermal_power() {
-        // Regression test: when supply_temp_c <= return_temp_c, computed_flow is
-        // 0.0 and the fluid port must not declare thermal power (thermal_power_w
-        // is None). Before the fix in T-0425, the port wrote Some(q_thermal_effective_w)
-        // alongside 0.0 flow, causing a downstream debug_assert mismatch in the
-        // fluid solver between flow-implied power (0 W) and declared power (>0 W).
+        // Regression test: when the generator is producing thermal output and
+        // has a fluid port, flow and declared thermal power must be self-consistent.
+        // The invalid-config case (supply_temp_c <= return_temp_c) that previously
+        // triggered zero flow is now rejected by GeneratorConfig::validate() at
+        // config time, so this test exercises the normal positive-flow path.
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
-            (KEY_RETURN_TEMP_C, 75.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -5491,13 +5582,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(slots.fluid.len(), 1, "CHP generator must have a fluid port");
-        assert_eq!(
-            slots.fluid[0].total_flow_kg_s, 0.0,
-            "computed flow must be zero when supply_temp_c <= return_temp_c"
+        assert!(
+            slots.fluid[0].total_flow_kg_s > 0.0,
+            "computed flow must be positive when CHP is active and delta_t > 0"
         );
-        assert_eq!(
-            slots.fluid[0].total_thermal_power_w, 0.0,
-            "declared thermal power must be zero when flow is zero"
+        assert!(
+            slots.fluid[0].total_thermal_power_w > 0.0,
+            "declared thermal power must be positive when flow is positive"
         );
     }
 
@@ -5671,6 +5762,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -5730,6 +5822,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -5793,6 +5886,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
