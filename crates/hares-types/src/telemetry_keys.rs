@@ -445,6 +445,12 @@ pub const PV_LUT_INTERP_METHOD: &str = "pv_lut_interp_method";
 /// scope: internal
 pub const PV_LUT_NN_FALLBACK_COUNT: &str = "pv_lut_nn_fallback_count";
 
+/// Reactive-power source: 0.0 = none, 1.0 = reactive_setpoint,
+/// 2.0 = power_factor, 3.0 = power_setpoint.
+///
+/// scope: internal
+pub const Q_SOURCE: &str = "q_source";
+
 // ── HVAC capacity reporting ────────────────────────────────────────────────
 
 /// scope: internal — capacity output comes from CoreOutput, not telemetry key
@@ -1056,6 +1062,7 @@ mod tests {
             SHADING_FACTOR,
             PV_LUT_INTERP_METHOD,
             PV_LUT_NN_FALLBACK_COUNT,
+            Q_SOURCE,
             // HVAC capacity
             HVAC_HEATING_CAPACITY_W,
             HVAC_COOLING_CAPACITY_W,
@@ -1294,6 +1301,7 @@ mod tests {
             SHADING_FACTOR,
             PV_LUT_INTERP_METHOD,
             PV_LUT_NN_FALLBACK_COUNT,
+            Q_SOURCE,
             // HVAC capacity
             HVAC_HEATING_CAPACITY_W,
             HVAC_COOLING_CAPACITY_W,

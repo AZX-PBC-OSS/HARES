@@ -194,6 +194,15 @@ struct PvCheckpoint {
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
+    /// v3: whether an explicit Q override is active (distinct from `q_setpoint_kvar == Some(0.0)`).
+    q_setpoint_active: bool,
+    /// v4: source of the active Q override (0 = none, 1 = ReactiveSetpoint,
+    /// 3 = PowerSetpoint.reactive_power_kvar). Must be persisted alongside
+    /// `q_setpoint_active`: it is a derived field that drives `q_source`
+    /// telemetry and the ReactiveSetpoint invariant, so restoring
+    /// `q_setpoint_active` without it would leave a stale live value after a
+    /// checkpoint load onto already-stepped equipment.
+    q_setpoint_source: u8,
 }
 
 pub struct PV {
@@ -224,6 +233,18 @@ pub struct PV {
     /// through to the displacement power-factor baseline; `Some(0.0)` is a
     /// *commanded zero* that forces Q = 0 even over a pf < 1 baseline.
     q_setpoint_kvar: Option<f64>,
+    /// `true` when an explicit reactive-power override is active (set by
+    /// ReactiveSetpoint or PowerSetpoint.reactive_power_kvar). Cleared by
+    /// PowerFactorSetpoint. Provides mutual-exclusivity between explicit Q
+    /// commands and the PF baseline that `Option<f64>` alone cannot express
+    /// (both `None` and `Some(0.0)` are valid Q values, but a caller may
+    /// need to interrogate whether an explicit override is active without
+    /// inspecting the kvar magnitude).
+    q_setpoint_active: bool,
+    /// Source of the most recent explicit Q command: 0 = none,
+    /// 1 = ReactiveSetpoint, 3 = PowerSetpoint.reactive_power_kvar.
+    /// Used to populate the `q_source` telemetry field.
+    q_setpoint_source: u8,
     /// ZIP carrier for the inverter power-factor used to derive the baseline
     /// reactive output. Only [`ZipLoad::tan_phi`] is consumed — PV is a
     /// generator, not a voltage-scaled ZIP load, so the reactive polynomial is
@@ -275,7 +296,7 @@ impl PV {
             zone_type: None,
         };
 
-        let mut telemetry = Telemetry::with_capacity(12);
+        let mut telemetry = Telemetry::with_capacity(14);
         telemetry.insert(tk::DC_POWER_KW, 0.0);
         telemetry.insert(tk::AC_POWER_KW, 0.0);
         telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -288,6 +309,7 @@ impl PV {
         telemetry.insert(tk::SHADING_FACTOR, 1.0);
         telemetry.insert(tk::PV_LUT_INTERP_METHOD, 0.0);
         telemetry.insert(tk::PV_LUT_NN_FALLBACK_COUNT, 0.0);
+        telemetry.insert(tk::Q_SOURCE, 0.0);
 
         Self {
             descriptor,
@@ -306,6 +328,8 @@ impl PV {
             inverter_priority: InverterPriority::Var,
             inverter_min_pf: Some(0.8),
             q_setpoint_kvar: None,
+            q_setpoint_active: false,
+            q_setpoint_source: 0,
             zip_pf: ZipLoad::constant_power(),
             luts_by_surface: HashMap::new(),
             last_ac_power_kw: 0.0,
@@ -1170,14 +1194,22 @@ impl Equipment for PV {
         // override; only `None` falls through to the power-factor baseline.
         // A tripped inverter (de-energized bus) produces no vars regardless
         // of any commanded setpoint.
-        let bus_q_kvar = if !inverter_online {
-            0.0
+        let (bus_q_kvar, q_source) = if !inverter_online {
+            (0.0, 0.0_f64)
         } else {
             match self.q_setpoint_kvar {
-                Some(q) => q,
+                Some(q) => (q, self.q_setpoint_source as f64),
                 // `total_ac_power_kw` is the positive generation magnitude; the
                 // negative sign encodes "supplying vars to the bus."
-                None => -total_ac_power_kw * self.zip_pf.tan_phi(),
+                None => {
+                    let q_pf = -total_ac_power_kw * self.zip_pf.tan_phi();
+                    let source = if self.power_factor < 1.0 {
+                        2.0_f64
+                    } else {
+                        0.0_f64
+                    };
+                    (q_pf, source)
+                }
             }
         };
 
@@ -1186,6 +1218,25 @@ impl Equipment for PV {
         // signed q that respects the inverter's apparent-power rating.
         let (final_p_kw, final_q_kvar) = self.apply_inverter_limits(total_ac_power_kw, bus_q_kvar);
         let inverter_clipping_kw = (total_ac_power_kw - final_p_kw).max(0.0);
+
+        // T-0424 invariant: if an explicit ReactiveSetpoint { kvar: 0.0 }
+        // was applied (q_setpoint_active && q_setpoint_source == 1 for
+        // ReactiveSetpoint), then reactive_power_kvar must be 0.0 and no PF
+        // override may have occurred. This guards against the original bug
+        // where q_setpoint_kvar = 0.0 was indistinguishable from "unset".
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.q_setpoint_active
+                && self.q_setpoint_source == 1 // ReactiveSetpoint
+                && self.q_setpoint_kvar == Some(0.0)
+            {
+                debug_assert!(
+                    (final_q_kvar - 0.0_f64).abs() < 1e-12,
+                    "T-0424 invariant: ReactiveSetpoint {{ kvar: 0.0 }} was active \
+                     but final_q_kvar = {final_q_kvar} (expected 0.0); PF override likely occurred"
+                );
+            }
+        }
 
         // Observer capture: record per-timestep inverter clipping events.
         #[cfg(feature = "observe")]
@@ -1252,6 +1303,7 @@ impl Equipment for PV {
             .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_kw);
         self.telemetry.set(tk::SOILING_RATIO, soiling_ratio);
         self.telemetry.set(tk::SHADING_FACTOR, shading_factor);
+        self.telemetry.set(tk::Q_SOURCE, q_source);
         self.telemetry
             .set(tk::PV_LUT_INTERP_METHOD, f64::from(lut_nn_fallback));
         if lut_nn_fallback {
@@ -1298,9 +1350,13 @@ impl Equipment for PV {
     }
 
     fn checkpoint_version() -> u32 {
-        // v2: `q_setpoint_kvar` became Option<f64> (None = no var override;
-        //     Some(0.0) is a commanded zero).
-        2
+        // v3: added q_setpoint_active flag for mutual exclusivity between
+        //     explicit Q commands and the PF baseline (T-0424).
+        // v4: added q_setpoint_source so the derived Q-source telemetry field
+        //     survives a checkpoint restore onto already-stepped equipment
+        //     (T-0424 review). Persisting q_setpoint_active without its source
+        //     left a stale live source after load_state.
+        4
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1314,6 +1370,8 @@ impl Equipment for PV {
                 soiling_config: self.soiling_config.clone(),
                 soiling_state: self.soiling_state.clone(),
                 shading_model: self.shading_model.clone(),
+                q_setpoint_active: self.q_setpoint_active,
+                q_setpoint_source: self.q_setpoint_source,
             },
             Self::checkpoint_version(),
             "PV",
@@ -1340,6 +1398,14 @@ impl Equipment for PV {
         self.soiling_config = decoded.soiling_config;
         self.soiling_state = decoded.soiling_state;
         self.shading_model = decoded.shading_model;
+        self.q_setpoint_active = decoded.q_setpoint_active;
+        // Restore the source unconditionally, mirroring every other field:
+        // load_state runs on already-live, already-stepped equipment
+        // (Dwelling::load_checkpoint), so any live value must be fully
+        // overwritten by the checkpoint. `q_setpoint_source` is kept in sync
+        // with `q_setpoint_active` at every write site, so the checkpoint's
+        // paired values are authoritative.
+        self.q_setpoint_source = decoded.q_setpoint_source;
         // Recompute effective losses: soiling_config may have been restored
         // from a checkpoint where the Kimber model was active, and
         // init_typed() computed the default (no-soiling) value before
@@ -1391,6 +1457,8 @@ impl Equipment for PV {
                         ));
                     }
                     self.q_setpoint_kvar = Some(*q);
+                    self.q_setpoint_active = true;
+                    self.q_setpoint_source = 3; // power_setpoint
                 }
                 Ok(())
             }
@@ -1410,6 +1478,8 @@ impl Equipment for PV {
                     ));
                 }
                 self.q_setpoint_kvar = Some(*kvar);
+                self.q_setpoint_active = true;
+                self.q_setpoint_source = 1; // reactive_setpoint
                 Ok(())
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
@@ -1434,6 +1504,8 @@ impl Equipment for PV {
                 self.power_factor = *power_factor;
                 self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, *power_factor);
                 self.q_setpoint_kvar = None;
+                self.q_setpoint_active = false;
+                self.q_setpoint_source = 0;
                 Ok(())
             }
             ControlSignal::InverterPriorityMode { priority } => {
@@ -1525,6 +1597,13 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::PV_LUT_NN_FALLBACK_COUNT.to_string(),
             unit: "count".to_string(),
             description: "Cumulative count of nearest-neighbor fallbacks in PV LUT interpolation"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::Q_SOURCE.to_string(),
+            unit: "-".to_string(),
+            description: "Reactive-power source: 0.0 = none, 1.0 = reactive_setpoint, \
+                 2.0 = power_factor, 3.0 = power_setpoint"
                 .to_string(),
         },
     ]
@@ -2052,6 +2131,70 @@ mod tests {
         assert_eq!(state, state2);
     }
 
+    /// T-0424 regression: `q_setpoint_source` must survive a checkpoint
+    /// round-trip so `q_source` telemetry reflects the *checkpointed* source
+    /// after a restore, not a stale live value. `load_state` runs on
+    /// already-stepped equipment (Dwelling::load_checkpoint), so a checkpoint
+    /// whose active source is PowerSetpoint (3) restored onto a PV whose live
+    /// source is ReactiveSetpoint (1) must report `power_setpoint` after step,
+    /// not the stale `reactive_setpoint`. Before persisting `q_setpoint_source`
+    /// the restore skipped the source reset whenever `q_setpoint_active` was
+    /// true, leaving the wrong live value in place.
+    #[test]
+    fn q_setpoint_source_survives_checkpoint_round_trip() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV QRT".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+
+        // Source PV: the checkpointed state was captured with a commanded
+        // zero from PowerSetpoint (source = 3 = power_setpoint).
+        let mut source = PV::new(cfg.clone());
+        source.init(&cfg, &env).unwrap();
+        source
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: Some(0.0),
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let state = source.save_state().unwrap();
+
+        // Destination PV: already live with a *different* active source
+        // (ReactiveSetpoint, source = 1) before the checkpoint is loaded.
+        let mut restored = PV::new(cfg.clone());
+        restored.init(&cfg, &env).unwrap();
+        restored
+            .apply_control(&ControlSignal::ReactiveSetpoint { kvar: 5.0 })
+            .unwrap();
+        restored.load_state(&state).unwrap();
+
+        let mut ports = PortSlots::default();
+        restored
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // q_source must report power_setpoint (3.0), the checkpointed source,
+        // not the stale ReactiveSetpoint (1.0).
+        let q_source = restored.telemetry().get(tk::Q_SOURCE).unwrap();
+        approx_eq(q_source, 3.0);
+        // The commanded zero must also hold through the restore.
+        let q = restored.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.0);
+    }
+
     /// Regression: `load_state` must re-derive the cached `zip_pf` from the
     /// restored `power_factor`, otherwise a PowerFactorSetpoint applied
     /// before the checkpoint is silently dropped from the baseline Q path.
@@ -2374,6 +2517,142 @@ mod tests {
         approx_eq(pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap(), 0.0);
         approx_eq(pv.core_output().flows.reactive_power_kvar.unwrap(), 0.0);
         approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+    }
+
+    /// T-0424: A PV with power_factor=0.95 must produce Q=0.0 when
+    /// ReactiveSetpoint { kvar: 0.0 } is explicitly commanded. The explicit
+    /// zero must not be overridden by the PF baseline fallback.
+    #[test]
+    fn reactive_zero_setpoint_not_overridden_by_pf() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV QZ".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.0);
+    }
+
+    /// T-0424: A PV with power_factor=0.95 and no explicit Q setpoint must
+    /// derive Q from PF (non-zero). Default q_setpoint_kvar=None falls
+    /// through to the PF baseline path.
+    #[test]
+    fn pf_fallback_when_no_q_setpoint() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV PF".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        // Must produce PF-derived Q with no explicit setpoint — non-zero.
+        assert!(
+            q.abs() > 1e-9,
+            "expected PF-derived Q (non-zero) but got {q}"
+        );
+    }
+
+    /// T-0424: Applying PowerFactorSetpoint after ReactiveSetpoint must clear
+    /// the explicit Q override and re-engage the PF baseline.
+    #[test]
+    fn power_factor_setpoint_clears_q_active_flag() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV PFC".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        // Set an explicit Q override via ReactiveSetpoint.
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 5.0 })
+            .unwrap();
+        // Then send PowerFactorSetpoint to clear it and re-engage PF baseline.
+        pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.95 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        // PF=0.95 with positive P power must produce non-zero Q.
+        assert!(
+            q.abs() > 1e-9,
+            "expected PF-derived Q (non-zero) after PowerFactorSetpoint cleared \
+             ReactiveSetpoint, got {q}"
+        );
+    }
+
+    /// T-0424: PowerSetpoint with reactive_power_kvar=Some(0.0) must force Q=0
+    /// even when the PF baseline would otherwise produce non-zero Q.
+    #[test]
+    fn power_setpoint_with_q_zero() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.power_factor = Some(0.95);
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV PS".to_string(), "PV".to_string(), cfg).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        // PowerSetpoint with active_power_kw=3.0 and reactive_power_kvar=Some(0.0)
+        // should force Q to zero.
+        pv.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: Some(0.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.0);
     }
 
     /// A misconfigured power_factor outside (0, 1] must fail at init (via
