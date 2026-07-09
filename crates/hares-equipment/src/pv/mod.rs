@@ -337,8 +337,21 @@ impl PV {
     /// bypass the correction (results may be biased).
     ///
     /// Both paths apply soiling and shading reduction before the power
-    /// calculation. The LUT path additionally applies soiling/shading on top
-    /// of the LUT's own AC power output.
+    /// calculation. In the non-LUT path soiling/shading reduce irradiance;
+    /// in the LUT path soiling/shading are applied as a DC-side derating
+    /// after recovering raw DC from the LUT's AC output, keeping the
+    /// inverter model boundary intact.
+    ///
+    /// **Numeric equivalence note:** for the current scalar-only SAM LUT
+    /// metadata format (`sam_inv_eff` and `sam_losses` are single `f64`
+    /// scalars in `PvLut`, parsed from PySAM `SystemDesign.inv_eff / 100.0`),
+    /// this structural reordering produces `dc_power_kw` and `ac_power_kw`
+    /// numerically identical to the pre-fix AC-side multiplication
+    /// (commutative under real-number arithmetic). The DC-side structure
+    /// only changes results when the LUT format gains a genuine part-load
+    /// efficiency curve — which PySAM's PVWatts module does not currently
+    /// expose as a vector-valued output. See T-0422 `### Known Limitations`
+    /// for the concrete constraint.
     fn step_one_array(
         &self,
         env: &EnvironmentState,
@@ -366,7 +379,7 @@ impl PV {
             let ghi = env.weather.ghi_w_m2.max(0.0);
             let dni = env.weather.dni_w_m2.max(0.0);
             let dhi = env.weather.dhi_w_m2.max(0.0);
-            let (lut_ac_kw, interp_method) = lut.interpolate(
+            let (raw_lut_ac_kw, interp_method) = lut.interpolate(
                 solar_zenith_deg,
                 solar_azimuth_deg,
                 ghi,
@@ -374,7 +387,7 @@ impl PV {
                 dhi,
                 ambient_temp_c,
             );
-            let ac_power_kw = lut_ac_kw.max(0.0) * soiling_ratio * shading_factor;
+            let raw_lut_ac_kw = raw_lut_ac_kw.max(0.0);
 
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
@@ -386,32 +399,48 @@ impl PV {
             let sam_inv_eff = lut.sam_inv_eff();
             let sam_losses = lut.sam_losses();
 
-            // T-0086: SAM's PVWatts already applies its own internal inverter
-            // efficiency (inv_eff) and system losses (losses) when producing
-            // the AC output stored in the LUT. Recover the true DC power by
-            // dividing these out, then re-apply HARES' configured values so
-            // both LUT and non-LUT paths use the same sequence:
-            //   DC → system_losses → inverter_efficiency → AC
+            // T-0086 / T-0422: SAM's PVWatts already applies its own internal
+            // inverter efficiency (inv_eff) and system losses (losses) when
+            // producing the AC output stored in the LUT. Recover the true DC
+            // power from the *raw* LUT AC (no soiling/shading), then apply
+            // soiling at the DC level before re-converting through HARES'
+            // inverter model. This ensures dc_power_kw reflects true DC-side
+            // derating rather than a post-inverter back-calculation.
+            //
+            // For the current scalar-only LUT metadata format (sam_inv_eff
+            // and sam_losses are single f64 scalars — see lut.rs:105-106 and
+            // sam_pv.py:316), soiling at DC vs AC is mathematically equivalent
+            // (commutativity under real-number arithmetic). Output is
+            // numerically identical to pre-fix for all LUTs this codebase
+            // can currently produce. The DC-side structure only becomes
+            // behaviorally meaningful when the LUT format gains a genuine
+            // part-load inverter efficiency curve (not exposed by PySAM's
+            // PVWatts module).
             //
             // SAM PVWatts v8 defaults: inv_eff = 96%, losses = 14%
             // (NREL/TP-7A40-80694). SSC declares both with unit "%"
             // (cmod_pvwattsv5.cpp:53-54). The Python adapter divides by
             // 100 so the Rust consumer receives fraction form (0.96, 0.14).
-            let dc_true = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                ac_power_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9)
+            let dc_no_losses = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
+                raw_lut_ac_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9)
             } else {
-                ac_power_kw / self.inverter_efficiency.max(1e-9)
+                raw_lut_ac_kw / self.inverter_efficiency.max(1e-9)
             };
 
+            // T-0422: Apply soiling and shading as DC-side derating.
+            let dc_soiled = dc_no_losses * soiling_ratio * shading_factor;
+
             let (dc_power_kw, ac_power_kw) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                let dc_power_kw = dc_true * (1.0 - self.effective_system_losses_fraction);
+                let dc_power_kw = dc_soiled * (1.0 - self.effective_system_losses_fraction);
                 let ac_power_kw = dc_power_kw * self.inverter_efficiency;
                 (dc_power_kw, ac_power_kw.max(0.0))
             } else {
-                // Legacy LUT without SAM metadata — fall back to pre-T-0086
-                // behaviour. Results will be biased by ~4-18% due to double-
-                // applied inverter efficiency and missing system losses.
-                (dc_true, ac_power_kw)
+                // Legacy LUT without SAM metadata — apply soiling at DC
+                // level under the commutativity assumption. Results may be
+                // biased by ~4-18% due to double-applied inverter efficiency
+                // and missing internal system losses in the legacy LUT.
+                let ac_power_kw = dc_soiled * self.inverter_efficiency;
+                (dc_soiled, ac_power_kw)
             };
 
             // T-0107 invariant check: warn when system_losses_fraction
@@ -498,13 +527,32 @@ impl PV {
                     pv_lut_vs_direct_ac_diff_ratio = ratio,
                     lut_ac_kw = ac_power_kw,
                     direct_ac_kw = ac_direct,
+                    soiling_lut_path_corrected = sam_inv_eff > 0.0 && sam_inv_eff <= 1.0,
+                    soiling_ratio = soiling_ratio,
                     "PV LUT vs direct comparison",
                 );
             }
 
-            // dc_power_kw_before_losses: the raw DC recovered from the LUT
-            // AC output before HARES' own system_losses_fraction is applied.
-            let dc_before_losses = dc_true;
+            // T-0422: dc_power_kw is already computed from dc_no_losses *
+            // soiling_ratio * shading_factor * (1 - effective_system_losses_fraction)
+            // at lines 415-428. For the current scalar-only LUT metadata format
+            // this is algebraically equivalent to the pre-fix AC-side
+            // multiplication; no runtime invariant check is currently
+            // constructible that can distinguish DC-side from AC-side soiling
+            // placement (see T-0422 Known Limitations). The invariant check
+            // previously inserted here was removed because it was vacuous:
+            // dc_power_kw ≤ dc_no_losses * soiling_ratio by construction
+            // regardless of which side of the inverter division soiling was
+            // applied on, due to shading_factor ∈ [0,1] and losses ∈ [0,1]
+            // (algebraic identity, not a check of soiling placement).
+
+            // dc_power_kw_before_losses: the DC recovered from the LUT AC
+            // output with soiling/shading applied, before HARES' own
+            // system_losses_fraction is applied. Soiling is applied here
+            // rather than in dc_no_losses so the before-losses value is
+            // comparable with the non-LUT path (where irradiance already
+            // includes soiling).
+            let dc_before_losses = dc_soiled;
 
             return ArrayStepOutput {
                 dc_power_kw,
@@ -4541,5 +4589,254 @@ mod tests {
         // The soiling component alone: 1 - 0.98 = 0.02.
         approx_eq(PVWATTS_SOILING_COMPONENT, 0.02);
         approx_eq(1.0 - PVWATTS_SOILING_COMPONENT, 0.98);
+    }
+
+    // --- T-0422: SAM LUT path soiling at DC level ---
+
+    /// Output-preservation: verifies that the restructured LUT-path DC-side
+    /// soiling computation produces algebraically consistent results for the
+    /// current scalar-only LUT metadata format. For `sam_inv_eff` and
+    /// `sam_losses` as single f64 scalars (the only format HARES LUTs
+    /// currently carry — see lut.rs:105-106, sam_pv.py:316), the DC-side
+    /// reordering is mathematically equivalent to the pre-fix AC-side
+    /// multiplication. This test documents the equivalence and would break if
+    /// the algebraic structure of the correction diverges from the no-soiling
+    /// DC recovery path. It does not catch a behavioral front-regression from
+    /// a hypothetical part-load efficiency curve — no such curve exists in the
+    /// current LUT format, so no behavioral regression test is constructible
+    /// for that defect class at this time.
+    #[test]
+    fn lut_path_soiling_dc_power_algebraically_consistent() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let capacity_kw = 5.0;
+        let sam_losses = 0.14;
+        let sam_inv_eff = 0.96;
+
+        // At STC without soiling, compute expected raw DC.
+        let t_cell = cell_temperature_noct_wind(25.0, 1000.0, DEFAULT_NOCT_C, 1.0);
+        let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
+        let dc_no_losses_expected = capacity_kw * derate;
+        // SAM would produce AC = dc_no_losses * (1 - sam_losses) * sam_inv_eff
+        let ac_lut = dc_no_losses_expected * (1.0 - sam_losses) * sam_inv_eff;
+
+        let path = unique_temp_path("pv_lut_t0422_soiling_dc", "parquet");
+        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(1);
+        cfg.capacity_kw = capacity_kw;
+        cfg.system_losses_fraction = Some(0.0);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        let cfg = EquipmentConfig::from_typed("PV LUT Soiling".to_string(), "PV".to_string(), cfg)
+            .unwrap();
+
+        let mut env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+            1.0,
+        );
+        env.weather.solar_altitude_deg = 60.0; // zenith = 30
+        env.weather.solar_azimuth_deg = 180.0;
+        env.weather.ghi_w_m2 = 0.0;
+        env.weather.dni_w_m2 = 0.0;
+        env.weather.dhi_w_m2 = 0.0;
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        // Override effective losses to 0 so dc_power_kw = dc_soiled directly.
+        pv.effective_system_losses_fraction = 0.0;
+
+        let irr = env
+            .weather
+            .solar_irradiance
+            .iter()
+            .find(|e| e.surface_id == sid)
+            .unwrap();
+
+        // 10% soiling (ratio = 0.90), no shading.
+        let soil_ratio = 0.90;
+        let shade_factor = 1.0;
+        let output = pv.step_one_array(&env, irr, &pv.arrays[0], soil_ratio, shade_factor);
+
+        assert!(output.lut_path_active, "must use LUT path");
+        let dc = output.dc_power_kw;
+        let dc_before = output.dc_power_kw_before_losses;
+
+        // dc_before_losses should equal dc (losses = 0.0) and reflect soiling.
+        approx_eq(dc, dc_before);
+
+        // Raw DC from LUT AC (no soiling) * soiling = expected DC.
+        // SAM's AC encodes dc_no_losses * (1 - 0.14) * 0.96.
+        // T-0086 correction: dc_no_losses = ac_lut / 0.96 / 0.86.
+        // dc_soiled = dc_no_losses * 0.90 * 1.0, dc_power_kw = dc_soiled (losses=0).
+        let dc_no_losses = ac_lut / sam_inv_eff / (1.0 - sam_losses);
+        let expected_dc = dc_no_losses * soil_ratio * shade_factor;
+        approx_eq(dc, expected_dc);
+
+        // invariant: dc_power_kw reflects DC-side soiling.
+        assert!(
+            dc <= dc_no_losses * soil_ratio + 1e-12,
+            "dc_power_kw ({dc:.6}) must be <= dc_no_losses * soiling_ratio ({:.6})",
+            dc_no_losses * soil_ratio,
+        );
+        assert!(
+            dc < dc_no_losses,
+            "dc_power_kw ({dc:.6}) must be < un-soiled dc_no_losses ({dc_no_losses:.6})"
+        );
+
+        // AC output at eff=1.0, losses=0.0: AC = DC = dc_no_losses * soil * shade.
+        let expected_ac = expected_dc;
+        approx_eq(output.ac_power_kw, expected_ac);
+
+        // Cell temp uses soiling-reduced irradiance — verify it's consistent.
+        let irr_no_soiling = 1000.0; // direct=1000, diffuse=0, reflected=0
+        let irr_soiled = irr_no_soiling * soil_ratio;
+        let expected_cell_temp = cell_temperature_noct_wind(25.0, irr_soiled, DEFAULT_NOCT_C, 1.0);
+        approx_eq(output.irradiance_w_m2, irr_soiled);
+        approx_eq(output.cell_temp_c, expected_cell_temp);
+    }
+
+    /// Commutativity-preservation: verifies that LUT and non-LUT (PVWatts)
+    /// paths produce identical `dc_power_kw` and `ac_power_kw` for the same
+    /// irradiance, soiling ratio, and a constant-efficiency inverter (eff =
+    /// 1.0, losses = 0.0). The commutativity property ((DC × S) × inv_eff =
+    /// (DC × inv_eff) × S for constant inv_eff) is satisfied by both the
+    /// pre-fix AC-side and post-restructure DC-side soiling placements, so
+    /// this test passes against both. It is an output-preservation test, not
+    /// a behavioral regression test for the defect T-0422 was opened to close
+    /// — that defect class requires a part-load efficiency curve which the
+    /// current scalar-only LUT format cannot represent (see T-0422 Known
+    /// Limitations, citing lut.rs:105-106 and sam_pv.py:316).
+    #[test]
+    fn lut_and_non_lut_paths_agree_for_constant_efficiency_under_soiling() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let capacity_kw = 5.0;
+        let hares_losses = 0.0;
+        let hares_inv_eff = 1.0;
+        let sam_losses = 0.14;
+        let sam_inv_eff = 0.96;
+        let ambient_c = 25.0;
+        let soil_ratio = 0.85;
+        let shade_factor = 1.0;
+
+        // --- Non-LUT (PVWatts) path ---
+        let mut pv_no_lut_cfg = base_pv_typed_config();
+        pv_no_lut_cfg.equipment_id = Some(1);
+        pv_no_lut_cfg.system_losses_fraction = Some(hares_losses);
+        pv_no_lut_cfg.inverter_efficiency = Some(hares_inv_eff);
+        let cfg_no_lut = EquipmentConfig::from_typed(
+            "PV NoLUT Soiling".to_string(),
+            "PV".to_string(),
+            pv_no_lut_cfg,
+        )
+        .unwrap();
+
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+
+        let mut pv_no_lut = PV::new(cfg_no_lut.clone());
+        pv_no_lut.init(&cfg_no_lut, &env).unwrap();
+        pv_no_lut.effective_system_losses_fraction = hares_losses;
+
+        let irr = env
+            .weather
+            .solar_irradiance
+            .iter()
+            .find(|e| e.surface_id == sid)
+            .unwrap();
+        let out_no_lut =
+            pv_no_lut.step_one_array(&env, irr, &pv_no_lut.arrays[0], soil_ratio, shade_factor);
+        let ac_no_lut = out_no_lut.ac_power_kw;
+        let dc_no_lut = out_no_lut.dc_power_kw;
+
+        // --- LUT path ---
+        // The LUT AC must encode the same DC as the non-LUT path at the
+        // soiling-reduced cell temperature so that both paths produce
+        // identical AC (commutativity test). SAM's NOCT model matches
+        // HARES', so we compute the cell temp at the soiled irradiance
+        // and set the LUT AC to represent that DC state.
+        //
+        // Non-LUT cell temp: T_cell(POA * soil) = T_amb + POA*soil*(NOCT-20)/800
+        // We encode: AC_lut = DC_at_this_temp * (1-sam_losses) * sam_inv_eff
+        let t_cell_soiled =
+            cell_temperature_noct_wind(ambient_c, 1000.0 * soil_ratio, DEFAULT_NOCT_C, 1.0);
+        let derate_soiled = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell_soiled - 25.0);
+        let target_dc_no_losses = capacity_kw * (1000.0 / 1000.0) * derate_soiled;
+        let ac_lut = target_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
+        let path = unique_temp_path("pv_lut_t0422_parity", "parquet");
+        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+
+        let mut cfg_lut = base_pv_typed_config();
+        cfg_lut.equipment_id = Some(2);
+        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.system_losses_fraction = Some(hares_losses);
+        cfg_lut.inverter_efficiency = Some(hares_inv_eff);
+        cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        let cfg_lut =
+            EquipmentConfig::from_typed("PV LUT Soiling".to_string(), "PV".to_string(), cfg_lut)
+                .unwrap();
+
+        let mut env_lut = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        env_lut.weather.solar_altitude_deg = 60.0; // zenith = 30
+        env_lut.weather.solar_azimuth_deg = 180.0;
+        env_lut.weather.ghi_w_m2 = 0.0;
+        env_lut.weather.dni_w_m2 = 0.0;
+        env_lut.weather.dhi_w_m2 = 0.0;
+
+        let mut pv_lut = PV::new(cfg_lut.clone());
+        pv_lut.init(&cfg_lut, &env_lut).unwrap();
+        // Override system_losses_fraction to match the non-LUT path.
+        pv_lut.effective_system_losses_fraction = hares_losses;
+
+        let irr_lut = env_lut
+            .weather
+            .solar_irradiance
+            .iter()
+            .find(|e| e.surface_id == sid)
+            .unwrap();
+        let out_lut = pv_lut.step_one_array(
+            &env_lut,
+            irr_lut,
+            &pv_lut.arrays[0],
+            soil_ratio,
+            shade_factor,
+        );
+        let ac_lut_path = out_lut.ac_power_kw;
+        let dc_lut_path = out_lut.dc_power_kw;
+
+        assert!(out_lut.lut_path_active, "must use LUT path");
+
+        // For constant-efficiency inverter (eff=1.0, losses=0.0), both paths
+        // produce the same AC output (commutativity). The LUT entry encodes
+        // the same cell temperature as the non-LUT path by using the soiled
+        // irradiance for the SAM NOCT calculation.
+        approx_eq(ac_lut_path, ac_no_lut);
+        approx_eq(dc_lut_path, dc_no_lut);
     }
 }
