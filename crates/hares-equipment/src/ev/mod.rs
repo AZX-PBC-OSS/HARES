@@ -75,7 +75,19 @@ pub struct Ev {
     telemetry: Telemetry,
     core_output: CoreOutput,
 
+    /// Current usable pack capacity [kWh], degraded from rated by state of
+    /// health. Updated at each day boundary in `update_degradation` as
+    /// `battery_capacity_kwh_rated * SOH`. This is the divisor used for all
+    /// SOC arithmetic (driving, charging, V2L/V2G discharge) so the runtime
+    /// SOC, range, and charging duration reflect the aged pack — mirroring
+    /// the Battery model's `capacity_kwh_nominal` (battery/mod.rs).
     battery_capacity_kwh: f64,
+    /// Rated (beginning-of-life) pack capacity [kWh], held constant from
+    /// initialization. Mirrors the Battery model's `capacity_kwh_rated`.
+    /// Not stored in the checkpoint: `init` sets it from config, and
+    /// `load_state` recomputes `battery_capacity_kwh` from it and the
+    /// restored SOH.
+    battery_capacity_kwh_rated: f64,
     charging_level: ChargingLevel,
     rated_power_kw: f64,
     charging_efficiency: f64,
@@ -224,6 +236,7 @@ impl Ev {
             telemetry: default_telemetry(charging_level),
             core_output: CoreOutput::default(),
             battery_capacity_kwh,
+            battery_capacity_kwh_rated: battery_capacity_kwh,
             charging_level,
             rated_power_kw,
             charging_efficiency: config.get_f64(KEY_EFFICIENCY).unwrap_or(DEFAULT_EFFICIENCY),
@@ -344,6 +357,7 @@ impl Ev {
         c.validate()?;
 
         self.battery_capacity_kwh = c.capacity_kwh;
+        self.battery_capacity_kwh_rated = c.capacity_kwh;
 
         let level_str = c.charging_level.as_deref().unwrap_or("L2");
         self.charging_level = match level_str
@@ -769,7 +783,7 @@ impl Ev {
         }
 
         #[cfg(feature = "observe")]
-        if !self.charging_curve_lut.is_some() && self.soc >= self.cc_cv_transition_soc {
+        if self.charging_curve_lut.is_none() && self.soc >= self.cc_cv_transition_soc {
             tracing::debug!(
                 soc = self.soc,
                 transition_soc = self.cc_cv_transition_soc,
@@ -1041,6 +1055,8 @@ impl Ev {
         self.telemetry
             .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
         self.telemetry
+            .set(tk::CAPACITY_KWH_RATED, self.battery_capacity_kwh_rated);
+        self.telemetry
             .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
         self.telemetry
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
@@ -1053,6 +1069,8 @@ impl Ev {
         tracing::debug!(
             effective_wall_kwh_per_mi = self.fuel_economy_kwh_per_mi,
             battery_capacity_kwh = self.battery_capacity_kwh,
+            battery_capacity_kwh_rated = self.battery_capacity_kwh_rated,
+            capacity_fade_pct = self.degradation.capacity_fade_fraction() * 100.0,
             charging_efficiency = self.charging_efficiency,
             "EV runtime: effective wall-to-wheels fuel economy diagnostic",
         );
@@ -1071,6 +1089,25 @@ impl Ev {
         if current_day != self.last_daily_update_day {
             let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
             self.degradation.update_daily(&self.u_neg_table, sum_sq_dod);
+
+            // Feed the aged state of health back into the usable pack
+            // capacity so runtime SOC arithmetic (driving, charging, V2L/V2G)
+            // reflects the degraded pack. Mirrors the Battery model's daily
+            // update `capacity_kwh_nominal = capacity_kwh_rated * SOH`
+            // (battery/mod.rs). Without this the EV would move SOC using the
+            // undegraded divisor, understating range loss and charge duration.
+            let soh = 1.0 - self.degradation.capacity_fade_fraction();
+            self.battery_capacity_kwh = self.battery_capacity_kwh_rated * soh;
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                debug_assert!(
+                    self.battery_capacity_kwh > 0.0 || soh <= 0.0,
+                    "battery_capacity_kwh underflow: rated={}, soh={soh}, current={}",
+                    self.battery_capacity_kwh_rated,
+                    self.battery_capacity_kwh
+                );
+            }
+
             self.degradation.reset_day_tracking(self.soc);
             self.rainflow.reset_daily();
             self.last_daily_update_day = current_day;
@@ -1409,6 +1446,14 @@ impl Equipment for Ev {
         self.last_daily_update_day = cp.last_daily_update_day;
         self.q_setpoint_kvar = cp.q_setpoint_kvar;
         self.power_factor = cp.power_factor;
+
+        // `battery_capacity_kwh_rated` is static config set by `init`, not
+        // stored in the checkpoint (the caller must call `init` before
+        // `load_state`). Recompute the degraded usable capacity from the
+        // rated capacity and the restored SOH so SOC arithmetic resumes with
+        // the aged divisor. Mirrors Battery::load_state (battery/mod.rs).
+        let soh = 1.0 - self.degradation.capacity_fade_fraction();
+        self.battery_capacity_kwh = self.battery_capacity_kwh_rated * soh;
 
         self.v2l_active = false;
         self.v2l_power_kw = 0.0;

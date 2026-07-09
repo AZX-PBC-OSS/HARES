@@ -6125,6 +6125,24 @@ impl Dwelling {
             if let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) {
                 checker.check_soc(soc, 0.0)?;
             }
+            // EV usable capacity must track its degraded SOH: the runtime SOC
+            // divisor (`capacity_kwh`) must equal rated · (1 − capacity_fade).
+            // These are static EV telemetry keys populated at init and every
+            // step; reading them here keeps the check DAG-clean (hares-core
+            // never reaches into hares-equipment internals). `capacity_fade_pct`
+            // is a percentage.
+            if *end_use == EndUse::EV {
+                let telem = eq.telemetry();
+                let current = telem.get(tk::CAPACITY_KWH);
+                // allowed: capacity_kwh is a static EV telemetry key set at init.
+                let rated = telem.get(tk::CAPACITY_KWH_RATED);
+                // allowed: capacity_kwh_rated is a static EV telemetry key set at init.
+                let fade_pct = telem.get(tk::CAPACITY_FADE_PCT);
+                // allowed: capacity_fade_pct is a static EV telemetry key set at init.
+                if let (Some(current), Some(rated), Some(fade_pct)) = (current, rated, fade_pct) {
+                    checker.check_ev_capacity_degraded(current, rated, fade_pct / 100.0)?;
+                }
+            }
         }
 
         // Electrical finiteness — screened before any residual computation.

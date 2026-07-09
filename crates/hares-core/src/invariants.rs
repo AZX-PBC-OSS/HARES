@@ -310,6 +310,71 @@ impl InvariantChecker {
         Ok(())
     }
 
+    /// Verifies that the EV's usable pack capacity tracks its degraded state of
+    /// health.
+    ///
+    /// The EV mirrors the Battery model: the usable pack capacity
+    /// (`battery_capacity_kwh`) is recomputed at each day boundary as
+    /// `battery_capacity_kwh_rated · (1 − capacity_fade_fraction)`. This check
+    /// asserts that algebraic relationship holds within `1e-6`:
+    ///
+    /// `|battery_capacity_kwh / battery_capacity_kwh_rated − (1 − capacity_fade_fraction)| < 1e-6`
+    ///
+    /// A violation means SOC arithmetic (driving, charging, V2L/V2G) is using a
+    /// capacity divisor that disagrees with the tracked degradation.
+    ///
+    /// Note: this check does **not** assert `battery_capacity_kwh ≤ rated`.
+    /// The Smith (2017) degradation model has a beginning-of-life transient
+    /// (`q_li3 < 0`) that can drive SOH slightly above 1.0 in the first days,
+    /// making usable capacity momentarily exceed rated. The Battery model
+    /// likewise avoids a `nominal ≤ rated` assertion for this reason; only the
+    /// algebraic consistency relationship is universally valid.
+    pub fn check_ev_capacity_degraded(
+        &self,
+        battery_capacity_kwh: f64,
+        battery_capacity_kwh_rated: f64,
+        capacity_fade_fraction: f64,
+    ) -> Result<(), HaresError> {
+        const CHECK: &str = "ev_capacity_degraded";
+        const TOLERANCE: f64 = 1e-6;
+
+        for value in [
+            battery_capacity_kwh,
+            battery_capacity_kwh_rated,
+            capacity_fade_fraction,
+        ] {
+            if !value.is_finite() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: CHECK.to_string(),
+                    value,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
+        // A non-positive rated capacity has no valid SOH ratio and would make
+        // the divisor meaningless — a configuration/initialization error.
+        if battery_capacity_kwh_rated <= 0.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: CHECK.to_string(),
+                value: battery_capacity_kwh_rated,
+                tolerance: 0.0,
+            });
+        }
+
+        let expected_soh = 1.0 - capacity_fade_fraction;
+        let actual_ratio = battery_capacity_kwh / battery_capacity_kwh_rated;
+        let residual = (actual_ratio - expected_soh).abs();
+        if residual >= TOLERANCE {
+            return Err(HaresError::InvariantViolation {
+                check_name: CHECK.to_string(),
+                value: residual,
+                tolerance: TOLERANCE,
+            });
+        }
+        Ok(())
+    }
+
     /// Validates that zone and tank temperatures are within physically plausible bounds.
     ///
     /// - Conditioned zone temperatures: `[-50, 80]` °C
@@ -632,6 +697,10 @@ impl InvariantChecker {
     }
 
     pub fn check_soc(&self, _: f64, _: f64) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_ev_capacity_degraded(&self, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
         Ok(())
     }
 
@@ -1302,6 +1371,59 @@ mod tests {
         // SoC violations warn but do not return Err.
         let result = checker().check_soc(1.5, 0.002);
         assert!(result.is_ok());
+    }
+
+    // ── ev_capacity_degraded ──────────────────────────────────────────────────
+
+    #[test]
+    fn ev_capacity_degraded_passes_when_capacity_matches_soh() {
+        // rated 60 kWh, 10% fade → usable 54 kWh; ratio 0.9 == 1 − 0.1.
+        let result = checker().check_ev_capacity_degraded(54.0, 60.0, 0.10);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ev_capacity_degraded_passes_at_beginning_of_life_when_undegraded() {
+        // Fresh pack: fade 0, usable == rated.
+        let result = checker().check_ev_capacity_degraded(60.0, 60.0, 0.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ev_capacity_degraded_passes_when_soh_exceeds_one() {
+        // Smith (2017) BOL transient: fade can be negative (SOH > 1), so usable
+        // capacity legitimately exceeds rated. The algebraic relationship still
+        // holds and must pass — the check must not assume usable ≤ rated.
+        let rated = 60.0;
+        let fade = -0.024;
+        let usable = rated * (1.0 - fade);
+        let result = checker().check_ev_capacity_degraded(usable, rated, fade);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ev_capacity_degraded_fails_when_capacity_ignores_degradation() {
+        // The bug this guards against: usable capacity held at rated while the
+        // tracked fade is 10%. ratio 1.0 ≠ 0.9 → violation.
+        let result = checker().check_ev_capacity_degraded(60.0, 60.0, 0.10);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "ev_capacity_degraded"
+        ));
+    }
+
+    #[test]
+    fn ev_capacity_degraded_fails_on_nan() {
+        let result = checker().check_ev_capacity_degraded(f64::NAN, 60.0, 0.1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ev_capacity_degraded_fails_on_non_positive_rated() {
+        let result = checker().check_ev_capacity_degraded(0.0, 0.0, 0.0);
+        assert!(result.is_err());
     }
 
     // ── protocol_native_registration ────────────────────────────────────────

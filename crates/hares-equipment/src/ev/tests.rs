@@ -4500,3 +4500,169 @@ fn v2l_discharge_respects_deadline_flag_off_bypasses_interlock() {
          to v2l_soc_reserve=0.2 even with ready_by_soc=0.9, got {power}"
     );
 }
+
+/// Ages an EV through `days` of pure calendar degradation (disconnected, SOC
+/// held constant) so `capacity_fade_fraction()` becomes non-zero and the
+/// day-boundary SOH→capacity linkage fires. Returns the aged EV.
+///
+/// Under the Smith (2017) model the beginning-of-life transient (`q_li3 < 0`)
+/// keeps SOH slightly above 1.0 for hundreds of days at mid-SOC, so the usable
+/// capacity sits marginally *above* rated here — the linkage is proportional
+/// (`capacity = rated · SOH`), not strictly a reduction. Tests therefore assert
+/// the algebraic relationship, which is universally valid.
+fn aged_ev(days: usize) -> Ev {
+    let dt = Duration::from_secs(300);
+    let steps_per_day = 288usize;
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 25.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut env = sample_env();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &env).unwrap();
+    ev.last_daily_update_day = {
+        use chrono::Datelike;
+        env.current_time.date_naive().num_days_from_ce()
+    };
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    for _ in 0..days {
+        for _ in 0..steps_per_day {
+            let mut ports = PortSlots::default();
+            ev.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(dt.as_secs() as i64);
+        }
+    }
+    ev
+}
+
+/// Unit test for the SOH→capacity feedback (T-0421 directive 2): once the
+/// day-boundary degradation update has produced a non-zero capacity fade, the
+/// usable pack capacity must equal `rated · (1 − fade)`. Before the fix the EV
+/// held `battery_capacity_kwh` constant at the rated value, so SOC arithmetic
+/// ignored degradation entirely.
+#[test]
+fn daily_degradation_rescales_usable_capacity() {
+    let ev = aged_ev(30);
+    let fade = ev.degradation.capacity_fade_fraction();
+
+    assert!(
+        fade.abs() > 1e-6,
+        "30 days of aging should produce a non-zero capacity fade, got {fade}"
+    );
+
+    let expected = ev.battery_capacity_kwh_rated * (1.0 - fade);
+    assert!(
+        (ev.battery_capacity_kwh - expected).abs() < 1e-9,
+        "usable capacity {} must equal rated·(1−fade) = {expected}",
+        ev.battery_capacity_kwh
+    );
+    // The runtime divisor must differ from the rated value — otherwise SOC
+    // arithmetic would still be using the undegraded capacity (the bug).
+    assert!(
+        (ev.battery_capacity_kwh - ev.battery_capacity_kwh_rated).abs() > 1e-6,
+        "aged usable capacity {} must differ from rated {}",
+        ev.battery_capacity_kwh,
+        ev.battery_capacity_kwh_rated
+    );
+}
+
+/// Integration test for the runtime effect (T-0421 directive core): a
+/// fixed-energy drive moves SOC by `energy / usable_capacity`, i.e. it scales
+/// as `1/SOH` relative to a fresh pack. Before the fix a fixed drive always
+/// moved SOC by `energy / rated`, independent of the pack's aged state.
+#[test]
+fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
+    let drive_kwh = 6.0;
+
+    // Fresh pack: SOH = 1, capacity = rated.
+    let mut fresh = aged_ev(0);
+    fresh.soc = 0.9;
+    let rated = fresh.battery_capacity_kwh_rated;
+    assert!((fresh.battery_capacity_kwh - rated).abs() < 1e-12);
+    let soc_before_fresh = fresh.soc;
+    fresh
+        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+        .unwrap();
+    let swing_fresh = soc_before_fresh - fresh.soc;
+
+    // Aged pack: SOH ≠ 1, capacity = rated·SOH.
+    let mut aged = aged_ev(40);
+    aged.soc = 0.9;
+    let cap_aged = aged.battery_capacity_kwh;
+    let soh = 1.0 - aged.degradation.capacity_fade_fraction();
+    let soc_before_aged = aged.soc;
+    aged.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+        .unwrap();
+    let swing_aged = soc_before_aged - aged.soc;
+
+    // Each swing equals energy / usable_capacity.
+    assert!(
+        (swing_fresh - drive_kwh / rated).abs() < 1e-9,
+        "fresh swing {swing_fresh} should equal energy/rated"
+    );
+    assert!(
+        (swing_aged - drive_kwh / cap_aged).abs() < 1e-9,
+        "aged swing {swing_aged} should equal energy/degraded-capacity"
+    );
+
+    // The scaling law: swing ratio equals the capacity ratio = 1/SOH.
+    let swing_ratio = swing_aged / swing_fresh;
+    assert!(
+        (swing_ratio - rated / cap_aged).abs() < 1e-9,
+        "swing ratio {swing_ratio} must match rated/aged capacity = 1/SOH"
+    );
+    assert!(
+        (swing_ratio - 1.0 / soh).abs() < 1e-9,
+        "swing ratio {swing_ratio} must equal 1/SOH = {}",
+        1.0 / soh
+    );
+
+    // Degradation must actually change the runtime SOC dynamics: the aged swing
+    // differs measurably from what the rated (undegraded) divisor would give.
+    assert!(
+        (swing_aged - drive_kwh / rated).abs() > 1e-4,
+        "aged swing {swing_aged} must differ from the buggy rated-based swing {}",
+        drive_kwh / rated
+    );
+}
+
+/// Checkpoint restore must recompute the degraded usable capacity from the
+/// rated capacity (set by `init`) and the restored SOH — mirroring
+/// `Battery::load_state`. `battery_capacity_kwh_rated` is not serialized; it is
+/// re-established by `init` before `load_state`.
+#[test]
+fn load_state_recomputes_degraded_capacity_from_rated_and_soh() {
+    let source = aged_ev(40);
+    let saved = source.save_state().unwrap();
+
+    let config = {
+        let mut raw = base_raw();
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+        ev_config(raw)
+    };
+    let env = sample_env();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&saved).unwrap();
+
+    assert!(
+        (restored.battery_capacity_kwh_rated - source.battery_capacity_kwh_rated).abs() < 1e-12,
+        "rated capacity must survive init across restore"
+    );
+    assert!(
+        (restored.battery_capacity_kwh - source.battery_capacity_kwh).abs() < 1e-9,
+        "restored usable capacity {} must match source {}",
+        restored.battery_capacity_kwh,
+        source.battery_capacity_kwh
+    );
+    let fade = restored.degradation.capacity_fade_fraction();
+    assert!(
+        (restored.battery_capacity_kwh - restored.battery_capacity_kwh_rated * (1.0 - fade)).abs()
+            < 1e-9,
+        "restored usable capacity must equal rated·(1−fade)"
+    );
+}

@@ -404,6 +404,14 @@ pub const AWAY_CHARGE_POWER_KW: &str = "away_charge_power_kw";
 /// scope: internal
 pub const CAPACITY_KWH: &str = "capacity_kwh";
 
+/// Rated (beginning-of-life) pack capacity [kWh]. Held constant from
+/// initialization; paired with `CAPACITY_KWH` (the degraded usable capacity)
+/// so downstream observers and the capacity-degradation invariant can verify
+/// `CAPACITY_KWH / CAPACITY_KWH_RATED ≈ 1 − capacity_fade_fraction`.
+///
+/// scope: internal
+pub const CAPACITY_KWH_RATED: &str = "capacity_kwh_rated";
+
 /// scope: internal
 pub const FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
 
@@ -1037,6 +1045,7 @@ mod tests {
             V2L_POWER_KW,
             AWAY_CHARGE_POWER_KW,
             CAPACITY_KWH,
+            CAPACITY_KWH_RATED,
             FUEL_ECONOMY_KWH_PER_MI,
             // PV
             DC_POWER_KW,
@@ -1274,6 +1283,7 @@ mod tests {
             V2L_POWER_KW,
             AWAY_CHARGE_POWER_KW,
             CAPACITY_KWH,
+            CAPACITY_KWH_RATED,
             FUEL_ECONOMY_KWH_PER_MI,
             // PV
             DC_POWER_KW,

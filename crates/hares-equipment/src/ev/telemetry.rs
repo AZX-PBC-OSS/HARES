@@ -5,7 +5,7 @@ use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAU
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
-    let mut t = Telemetry::with_capacity(18);
+    let mut t = Telemetry::with_capacity(19);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
@@ -19,6 +19,7 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::CAPACITY_FADE_PCT, 0.0);
     t.insert(tk::AWAY_CHARGE_POWER_KW, 0.0);
     t.insert(tk::CAPACITY_KWH, DEFAULT_CAPACITY_KWH);
+    t.insert(tk::CAPACITY_KWH_RATED, DEFAULT_CAPACITY_KWH);
     t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
@@ -94,6 +95,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::CAPACITY_KWH.to_string(),
             unit: "kWh".to_string(),
             description: "EV battery capacity".to_string(),
+        },
+        TelemetryField {
+            name: tk::CAPACITY_KWH_RATED.to_string(),
+            unit: "kWh".to_string(),
+            description: "EV rated (beginning-of-life) battery capacity".to_string(),
         },
         TelemetryField {
             name: tk::FUEL_ECONOMY_KWH_PER_MI.to_string(),
