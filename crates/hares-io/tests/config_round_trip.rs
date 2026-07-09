@@ -508,6 +508,7 @@ fn sample_ev_config() -> EvConfig {
         charger_capacity_kva: None,
         cc_cv_transition_soc: None,
         charging_priority: None,
+        discharge_respects_deadline: true,
     }
 }
 

@@ -524,6 +524,7 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         charger_capacity_kva: ev.charger_capacity_kva,
         cc_cv_transition_soc: None,
         charging_priority: None,
+        discharge_respects_deadline: true,
     };
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }
@@ -1103,6 +1104,7 @@ impl PyDwelling {
                 charger_capacity_kva: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
+                discharge_respects_deadline: true,
             },
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;

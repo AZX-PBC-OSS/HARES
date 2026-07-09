@@ -95,6 +95,7 @@ pub struct Ev {
     v2g_enabled: bool,
     v2g_soc_reserve: f64,
     v2g_max_discharge_kw: f64,
+    discharge_respects_deadline: bool,
 
     soc: f64,
     battery_temp_c: f64,
@@ -262,6 +263,7 @@ impl Ev {
             v2g_max_discharge_kw: config
                 .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
                 .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW),
+            discharge_respects_deadline: true,
             soc: config
                 .get_f64(KEY_INITIAL_SOC)
                 .unwrap_or(DEFAULT_SOC)
@@ -391,6 +393,8 @@ impl Ev {
         self.v2g_max_discharge_kw = c
             .v2g_max_discharge_kw
             .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
+
+        self.discharge_respects_deadline = c.discharge_respects_deadline;
 
         self.chemistry = c
             .chemistry
@@ -794,9 +798,69 @@ impl Ev {
     }
 
     fn compute_v2l_discharge(&self, dt: Duration) -> f64 {
-        let effective_floor = self
+        let reserve_floor = self
             .power_setpoint_min_soc
             .map_or(self.v2l_soc_reserve, |ms| self.v2l_soc_reserve.max(ms));
+
+        let effective_floor = if self.discharge_respects_deadline
+            && let Some(ready_by_soc) = self.ready_by_soc
+        {
+            reserve_floor.max(ready_by_soc)
+        } else {
+            reserve_floor
+        };
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            ev_discharge_floor_effective = effective_floor,
+            ev_discharge_deadline_interlocked = (effective_floor > reserve_floor),
+            soc = self.soc,
+            "compute_v2l_discharge: effective floor = {effective_floor}, interlocked = {}",
+            effective_floor > reserve_floor,
+        );
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let expected_min = if let (true, Some(ready_by_soc)) =
+                (self.discharge_respects_deadline, self.ready_by_soc)
+            {
+                let signal_floor = self
+                    .power_setpoint_min_soc
+                    .map_or(self.v2l_soc_reserve, |ms| self.v2l_soc_reserve.max(ms));
+                signal_floor.max(ready_by_soc)
+            } else {
+                reserve_floor
+            };
+            assert!(
+                effective_floor >= expected_min,
+                "V2L effective discharge floor {effective_floor} less than required minimum \
+                 {expected_min} (reserve={}, ready_by_soc={:?}, respects_deadline={})",
+                self.v2l_soc_reserve,
+                self.ready_by_soc,
+                self.discharge_respects_deadline,
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let interlock_prevented = effective_floor > reserve_floor
+                && self.soc <= effective_floor
+                && self.soc > reserve_floor;
+            if interlock_prevented {
+                tracing::warn!(
+                    soc = self.soc,
+                    v2l_soc_reserve = self.v2l_soc_reserve,
+                    ready_by_soc = self.ready_by_soc,
+                    effective_floor,
+                    "V2L discharge prevented by Ready‑By deadline interlock: \
+                     SOC {:.4} below effective floor {:.4} (reserve={:.4})",
+                    self.soc,
+                    effective_floor,
+                    self.v2l_soc_reserve,
+                );
+            }
+        }
+
         if self.soc <= effective_floor {
             return 0.0;
         }
@@ -809,9 +873,69 @@ impl Ev {
     }
 
     fn compute_v2g_discharge(&self, dt: Duration) -> f64 {
-        let effective_floor = self
+        let reserve_floor = self
             .power_setpoint_min_soc
             .map_or(self.v2g_soc_reserve, |ms| self.v2g_soc_reserve.max(ms));
+
+        let effective_floor = if self.discharge_respects_deadline
+            && let Some(ready_by_soc) = self.ready_by_soc
+        {
+            reserve_floor.max(ready_by_soc)
+        } else {
+            reserve_floor
+        };
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            ev_discharge_floor_effective = effective_floor,
+            ev_discharge_deadline_interlocked = (effective_floor > reserve_floor),
+            soc = self.soc,
+            "compute_v2g_discharge: effective floor = {effective_floor}, interlocked = {}",
+            effective_floor > reserve_floor,
+        );
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let expected_min = if let (true, Some(ready_by_soc)) =
+                (self.discharge_respects_deadline, self.ready_by_soc)
+            {
+                let signal_floor = self
+                    .power_setpoint_min_soc
+                    .map_or(self.v2g_soc_reserve, |ms| self.v2g_soc_reserve.max(ms));
+                signal_floor.max(ready_by_soc)
+            } else {
+                reserve_floor
+            };
+            assert!(
+                effective_floor >= expected_min,
+                "V2G effective discharge floor {effective_floor} less than required minimum \
+                 {expected_min} (reserve={}, ready_by_soc={:?}, respects_deadline={})",
+                self.v2g_soc_reserve,
+                self.ready_by_soc,
+                self.discharge_respects_deadline,
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let interlock_prevented = effective_floor > reserve_floor
+                && self.soc <= effective_floor
+                && self.soc > reserve_floor;
+            if interlock_prevented {
+                tracing::warn!(
+                    soc = self.soc,
+                    v2g_soc_reserve = self.v2g_soc_reserve,
+                    ready_by_soc = self.ready_by_soc,
+                    effective_floor,
+                    "V2G discharge prevented by Ready‑By deadline interlock: \
+                     SOC {:.4} below effective floor {:.4} (reserve={:.4})",
+                    self.soc,
+                    effective_floor,
+                    self.v2g_soc_reserve,
+                );
+            }
+        }
+
         if self.soc <= effective_floor {
             return 0.0;
         }

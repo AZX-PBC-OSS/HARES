@@ -236,6 +236,7 @@ pub(super) fn resolve_ev(
             charger_capacity_kva: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
+            discharge_respects_deadline: true,
         };
         let mut spec = build_typed_spec("EV".to_string(), FuelType::Electric, cfg, defaults)?;
         spec.system_id = ev_id_opt;

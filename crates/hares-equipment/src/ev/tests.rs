@@ -157,6 +157,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
                 "ExternalAuthority" => ChargingPriority::ExternalAuthority,
                 _ => ChargingPriority::DeadlineGuarantee,
             }),
+            discharge_respects_deadline: true,
         },
     )
     .unwrap()
@@ -3312,6 +3313,7 @@ fn minimal_ev_config() -> EvConfig {
         charger_capacity_kva: None,
         cc_cv_transition_soc: None,
         charging_priority: None,
+        discharge_respects_deadline: true,
     }
 }
 
@@ -4285,5 +4287,216 @@ fn v2l_discharge_not_gated_by_outage_and_counts_as_island_source() {
     assert!(
         ev.island_source_available(),
         "a discharging EV reports island-source availability"
+    );
+}
+
+// ── V2L/V2G Ready‑By deadline interlock tests ────────────────────
+
+#[test]
+fn v2l_discharge_stops_at_ready_by_soc() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -2.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert_eq!(
+        power, 0.0,
+        "V2L discharge must stop at ready_by_soc=0.9 when SOC=0.5 and v2l_soc_reserve=0.2"
+    );
+}
+
+#[test]
+fn v2l_discharge_proceeds_without_ready_by_soc() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -2.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power < -1.0,
+        "V2L discharge must proceed to v2l_soc_reserve=0.2 when ready_by_soc is unset, got {power}"
+    );
+}
+
+#[test]
+fn v2g_discharge_stops_at_ready_by_soc() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert_eq!(
+        power, 0.0,
+        "V2G discharge must stop at ready_by_soc=0.9 when SOC=0.5 and v2g_soc_reserve=0.2"
+    );
+}
+
+#[test]
+fn v2g_discharge_proceeds_without_ready_by_soc() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power < -1.0,
+        "V2G discharge must proceed to v2g_soc_reserve=0.2 when ready_by_soc is unset, got {power}"
+    );
+}
+
+#[test]
+fn ev_with_0700_deadline_refuses_discharge_below_90pct_at_2000() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -2.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 20, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert_eq!(
+        power, 0.0,
+        "EV with 07:00 deadline at 90% SOC must not discharge below 90% at 20:00, \
+         even with reserve=20%. Got {power}"
+    );
+}
+
+#[test]
+fn v2l_discharge_respects_deadline_flag_off_bypasses_interlock() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.discharge_respects_deadline = false;
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -2.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power < -1.0,
+        "V2L discharge with discharge_respects_deadline=false must proceed \
+         to v2l_soc_reserve=0.2 even with ready_by_soc=0.9, got {power}"
     );
 }

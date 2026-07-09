@@ -255,12 +255,24 @@ pub struct EvConfig {
     /// departure SOC.
     #[serde(default)]
     pub charging_priority: Option<ChargingPriority>,
+    /// When `true` (default), V2L/V2G discharge is stopped at
+    /// `max(reserve, ready_by_soc)` when a Ready‑By departure deadline is
+    /// active, preventing discharge from compromising departure readiness.
+    /// Set to `false` to allow intentional discharge below the deadline
+    /// target (e.g. emergency backup power where departure compromise is
+    /// acceptable).
+    #[serde(default = "default_true")]
+    pub discharge_respects_deadline: bool,
 }
 
 impl EquipmentTypedConfig for EvConfig {
     fn equipment_type_name() -> &'static str {
         "EV"
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl EvConfig {
