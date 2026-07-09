@@ -7,6 +7,18 @@
 //!
 //! Equipment is self-contained with its own BMS. The driver actor only
 //! pushes external decisions -- it never mutates equipment state directly.
+//!
+//! ## SOC estimation model
+//!
+//! The actor maintains `estimated_soc` as its best guess of battery state.
+//! This intentionally diverges from actual equipment SOC because the actor
+//! does not observe CC-CV taper, thermal derating, or BMS charge termination.
+//! All driver behavioral decisions -- plug-in, range anxiety, charging strategy
+//! -- operate on `perceived_soc()` which returns `estimated_soc`. The ground-truth
+//! `actual_soc()` reads `equipment_core` and exists only for reconciliation,
+//! observability, and diagnostics. The divergence is bounded and conservative:
+//! the actor overestimates discharge and underestimates charge, causing it to
+//! over-charge rather than strand the driver.
 
 mod composer;
 mod departure;
@@ -564,31 +576,41 @@ impl EvDriverActor {
         current_minute >= target_minute && current_minute < target_minute.saturating_add(res)
     }
 
-    /// Read the actual SOC from typed equipment core output, falling back to estimated.
-    fn current_soc(&self, env: &EnvironmentState) -> f64 {
+    /// The actor's perceived SOC — its best guess diverging from actual equipment
+    /// SOC because the actor doesn't observe CC-CV taper, thermal derating, or BMS
+    /// charge termination. This is the value used for all driver behavioral decisions.
+    fn perceived_soc(&self) -> f64 {
+        self.estimated_soc
+    }
+
+    /// Read the ground-truth SOC from typed equipment core output.
+    ///
+    /// Returns `None` when the equipment is not registered (e.g. test scenarios).
+    /// For behavioral decisions use `perceived_soc()`. This function exists for
+    /// reconciliation, observability, and diagnostics — never for driver logic.
+    fn actual_soc(&self, env: &EnvironmentState) -> Option<f64> {
         self.equipment_id
             .and_then(|id| env.equipment_core.get(&id))
             .and_then(|co| co.state.soc)
             .map(|soc| soc.get())
-            .unwrap_or(self.estimated_soc)
     }
 
-    /// Should the driver plug in at home based on policy?
-    fn should_plug_in(&self, env: &EnvironmentState) -> bool {
+    /// Should the driver plug in at home based on perceived SOC and policy.
+    fn should_plug_in(&self) -> bool {
         match &self.plug_in_policy {
             PlugInPolicy::Always => true,
-            PlugInPolicy::LowSoc { threshold } => self.current_soc(env) < *threshold,
+            PlugInPolicy::LowSoc { threshold } => self.perceived_soc() < *threshold,
         }
     }
 
-    /// Check if tomorrow's expected trip would leave SOC dangerously low.
+    /// Check if tomorrow's expected trip would leave perceived SOC dangerously low.
     /// If so, the driver overrides their strategy and charges to full.
     fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
         if self.range_anxiety_miles <= 0.0 {
             return false;
         }
         let ambient_c = env.weather.outdoor_temp_c;
-        let soc = self.current_soc(env);
+        let soc = self.perceived_soc();
         let temp_mult = temp_efficiency_multiplier(ambient_c);
         let anxiety_kwh = (self.expected_daily_miles + self.range_anxiety_miles)
             * self.fuel_economy_kwh_per_mi
@@ -621,7 +643,7 @@ impl EvDriverActor {
             return;
         }
 
-        let soc = self.current_soc(env);
+        let soc = self.perceived_soc();
         let ctx = DecisionContext {
             current_soc: soc,
             capacity_kwh: self.capacity_kwh,
@@ -805,7 +827,8 @@ impl Actor for EvDriverActor {
                         });
                     }
 
-                    if self.should_plug_in(env) {
+                    let doing_plugin = self.should_plug_in();
+                    if doing_plugin {
                         out.push(DispatchRequest {
                             target: self.dispatch_target.clone(),
                             signal: ControlSignal::EvPlugIn {
@@ -822,8 +845,48 @@ impl Actor for EvDriverActor {
                         target = self.target_name(),
                         arrival_minute = event.arrival_minute,
                         estimated_soc = self.estimated_soc,
-                        plugged_in = self.should_plug_in(env),
+                        plugged_in = self.should_plug_in(),
                         "EV driver arrived home",
+                    );
+                }
+            }
+        }
+
+        // Observability and diagnostics: record divergence between perceived SOC
+        // (the actor's internal estimate) and actual equipment core SOC.
+        #[cfg(feature = "observe")]
+        {
+            let actual = self.actual_soc(env);
+            if let Some(a) = actual {
+                let divergence = (a - self.estimated_soc).abs();
+                tracing::debug!(
+                    actor = %self.name,
+                    estimated_soc = self.estimated_soc,
+                    actual_soc = a,
+                    divergence = divergence,
+                    "EV driver SOC divergence"
+                );
+            }
+        }
+
+        // Invariant: when equipment core telemetry is available, the actual SOC
+        // should be within a reasonable band of the estimated SOC. The 15% band
+        // is generous — real BMS limits, CC-CV taper, and thermal derating
+        // should not push divergence beyond this in normal operation. A breach
+        // signals either a modelling error (too-aggressive fade) or an estimator
+        // bug (e.g. missing away-charge credit).
+        #[cfg(debug_assertions)]
+        {
+            let actual = self.actual_soc(env);
+            if let Some(a) = actual {
+                let divergence = (a - self.estimated_soc).abs();
+                if divergence > 0.15 {
+                    tracing::warn!(
+                        actor = %self.name,
+                        estimated_soc = self.estimated_soc,
+                        actual_soc = a,
+                        divergence = divergence,
+                        "EV driver SOC estimate diverged >15% from actual equipment SOC"
                     );
                 }
             }
@@ -1059,26 +1122,37 @@ mod tests {
     }
 
     #[test]
-    fn current_soc_reads_from_typed_core_output() {
+    fn perceived_soc_returns_estimated_soc_not_equipment_core() {
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
             42,
         );
-        actor.estimated_soc = 0.2;
+        actor.estimated_soc = 0.45;
         let mut env = env_at_minute(12 * 60);
         set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.73);
-        assert!((actor.current_soc(&env) - 0.73).abs() < 1e-12);
+        assert!((actor.perceived_soc() - 0.45).abs() < 1e-12);
     }
 
     #[test]
-    fn current_soc_handles_missing_equipment_id_gracefully() {
+    fn actual_soc_reads_from_equipment_core() {
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
             42,
         );
-        actor.estimated_soc = 0.37;
+        let mut env = env_at_minute(12 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.73);
+        assert_eq!(actor.actual_soc(&env), Some(0.73));
+    }
+
+    #[test]
+    fn actual_soc_returns_none_when_equipment_id_not_resolved() {
+        let actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
         let mut env = env_at_minute(12 * 60);
         env.equipment_core.insert(
             EquipmentId(99),
@@ -1090,7 +1164,27 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!((actor.current_soc(&env) - 0.37).abs() < 1e-12);
+        assert_eq!(actor.actual_soc(&env), None);
+    }
+
+    #[test]
+    fn perceived_soc_ignores_equipment_core_telemetry() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.52;
+        let mut env = env_at_minute(12 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.91);
+        let perceived = actor.perceived_soc();
+        let actual = actor.actual_soc(&env);
+        assert!((perceived - 0.52).abs() < 1e-12);
+        assert_eq!(actual, Some(0.91));
+        assert!(
+            (perceived - actual.unwrap()).abs() > 0.01,
+            "perceived and actual SOC should diverge when estimated differs from equipment"
+        );
     }
 
     #[test]
@@ -3415,5 +3509,142 @@ mod tests {
         actor
             .load_state(&[])
             .expect("load_state default should succeed");
+    }
+
+    // ======= SOC divergence model tests =======
+
+    #[test]
+    fn should_plug_in_uses_perceived_soc_not_equipment_core_telemetry() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::LowSoc { threshold: 0.4 },
+            42,
+        );
+        // estimated_soc is 1.0 by default (well above 0.4 threshold)
+        actor.phase = DriverPhase::HomePluggedIn;
+        // Insert equipment core with SOC=0.1 (below threshold)
+        let mut env = env_at_minute(18 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.1);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let has_plug_in = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            !has_plug_in,
+            "should NOT plug in when estimated_soc is above threshold even if actual SOC is low"
+        );
+    }
+
+    #[test]
+    fn perceived_soc_diverges_from_actual_during_driving() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // Set equipment_core with SOC=0.5, estimated_soc=0.8 — simulating
+        // a case where the driver's naive energy accounting overestimates SOC.
+        actor.estimated_soc = 0.8;
+        let mut env = env_at_minute(12 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.5);
+        let perceived = actor.perceived_soc();
+        let actual = actor.actual_soc(&env);
+        assert!((perceived - 0.8).abs() < 1e-12);
+        assert_eq!(actual, Some(0.5));
+        assert!(
+            (perceived - 0.5).abs() > 0.05,
+            "perceived SOC (0.8) should diverge from actual equipment SOC (0.5)"
+        );
+    }
+
+    #[test]
+    fn needs_range_anxiety_override_uses_perceived_soc() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // expected_daily_miles=30, range_anxiety_miles=20, fuel=0.3, cap=60
+        // anxiety_soc ≈ (30+20)*0.3*1.11/60 ≈ 0.278
+        // perceived estimated_soc=0.10 < anxiety threshold → should trigger
+        actor.estimated_soc = 0.10;
+        let mut env = env_at_minute(0);
+        // Insert equipment_core with high SOC=0.9 — driver doesn't know this
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.9);
+        assert!(
+            actor.needs_range_anxiety_override(&env),
+            "range anxiety should use perceived_soc (0.10), not actual equipment SOC (0.9)"
+        );
+    }
+
+    #[test]
+    fn evaluate_charging_uses_perceived_soc_for_decision_context() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // estimated_soc=0.4, equipment_core says SOC=0.95
+        actor.estimated_soc = 0.4;
+        actor.phase = DriverPhase::HomePluggedIn;
+        let mut env = env_at_minute(18 * 60 + 1);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.95);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let has_soc_target = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
+            ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
+                || matches!(
+                    r.signal,
+                    ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                )
+        });
+        assert!(
+            has_soc_target,
+            "should charge when perceived_soc (0.4) is below target, even if actual SOC (0.95) is at target"
+        );
+    }
+
+    #[test]
+    fn multi_step_driving_soc_divergence_accumulates() {
+        // Simulate multiple complete drive cycles. After each trip the
+        // actor deducts energy from estimated_soc but equipment_core
+        // remains unchanged, so the estimates diverge.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut env = env_at_minute(0);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 1.0);
+        // Run 3 complete drive cycles (depart→drive→arrive→home)
+        for _cycle in 0..3 {
+            let mut out = Vec::new();
+            // Depart at 08:00, drive through to 18:00
+            for minute in 0_u16..1440 {
+                env.current_time = env_at_minute(minute).current_time;
+                out.clear();
+                actor.decide(&env, &mut out);
+            }
+        }
+        let perceived = actor.perceived_soc();
+        let actual = actor.actual_soc(&env);
+        assert!(
+            perceived < actual.unwrap() - 0.1,
+            "after 3 trips without reconciliation, estimated_soc should be below actual equipment SOC"
+        );
+        assert_eq!(
+            actual,
+            Some(1.0),
+            "equipment_core SOC should remain unchanged at 1.0"
+        );
     }
 }
