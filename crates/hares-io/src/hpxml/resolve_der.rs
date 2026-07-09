@@ -85,6 +85,7 @@ pub(super) fn resolve_pv(
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         };
 

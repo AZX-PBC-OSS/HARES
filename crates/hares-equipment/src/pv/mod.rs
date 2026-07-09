@@ -876,8 +876,14 @@ impl PV {
             );
         }
 
-        self.soiling_config = None;
-        self.soiling_state = None;
+        self.soiling_config = c.soiling.clone();
+        if let Some(ref soiling_cfg) = self.soiling_config {
+            let dt_s = env.time_step_secs();
+            let state = soiling::SoilingState::new(soiling_cfg, dt_s);
+            self.soiling_state = Some(state);
+        } else {
+            self.soiling_state = None;
+        }
 
         // T-0108: When the Kimber soiling model is active, subtract the
         // PVWatts static soiling component (2% = 0.02) from
@@ -907,6 +913,18 @@ impl PV {
             self.system_losses_fraction
         };
 
+        // T-0423 invariant: soiling_config and soiling_state must agree.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.soiling_config.is_some() && self.soiling_state.is_none() {
+                panic!(
+                    "PV soiling config is set but soiling state is None; \
+                     config/staging mismatch — init_typed() should have \
+                     constructed SoilingState from the config."
+                );
+            }
+        }
+
         self.telemetry
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
         self.telemetry.set(tk::DC_POWER_KW, 0.0);
@@ -917,7 +935,12 @@ impl PV {
         self.telemetry.set(tk::IRRADIANCE_W_M2, 0.0);
         self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
         self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
-        self.telemetry.set(tk::SOILING_RATIO, 1.0);
+        let init_soiling_ratio = self
+            .soiling_state
+            .as_ref()
+            .map(|s| s.soiling_ratio())
+            .unwrap_or(1.0);
+        self.telemetry.set(tk::SOILING_RATIO, init_soiling_ratio);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -1014,6 +1037,19 @@ impl Equipment for PV {
             }
             _ => 1.0,
         };
+
+        // T-0423 observer: capture soiling_loss at each timestep.
+        #[cfg(feature = "observe")]
+        {
+            let soiling_loss = 1.0 - soiling_ratio;
+            if soiling_loss > 0.0 {
+                tracing::debug!(
+                    soiling_loss = soiling_loss,
+                    soiling_ratio = soiling_ratio,
+                    "PV soiling loss accumulated",
+                );
+            }
+        }
 
         // Compute shading factor from current solar position.
         let shading_factor = self.shading_model.shading_factor(
@@ -1591,6 +1627,7 @@ mod tests {
             power_factor: Some(DEFAULT_POWER_FACTOR),
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         }
     }
@@ -2057,6 +2094,7 @@ mod tests {
                 power_factor: Some(DEFAULT_POWER_FACTOR),
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
+                soiling: None,
                 arrays: None,
             },
         )
@@ -4576,6 +4614,65 @@ mod tests {
         approx_eq(
             pv.effective_system_losses_fraction,
             DEFAULT_SYSTEM_LOSSES_FRACTION - PVWATTS_SOILING_COMPONENT,
+        );
+    }
+
+    /// `init_typed()` with a soiling config constructs soiling state.
+    #[test]
+    fn init_typed_with_soiling_config_constructs_soiling_state() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+
+        let mut typed_cfg = base_pv_typed_config();
+        typed_cfg.soiling = Some(super::soiling::SoilingConfig::default());
+        let cfg =
+            EquipmentConfig::from_typed("PV Soiling".to_string(), "PV".to_string(), typed_cfg)
+                .unwrap();
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        assert!(pv.soiling_config.is_some(), "soiling_config should be Some");
+        assert!(pv.soiling_state.is_some(), "soiling_state should be Some");
+        assert!(
+            pv.effective_system_losses_fraction < pv.system_losses_fraction,
+            "effective losses should be reduced when soiling is active"
+        );
+    }
+
+    /// `init_typed()` without soiling config leaves soiling state None.
+    #[test]
+    fn init_typed_without_soiling_config_leaves_soiling_state_none() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+
+        let cfg = config_single();
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        assert!(pv.soiling_config.is_none(), "soiling_config should be None");
+        assert!(pv.soiling_state.is_none(), "soiling_state should be None");
+        assert!(
+            (pv.effective_system_losses_fraction - pv.system_losses_fraction).abs() < 1e-12,
+            "effective losses should equal system losses when soiling is inactive"
         );
     }
 

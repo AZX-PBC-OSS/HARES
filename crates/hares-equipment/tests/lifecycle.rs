@@ -1074,6 +1074,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 power_factor: Some(1.0),
                 surface_resolution_deg: Some(360.0),
                 sam_lut_path: None,
+                soiling: None,
                 arrays: None,
             },
         ),

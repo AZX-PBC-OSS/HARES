@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// User-facing units (mm, per-day, days) should be converted to SI at the
 /// config parsing boundary. All fields are stored in SI internally.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoilingConfig {
     /// Rainfall accumulation window [s].
     /// Rain within this rolling window is summed to detect cleaning events.
@@ -89,7 +89,7 @@ impl Default for SoilingConfig {
 ///   5. Else if outside grace period → soiling_loss += rate * dt,
 ///      clamped at max_soiling
 ///   6. Output soiling_ratio = 1 - soiling_loss
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoilingState {
     soiling_loss: f64,
     rain_buffer: VecDeque<f64>,

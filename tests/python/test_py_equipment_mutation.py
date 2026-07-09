@@ -588,3 +588,46 @@ class TestCheckpointRoundTrip:
         assert "TestBat" in dw.equipment_names()
         result = dw.step()
         assert "timestamp" in result
+
+
+class TestPvSoilingConfig:
+    def test_soiling_config_produces_non_unity_soiling_ratio(self):
+        from ochre_next import PV, PvSoilingConfig
+
+        sc = PvSoilingConfig(
+            grace_period_days=0.0,
+            loss_rate_per_day=0.0015,
+            max_loss=0.9,
+            initial_loss=0.0,
+        )
+        pv = PV("SoiledPV", 5.0, 30.0, 180.0, soiling=sc)
+
+        num_days = 2
+        step_s = 1800
+        steps_per_day = 86400 // step_s
+        dw = make_dwelling(
+            duration_s=num_days * 86400,
+            time_res_s=step_s,
+        )
+        dw.initialize()
+        dw.add_pv(pv)
+
+        for _ in range(num_days * steps_per_day):
+            dw.step()
+
+        for eq in dw.equipment():
+            if eq.name == "SoiledPV":
+                tel = eq.telemetry()
+                ratio = tel["soiling_ratio"]
+                assert ratio < 1.0, (
+                    f"Soiling ratio should be < 1.0 with active soiling model, got {ratio}"
+                )
+                assert ratio > 0.0, f"Soiling ratio should be > 0.0, got {ratio}"
+                expected = 1.0 - num_days * sc.loss_rate_per_day
+                assert abs(ratio - expected) < 1e-3, (
+                    f"Soiling ratio {ratio} deviates from expected {expected} "
+                    f"after {num_days} dry days"
+                )
+                break
+        else:
+            pytest.fail("SoiledPV not found in equipment list")

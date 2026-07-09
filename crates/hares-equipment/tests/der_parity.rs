@@ -393,6 +393,7 @@ fn pv_cell_temperature_noct_model() {
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         },
     )
@@ -506,6 +507,7 @@ fn pv_peak_generation_in_good_conditions() {
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         },
     )
@@ -607,10 +609,12 @@ fn pv_power_temperature_derating() {
                 power_factor: None,
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
+                soiling: None,
                 arrays: None,
             },
         )
         .unwrap();
+
         let mut env = base_env();
         env.weather.outdoor_temp_c = outdoor_temp_c;
         env.weather.wind_speed_m_s = 0.5; // low wind → high cell temp

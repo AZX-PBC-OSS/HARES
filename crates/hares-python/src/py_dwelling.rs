@@ -463,6 +463,17 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
 }
 
 fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
+    let soiling = pv
+        .soiling
+        .as_ref()
+        .map(|s| hares_equipment::pv::soiling::SoilingConfig {
+            cleaning_threshold_m: s.cleaning_threshold_mm / 1000.0,
+            rain_accum_period_s: s.rain_accum_hours * 3600.0,
+            soiling_loss_rate_per_s: s.loss_rate_per_day / 86_400.0,
+            grace_period_s: s.grace_period_days * 86_400.0,
+            max_soiling: s.max_loss,
+            initial_soiling: s.initial_loss,
+        });
     let cfg = PvConfig {
         equipment_id: None,
         zone_id: None,
@@ -478,6 +489,7 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
         power_factor: None,
         surface_resolution_deg: None,
         sam_lut_path: pv.sam_lut_path.clone(),
+        soiling,
         arrays: None,
     };
     EquipmentConfig::from_typed(pv.name.clone(), "PV".to_string(), cfg)

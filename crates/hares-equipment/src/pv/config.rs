@@ -57,6 +57,15 @@ pub struct PvConfig {
     // Optional SAM LUT path (CSV/Parquet ingestion handled at init boundary)
     pub sam_lut_path: Option<String>,
 
+    /// Kimber dynamic soiling model configuration.
+    ///
+    /// When present, the soiling model tracks dust accumulation during dry
+    /// periods and resets after rain cleaning events. The static soiling
+    /// component (2%) is automatically removed from `system_losses_fraction`
+    /// to prevent double-counting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soiling: Option<crate::pv::soiling::SoilingConfig>,
+
     /// Per-array configuration for multi-array systems.
     ///
     /// When present and non-empty, each entry maps to one `PvArray`.
@@ -187,6 +196,7 @@ mod tests {
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         }
     }
@@ -199,6 +209,36 @@ mod tests {
         assert!(ec.is_typed());
         let recovered: PvConfig = ec.typed().unwrap();
         assert_eq!(recovered.capacity_kw, cfg.capacity_kw);
+    }
+
+    #[test]
+    fn pv_config_with_soiling_round_trips_via_equipment_config() {
+        let mut cfg = minimal_pv_config();
+        cfg.soiling = Some(crate::pv::soiling::SoilingConfig::default());
+        let ec = EquipmentConfig::from_typed(
+            "test_pv_soiling".to_string(),
+            "PV".to_string(),
+            cfg.clone(),
+        )
+        .unwrap();
+        assert!(ec.is_typed());
+        let recovered: PvConfig = ec.typed().unwrap();
+        let recovered_soiling = recovered
+            .soiling
+            .expect("soiling should survive round-trip");
+        let original_soiling = cfg.soiling.expect("original soiling should be Some");
+        assert_eq!(
+            recovered_soiling.cleaning_threshold_m, original_soiling.cleaning_threshold_m,
+            "cleaning threshold mismatch"
+        );
+        assert_eq!(
+            recovered_soiling.max_soiling, original_soiling.max_soiling,
+            "max soiling mismatch"
+        );
+        assert_eq!(
+            recovered_soiling.initial_soiling, original_soiling.initial_soiling,
+            "initial soiling mismatch"
+        );
     }
 
     #[test]

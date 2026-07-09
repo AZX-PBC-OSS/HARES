@@ -335,6 +335,7 @@ fn oracle_pv_24h_constant_irradiance() {
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
+            soiling: None,
             arrays: None,
         },
     )
@@ -501,6 +502,7 @@ fn oracle_pv_24h_lut_parity() {
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: Some(lut_path.to_string_lossy().into_owned()),
+            soiling: None,
             arrays: None,
         },
     )
