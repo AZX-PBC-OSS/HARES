@@ -648,6 +648,7 @@ fn oracle_generator_24h_constant_load() {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         },
     )
     .unwrap();

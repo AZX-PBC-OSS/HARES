@@ -317,6 +317,7 @@ pub(super) fn resolve_generators(
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         };
 
         let mut spec = build_typed_spec("Gas Generator".to_string(), fuel, cfg, defaults)?;

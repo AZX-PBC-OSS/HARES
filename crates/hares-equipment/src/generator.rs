@@ -127,6 +127,14 @@ pub struct GeneratorConfig {
     /// enabled standby generator during normal operation (it CAN island — that
     /// is exactly its purpose). Default false.
     pub standby_mode: Option<bool>,
+    /// Parasitic electrical load as a fraction of gross output [0.0, 1.0].
+    /// Covers auxiliary pumps, cooling fans, fuel compressors (fuel cells),
+    /// and control electronics. Deducted from gross output before the
+    /// electrical port write; the parasitic power becomes zone waste heat
+    /// when a zone is configured. Default 0.0 (backward compatible).
+    /// IEA Annex 42 FC+Micro-CHP Test Protocol: residential micro-CHP
+    /// parasitic loads range 2–15 % of rated output.
+    pub parasitic_fraction: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GeneratorConfig {
@@ -315,6 +323,13 @@ impl GeneratorConfig {
                 ));
             }
         }
+        if let Some(fraction) = self.parasitic_fraction {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(HaresError::Equipment(
+                    "generator parasitic_fraction must be finite and within [0, 1]".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -377,6 +392,8 @@ const KEY_NO_LOAD_FUEL_FRACTION: &str = "no_load_fuel_fraction";
 const KEY_GRID_FORMING: &str = "grid_forming";
 #[cfg(test)]
 const KEY_STANDBY_MODE: &str = "standby_mode";
+#[cfg(test)]
+const KEY_PARASITIC_FRACTION: &str = "parasitic_fraction";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -873,6 +890,10 @@ pub struct Generator {
     no_load_fuel_fraction: f64,
     grid_forming: bool,
     standby_mode: bool,
+    /// Parasitic electrical load as a fraction of gross output [0.0, 1.0].
+    /// Deducted from gross output before the electrical port write. See
+    /// `GeneratorConfig::parasitic_fraction`.
+    parasitic_fraction: f64,
 
     // Dynamic state
     current_power_kw: f64,
@@ -1037,6 +1058,10 @@ impl Generator {
                 .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION),
             grid_forming: typed.as_ref().and_then(|c| c.grid_forming).unwrap_or(true),
             standby_mode: typed.as_ref().and_then(|c| c.standby_mode).unwrap_or(false),
+            parasitic_fraction: typed
+                .as_ref()
+                .and_then(|c| c.parasitic_fraction)
+                .unwrap_or(0.0),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
             power_setpoint_kw: None,
@@ -1156,6 +1181,7 @@ impl Generator {
             .unwrap_or(DEFAULT_NO_LOAD_FUEL_FRACTION);
         self.grid_forming = c.grid_forming.unwrap_or(true);
         self.standby_mode = c.standby_mode.unwrap_or(false);
+        self.parasitic_fraction = c.parasitic_fraction.unwrap_or(0.0);
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
@@ -1262,6 +1288,26 @@ impl Equipment for Generator {
         let ramp_limited =
             ramp_delta > 0.0 && ramp_delta > self.delta_kw_per_s * dt_s + IDLE_KW_THRESHOLD;
         let output_kw = self.apply_ramp_limit(unconstrained_kw, dt_s);
+
+        // Parasitic electrical load: auxiliary pumps, cooling fans, fuel compressors
+        // (fuel cells), and control electronics consume a fraction of gross output.
+        // IEA Annex 42 FC+Micro-CHP Test Protocol: residential micro-CHP parasitic
+        // loads range 2–15 % of rated output. Deducted before the electrical port
+        // write so downstream consumers see the net value automatically.
+        let parasitic_kw = if self.parasitic_fraction > 0.0 && output_kw > IDLE_KW_THRESHOLD {
+            output_kw * self.parasitic_fraction
+        } else {
+            0.0
+        };
+
+        // Invariant: parasitic load must never exceed gross output.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            parasitic_kw >= 0.0 && parasitic_kw <= output_kw + f64::EPSILON,
+            "Parasitic load {parasitic_kw:.3} kW exceeds gross output {output_kw:.3} kW"
+        );
+
+        let net_output_kw = output_kw - parasitic_kw;
 
         self.current_power_kw = output_kw;
 
@@ -1551,11 +1597,12 @@ impl Equipment for Generator {
             };
 
         // Write electrical port (negative = generation).
-        // Generator reactive power is held at zero. Detailed synchronous genset
-        // excitation / power-factor control is out of scope for this model; Q=0
-        // keeps parity with OCHRE and avoids inventing unvalidated PF behavior.
+        // Net output after deducting parasitic auxiliary loads. Generator reactive
+        // power is held at zero. Detailed synchronous genset excitation / power-factor
+        // control is out of scope for this model; Q=0 keeps parity with OCHRE and
+        // avoids inventing unvalidated PF behavior.
         ports.accumulate(&PortContribution::Electrical {
-            active_power_w: power_kw_to_w(-output_kw),
+            active_power_w: power_kw_to_w(-net_output_kw),
             reactive_power_kvar: 0.0,
         })?;
 
@@ -1584,6 +1631,21 @@ impl Equipment for Generator {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: zone_internal_gain_w,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::InternalGain,
+                })?;
+            }
+        }
+
+        // Parasitic auxiliary power becomes sensible heat in the building zone.
+        // Pump and fan motors reject heat locally; this is separate from
+        // combustion-derived waste heat (flue, jacket, etc.).
+        if parasitic_kw > IDLE_KW_THRESHOLD {
+            if let Some(zone) = self.descriptor.zone {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: parasitic_kw * 1000.0,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::InternalGain,
@@ -1650,13 +1712,15 @@ impl Equipment for Generator {
             }
         }
 
-        self.mode = if output_kw > IDLE_KW_THRESHOLD {
+        let mode = if output_kw > IDLE_KW_THRESHOLD {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
         };
+        self.mode = mode;
 
         self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_kw);
+        self.telemetry.set(tk::PARASITIC_KW, parasitic_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
         self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
@@ -1730,7 +1794,7 @@ impl Equipment for Generator {
         }
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(output_kw.max(0.0))),
+                electric_kw: Some(ElectricPower::Generation(net_output_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: Some(FuelPower {
                     fuel_type: FuelType::Gas,
@@ -1817,8 +1881,17 @@ impl Equipment for Generator {
         };
         let fuel_w = idle_fuel_w.max(load_fuel_w);
 
+        // Recompute parasitic deduction from restored gross output and config fraction.
+        let parasitic_kw =
+            if self.parasitic_fraction > 0.0 && self.current_power_kw > IDLE_KW_THRESHOLD {
+                self.current_power_kw * self.parasitic_fraction
+            } else {
+                0.0
+            };
+
         self.telemetry
             .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
+        self.telemetry.set(tk::PARASITIC_KW, parasitic_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
         self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
@@ -1875,9 +1948,10 @@ impl Equipment for Generator {
                 .set(tk::FUEL_CELL_STACK_HEAT_W, stack_cooling_w);
         }
         let q_thermal_w = fuel_w * self.eta_thermal;
+        let net_output_kw = self.current_power_kw - parasitic_kw;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(self.current_power_kw.max(0.0))),
+                electric_kw: Some(ElectricPower::Generation(net_output_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: Some(FuelPower {
                     fuel_type: FuelType::Gas,
@@ -1998,12 +2072,13 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
-    // Base: 6 fields (electric, fuel, idle, load, eta, ramp).
+    // Base: 7 fields (electric, parasitic, fuel, idle, load, eta, ramp).
     // CHP: 11 extra (thermal, available, delivered, ratio, loop_return,
     // flue, jacket, lube, exhaust, +2 supply temps).
-    let capacity = if has_chp { 15 } else { 6 } + if is_fuel_cell { 3 } else { 0 };
+    let capacity = if has_chp { 16 } else { 7 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
+    t.insert(tk::PARASITIC_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
     t.insert(tk::FUEL_IDLE_W, 0.0);
     t.insert(tk::FUEL_LOAD_W, 0.0);
@@ -2035,7 +2110,14 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
         TelemetryField {
             name: tk::ELECTRIC_OUTPUT_KW.to_string(),
             unit: "kW".to_string(),
-            description: "Electrical generation output".to_string(),
+            description: "Electrical generation output (gross, before parasitic deduction)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PARASITIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Parasitic electrical load deduction (auxiliary pumps, fans, controls)"
+                .to_string(),
         },
         TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
@@ -2252,6 +2334,7 @@ mod tests {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         };
         for (k, v) in overrides {
             match (*k, v) {
@@ -2311,6 +2394,9 @@ mod tests {
                 }
                 (KEY_GRID_FORMING, ConfigValue::Bool(value)) => cfg.grid_forming = Some(*value),
                 (KEY_STANDBY_MODE, ConfigValue::Bool(value)) => cfg.standby_mode = Some(*value),
+                (KEY_PARASITIC_FRACTION, ConfigValue::Float(value)) => {
+                    cfg.parasitic_fraction = Some(*value)
+                }
                 (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
                     cfg.equipment_id = Some(*value as u32)
@@ -2473,6 +2559,7 @@ mod tests {
             .collect();
         for expected in &[
             tk::ELECTRIC_OUTPUT_KW,
+            tk::PARASITIC_KW,
             tk::FUEL_INPUT_W,
             tk::FUEL_IDLE_W,
             tk::FUEL_LOAD_W,
@@ -3128,6 +3215,318 @@ mod tests {
             generator.current_power_kw
         );
         assert_eq!(generator.mode, OperatingMode::Off);
+    }
+
+    // =======================================================================
+    // Parasitic load
+    // =======================================================================
+
+    #[test]
+    fn parasitic_fraction_deducts_from_net_output() {
+        // At 5% parasitic_fraction and 10 kW gross output, net electrical
+        // should be 9.5 kW (electrical port receives -9.5 kW).
+        let config = gen_config(&[
+            (KEY_PARASITIC_FRACTION, 0.05.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let gross_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let net_generation_w = slots.electrical.generation_power_w;
+
+        assert!(
+            (gross_kw - 10.0).abs() < 1e-9,
+            "gross output should be 10 kW, got {gross_kw}"
+        );
+        assert!(
+            (parasitic_kw - 0.5).abs() < 1e-9,
+            "parasitic should be 0.5 kW at 5 %, got {parasitic_kw}"
+        );
+        assert!(
+            (net_generation_w.abs() - 9500.0).abs() < 1.0,
+            "net electrical should be 9.5 kW (9500 W), got {} W",
+            net_generation_w.abs()
+        );
+    }
+
+    #[test]
+    fn parasitic_fraction_zero_produces_identical_behavior() {
+        // Default parasitic_fraction = 0.0 must produce exactly the same
+        // results as before the feature was added (backward compatibility).
+        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let gross_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let net_generation_w = slots.electrical.generation_power_w;
+
+        assert!(
+            (gross_kw - 5.0).abs() < 1e-9,
+            "gross output should match setpoint"
+        );
+        assert!(
+            parasitic_kw < IDLE_KW_THRESHOLD,
+            "parasitic should be zero by default"
+        );
+        assert!(
+            (net_generation_w.abs() - 5000.0).abs() < 1.0,
+            "net should equal gross when parasitic_fraction = 0"
+        );
+    }
+
+    #[test]
+    fn parasitic_heat_goes_to_zone_when_zone_configured() {
+        // Parasitic auxiliary power should be added as zone sensible heat gain.
+        let config = gen_config(&[
+            (KEY_PARASITIC_FRACTION, 0.05.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        assert!(parasitic_kw > 0.0, "parasitic should be positive");
+
+        let expected_parasitic_heat_w = parasitic_kw * 1000.0;
+        let zone_internal_gain =
+            slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+        // Zone receives parasitic heat as InternalGain *plus* combustion waste heat,
+        // so the zone internal gain must be at least the parasitic contribution.
+        assert!(
+            zone_internal_gain >= expected_parasitic_heat_w - 1.0,
+            "zone thermal gain ({zone_internal_gain} W) must include parasitic heat \
+             ({expected_parasitic_heat_w} W), category InternalGain"
+        );
+    }
+
+    #[test]
+    fn parasitic_heat_not_written_without_zone() {
+        // Without a zone configured, parasitic heat is silently discarded
+        // (no thermal accumulator to receive it).
+        let config = gen_config(&[
+            (KEY_PARASITIC_FRACTION, 0.05.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // No thermal accumulators were created because no zone is configured.
+        assert!(
+            slots.thermal.is_empty(),
+            "no thermal port should be registered without a zone"
+        );
+        // Parasitic telemetry is still recorded even without a zone.
+        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        assert!(
+            (parasitic_kw - 0.5).abs() < 1e-9,
+            "parasitic telemetry still recorded"
+        );
+    }
+
+    #[test]
+    fn parasitic_fraction_accepted_in_valid_range() {
+        let mut cfg = minimal_generator_config();
+        cfg.parasitic_fraction = Some(0.0);
+        assert!(cfg.validate().is_ok(), "0.0 should be valid");
+
+        cfg.parasitic_fraction = Some(0.05);
+        assert!(cfg.validate().is_ok(), "0.05 should be valid");
+
+        cfg.parasitic_fraction = Some(0.5);
+        assert!(cfg.validate().is_ok(), "0.5 should be valid");
+
+        cfg.parasitic_fraction = Some(1.0);
+        assert!(cfg.validate().is_ok(), "1.0 should be valid");
+    }
+
+    #[test]
+    fn parasitic_fraction_rejects_out_of_range() {
+        let mut cfg = minimal_generator_config();
+
+        cfg.parasitic_fraction = Some(-0.1);
+        assert!(
+            cfg.validate().is_err(),
+            "negative parasitic_fraction should be rejected"
+        );
+
+        cfg.parasitic_fraction = Some(1.5);
+        assert!(
+            cfg.validate().is_err(),
+            "parasitic_fraction > 1.0 should be rejected"
+        );
+    }
+
+    #[test]
+    fn parasitic_fraction_rejects_nonfinite() {
+        let mut cfg = minimal_generator_config();
+
+        cfg.parasitic_fraction = Some(f64::NAN);
+        assert!(
+            cfg.validate().is_err(),
+            "NaN parasitic_fraction should be rejected"
+        );
+
+        cfg.parasitic_fraction = Some(f64::INFINITY);
+        assert!(
+            cfg.validate().is_err(),
+            "infinite parasitic_fraction should be rejected"
+        );
+    }
+
+    #[test]
+    fn two_timestep_parasitic_zone_heat_accumulates() {
+        // Two timesteps with parasitic_fraction = 0.05: verify parasitic heat
+        // accumulates in the zone thermal accumulator across steps.
+        let config = gen_config(&[
+            (KEY_PARASITIC_FRACTION, 0.05.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+
+        // Step 1
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        let parasitic_kw_1 = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        assert!(
+            (parasitic_kw_1 - 0.5).abs() < 1e-9,
+            "step 1 parasitic should be 0.5 kW"
+        );
+
+        // Step 2 (note: ports should NOT be zeroed between steps for accumulation test)
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        let parasitic_kw_2 = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        assert!(
+            (parasitic_kw_2 - 0.5).abs() < 1e-9,
+            "step 2 parasitic should be 0.5 kW"
+        );
+
+        // The zone thermal accumulator internal gain should have ~2 * 0.5 kW = 1000 W
+        let zone_internal_gain =
+            slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+        // Zone also gets combustion waste heat (fuel_w - electric), so this is a lower bound.
+        // Parasitic contribution per step = 0.5 kW → 500 W; 2 steps = 1000 W.
+        let min_expected_parasitic_w = 1000.0;
+        assert!(
+            zone_internal_gain >= min_expected_parasitic_w - 1.0,
+            "zone {zone_internal_gain} W must be >= parasitic contribution {min_expected_parasitic_w} W"
+        );
+    }
+
+    #[test]
+    fn parasitic_fraction_near_one_mode_stays_standby_with_gross_output() {
+        // At parasitic_fraction ≈ 1.0 with low output, gross output crosses
+        // IDLE_KW_THRESHOLD while net output falls below it. Mode must track
+        // gross output (the engine is physically running and burning fuel) to
+        // prevent validate_core_contract from rejecting Off with non-zero flows.
+        let config = gen_config(&[
+            (KEY_PARASITIC_FRACTION, 0.999999.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 0.001,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        assert!(
+            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            "gross output {:.9} should exceed idle threshold",
+            generator.current_power_kw
+        );
+        assert_eq!(
+            generator.mode,
+            OperatingMode::Standby,
+            "mode must be Standby when engine is running, got {:?}",
+            generator.mode
+        );
+        assert_eq!(
+            generator.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "core_output mode must be Standby when engine is running, got {:?}",
+            generator.core_output().state.operating_mode
+        );
     }
 
     // =======================================================================
@@ -4590,6 +4989,7 @@ mod tests {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         }
     }
 

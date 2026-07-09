@@ -757,6 +757,12 @@ pub const SUPPLY_TEMP_JACKET_C: &str = "supply_temp_jacket_c";
 pub const SUPPLY_TEMP_EXHAUST_C: &str = "supply_temp_exhaust_c";
 // (ELECTRIC_OUTPUT_KW is in the electrical power section above)
 
+/// Parasitic electrical load deduction (kW) — auxiliary pumps, fans, compressors,
+/// and control electronics that consume generator output before net delivery.
+///
+/// scope: internal
+pub const PARASITIC_KW: &str = "parasitic_kw";
+
 // ── Fuel cell ───────────────────────────────────────────────────────────────
 /// DC stack electrical output (kW) before inverter losses.
 /// EnergyPlus FuelCellElectricGenerator.cc:1691-1711 — DC power efficiency model.
@@ -1143,6 +1149,7 @@ mod tests {
             EXHAUST_WATER_W,
             SUPPLY_TEMP_JACKET_C,
             SUPPLY_TEMP_EXHAUST_C,
+            PARASITIC_KW,
             // Fuel cell
             FUEL_CELL_DC_KW,
             FUEL_CELL_INVERTER_LOSS_W,
@@ -1382,6 +1389,7 @@ mod tests {
             EXHAUST_WATER_W,
             SUPPLY_TEMP_JACKET_C,
             SUPPLY_TEMP_EXHAUST_C,
+            PARASITIC_KW,
             // Fuel cell
             FUEL_CELL_DC_KW,
             FUEL_CELL_INVERTER_LOSS_W,

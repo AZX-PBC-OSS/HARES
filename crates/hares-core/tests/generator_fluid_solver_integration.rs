@@ -105,6 +105,7 @@ fn generator_fluid_solver_invariant_passes() {
         no_load_fuel_fraction: None,
         grid_forming: None,
         standby_mode: None,
+        parasitic_fraction: None,
     };
     let config = EquipmentConfig::from_typed(
         "Test CHP Gen".to_string(),

@@ -719,6 +719,7 @@ fn generator_fuel_efficiency_at_half_load() {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         },
     )
     .unwrap();
@@ -822,6 +823,7 @@ fn generator_ramp_rate_is_kw_per_second() {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         },
     )
     .unwrap();
@@ -907,6 +909,7 @@ fn generator_capacity_min_enforced() {
             no_load_fuel_fraction: None,
             grid_forming: None,
             standby_mode: None,
+            parasitic_fraction: None,
         },
     )
     .unwrap();

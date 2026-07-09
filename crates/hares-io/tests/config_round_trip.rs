@@ -565,6 +565,7 @@ fn sample_generator_config() -> GeneratorConfig {
         no_load_fuel_fraction: None,
         grid_forming: None,
         standby_mode: None,
+        parasitic_fraction: None,
     }
 }
 

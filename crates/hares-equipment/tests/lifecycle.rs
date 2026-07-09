@@ -1161,6 +1161,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 no_load_fuel_fraction: None,
                 grid_forming: None,
                 standby_mode: None,
+                parasitic_fraction: None,
             },
         ),
         "HRV" => typed_alias_config(
