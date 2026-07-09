@@ -1397,17 +1397,13 @@ impl Equipment for Generator {
             (0.0, 0.0, 0.0, 0.0, 0.0, q_flue_w)
         };
 
-        // Update supply temperature from actual thermal output so the fluid port
-        // carries self-consistent data: flow × Cp × ΔT = declared thermal_power_w
-        // by construction. Without this, the generator would write a dynamically
-        // computed thermal_power_w alongside static config temperatures, causing
-        // the fluid solver invariant to fire on mismatched flow-implied energy.
-        // EnergyPlus ICEngineElectricGenerator.cc:763:
-        //   HeatRecOutTemp = EnergyRecovered / (HeatRecMdot × CpHeatRec) + HeatRecInTemp
-        if has_thermal && q_thermal_effective_w > IDLE_KW_THRESHOLD && self.flow_rate_kg_s > 0.0 {
-            self.supply_temp_c = self.return_temp_c
-                + q_thermal_effective_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K);
-        }
+        // Fluid port self-consistency: flow is computed dynamically from
+        // q_thermal_effective_w, supply_temp_c, and return_temp_c so that
+        // flow · Cp · ΔT = q_thermal_effective_w by construction.
+        // ASHRAE HoF 2021 Ch.1 Eq.2: Q = m_dot · cp · ΔT.
+        // This replaces the prior approach of adjusting supply_temp_c while
+        // keeping flow fixed — the configured supply/return temperatures are
+        // now preserved as the design ΔT, and flow scales with thermal output.
 
         // Invariant: heat_rec_ratio must be in [0, 1] and effective <= available.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -1549,18 +1545,61 @@ impl Equipment for Generator {
         }
 
         // Write CHP fluid port when producing heat.
+        // Compute flow dynamically from thermal output and configured ΔT so the
+        // fluid port carries the correct energy: m_dot = Q / (cp × ΔT).
+        // ASHRAE HoF 2021 Ch.1 Eq.2.
         if q_thermal_effective_w > IDLE_KW_THRESHOLD {
             if let Some(loop_id) = self.chp_loop_id {
+                let delta_t_c = self.supply_temp_c - self.return_temp_c;
+                let computed_flow = if delta_t_c > 0.0 {
+                    q_thermal_effective_w / (CP_LIQUID_WATER_J_KG_K * delta_t_c)
+                } else {
+                    0.0
+                };
                 ports.accumulate(&PortContribution::Fluid {
                     loop_id,
-                    flow_rate_kg_s: self.flow_rate_kg_s,
+                    flow_rate_kg_s: computed_flow,
                     supply_temp_c: self.supply_temp_c,
                     return_temp_c: self.return_temp_c,
                     fluid_type: FluidType::Water,
-                    thermal_power_w: Some(q_thermal_effective_w),
+                    thermal_power_w: if computed_flow > 0.0 {
+                        Some(q_thermal_effective_w)
+                    } else {
+                        None
+                    },
                     node_id: FluidNodeId(0),
                     direction: HeatTransferDirection::Source,
                 })?;
+
+                // Invariant: when flow is positive, the fluid port's flow-implied
+                // energy must equal the generator's computed effective thermal output.
+                // Any gap means energy was computed but never delivered to the fluid loop.
+                // Skipped when computed_flow == 0 (e.g. supply_temp_c <= return_temp_c),
+                // which is a physically impossible configuration. In this case
+                // thermal_power_w is None, so the port is self-consistent.
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                if computed_flow > 0.0 {
+                    let delta_t = self.supply_temp_c - self.return_temp_c;
+                    let fluid_energy = computed_flow * CP_LIQUID_WATER_J_KG_K * delta_t;
+                    debug_assert!(
+                        (fluid_energy - q_thermal_effective_w).abs() < 1.0,
+                        "CHP fluid port energy {fluid_energy:.2} W diverges from \
+                         q_thermal_effective_w {q_thermal_effective_w:.2} W"
+                    );
+                }
+
+                // Observer capture: record computed flow for diagnostics.
+                #[cfg(feature = "observe")]
+                {
+                    tracing::debug!(
+                        computed_flow_kg_s = computed_flow,
+                        q_thermal_effective_w,
+                        supply_temp_c = self.supply_temp_c,
+                        return_temp_c = self.return_temp_c,
+                        delta_t_c = self.supply_temp_c - self.return_temp_c,
+                        "Generator CHP computed flow rate",
+                    );
+                }
             }
         }
 
@@ -5423,6 +5462,46 @@ mod tests {
     }
 
     #[test]
+    fn chp_zero_flow_declares_no_thermal_power() {
+        // Regression test: when supply_temp_c <= return_temp_c, computed_flow is
+        // 0.0 and the fluid port must not declare thermal power (thermal_power_w
+        // is None). Before the fix in T-0425, the port wrote Some(q_thermal_effective_w)
+        // alongside 0.0 flow, causing a downstream debug_assert mismatch in the
+        // fluid solver between flow-implied power (0 W) and declared power (>0 W).
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.35.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_RETURN_TEMP_C, 75.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 8.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        assert_eq!(slots.fluid.len(), 1, "CHP generator must have a fluid port");
+        assert_eq!(
+            slots.fluid[0].total_flow_kg_s, 0.0,
+            "computed flow must be zero when supply_temp_c <= return_temp_c"
+        );
+        assert_eq!(
+            slots.fluid[0].total_thermal_power_w, 0.0,
+            "declared thermal power must be zero when flow is zero"
+        );
+    }
+
+    #[test]
     fn chp_without_fluid_port_thermal_power_w_is_zero() {
         // Regression test: when CHP is active WITHOUT a fluid port, the accumulator
         // should show zero thermal_power_w (energy goes to zone, not fluid).
@@ -5577,6 +5656,209 @@ mod tests {
         assert!(
             delivered > 0.0,
             "thermal_power_delivered_w should be restored after load_state"
+        );
+    }
+
+    // =======================================================================
+    // T-0425: dynamic flow computes flow from q_thermal_effective_w
+    // =======================================================================
+
+    #[test]
+    fn chp_flow_rate_scales_with_thermal_output() {
+        // Verify flow_rate_kg_s = q_thermal / (cp * delta_T) at multiple
+        // load points: 25%, 50%, 75%, 100%. The fluid port's declared
+        // thermal_power_w and flow-implied energy must agree.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_SUPPLY_TEMP_C, 70.0.into()),
+            (KEY_RETURN_TEMP_C, 60.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let cp = CP_LIQUID_WATER_J_KG_K;
+        let delta_t = 70.0 - 60.0; // 10 K
+
+        let load_kw_values = [2.5, 5.0, 7.5, 10.0]; // 25%, 50%, 75%, 100%
+
+        for &setpoint_kw in &load_kw_values {
+            let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+            generator.init(&config, &base_env()).unwrap();
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: setpoint_kw,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+
+            let q_thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+            assert!(q_thermal_w > 0.0);
+
+            // The fluid accumulator total_flow should match the expected flow.
+            assert_eq!(slots.fluid.len(), 1);
+            let expected_flow = q_thermal_w / (cp * delta_t);
+            let actual_flow = slots.fluid[0].total_flow_kg_s;
+            let flow_err = (actual_flow - expected_flow).abs();
+            assert!(
+                flow_err < 1e-6,
+                "at {setpoint_kw} kW: expected flow {expected_flow:.6} kg/s, \
+                 got {actual_flow:.6} kg/s (diff {flow_err:.3e})"
+            );
+
+            // Self-consistency: flow × cp × ΔT must equal declared thermal_power_w.
+            let flow_implied_w = actual_flow * cp * delta_t;
+            let declared_w = slots.fluid[0].total_thermal_power_w;
+            assert!(
+                (flow_implied_w - declared_w).abs() < 1.0,
+                "at {setpoint_kw} kW: flow-implied energy {flow_implied_w} W != \
+                 declared thermal_power {declared_w} W"
+            );
+        }
+    }
+
+    #[test]
+    fn chp_flow_rate_lower_at_part_load() {
+        // Regression: at 5 kW electric (part load) with eta_thermal=0.4,
+        // the fluid port flow rate must be lower than at 10 kW (rated),
+        // confirming it scales with output rather than being fixed.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_SUPPLY_TEMP_C, 70.0.into()),
+            (KEY_RETURN_TEMP_C, 60.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+
+        let flow_at_5kw = {
+            let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+            generator.init(&config, &base_env()).unwrap();
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 5.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+            slots.fluid[0].total_flow_kg_s
+        };
+
+        let flow_at_10kw = {
+            let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+            generator.init(&config, &base_env()).unwrap();
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 10.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+            slots.fluid[0].total_flow_kg_s
+        };
+
+        assert!(flow_at_5kw > 0.0, "flow should be positive at 5 kW");
+        assert!(
+            flow_at_10kw > flow_at_5kw,
+            "flow at 10 kW ({flow_at_10kw:.6}) must exceed flow at 5 kW ({flow_at_5kw:.6})"
+        );
+
+        // Flow should be approximately proportional to thermal output.
+        let q5 = flow_at_5kw * CP_LIQUID_WATER_J_KG_K * 10.0; // ΔT = 10 K
+        let q10 = flow_at_10kw * CP_LIQUID_WATER_J_KG_K * 10.0;
+        assert!(
+            q10 > q5,
+            "fluid port energy at 10 kW ({q10} W) must exceed energy at 5 kW ({q5} W)"
+        );
+    }
+
+    #[test]
+    fn chp_energy_balance_across_timesteps() {
+        // Two-timestep simulation: verify the fluid accumulator's total
+        // thermal energy equals the sum of q_thermal_w across timesteps.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_SUPPLY_TEMP_C, 70.0.into()),
+            (KEY_RETURN_TEMP_C, 60.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        let mut total_q_thermal_w = 0.0;
+        let mut total_fluid_energy_w = 0.0;
+
+        // Step 1: rated output
+        {
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 10.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+
+            let q = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+            total_q_thermal_w += q;
+            total_fluid_energy_w += slots.fluid[0].total_thermal_power_w;
+        }
+
+        // Step 2: part-load output (50%)
+        {
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 5.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+
+            let q = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+            total_q_thermal_w += q;
+            total_fluid_energy_w += slots.fluid[0].total_thermal_power_w;
+        }
+
+        let balance_err = (total_fluid_energy_w - total_q_thermal_w).abs();
+        assert!(
+            balance_err < 1.0,
+            "two-timestep energy balance: fluid accumulator total ({total_fluid_energy_w} W) != \
+             sum(q_thermal_w) ({total_q_thermal_w} W), diff = {balance_err} W"
+        );
+
+        // The total fluid energy must be positive (CHP produces net thermal output).
+        assert!(
+            total_fluid_energy_w > 0.0,
+            "total fluid energy across timesteps must be positive"
+        );
+        assert!(
+            total_q_thermal_w > 0.0,
+            "total q_thermal_w across timesteps must be positive"
         );
     }
 
