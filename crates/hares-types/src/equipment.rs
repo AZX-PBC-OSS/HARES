@@ -510,6 +510,47 @@ fn default_charge_buffer_hours() -> f64 {
     2.0
 }
 
+/// How the EV resolves conflicts between an external PowerSetpoint and the
+/// internal Ready‑By departure deadline.
+///
+/// Real EVs and smart EVSEs (Tesla scheduled departure, FordPass, Wallbox)
+/// default to deadline guarantee: cost optimization yields to departure
+/// readiness. VPP and grid‑service deployments may require external authority,
+/// where the utility dispatch has absolute control including the risk of a
+/// missed departure SOC.
+///
+/// This is a per‑equipment config‑time setting. It determines the equipment's
+/// contract with external controllers (RL agents, HEMS, VPP aggregators,
+/// HELICS co‑simulation federates): the equipment advertises whether it will
+/// guarantee the departure SOC regardless of external commands, or whether it
+/// cedes authority to the external controller.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default, strum::EnumIter,
+)]
+pub enum ChargingPriority {
+    /// BMS deadline enforcement always runs, even when an external
+    /// PowerSetpoint is active. When the deadline is urgent, actual power =
+    /// `max(bms_required_power, external_setpoint)` — the external setpoint
+    /// acts as a soft floor during urgent deadlines, not a hard ceiling.
+    /// `PowerLimit` is still applied as a final cap after the max operation.
+    ///
+    /// This mirrors real‑world smart EVSE behaviour: TOU optimization and
+    /// price‑responsive dispatch are honoured when there is ample time, but
+    /// the equipment will override cost signals to meet the departure SOC.
+    #[default]
+    DeadlineGuarantee,
+
+    /// The external controller has absolute authority. The BMS deadline logic
+    /// is completely bypassed when a PowerSetpoint is active — the controller
+    /// bears sole responsibility for meeting the departure SOC.
+    ///
+    /// Use this for VPP / grid‑service deployments where the user has
+    /// explicitly enrolled in a program that gives the utility dispatch
+    /// authority over charging, or for HELICS co‑simulations where an external
+    /// federate is the sole charging controller.
+    ExternalAuthority,
+}
+
 /// Charging strategy governing when and how fast to charge.
 ///
 /// `TouAware` references the TOU rate schedule from the environment/simulation

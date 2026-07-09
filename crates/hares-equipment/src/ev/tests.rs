@@ -153,6 +153,10 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             power_factor: get_f64(&[KEY_POWER_FACTOR]),
             charger_capacity_kva: get_f64(&[KEY_CHARGER_CAPACITY_KVA]),
             cc_cv_transition_soc: get_f64(&[KEY_CC_CV_TRANSITION_SOC]),
+            charging_priority: get_str(&[KEY_CHARGING_PRIORITY]).map(|s| match s.as_str() {
+                "ExternalAuthority" => ChargingPriority::ExternalAuthority,
+                _ => ChargingPriority::DeadlineGuarantee,
+            }),
         },
     )
     .unwrap()
@@ -1804,6 +1808,296 @@ fn power_limit_during_ready_by() {
     );
 }
 
+// ── ChargingPriority: deadline‑vs‑setpoint interaction tests ──────
+
+/// With `DeadlineGuarantee` (the default), an urgent deadline overrides
+/// a low external PowerSetpoint. The BMS raises power above the setpoint
+/// to meet the departure SOC.
+///
+/// Setup: 60 kWh battery, 7.2 kW L2, SOC=0.2, target_soc=0.9,
+/// departure in 2 h. The BMS needs ~6.5 h at full rate, so the deadline
+/// is urgent. An external setpoint of 1.0 kW must be overridden.
+#[test]
+fn deadline_guarantee_raises_power_above_setpoint_when_urgent() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 0, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+
+    assert!(
+        power > 1.0,
+        "DeadlineGuarantee should raise power above 1.0 kW setpoint when deadline is urgent, got {power}"
+    );
+    assert!(
+        power > 5.0,
+        "should be charging near full rate (~7.2 kW), got {power}"
+    );
+}
+
+/// With `ExternalAuthority`, the same urgent deadline + low setpoint
+/// scenario respects the external setpoint — the BMS deadline logic is
+/// bypassed. The external controller bears sole responsibility.
+#[test]
+fn external_authority_respects_setpoint_despite_urgent_deadline() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(
+        KEY_CHARGING_PRIORITY.to_string(),
+        "ExternalAuthority".into(),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.charging_priority, ChargingPriority::ExternalAuthority);
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 0, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+
+    assert!(
+        (power - 1.0).abs() < 1e-9,
+        "ExternalAuthority should respect 1.0 kW setpoint even with urgent deadline, got {power}"
+    );
+}
+
+/// With `DeadlineGuarantee`, when the deadline is NOT urgent (plenty of
+/// time), the external setpoint is honoured unchanged. The BMS reports
+/// no urgency (returns 0.0), so max(0.0, setpoint) = setpoint.
+#[test]
+fn deadline_guarantee_respects_setpoint_when_not_urgent() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.75.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.8,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    // 19:00 with departure at 7:00 — 12 hours remaining, SOC deficit
+    // is only 0.05, needs < 1 h. BMS reports no urgency.
+    env.current_time = dt(2026, 1, 1, 19, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+
+    assert!(
+        (power - 1.0).abs() < 1e-9,
+        "DeadlineGuarantee should respect 1.0 kW setpoint when deadline is not urgent, got {power}"
+    );
+}
+
+/// Default `charging_priority` is `DeadlineGuarantee` — matches real‑world
+/// smart EVSE behaviour where cost optimization yields to departure readiness.
+#[test]
+fn charging_priority_defaults_to_deadline_guarantee() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.charging_priority, ChargingPriority::DeadlineGuarantee);
+}
+
+/// `PowerLimit` is still applied as a final cap after the deadline guarantee
+/// max operation. An urgent deadline raises power above the setpoint, but
+/// a `PowerLimit` below the BMS‑required power caps the result.
+#[test]
+fn power_limit_caps_after_deadline_guarantee_max() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerLimit {
+        max_power_kw: 3.0,
+        ramp_rate_kw_per_s: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 0, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+
+    assert!(
+        power > 1.0,
+        "deadline guarantee should raise power above 1.0 kW setpoint, got {power}"
+    );
+    assert!(
+        power <= 3.0 + 1e-9,
+        "PowerLimit=3.0 should cap the result, got {power}"
+    );
+}
+
+/// Regression: with `DeadlineGuarantee`, an EV with a low external setpoint
+/// close to its departure deadline still charges at full rate when the BMS
+/// determines urgency. The SOC gain significantly exceeds what the setpoint
+/// alone would deliver, proving the deadline override is active.
+///
+/// Setup: 60 kWh, 7.2 kW L2, 0.9 η, SOC=0.3, target_soc=0.5,
+/// departure at 5:00. At 1.0 kW setpoint alone, 5 h would add only
+/// 0.9×5/60 = 0.075 SOC → 0.375. With deadline guarantee, the BMS
+/// becomes urgent partway through and charges at full rate, pushing
+/// SOC well above 0.375.
+#[test]
+fn deadline_guarantee_meets_target_soc_despite_low_setpoint() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 5.0,
+        target_soc: 0.5,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 0, 0, 0);
+    for _ in 0..20 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        env.current_time += ChronoDuration::minutes(15);
+    }
+
+    // With setpoint alone (1.0 kW × 0.9 η × 5 h / 60 kWh = 0.075 SOC):
+    // SOC would be ~0.375. Deadline guarantee raises power above the
+    // setpoint when the BMS determines urgency, so SOC must be
+    // significantly higher.
+    assert!(
+        ev.soc > 0.45,
+        "DeadlineGuarantee should charge above setpoint-only rate, got SOC={} (setpoint-only would be ~0.375)",
+        ev.soc
+    );
+}
+
+/// Under `ExternalAuthority` with an active PowerSetpoint, the BMS
+/// CC‑CV taper is not applied to the delivered power (the external
+/// setpoint is used verbatim). Verify `cc_cv_derating` reports 1.0
+/// even at high SOC, preventing a misleading telemetry signal that
+/// would incorrectly attribute a power reduction to CC‑CV tapering.
+///
+/// Setup: ExternalAuthority, SOC=0.95 (> 0.85 transition), setpoint
+/// active, Ready‑By deadline set. No LUT present.
+#[test]
+fn external_authority_reports_no_cc_cv_derating_when_setpoint_active() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.95.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(
+        KEY_CHARGING_PRIORITY.to_string(),
+        "ExternalAuthority".into(),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.charging_priority, ChargingPriority::ExternalAuthority);
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 5.0,
+        target_soc: 1.0,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.5,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 3, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert!(
+        ev.cc_cv_derating == 1.0,
+        "ExternalAuthority + setpoint: CC‑CV derating must be 1.0 (no taper applied to external setpoint), got {}",
+        ev.cc_cv_derating
+    );
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (power - 1.5).abs() < 1e-9,
+        "ExternalAuthority should deliver the raw setpoint power, got {power}"
+    );
+}
+
 // ── CC‑CV taper tests ────────────────────────────────────────────
 
 #[test]
@@ -3017,6 +3311,7 @@ fn minimal_ev_config() -> EvConfig {
         power_factor: None,
         charger_capacity_kva: None,
         cc_cv_transition_soc: None,
+        charging_priority: None,
     }
 }
 

@@ -1112,6 +1112,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 power_factor: None,
                 charger_capacity_kva: None,
                 cc_cv_transition_soc: None,
+                charging_priority: None,
             },
         ),
         "Scheduled EV" => config_mixed(

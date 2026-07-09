@@ -8,11 +8,11 @@ use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
 use hares_types::zip::ZipLoad;
 use hares_types::{
-    BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
-    CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower,
-    EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution, PortDeclaration,
-    PortSlots, Soc, Telemetry,
+    BatteryChemistry, ChargingLevel, ChargingPriority, ChargingStrategy, ControlCapabilities,
+    ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution,
+    PortDeclaration, PortSlots, Soc, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -127,7 +127,16 @@ pub struct Ev {
     plug_in_policy: PlugInPolicy,
 
     power_limit_kw: Option<f64>,
+    /// External active power setpoint [kW]. Positive = charging command,
+    /// negative = V2G/V2L discharge command. When set, the interaction
+    /// with Ready‑By deadline enforcement depends on `charging_priority`:
+    /// `DeadlineGuarantee` treats this as a soft floor and raises power
+    /// above it when the deadline is urgent; `ExternalAuthority` bypasses
+    /// deadline enforcement entirely.
     power_setpoint_kw: Option<f64>,
+    /// How the EV resolves conflicts between an external PowerSetpoint and
+    /// the internal Ready‑By departure deadline. See [`ChargingPriority`].
+    charging_priority: ChargingPriority,
     /// min_soc carried by the last PowerSetpoint signal. Used to enforce
     /// a SOC floor during discharge (OCHRE EV.py:298).
     power_setpoint_min_soc: Option<f64>,
@@ -284,6 +293,14 @@ impl Ev {
                 .unwrap_or(PlugInPolicy::Always),
             power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
             power_setpoint_kw: None,
+            charging_priority: config
+                .get_str(KEY_CHARGING_PRIORITY)
+                .map(|s| match s.trim() {
+                    "ExternalAuthority" => ChargingPriority::ExternalAuthority,
+                    "DeadlineGuarantee" => ChargingPriority::DeadlineGuarantee,
+                    _ => ChargingPriority::DeadlineGuarantee,
+                })
+                .unwrap_or_default(),
             power_setpoint_min_soc: None,
             power_setpoint_max_soc: None,
             dr_level: DRLevel::Normal,
@@ -392,6 +409,7 @@ impl Ev {
             .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
         self.ready_soc = c.ready_soc.unwrap_or(self.soc_max);
         self.power_limit_kw = c.power_limit_kw;
+        self.charging_priority = c.charging_priority.unwrap_or_default();
 
         self.power_factor = c.power_factor.unwrap_or(1.0);
         self.charger_capacity_kva = c.charger_capacity_kva.unwrap_or_else(|| {
@@ -540,13 +558,88 @@ impl Ev {
             .min(derated_rated);
 
         let mut cc_cv_mult = 1.0_f64;
-        if self.ready_by_hour.is_some() && self.power_setpoint_kw.is_none() {
-            requested = self.bms_ready_by_power(now, derated_rated, soc_limit);
+
+        // Diagnostic captures for the deadline‑vs‑setpoint interaction.
+        #[cfg(feature = "observe")]
+        let mut ev_ready_by_bypassed = false;
+        #[cfg(feature = "observe")]
+        let mut ev_ready_by_power_before_setpoint: Option<f64> = None;
+        #[cfg(feature = "observe")]
+        let mut ev_ready_by_power_after_setpoint: Option<f64> = None;
+
+        // Deadline‑vs‑setpoint resolution. The BMS Ready‑By logic always
+        // runs when a deadline is set; how its result interacts with an
+        // external PowerSetpoint depends on `charging_priority`.
+        if self.ready_by_hour.is_some() {
+            let bms_power = self.bms_ready_by_power(now, derated_rated, soc_limit);
             cc_cv_mult = if self.charging_curve_lut.is_some() {
                 1.0
             } else {
                 Self::cc_cv_taper_multiplier(self.soc, self.cc_cv_transition_soc)
             };
+
+            match self.charging_priority {
+                ChargingPriority::DeadlineGuarantee => {
+                    if self.power_setpoint_kw.is_some() {
+                        // External setpoint is a soft floor: BMS deadline
+                        // enforcement raises power above the setpoint when
+                        // the deadline is urgent. When the BMS reports no
+                        // urgency (returns 0.0), the external setpoint is
+                        // honoured unchanged. PowerLimit is still applied
+                        // as a final cap after this max operation.
+                        #[cfg(feature = "observe")]
+                        {
+                            ev_ready_by_power_before_setpoint = Some(requested);
+                        }
+                        requested = bms_power.max(requested);
+                        #[cfg(feature = "observe")]
+                        {
+                            ev_ready_by_power_after_setpoint = Some(requested);
+                        }
+                    } else {
+                        // No external setpoint: BMS has full control.
+                        requested = bms_power;
+                    }
+                }
+                ChargingPriority::ExternalAuthority => {
+                    if self.power_setpoint_kw.is_some() {
+                        // External controller bears sole responsibility;
+                        // BMS deadline logic is not applied. CC‑CV
+                        // tapering is a BMS‑level mechanism; since the
+                        // external setpoint is used verbatim, the
+                        // telemetry must report no CC‑CV derating here.
+                        cc_cv_mult = 1.0;
+                        #[cfg(feature = "observe")]
+                        {
+                            ev_ready_by_bypassed = true;
+                        }
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        {
+                            let ready_by_hour = self.ready_by_hour.unwrap_or(0.0);
+                            let current_hour = now.hour() as f64
+                                + now.minute() as f64 / 60.0
+                                + now.second() as f64 / 3600.0;
+                            let hours_remaining = if ready_by_hour > current_hour {
+                                ready_by_hour - current_hour
+                            } else {
+                                24.0 - current_hour + ready_by_hour
+                            };
+                            tracing::warn!(
+                                soc = self.soc,
+                                target_soc = soc_limit,
+                                hours_remaining,
+                                power_setpoint_kw = self.power_setpoint_kw,
+                                "EV Ready‑By deadline enforcement bypassed by external \
+                                 PowerSetpoint (charging_priority = ExternalAuthority): \
+                                 external controller bears sole responsibility for \
+                                 departure SOC"
+                            );
+                        }
+                    } else {
+                        requested = bms_power;
+                    }
+                }
+            }
         }
 
         self.cc_cv_derating = cc_cv_mult;
@@ -567,6 +660,9 @@ impl Ev {
                 eff_power_before_cc_cv = eff_before,
                 eff_power_after_cc_cv = eff_after,
                 ev_cc_cv_derating = cc_cv_mult,
+                ev_ready_by_bypassed,
+                ev_ready_by_power_before_setpoint,
+                ev_ready_by_power_after_setpoint,
                 soc = self.soc,
                 "compute_charging_power_kw: LUT active={lut_active}, CC‑CV derating multiplier={cc_cv_mult}",
             );

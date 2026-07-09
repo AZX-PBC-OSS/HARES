@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::EquipmentConfig;
 use crate::config::EquipmentTypedConfig;
 
-use hares_types::ChargingLevel;
+use hares_types::{ChargingLevel, ChargingPriority};
 
 pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(crate) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";
@@ -43,6 +43,7 @@ pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
 pub(super) const KEY_POWER_FACTOR: &str = "power_factor";
 pub(super) const KEY_CHARGER_CAPACITY_KVA: &str = "charger_capacity_kva";
 pub(super) const KEY_CC_CV_TRANSITION_SOC: &str = "cc_cv_transition_soc";
+pub(crate) const KEY_CHARGING_PRIORITY: &str = "charging_priority";
 
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
 pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;
@@ -245,6 +246,15 @@ pub struct EvConfig {
     /// Ignored when a charging-curve LUT is present — the LUT already
     /// captures the power roll-off.
     pub cc_cv_transition_soc: Option<f64>,
+    /// How the EV resolves conflicts between an external PowerSetpoint and
+    /// the internal Ready‑By departure deadline. Defaults to
+    /// [`ChargingPriority::DeadlineGuarantee`], matching real‑world smart
+    /// EVSE behaviour where cost optimization yields to departure readiness.
+    /// Set to `ExternalAuthority` for VPP / grid‑service deployments where
+    /// the external controller bears sole responsibility for meeting the
+    /// departure SOC.
+    #[serde(default)]
+    pub charging_priority: Option<ChargingPriority>,
 }
 
 impl EquipmentTypedConfig for EvConfig {

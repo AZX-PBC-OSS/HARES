@@ -184,6 +184,7 @@ impl VehicleSpec {
                 power_factor: None,
                 charger_capacity_kva: None,
                 cc_cv_transition_soc: None,
+                charging_priority: None,
             },
         )
     }
