@@ -63,10 +63,11 @@ fn dr_level_code(level: DRLevel) -> f64 {
     }
 }
 
-/// CC-CV margin: constant-power formula underestimates charge time because
-/// CC-CV taper reduces power at high SOC. 0.85 accounts for ~15% longer
-/// charge time in the CV region.
-const CC_CV_MARGIN: f64 = 0.85;
+/// Minimum CC-CV power multiplier at SOC = 1.0.
+/// When no LUT is present and SOC is at or above the transition point,
+/// effective charging power is scaled linearly from 1.0 at the transition
+/// SOC down to this value at 100% SOC.
+const CC_CV_MIN_MULTIPLIER: f64 = 0.3;
 
 pub struct Ev {
     descriptor: EquipmentDescriptor,
@@ -141,6 +142,9 @@ pub struct Ev {
     soc_target: Option<f64>,
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
+
+    cc_cv_transition_soc: f64,
+    cc_cv_derating: f64,
 
     // Reactive power / smart-inverter control (V2G/V2L inverter-coupled DER,
     // IEEE 1547-2018 / SAE J3072 require reactive capability).
@@ -287,6 +291,10 @@ impl Ev {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
+            cc_cv_transition_soc: config
+                .get_f64(KEY_CC_CV_TRANSITION_SOC)
+                .unwrap_or(DEFAULT_CC_CV_TRANSITION_SOC),
+            cc_cv_derating: 1.0,
             q_setpoint_kvar: None,
             power_factor: config.get_f64(KEY_POWER_FACTOR).unwrap_or(1.0),
             charger_capacity_kva: config.get_f64(KEY_CHARGER_CAPACITY_KVA).unwrap_or_else(|| {
@@ -351,6 +359,10 @@ impl Ev {
             .thermal_mass_j_per_k
             .unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K);
         self.ua_w_per_k = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
+
+        self.cc_cv_transition_soc = c
+            .cc_cv_transition_soc
+            .unwrap_or(DEFAULT_CC_CV_TRANSITION_SOC);
 
         self.v2l_enabled = c.v2l_enabled.unwrap_or(false);
         self.v2l_soc_reserve = c.v2l_soc_reserve.unwrap_or(DEFAULT_V2L_SOC_RESERVE);
@@ -434,6 +446,7 @@ impl Ev {
         self.soc_target = None;
         self.soc_target_min = None;
         self.soc_target_max = None;
+        self.cc_cv_derating = 1.0;
         self.reactive_power_kvar = 0.0;
         self.telemetry = default_telemetry(self.charging_level);
         self.core_output = CoreOutput::default();
@@ -462,7 +475,7 @@ impl Ev {
     /// correctly prevents SOC overshoot even under cold-temperature derating.
     /// `max_power_kw` is the charger's rated power (home rated or away charger).
     fn compute_charging_power_kw(
-        &self,
+        &mut self,
         now: DateTime<FixedOffset>,
         dt: Duration,
         charge_derate: f64,
@@ -526,8 +539,37 @@ impl Ev {
             .max(0.0)
             .min(derated_rated);
 
+        let mut cc_cv_mult = 1.0_f64;
         if self.ready_by_hour.is_some() && self.power_setpoint_kw.is_none() {
             requested = self.bms_ready_by_power(now, derated_rated, soc_limit);
+            cc_cv_mult = if self.charging_curve_lut.is_some() {
+                1.0
+            } else {
+                Self::cc_cv_taper_multiplier(self.soc, self.cc_cv_transition_soc)
+            };
+        }
+
+        self.cc_cv_derating = cc_cv_mult;
+
+        #[cfg(feature = "observe")]
+        {
+            let lut_active = self.charging_curve_lut.is_some();
+            let lut_derate = if derated_rated > 0.0 {
+                curve_limited_rated / rated
+            } else {
+                1.0
+            };
+            let eff_before = derated_rated * self.charging_efficiency;
+            let eff_after = eff_before * cc_cv_mult;
+            tracing::debug!(
+                lut_active,
+                lut_derate,
+                eff_power_before_cc_cv = eff_before,
+                eff_power_after_cc_cv = eff_after,
+                ev_cc_cv_derating = cc_cv_mult,
+                soc = self.soc,
+                "compute_charging_power_kw: LUT active={lut_active}, CC‑CV derating multiplier={cc_cv_mult}",
+            );
         }
 
         let taper_limit = (soc_limit - self.soc).max(0.0) * self.battery_capacity_kwh
@@ -541,6 +583,26 @@ impl Ev {
             power = power.min(limit.max(0.0));
         }
         power * self.dr_power_fraction()
+    }
+
+    /// Returns the CC‑CV tapering multiplier for a given SOC.
+    ///
+    /// When `soc < transition_soc`: multiplier = 1.0 (constant-power CC region).
+    /// When `soc >= transition_soc`: linear taper from 1.0 at `transition_soc`
+    /// to `CC_CV_MIN_MULTIPLIER` at SOC = 1.0 (CV taper region).
+    fn cc_cv_taper_multiplier(soc: f64, transition_soc: f64) -> f64 {
+        if soc < transition_soc {
+            return 1.0;
+        }
+        let range = 1.0 - transition_soc;
+        if range <= 0.0 {
+            return 1.0;
+        }
+        if soc >= 1.0 {
+            return CC_CV_MIN_MULTIPLIER;
+        }
+        let t = (soc - transition_soc) / range;
+        (1.0 - (1.0 - CC_CV_MIN_MULTIPLIER) * t).max(CC_CV_MIN_MULTIPLIER)
     }
 
     fn bms_ready_by_power(
@@ -559,12 +621,39 @@ impl Ev {
             return 0.0;
         }
 
-        let eff_power = derated_rated * self.charging_efficiency * CC_CV_MARGIN;
+        let cc_cv_mult = if self.charging_curve_lut.is_some() {
+            1.0
+        } else {
+            Self::cc_cv_taper_multiplier(self.soc, self.cc_cv_transition_soc)
+        };
+
+        let eff_power = derated_rated * self.charging_efficiency * cc_cv_mult;
         let hours_needed = if eff_power > 0.0 {
             soc_deficit * self.battery_capacity_kwh / eff_power
         } else {
             return derated_rated;
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.charging_curve_lut.is_some() {
+                assert!(
+                    cc_cv_mult == 1.0,
+                    "CC‑CV margin must not be applied when a charging‑curve LUT is present"
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        if !self.charging_curve_lut.is_some() && self.soc >= self.cc_cv_transition_soc {
+            tracing::debug!(
+                soc = self.soc,
+                transition_soc = self.cc_cv_transition_soc,
+                cc_cv_taper_mult = cc_cv_mult,
+                hours_needed,
+                "bms_ready_by_power: SOC‑based CC‑CV taper applied in no‑LUT path",
+            );
+        }
 
         let current_hour =
             now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0;
@@ -695,6 +784,7 @@ impl Ev {
         );
         self.telemetry
             .set(tk::CHARGE_DERATE, self.charge_derate_factor());
+        self.telemetry.set(tk::CC_CV_DERATE, self.cc_cv_derating);
         self.telemetry
             .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
         self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);

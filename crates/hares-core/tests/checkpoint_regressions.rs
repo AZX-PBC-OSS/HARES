@@ -372,6 +372,7 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
             initial_connection_state: None,
             power_factor: None,
             charger_capacity_kva: None,
+            cc_cv_transition_soc: None,
         },
     )
     .unwrap();

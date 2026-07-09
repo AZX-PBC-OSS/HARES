@@ -183,6 +183,7 @@ fn l1_ev_config(
             initial_connection_state: None,
             power_factor: None,
             charger_capacity_kva: None,
+            cc_cv_transition_soc: None,
         },
     )
     .unwrap()

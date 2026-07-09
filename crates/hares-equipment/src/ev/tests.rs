@@ -152,6 +152,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             initial_connection_state: get_str(&[KEY_INITIAL_CONNECTION_STATE]),
             power_factor: get_f64(&[KEY_POWER_FACTOR]),
             charger_capacity_kva: get_f64(&[KEY_CHARGER_CAPACITY_KVA]),
+            cc_cv_transition_soc: get_f64(&[KEY_CC_CV_TRANSITION_SOC]),
         },
     )
     .unwrap()
@@ -1803,6 +1804,165 @@ fn power_limit_during_ready_by() {
     );
 }
 
+// ── CC‑CV taper tests ────────────────────────────────────────────
+
+#[test]
+fn cc_cv_taper_no_derating_below_transition() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.8,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 3, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert!(
+        ev.cc_cv_derating == 1.0,
+        "SOC=0.5 is below transition, no CC‑CV taper should apply, got derating={}",
+        ev.cc_cv_derating
+    );
+}
+
+#[test]
+fn cc_cv_taper_applies_above_transition() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.95.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 5.0,
+        target_soc: 1.0,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 3, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert!(
+        ev.cc_cv_derating < 1.0,
+        "SOC=0.95 is above transition, CC‑CV taper should apply, got derating={}",
+        ev.cc_cv_derating
+    );
+    let expected = 0.533;
+    assert!(
+        (ev.cc_cv_derating - expected).abs() < 0.01,
+        "taper at SOC=0.95 should be ~{expected}, got {}",
+        ev.cc_cv_derating
+    );
+}
+
+#[test]
+fn cc_cv_taper_omitted_when_lut_present() {
+    let lut = make_4d_lut(&[(0.0, 1.0), (0.5, 1.0), (1.0, 0.0)]);
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.95.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.set_charging_curve_lut(Some(lut)).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 5.0,
+        target_soc: 1.0,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 3, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert_eq!(
+        ev.cc_cv_derating, 1.0,
+        "LUT present: CC‑CV derating must be 1.0 (LUT already captures power roll-off), got {}",
+        ev.cc_cv_derating
+    );
+}
+
+/// Verify the linear CC-CV taper produces the expected derating at SOC 0.88
+/// (just above the 0.85 transition point). The old flat CC_CV_MARGIN=0.85
+/// under-estimated charge time at this SOC by applying a 15% derate from the
+/// start of the CV region; the new SOC-dependent taper at SOC 0.88 gives a
+/// multiplier of 0.86 — a small improvement over the old flat value, but
+/// indicative of the fix's primary benefit (no derating below the transition,
+/// tested separately in `cc_cv_taper_no_derating_below_transition`).
+#[test]
+fn soc_88_linear_taper_near_transition() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.88.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.90,
+    })
+    .unwrap();
+
+    env.current_time = dt(2026, 1, 1, 0, 0, 0);
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert!(
+        ev.cc_cv_derating < 1.0,
+        "SOC=0.88 above transition, taper should apply, got derating={}",
+        ev.cc_cv_derating
+    );
+    // Linear taper: t = (0.88 - 0.85) / 0.15 = 0.2
+    // multiplier = 1.0 - 0.7 * 0.2 = 0.86
+    let expected = 0.86;
+    assert!(
+        (ev.cc_cv_derating - expected).abs() < 0.01,
+        "taper at SOC=0.88 should be ~{expected}, got {}",
+        ev.cc_cv_derating
+    );
+}
+
+/// Verify the taper multiplier helper at boundary points.
+#[test]
+fn cc_cv_taper_multiplier_boundaries() {
+    use super::Ev;
+
+    let ts = 0.85;
+
+    assert_eq!(Ev::cc_cv_taper_multiplier(0.0, ts), 1.0);
+    assert_eq!(Ev::cc_cv_taper_multiplier(ts, ts), 1.0);
+
+    let at_full = Ev::cc_cv_taper_multiplier(1.0, ts);
+    assert!(
+        (at_full - CC_CV_MIN_MULTIPLIER).abs() < 1e-15,
+        "taper at SOC=1.0 should be {CC_CV_MIN_MULTIPLIER}, got {at_full}"
+    );
+
+    let mid = Ev::cc_cv_taper_multiplier(0.925, ts);
+    assert!(mid > CC_CV_MIN_MULTIPLIER && mid < 1.0);
+
+    assert_eq!(Ev::cc_cv_taper_multiplier(1.0, 1.0), 1.0);
+    assert_eq!(Ev::cc_cv_taper_multiplier(0.5, 1.0), 1.0);
+}
+
 #[test]
 fn away_charges_to_ready_soc() {
     let mut raw = base_raw();
@@ -2745,12 +2905,13 @@ fn ev_soc_curve_monotonic_during_charging() {
 /// Departure at midnight (departure_hour = 0.0) exercises the day-wrapping
 /// boundary in the BMS ready-by scheduler.
 ///
-/// Physics: 60 kWh battery, 7.2 kW L2 charger, η = 0.9, CC-CV margin = 0.85.
-/// Effective charge rate = 7.2 * 0.9 * 0.85 = 5.508 kW effective throughput.
-/// SOC deficit = 0.9 - 0.2 = 0.7; hours_needed = 0.7 * 60 / 5.508 ≈ 7.63 h.
+/// Physics: 60 kWh battery, 7.2 kW L2 charger, η = 0.9.
+/// SOC = 0.2 is below the CC-CV transition SOC (0.85), so no taper applies.
+/// Effective charge rate = 7.2 * 0.9 = 6.48 kW effective throughput.
+/// SOC deficit = 0.9 - 0.2 = 0.7; hours_needed = 0.7 * 60 / 6.48 ≈ 6.48 h.
 ///
-/// At 12:00 (noon), hours_until_deadline = 24 - 12 + 0 = 12 h > 7.63 h → BMS delays.
-/// At 20:00, hours_until_deadline = 24 - 20 + 0 = 4 h < 7.63 h → BMS charges immediately.
+/// At 12:00 (noon), hours_until_deadline = 24 - 12 + 0 = 12 h > 6.48 h → BMS delays.
+/// At 20:00, hours_until_deadline = 24 - 20 + 0 = 4 h < 6.48 h → BMS charges immediately.
 /// The 1440-step boundary corresponds to a full 24-hour simulation day.
 #[test]
 fn ev_departure_at_step_boundary() {
@@ -2855,6 +3016,7 @@ fn minimal_ev_config() -> EvConfig {
         initial_connection_state: None,
         power_factor: None,
         charger_capacity_kva: None,
+        cc_cv_transition_soc: None,
     }
 }
 

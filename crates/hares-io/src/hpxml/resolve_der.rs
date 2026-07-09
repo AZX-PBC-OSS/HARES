@@ -234,6 +234,7 @@ pub(super) fn resolve_ev(
             initial_connection_state: None,
             power_factor: None,
             charger_capacity_kva: None,
+            cc_cv_transition_soc: None,
         };
         let mut spec = build_typed_spec("EV".to_string(), FuelType::Electric, cfg, defaults)?;
         spec.system_id = ev_id_opt;

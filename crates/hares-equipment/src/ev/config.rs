@@ -42,6 +42,7 @@ pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
 pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
 pub(super) const KEY_POWER_FACTOR: &str = "power_factor";
 pub(super) const KEY_CHARGER_CAPACITY_KVA: &str = "charger_capacity_kva";
+pub(super) const KEY_CC_CV_TRANSITION_SOC: &str = "cc_cv_transition_soc";
 
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
 pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;
@@ -69,6 +70,19 @@ pub(super) const DEFAULT_V2L_SOC_RESERVE: f64 = 0.2;
 pub(super) const DEFAULT_V2L_MAX_DISCHARGE_KW: f64 = 3.0;
 pub(super) const DEFAULT_V2G_SOC_RESERVE: f64 = 0.3;
 pub(super) const DEFAULT_V2G_MAX_DISCHARGE_KW: f64 = 5.0;
+/// SOC above which CC-CV tapering of charging power begins.
+///
+/// This is a conventional engineering default for NMC Li‑ion chemistry: the
+/// CC (constant‑current) region delivers near‑constant power through ~80‑90%
+/// SOC, then the CV (constant‑voltage) region tapers power as the battery
+/// approaches full charge.  No single standard specifies exact CC→CV
+/// transition SOC and minimum multiplier for generic simulation — these
+/// values represent the centroid of commonly‑observed NMC charge behaviour
+/// and should be tuned from cell datasheets when available.
+///
+/// When a charging-curve LUT is present, this parameter is unused — the LUT
+/// already captures the electrochemical power roll-off at high SOC.
+pub(super) const DEFAULT_CC_CV_TRANSITION_SOC: f64 = 0.85;
 pub(super) use hares_physics::constants::SECONDS_PER_HOUR;
 pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 
@@ -225,6 +239,12 @@ pub struct EvConfig {
     /// Defaults to `max(max_charging_power_kw, v2g_max_discharge_kw,
     /// v2l_max_discharge_kw)` at init time.
     pub charger_capacity_kva: Option<f64>,
+    /// SOC above which CC-CV tapering begins (e.g. 0.85 for NMC).
+    /// Below this SOC, charging power is constant; above it, power
+    /// tapers linearly toward `CC_CV_MIN_MULTIPLIER` at SOC=1.0.
+    /// Ignored when a charging-curve LUT is present — the LUT already
+    /// captures the power roll-off.
+    pub cc_cv_transition_soc: Option<f64>,
 }
 
 impl EquipmentTypedConfig for EvConfig {
@@ -338,6 +358,13 @@ impl EvConfig {
             if !kva.is_finite() || kva <= 0.0 {
                 return Err(HaresError::Equipment(
                     "EV charger_capacity_kva must be finite and > 0".to_string(),
+                ));
+            }
+        }
+        if let Some(soc) = self.cc_cv_transition_soc {
+            if !soc.is_finite() || !(0.0..=1.0).contains(&soc) {
+                return Err(HaresError::Equipment(
+                    "EV cc_cv_transition_soc must be finite and within [0, 1]".to_string(),
                 ));
             }
         }

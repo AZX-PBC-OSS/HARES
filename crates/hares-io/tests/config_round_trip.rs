@@ -506,6 +506,7 @@ fn sample_ev_config() -> EvConfig {
         initial_connection_state: None,
         power_factor: None,
         charger_capacity_kva: None,
+        cc_cv_transition_soc: None,
     }
 }
 

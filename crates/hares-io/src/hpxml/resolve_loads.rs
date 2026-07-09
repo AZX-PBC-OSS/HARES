@@ -723,6 +723,7 @@ pub(super) fn resolve_scheduled_loads(
                             initial_connection_state: None,
                             power_factor: None,
                             charger_capacity_kva: None,
+                            cc_cv_transition_soc: None,
                         };
                         specs.push(build_typed_spec(
                             "Electric Vehicle".to_string(),

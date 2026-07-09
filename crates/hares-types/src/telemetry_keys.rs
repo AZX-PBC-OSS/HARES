@@ -322,6 +322,13 @@ pub const CAPACITY_DERATE: &str = "capacity_derate";
 /// scope: internal
 pub const CHARGE_DERATE: &str = "charge_derate";
 
+/// CC-CV charging power taper multiplier [0..1] (1.0 = no derating,
+/// < 1.0 = CV taper active).  Set only when no charging-curve LUT is
+/// present; when a LUT is loaded the value is 1.0.
+///
+/// scope: internal
+pub const CC_CV_DERATE: &str = "cc_cv_derate";
+
 /// scope: internal
 pub const CYCLE_COUNT: &str = "cycle_count";
 
