@@ -468,6 +468,15 @@ impl EvDriverActor {
         }
         self.current_day_ordinal = ordinal;
 
+        // Reconcile estimated_soc at day start when plugged in. Overnight grid
+        // charging can change actual SOC without a new plug-in event — the
+        // driver observes the battery level when waking up. The arrival
+        // reconciliation (above) covers the plug-in event itself; this covers
+        // multi-day stay-at-home scenarios.
+        if matches!(self.phase, DriverPhase::HomePluggedIn) {
+            self.reconcile_soc(env, "day_start");
+        }
+
         // Decide if today is a driving day
         let roll: f64 = self.rng.random();
         if roll >= self.event_day_ratio {
@@ -593,6 +602,31 @@ impl EvDriverActor {
             .and_then(|id| env.equipment_core.get(&id))
             .and_then(|co| co.state.soc)
             .map(|soc| soc.get())
+    }
+
+    /// Reconcile estimated_soc to actual equipment SOC.
+    ///
+    /// Called at plug-in and day-start to align the driver's energy-accounting
+    /// estimate with the equipment BMS's measured state of charge. This closes
+    /// the drift gap that accumulates during driving when the driver
+    /// overestimates discharge and underestimates charge.
+    fn reconcile_soc(&mut self, env: &EnvironmentState, _event_label: &str) {
+        if let Some(actual) = self.actual_soc(env) {
+            #[cfg(feature = "observe")]
+            {
+                let pre = self.estimated_soc;
+                tracing::debug!(
+                    actor = %self.name,
+                    pre_reconcile_soc = pre,
+                    post_reconcile_soc = actual,
+                    actual_soc = actual,
+                    correction = actual - pre,
+                    reconcile_event = _event_label,
+                    "EV driver SOC reconciliation"
+                );
+            }
+            self.estimated_soc = actual;
+        }
     }
 
     /// Should the driver plug in at home based on perceived SOC and policy.
@@ -839,6 +873,11 @@ impl Actor for EvDriverActor {
                     }
 
                     self.phase = DriverPhase::HomePluggedIn;
+
+                    // Reconcile the driver's energy-accounting estimate to the
+                    // equipment BMS measured SOC. On arrival the driver observes
+                    // the actual battery state and updates their belief.
+                    self.reconcile_soc(env, "arrival");
 
                     tracing::debug!(
                         actor = %self.name,
@@ -3614,10 +3653,10 @@ mod tests {
     }
 
     #[test]
-    fn multi_step_driving_soc_divergence_accumulates() {
-        // Simulate multiple complete drive cycles. After each trip the
-        // actor deducts energy from estimated_soc but equipment_core
-        // remains unchanged, so the estimates diverge.
+    fn multi_day_estimated_soc_reconciled_at_each_arrival() {
+        // Simulate multiple complete drive cycles. At each arrival the
+        // driver reconciles estimated_soc to actual equipment SOC, so
+        // divergence does not accumulate across days.
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
@@ -3625,10 +3664,8 @@ mod tests {
         );
         let mut env = env_at_minute(0);
         set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 1.0);
-        // Run 3 complete drive cycles (depart→drive→arrive→home)
         for _cycle in 0..3 {
             let mut out = Vec::new();
-            // Depart at 08:00, drive through to 18:00
             for minute in 0_u16..1440 {
                 env.current_time = env_at_minute(minute).current_time;
                 out.clear();
@@ -3638,13 +3675,201 @@ mod tests {
         let perceived = actor.perceived_soc();
         let actual = actor.actual_soc(&env);
         assert!(
-            perceived < actual.unwrap() - 0.1,
-            "after 3 trips without reconciliation, estimated_soc should be below actual equipment SOC"
+            (perceived - actual.unwrap()).abs() < 1e-6,
+            "after 3 cycles with reconciliation, estimated_soc should equal actual equipment SOC"
         );
         assert_eq!(
             actual,
             Some(1.0),
             "equipment_core SOC should remain unchanged at 1.0"
+        );
+    }
+
+    // ======= SOC reconciliation tests (T-0429) =======
+
+    #[test]
+    fn home_plugged_in_transition_reconciles_estimated_soc_to_actual() {
+        use chrono::TimeZone;
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut env = env_at_minute(0);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.73);
+        actor.estimated_soc = 0.45;
+
+        let mut out = Vec::new();
+
+        // Step through minutes 0 to 1081 (departure at 480, arrival at 1080).
+        for minute in 0_u16..=1081 {
+            let h = (minute / 60) as u8;
+            let m = (minute % 60) as u8;
+            let tz = chrono::FixedOffset::east_opt(0).unwrap();
+            env.current_time = tz
+                .with_ymd_and_hms(2026, 1, 1, h as u32, m as u32, 0)
+                .single()
+                .unwrap();
+
+            out.clear();
+            actor.decide(&env, &mut out);
+
+            if minute == 1080 {
+                assert_eq!(
+                    actor.phase,
+                    DriverPhase::HomePluggedIn,
+                    "phase should be HomePluggedIn after arrival"
+                );
+                assert!(
+                    (actor.estimated_soc - 0.73).abs() < 1e-6,
+                    "estimated_soc should be reconciled to actual equipment SOC 0.73 after arrival, got {}",
+                    actor.estimated_soc
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn low_soc_policy_reconciliation_fires_on_arrival_without_plug_in() {
+        use chrono::TimeZone;
+
+        // When PlugInPolicy::LowSoc with threshold=0.3 prevents plug-in
+        // (perceived SOC 0.80 > 0.3), the phase still transitions to
+        // HomePluggedIn and reconciliation still fires.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::LowSoc { threshold: 0.3 },
+            42,
+        );
+        let mut env = env_at_minute(0);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.82);
+        actor.estimated_soc = 0.80;
+
+        let mut out = Vec::new();
+
+        for minute in 0_u16..=1080 {
+            let h = (minute / 60) as u8;
+            let m = (minute % 60) as u8;
+            let tz = chrono::FixedOffset::east_opt(0).unwrap();
+            env.current_time = tz
+                .with_ymd_and_hms(2026, 1, 1, h as u32, m as u32, 0)
+                .single()
+                .unwrap();
+
+            out.clear();
+            actor.decide(&env, &mut out);
+
+            if minute == 1080 {
+                let has_plugin = out.iter().any(|r| {
+                    matches!(
+                        r.signal,
+                        ControlSignal::EvPlugIn {
+                            state: EvConnectionState::HomePluggedIn
+                        }
+                    )
+                });
+                assert!(!has_plugin, "should NOT plug in when SOC above threshold");
+                assert_eq!(actor.phase, DriverPhase::HomePluggedIn);
+                assert!(
+                    (actor.estimated_soc - 0.82).abs() < 1e-6,
+                    "estimated_soc should be reconciled to actual 0.82 even without plug-in, got {}",
+                    actor.estimated_soc
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_day_low_soc_no_soc_drift_at_arrival() {
+        use chrono::TimeZone;
+        // 8-day simulation with PlugInPolicy::LowSoc against a *moving* ground
+        // truth: the equipment BMS SOC is set to a distinct value each day,
+        // simulating overnight grid charging and away-charging restoring the
+        // battery to a different level than the driver's decremented estimate.
+        // At each arrival reconciliation, estimated_soc must snap to that day's
+        // actual SOC — proving reconciliation tracks the target it is reconciling
+        // against, not merely re-writing a single value it saw once. A static
+        // ground truth would pass even if reconciliation were deleted; this one
+        // cannot, because estimated_soc is driven away from the new actual by
+        // driving-decrement each day and only the arrival reconciliation can
+        // bring it back to the day's true value.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::LowSoc { threshold: 0.5 },
+            42,
+        );
+        let mut env = env_at_minute(0);
+
+        // Distinct actual SOC per day. Values differ from each other and from
+        // the driving-decremented estimate so a stale estimate is detectable.
+        let daily_actual_soc = [0.85, 0.62, 0.91, 0.55, 0.78, 0.48, 0.88, 0.66];
+
+        let mut out = Vec::new();
+        let mut arrival_reconciliation_count = 0usize;
+        let mut observed_actuals: Vec<f64> = Vec::new();
+
+        for (day, &day_soc) in daily_actual_soc.iter().enumerate() {
+            let day = day as u32;
+
+            // Simulate the BMS having charged/drained the battery overnight to a
+            // new level before the driver departs for the day. Set it at the top
+            // of the day so driving-decrement then drives estimated_soc away from
+            // it, leaving a genuine gap for arrival reconciliation to close.
+            set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), day_soc);
+
+            for minute in 0_u16..1440 {
+                let abs_minute = day * 1440 + minute as u32;
+                let h = (abs_minute / 60).min(23) as u8;
+                let m = (abs_minute % 60) as u8;
+                let tz = chrono::FixedOffset::east_opt(0).unwrap();
+                env.current_time = tz
+                    .with_ymd_and_hms(2026, 1, 1 + day, h as u32, m as u32, 0)
+                    .single()
+                    .unwrap();
+
+                out.clear();
+                actor.decide(&env, &mut out);
+
+                // At the arrival minute, reconciliation has just fired.
+                // Verify estimated_soc matches this day's actual equipment SOC.
+                if matches!(actor.phase, DriverPhase::HomePluggedIn) && minute == 1080 {
+                    if let Some(actual) = actor.actual_soc(&env) {
+                        arrival_reconciliation_count += 1;
+                        observed_actuals.push(actual);
+                        let drift = (actor.estimated_soc - actual).abs();
+                        // Ticket tolerance is <1% drift; reconciliation is exact,
+                        // so 1e-6 is the meaningful bound.
+                        assert!(
+                            drift < 1e-6,
+                            "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
+                            actor.estimated_soc
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(
+            arrival_reconciliation_count > 0,
+            "should have observed at least one arrival reconciliation"
+        );
+
+        // Guard against the static-ground-truth regression: the test must have
+        // reconciled against more than one distinct actual value, otherwise it
+        // could not distinguish "tracks a moving target" from "writes one value".
+        let distinct = observed_actuals
+            .iter()
+            .fold(Vec::<f64>::new(), |mut acc, &v| {
+                if !acc.iter().any(|&a| (a - v).abs() < 1e-6) {
+                    acc.push(v);
+                }
+                acc
+            });
+        assert!(
+            distinct.len() > 1,
+            "test must reconcile against a varying ground truth to be meaningful, saw {} distinct values",
+            distinct.len()
         );
     }
 }
