@@ -8,11 +8,11 @@ use super::constants::{
     DEFAULT_DEFROST_CYCLE_DURATION_S, DEFAULT_DEFROST_TIME_FRACTION,
     DEFROST_CAPACITY_MULTIPLIER_BASE, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_COIL_TEMP_OFFSET_C,
     DEFROST_COIL_TEMP_SLOPE, DEFROST_EIR_CURVE_TEMP_MIN_C, DEFROST_EIR_TEMP_MODIFIER,
-    DEFROST_ENABLE_TEMP_C, DEFROST_MIN_DELTA_HUMIDITY_RATIO, DEFROST_POWER_MULTIPLIER_NUMERATOR,
-    DEFROST_Q_MULTIPLIER, DEFROST_REFERENCE_TEMP_C, DEFROST_TIME_FRACTION_NUMERATOR,
-    FROST_DECAY_CLEAR_TEMP_C, FROST_DECAY_TAU_AT_0C_S, FROST_DECAY_TAU_AT_10C_S,
-    MAX_DEFROST_CYCLE_DURATION_S, TIMED_DEFROST_CAP_MULT_BASE, TIMED_DEFROST_CAP_MULT_SLOPE,
-    TIMED_DEFROST_PWR_MULT_BASE, TIMED_DEFROST_PWR_MULT_SLOPE,
+    DEFROST_ENABLE_TEMP_C, DEFROST_EWMA_TAU_S, DEFROST_MIN_DELTA_HUMIDITY_RATIO,
+    DEFROST_POWER_MULTIPLIER_NUMERATOR, DEFROST_Q_MULTIPLIER, DEFROST_REFERENCE_TEMP_C,
+    DEFROST_TIME_FRACTION_NUMERATOR, FROST_DECAY_CLEAR_TEMP_C, FROST_DECAY_TAU_AT_0C_S,
+    FROST_DECAY_TAU_AT_10C_S, MAX_DEFROST_CYCLE_DURATION_S, TIMED_DEFROST_CAP_MULT_BASE,
+    TIMED_DEFROST_CAP_MULT_SLOPE, TIMED_DEFROST_PWR_MULT_BASE, TIMED_DEFROST_PWR_MULT_SLOPE,
 };
 
 /// Defrost activation / timing strategy.
@@ -243,6 +243,11 @@ pub struct DefrostCycleTracker {
     pub cycle_duration_s: f64,
     /// Hard cap on defrost cycle duration [s] (default 600 s = 10 min).
     pub max_defrost_duration_s: f64,
+    /// EWMA of defrost `time_fraction` used for inter-defrost interval calculation.
+    /// Smooths step-to-step fluctuations when OAT oscillates around the defrost
+    /// threshold. Reset to 0.0 when transitioning from Defrosting to Accumulating.
+    #[serde(default)]
+    pub ewma_time_fraction: f64,
 }
 
 impl DefrostCycleTracker {
@@ -255,6 +260,7 @@ impl DefrostCycleTracker {
             defrost_elapsed_s: 0.0,
             cycle_duration_s: DEFAULT_DEFROST_CYCLE_DURATION_S,
             max_defrost_duration_s: MAX_DEFROST_CYCLE_DURATION_S,
+            ewma_time_fraction: 0.0,
         }
     }
 
@@ -284,11 +290,19 @@ impl DefrostCycleTracker {
         match self.state {
             DefrostCycleState::Accumulating => {
                 if conditions_favor_frost && time_fraction > 0.0 {
+                    // Continuous-time EWMA of time_fraction with τ = 10 min.
+                    // Smooths step-to-step fluctuations when OAT oscillates
+                    // around the defrost threshold, preventing the inter-defrost
+                    // interval from varying wildly between steps.
+                    // HARES-specific — EnergyPlus uses instantaneous conditions
+                    // in its continuous defrost model (ERM 26.1).
+                    let alpha = 1.0 - (-dt_s / DEFROST_EWMA_TAU_S).exp();
+                    self.ewma_time_fraction =
+                        alpha * time_fraction + (1.0 - alpha) * self.ewma_time_fraction;
+
                     self.accumulated_frost_s += dt_s * time_fraction;
-                    // Inter-defrost interval: how long we need to accumulate before
-                    // the next defrost cycle fires. Derived so that the long-run
-                    // average fraction of time in defrost matches the continuous model.
-                    let interval_s = self.cycle_duration_s / time_fraction;
+                    let interval_s =
+                        self.cycle_duration_s / self.ewma_time_fraction.max(f64::EPSILON);
                     if self.accumulated_frost_s >= interval_s {
                         self.state = DefrostCycleState::Defrosting;
                         self.defrost_elapsed_s = 0.0;
@@ -312,6 +326,7 @@ impl DefrostCycleTracker {
                 {
                     self.state = DefrostCycleState::Accumulating;
                     self.accumulated_frost_s = 0.0;
+                    self.ewma_time_fraction = 0.0;
                     self.defrost_elapsed_s = 0.0;
                 }
             }
@@ -323,6 +338,11 @@ impl DefrostCycleTracker {
                 self.accumulated_frost_s >= 0.0,
                 "accumulated_frost_s {:.6} must be non-negative",
                 self.accumulated_frost_s
+            );
+            debug_assert!(
+                (0.0..=1.0).contains(&self.ewma_time_fraction),
+                "ewma_time_fraction {:.6} must be in [0.0, 1.0]",
+                self.ewma_time_fraction
             );
             // When OAT exceeds the defrost-enable temperature, accumulated frost
             // must not have increased during this advance call (it should hold
@@ -341,12 +361,14 @@ impl DefrostCycleTracker {
 
         #[cfg(feature = "observe")]
         {
-            if (frost_before - self.accumulated_frost_s).abs() > 1e-12 {
+            if (frost_before - self.accumulated_frost_s).abs() > 1e-12 || conditions_favor_frost {
                 tracing::debug!(
                     frost_before,
                     frost_after = self.accumulated_frost_s,
                     outdoor_db_c,
                     conditions_favor_frost,
+                    time_fraction,
+                    ewma_time_fraction = self.ewma_time_fraction,
                     "defrost frost accumulation change",
                 );
             }
@@ -1148,6 +1170,217 @@ mod defrost_tests {
             tracker.state,
             DefrostCycleState::Accumulating,
             "first heating call after hiatus must not trigger spurious defrost"
+        );
+    }
+
+    // ── EWMA time_fraction tests ────────────────────────────────────────────
+
+    /// Feed oscillating `time_fraction` (alternating 0.1 and 0.3) and verify
+    /// that `ewma_time_fraction` converges to the mean (0.2).
+    #[test]
+    fn ewma_converges_to_mean_under_oscillating_time_fraction() {
+        let mut tracker = DefrostCycleTracker::new();
+        // Use very large cycle duration so defrost never triggers during the test,
+        // allowing the EWMA to converge without reset.
+        tracker.cycle_duration_s = 1_000_000.0;
+        tracker.max_defrost_duration_s = 1_000_000.0;
+        let dt = 60.0;
+        let mut tfs = [0.1_f64, 0.3_f64].into_iter().cycle();
+        for _ in 0..200 {
+            let tf = tfs.next().unwrap();
+            tracker.advance(dt, tf, true, 0.0);
+        }
+        let error = (tracker.ewma_time_fraction - 0.2).abs();
+        assert!(
+            error < 0.01,
+            "ewma_time_fraction {:.6} should be within 0.01 of 0.2 after 200 steps",
+            tracker.ewma_time_fraction
+        );
+    }
+
+    /// EWMA starts at 0.0 and builds up gradually; verify it is below the steady
+    /// state after just a few steps.
+    #[test]
+    fn ewma_starts_at_zero_and_ramps_up() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 1_000_000.0;
+        tracker.max_defrost_duration_s = 1_000_000.0;
+        let dt = 60.0;
+        let tf = 0.3;
+        tracker.advance(dt, tf, true, 0.0);
+        assert!(
+            tracker.ewma_time_fraction > 0.0 && tracker.ewma_time_fraction < tf,
+            "ewma {:.6} should be between 0 and {tf} after one step",
+            tracker.ewma_time_fraction
+        );
+        for _ in 0..199 {
+            tracker.advance(dt, tf, true, 0.0);
+        }
+        assert!(
+            (tracker.ewma_time_fraction - tf).abs() < 0.01,
+            "ewma {:.6} should be near {tf} after 200 steps",
+            tracker.ewma_time_fraction
+        );
+    }
+
+    /// When transitioning from Defrosting to Accumulating, `ewma_time_fraction`
+    /// must reset to 0.0.
+    #[test]
+    fn ewma_resets_on_defrost_to_accumulating_transition() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let dt = 60.0;
+        let tf = 0.2;
+
+        // Build up EWMA and trigger a defrost cycle.
+        for _ in 0..200 {
+            tracker.advance(dt, tf, true, 0.0);
+        }
+        assert!(tracker.ewma_time_fraction > 0.0);
+
+        // Force into Defrosting and then complete the cycle.
+        tracker.state = DefrostCycleState::Defrosting;
+        tracker.defrost_elapsed_s = 200.0;
+        tracker.advance(dt, tf, true, 0.0);
+        // Should have transitioned back to Accumulating.
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        assert_eq!(
+            tracker.ewma_time_fraction, 0.0,
+            "ewma_time_fraction must reset to 0.0 after leaving Defrosting"
+        );
+    }
+
+    /// Verify that under an oscillating `time_fraction`, the discrete FSM's
+    /// cycle-trigger timing is determined by the EWMA (which converges to the
+    /// long-run average), not by the current step's instantaneous value.
+    ///
+    /// Pre-warms the EWMA to steady state with a large `cycle_duration_s` to
+    /// prevent triggering during warmup, then resets frost and measures steps
+    /// to the first `Accumulating → Defrosting` transition under normal
+    /// `cycle_duration_s`. With EWMA ≈ 0.2 the expected interval is
+    /// ≈ 210 / 0.2 = 1050 s and frost accumulation per step is ≈ 12 s/step,
+    /// so ~88 steps. Instantaneous tf would trigger at ~60 (tf=0.3 → interval
+    /// 700 s) or ~175 (tf=0.1 → interval 2100 s) — this test catches a
+    /// regression where `interval_s` reverts to the instantaneous value.
+    #[test]
+    fn ewma_driven_interval_determines_cycle_trigger_timing_under_oscillation() {
+        let mut tracker = DefrostCycleTracker::new();
+        let dt = 60.0;
+        let mut tfs = [0.1_f64, 0.3_f64].into_iter().cycle();
+
+        // Pre-warm EWMA with large cycle_duration to prevent triggering.
+        tracker.cycle_duration_s = 1_000_000.0;
+        tracker.max_defrost_duration_s = 1_000_000.0;
+        for _ in 0..200 {
+            tracker.advance(dt, tfs.next().unwrap(), true, 0.0);
+        }
+        assert!(
+            (tracker.ewma_time_fraction - 0.2).abs() < 0.02,
+            "EWMA {:.6} should have converged to ~0.2 after 200 warmup steps",
+            tracker.ewma_time_fraction
+        );
+
+        // Reset frost and set normal cycle duration for the timing measurement.
+        tracker.accumulated_frost_s = 0.0;
+        tracker.cycle_duration_s = 210.0;
+        tracker.max_defrost_duration_s = 210.0;
+
+        let mut steps = 0u32;
+        for _ in 0..500 {
+            let old_state = tracker.state;
+            tracker.advance(dt, tfs.next().unwrap(), true, 0.0);
+            steps += 1;
+            if old_state == DefrostCycleState::Accumulating
+                && tracker.state == DefrostCycleState::Defrosting
+            {
+                // With EWMA ≈ 0.2: interval = 1050 s, frost/step ≈ 12 s → ~88 steps.
+                // With instantaneous tf=0.3: interval = 700 s → ~60 steps.
+                // With instantaneous tf=0.1: interval = 2100 s → ~175 steps.
+                let expected = 210.0 / 0.2 / (dt * 0.2); // ≈ 87.5
+                assert!(
+                    steps >= 70 && steps <= 110,
+                    "first defrost trigger at step {steps}; expected near {expected:.0} (±25 %) \
+                     with EWMA (≈ 88), not at the instantaneous-tf extremes (≈ 60 or ≈ 175)"
+                );
+                return;
+            }
+        }
+        panic!("defrost did not trigger within 500 steps under oscillating time_fraction");
+    }
+
+    /// Multi-cycle simulation with OAT repeatedly crossing the defrost-enable
+    /// threshold under an oscillating `time_fraction` (alternating 0.15 and
+    /// 0.25, mean 0.2). Frost should decay during warm periods and accumulate
+    /// during cold periods; the number of defrost cycles should be proportional
+    /// to the time spent below the threshold, not spurious from threshold
+    /// crossings. The EWMA smoothing ensures the inter-defrost interval is
+    /// based on the long-run average time_fraction, not the instantaneous
+    /// value that would drift under oscillation.
+    #[test]
+    fn multi_cycle_defrost_proportional_to_cold_duration() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let dt = 60.0;
+        let mut tfs = [0.15_f64, 0.25_f64].into_iter().cycle(); // mean = 0.2
+
+        // Phase 1: 2 hours continuous cold (7200 s).
+        // Mean frost/step = 60 * 0.2 = 12 s. With EWMA → 0.2, interval ≈
+        // 210 / 0.2 = 1050 s → defrost fires after ~88 steps (and resets frost).
+        let mut defrost_count = 0u32;
+        for _ in 0..120 {
+            let tf = tfs.next().unwrap();
+            let old_state = tracker.state;
+            tracker.advance(dt, tf, true, -5.0);
+            if old_state == DefrostCycleState::Accumulating
+                && tracker.state == DefrostCycleState::Defrosting
+            {
+                defrost_count += 1;
+            }
+        }
+        assert!(
+            defrost_count >= 1,
+            "must trigger defrost during 2h of cold; got {defrost_count}"
+        );
+        assert!(
+            tracker.ewma_time_fraction > 0.0,
+            "ewma_time_fraction {:.6} should be non-zero after cold-weather accumulation",
+            tracker.ewma_time_fraction
+        );
+
+        // Phase 2: 1 hour warm hiatus (3600 s at 10°C) — frost decays.
+        // After 3600 s at 10°C (tau = 600 s), decay factor = exp(-6) ≈ 0.0025.
+        // The remaining post-defrost frost is negligible after decay.
+        for _ in 0..60 {
+            tracker.advance(dt, 0.0, false, 10.0);
+        }
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        assert!(
+            tracker.accumulated_frost_s < 10.0,
+            "frost must be low after warm hiatus, got {:.3}",
+            tracker.accumulated_frost_s
+        );
+
+        // Phase 3: 2 more hours cold with oscillating tf — must trigger defrost
+        // again (not spurious from the warm→cold transition).
+        let before = defrost_count;
+        for _ in 0..120 {
+            let tf = tfs.next().unwrap();
+            let old_state = tracker.state;
+            tracker.advance(dt, tf, true, -5.0);
+            if old_state == DefrostCycleState::Accumulating
+                && tracker.state == DefrostCycleState::Defrosting
+            {
+                defrost_count += 1;
+            }
+        }
+        assert!(
+            defrost_count > before,
+            "must trigger defrost again after hiatus; defrost count went from {before} to {defrost_count}"
+        );
+        assert!(
+            tracker.ewma_time_fraction > 0.0,
+            "ewma_time_fraction {:.6} should be non-zero after second cold-weather accumulation",
+            tracker.ewma_time_fraction
         );
     }
 }

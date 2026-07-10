@@ -94,6 +94,12 @@ pub const DEFAULT_DEFROST_CYCLE_DURATION_S: f64 = 210.0;
 /// Maximum defrost cycle duration [s]. Hard cap prevents runaway defrost; 10 min
 /// is the practical upper bound for residential equipment safety.
 pub const MAX_DEFROST_CYCLE_DURATION_S: f64 = 600.0;
+/// Time constant for the exponentially-weighted moving average of defrost
+/// `time_fraction` [s]. A 10-minute τ smooths step-to-step fluctuations in
+/// the FSM's inter-defrost interval when OAT oscillates around the defrost
+/// threshold, preventing duty-cycle drift. HARES-specific (not from EnergyPlus
+/// or OCHRE — both use instantaneous conditions).
+pub const DEFROST_EWMA_TAU_S: f64 = 600.0;
 
 // Frost decay during extended off-periods.
 // Engineering estimate — no primary source exists for temperature-indexed frost
