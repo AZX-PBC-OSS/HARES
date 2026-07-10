@@ -681,19 +681,59 @@ impl EvDriverActor {
         {
             let day_drive_kwh = self.todays_event.map(|e| e.drive_kwh).unwrap_or(0.0);
             let triggered = soc < anxiety_soc;
+            // `plugged_in` is derived from the plug-in policy at the current SOC,
+            // not from `DriverPhase`: the phase conflates "at home" with
+            // "physically connected", so it cannot answer "is the vehicle
+            // plugged in". `should_plug_in()` is the observable proxy.
+            // `non_driving_day` distinguishes the non-driving-day override call
+            // site (decide's None arm) from the normal in-phase evaluation.
             tracing::debug!(
                 actor = %self.name,
                 anxiety_soc,
                 day_drive_kwh,
                 miles_term = miles_for_anxiety,
+                expected_daily_miles = self.expected_daily_miles,
                 range_anxiety_miles = self.range_anxiety_miles,
                 perceived_soc = soc,
+                non_driving_day = self.todays_event.is_none(),
+                plugged_in = self.should_plug_in(),
                 triggered,
                 "EV driver range anxiety evaluation"
             );
         }
 
         soc < anxiety_soc
+    }
+
+    /// Emit the range-anxiety charging override if tomorrow's trip would strand
+    /// the driver. Returns `true` (and pushes a full-charge `SOCTarget`) when the
+    /// override fired, `false` otherwise.
+    ///
+    /// This is the single home for the override rule: both the in-phase charging
+    /// path (`evaluate_charging`) and the non-driving-day path (`decide`'s `None`
+    /// arm) route through here so the `SOCTarget(1.0)` push exists in exactly one
+    /// place.
+    ///
+    /// `Schedule` tier — the EV driver is a schedule-level actor; this override is
+    /// a pre-defined operational rule, not a user or grid action.
+    fn maybe_push_range_anxiety_override(
+        &self,
+        env: &EnvironmentState,
+        out: &mut Vec<DispatchRequest>,
+    ) -> bool {
+        if !self.needs_range_anxiety_override(env) {
+            return false;
+        }
+        out.push(DispatchRequest {
+            target: self.dispatch_target.clone(),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 1.0,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        true
     }
 
     /// Evaluate the composer per-step while plugged in at home.
@@ -704,19 +744,9 @@ impl EvDriverActor {
         out: &mut Vec<DispatchRequest>,
     ) {
         // Range anxiety override: if tomorrow's trip would strand the driver,
-        // charge to full regardless of strategy.
-        // `Schedule` tier — the EV driver is a schedule-level actor; this
-        // override is a pre-defined operational rule, not a user or grid action.
-        if self.needs_range_anxiety_override(env) {
-            out.push(DispatchRequest {
-                target: self.dispatch_target.clone(),
-                signal: ControlSignal::SOCTarget {
-                    target_soc: 1.0,
-                    min_soc: None,
-                    max_soc: None,
-                },
-                priority: PriorityTier::Schedule,
-            });
+        // charge to full regardless of strategy. The override returns before
+        // reaching the composer.
+        if self.maybe_push_range_anxiety_override(env, out) {
             return;
         }
 
@@ -779,6 +809,26 @@ impl Actor for EvDriverActor {
         let event = match self.todays_event {
             Some(ev) => ev,
             None => {
+                // On a non-driving day, a driver with a critically low battery still
+                // needs to charge for tomorrow's trip. Fire the range anxiety
+                // override before returning so it can act even when a trip is
+                // skipped. Only meaningful while at home: an Away vehicle cannot
+                // plug into the home charger. Observability (SOC, threshold,
+                // plugged-in proxy, non_driving_day marker) is emitted by the
+                // single observe block in `needs_range_anxiety_override()`.
+                if matches!(self.phase, DriverPhase::HomePluggedIn) {
+                    let fired = self.maybe_push_range_anxiety_override(env, out);
+
+                    // When anxiety fires on a non-driving day, the override must
+                    // have emitted a charging signal — the early return must not
+                    // swallow it. `fired` and the emitted signal are coupled in
+                    // `maybe_push_range_anxiety_override`, so this guards the
+                    // coupling rather than an independently-computed condition.
+                    debug_assert!(
+                        !fired || out.len() > before_out,
+                        "range anxiety override on non-driving day must emit a charging signal"
+                    );
+                }
                 self.populate_telemetry(before_out, out);
                 return;
             }
@@ -2283,6 +2333,125 @@ mod tests {
             actor.range_anxiety_miles,
             actor.fuel_economy_kwh_per_mi,
             actor.capacity_kwh,
+        );
+    }
+
+    // ======= Range anxiety on non-driving days (T-0431) =======
+
+    #[test]
+    fn non_driving_day_range_anxiety_emits_soc_target() {
+        // Actor: 30 mi/day expected, 20 mi buffer, 0.3 kWh/mi, 60 kWh battery.
+        // anxiety_soc ≈ 0.278 at 10°C. SOC 0.15 < 0.278 → should trigger.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.event_day_ratio = 0.0;
+        actor.estimated_soc = 0.15;
+        actor.todays_event = None;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+
+        let has_soc_target = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+            )
+        });
+        assert!(
+            has_soc_target,
+            "non-driving day with low SOC: decide() must emit SOCTarget(1.0) via range anxiety, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_driving_day_no_anxiety_when_soc_high() {
+        // SOC well above anxiety threshold → early-return behaviour preserved.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.event_day_ratio = 0.0;
+        actor.estimated_soc = 0.8;
+        actor.todays_event = None;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+
+        assert!(
+            out.is_empty(),
+            "non-driving day with SOC above anxiety threshold should emit no signals, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_driving_day_anxiety_charges_for_next_driving_day() {
+        // Regression: PlugInPolicy::LowSoc with a non-driving day at low SOC
+        // must charge the battery so the driver is not stranded on the
+        // following driving day.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::LowSoc { threshold: 0.5 },
+            42,
+        );
+
+        // --- Day 1: non-driving day, critically low SOC ---
+        actor.event_day_ratio = 0.0;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+        actor.todays_event = None;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+
+        assert!(
+            out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+                )
+            }),
+            "Day 1 (non-driving): range anxiety must charge to full"
+        );
+
+        // Simulate overnight charging: battery is now full.
+        actor.estimated_soc = 1.0;
+
+        // --- Day 2: driving day ---
+        actor.current_day_ordinal = -1;
+        actor.event_day_ratio = 1.0;
+
+        let day2_out = drive_cycle_and_charge_step(&mut actor);
+
+        // Range anxiety should NOT have fired — started Day 2 at full SOC.
+        let has_anxiety = day2_out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+            )
+        });
+        assert!(
+            !has_anxiety,
+            "Day 2 range anxiety should not fire — battery was fully charged on Day 1"
+        );
+
+        // Normal charging should proceed (Immediate targets 0.9).
+        let has_normal = day2_out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01
+            )
+        });
+        assert!(
+            has_normal,
+            "Day 2 should charge normally to 0.9 (battery was full on departure)"
         );
     }
 
