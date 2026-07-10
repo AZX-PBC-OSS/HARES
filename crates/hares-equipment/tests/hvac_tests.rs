@@ -2403,6 +2403,135 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
     );
 }
 
+#[test]
+fn defrost_no_spurious_defrost_after_warm_hiatus() {
+    // Regression: after a warm hiatus (OAT > 10°C, no frost conditions), the first
+    // heating call must not trigger spurious defrost. Verified at the heater level
+    // through the full equipment stack (EquipmentRegistry -> step -> defrost FSM).
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_hiatus".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                setpoint: HvacSetpointConfig::default(),
+                hysteresis_c: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+                er_stages: 1,
+                charge_defect_ratio: None,
+                ..Default::default()
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            capacity_ratio_at_17f: None,
+            defrost: DefrostConfig::default(),
+        },
+    )
+    .unwrap();
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    let dt = Duration::from_secs(60);
+
+    // Phase 1: heating season — run several cold steps to accumulate frost.
+    // 50 steps × 60s = 3000s. At OAT=-5°C the defrost is active; frost accrues.
+    for _ in 0..50 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+    }
+    let frost_after_cold = eq
+        .telemetry()
+        .get(tk::DEFROST_ACCUMULATED_FROST_S)
+        .unwrap_or(0.0);
+    assert!(
+        frost_after_cold > 0.0,
+        "frost must accumulate during cold heating phase; got {frost_after_cold:.1} s"
+    );
+
+    // Phase 2: spring warm hiatus — OAT = 15°C, well above the frost-clear
+    // threshold. The HP may still run but defrost is inactive above 4.4445°C,
+    // so conditions_favor_frost is false and frost decays exponentially.
+    // At 15°C, tau = 600 s. 60 steps × 60s = 3600s = 6 tau → frost ≈ 0.25% of original.
+    env.weather.outdoor_temp_c = 15.0;
+    for _ in 0..60 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+    }
+    let frost_after_warm = eq
+        .telemetry()
+        .get(tk::DEFROST_ACCUMULATED_FROST_S)
+        .unwrap_or(0.0);
+    assert!(
+        frost_after_warm < frost_after_cold * 0.1,
+        "frost must decay substantially during warm hiatus; {frost_after_warm:.3} < {:.3}",
+        frost_after_cold * 0.1
+    );
+
+    // Phase 3: resume heating — switch back to cold OAT and run one step.
+    // The decayed frost is far below the inter-defrost interval threshold,
+    // so the FSM must stay in Accumulating (DEFROST_CYCLE_STATE = 0) and
+    // the heat pump must produce non-zero heating capacity.
+    env.weather.outdoor_temp_c = -5.0;
+    eq.update_control(&env);
+    eq.step(&env, dt, &mut ports).unwrap();
+
+    let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+    assert_eq!(
+        cycle_state, 0.0,
+        "first heating call after warm hiatus must not trigger spurious defrost; \
+         got DEFROST_CYCLE_STATE={cycle_state}"
+    );
+
+    let hp_capacity_w = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+    assert!(
+        hp_capacity_w > 0.0,
+        "heat pump must produce non-zero capacity on first heating call after hiatus; \
+         got {hp_capacity_w:.1} W"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Heating-side latent gain
 //

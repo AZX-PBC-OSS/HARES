@@ -10,6 +10,7 @@ use super::constants::{
     DEFROST_COIL_TEMP_SLOPE, DEFROST_EIR_CURVE_TEMP_MIN_C, DEFROST_EIR_TEMP_MODIFIER,
     DEFROST_ENABLE_TEMP_C, DEFROST_MIN_DELTA_HUMIDITY_RATIO, DEFROST_POWER_MULTIPLIER_NUMERATOR,
     DEFROST_Q_MULTIPLIER, DEFROST_REFERENCE_TEMP_C, DEFROST_TIME_FRACTION_NUMERATOR,
+    FROST_DECAY_CLEAR_TEMP_C, FROST_DECAY_TAU_AT_0C_S, FROST_DECAY_TAU_AT_10C_S,
     MAX_DEFROST_CYCLE_DURATION_S, TIMED_DEFROST_CAP_MULT_BASE, TIMED_DEFROST_CAP_MULT_SLOPE,
     TIMED_DEFROST_PWR_MULT_BASE, TIMED_DEFROST_PWR_MULT_SLOPE,
 };
@@ -264,9 +265,21 @@ impl DefrostCycleTracker {
     ///   (only meaningful when `conditions_favor_frost` is true)
     /// - `conditions_favor_frost` — true when OAT < max_oat_defrost_c and the
     ///   compressor is running (i.e. `DefrostResult.active` from `evaluate_defrost`)
-    ///
-    /// Returns the new state after the transition.
-    pub fn advance(&mut self, dt_s: f64, time_fraction: f64, conditions_favor_frost: bool) {
+    /// - `outdoor_db_c` — outdoor dry-bulb temperature [°C]; used for frost
+    ///   decay when conditions do not favor frost (preventing spurious defrost
+    ///   after seasonal hiatus)
+    pub fn advance(
+        &mut self,
+        dt_s: f64,
+        time_fraction: f64,
+        conditions_favor_frost: bool,
+        outdoor_db_c: f64,
+    ) {
+        #[cfg_attr(
+            not(any(debug_assertions, feature = "check_invariants", feature = "observe")),
+            allow(unused_variables)
+        )]
+        let frost_before = self.accumulated_frost_s;
         let old_state = self.state;
         match self.state {
             DefrostCycleState::Accumulating => {
@@ -280,6 +293,17 @@ impl DefrostCycleTracker {
                         self.state = DefrostCycleState::Defrosting;
                         self.defrost_elapsed_s = 0.0;
                     }
+                } else if !conditions_favor_frost && outdoor_db_c > FROST_DECAY_CLEAR_TEMP_C {
+                    // Exponential frost decay during extended off-periods.
+                    // Time constant τ decreases as OAT rises: slower decay near
+                    // freezing, faster decay in warm weather. This prevents the
+                    // accumulator from holding stale frost values across seasonal
+                    // hiatuses that would trigger spurious defrost on the first
+                    // heating call.
+                    let fraction = (outdoor_db_c / 10.0).clamp(0.0, 1.0);
+                    let tau_s = FROST_DECAY_TAU_AT_0C_S
+                        - fraction * (FROST_DECAY_TAU_AT_0C_S - FROST_DECAY_TAU_AT_10C_S);
+                    self.accumulated_frost_s *= (-dt_s / tau_s).exp();
                 }
             }
             DefrostCycleState::Defrosting => {
@@ -292,6 +316,42 @@ impl DefrostCycleTracker {
                 }
             }
         }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.accumulated_frost_s >= 0.0,
+                "accumulated_frost_s {:.6} must be non-negative",
+                self.accumulated_frost_s
+            );
+            // When OAT exceeds the defrost-enable temperature, accumulated frost
+            // must not have increased during this advance call (it should hold
+            // steady or decay). This guards against stale frost accumulation during
+            // warm off-periods.
+            if outdoor_db_c >= DEFROST_ENABLE_TEMP_C && !conditions_favor_frost {
+                debug_assert!(
+                    frost_before >= self.accumulated_frost_s - 1e-12,
+                    "accumulated_frost_s must not increase when OAT ({:.2}°C) >= defrost-enable \
+                     threshold ({:.2}°C) and conditions do not favor frost",
+                    outdoor_db_c,
+                    DEFROST_ENABLE_TEMP_C
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            if (frost_before - self.accumulated_frost_s).abs() > 1e-12 {
+                tracing::debug!(
+                    frost_before,
+                    frost_after = self.accumulated_frost_s,
+                    outdoor_db_c,
+                    conditions_favor_frost,
+                    "defrost frost accumulation change",
+                );
+            }
+        }
+
         if old_state != self.state {
             debug!(
                 old = %old_state,
@@ -869,7 +929,7 @@ mod defrost_tests {
     fn tracker_accumulates_frost_when_conditions_favor_frost() {
         let mut tracker = DefrostCycleTracker::new();
         let time_fraction = 0.2;
-        tracker.advance(60.0, time_fraction, true);
+        tracker.advance(60.0, time_fraction, true, 0.0);
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         let expected = 60.0 * 0.2;
         assert!(
@@ -882,7 +942,7 @@ mod defrost_tests {
     #[test]
     fn tracker_does_not_accumulate_when_no_frost() {
         let mut tracker = DefrostCycleTracker::new();
-        tracker.advance(60.0, 0.0, false);
+        tracker.advance(60.0, 0.0, false, 0.0);
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         assert_eq!(tracker.accumulated_frost_s, 0.0);
     }
@@ -901,7 +961,7 @@ mod defrost_tests {
         // Simulate steps until just before threshold
         let steps_before: usize = (interval_s / frost_per_step).floor() as usize;
         for _ in 0..steps_before {
-            tracker.advance(dt, time_fraction, true);
+            tracker.advance(dt, time_fraction, true, 0.0);
         }
         assert_eq!(
             tracker.state,
@@ -910,7 +970,7 @@ mod defrost_tests {
         );
 
         // One more step crosses the threshold
-        tracker.advance(dt, time_fraction, true);
+        tracker.advance(dt, time_fraction, true, 0.0);
         assert_eq!(
             tracker.state,
             DefrostCycleState::Defrosting,
@@ -932,12 +992,12 @@ mod defrost_tests {
         let dt = 60.0;
         // 3 steps = 180s, not yet 210s
         for _ in 0..3 {
-            tracker.advance(dt, 1.0, true);
+            tracker.advance(dt, 1.0, true, 0.0);
         }
         assert_eq!(tracker.state, DefrostCycleState::Defrosting);
 
         // 4th step = 240s > 210s → back to Accumulating
-        tracker.advance(dt, 1.0, true);
+        tracker.advance(dt, 1.0, true, 0.0);
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
@@ -957,10 +1017,10 @@ mod defrost_tests {
 
         // 3 steps = 180s = max_duration
         for _ in 0..2 {
-            tracker.advance(60.0, 1.0, true);
+            tracker.advance(60.0, 1.0, true, 0.0);
         }
         assert_eq!(tracker.state, DefrostCycleState::Defrosting);
-        tracker.advance(60.0, 1.0, true);
+        tracker.advance(60.0, 1.0, true, 0.0);
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
@@ -977,7 +1037,7 @@ mod defrost_tests {
     #[test]
     fn tracker_zero_time_fraction_does_not_accumulate() {
         let mut tracker = DefrostCycleTracker::new();
-        tracker.advance(60.0, 0.0, true);
+        tracker.advance(60.0, 0.0, true, 0.0);
         assert_eq!(tracker.accumulated_frost_s, 0.0);
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
     }
@@ -992,12 +1052,102 @@ mod defrost_tests {
         tracker.defrost_elapsed_s = 200.0;
 
         // Advance with conditions_favor_frost = false — should still progress
-        tracker.advance(60.0, 0.0, false);
+        tracker.advance(60.0, 0.0, false, 0.0);
         // 260s > 210s → back to Accumulating
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
             "Defrosting state must still progress even without frost conditions"
+        );
+    }
+
+    #[test]
+    fn frost_decays_when_no_frost_conditions_and_warm_oat() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.accumulated_frost_s = 10.0;
+
+        // Advance at OAT = 7°C (well above freezing) with conditions_favor_frost = false.
+        // At 7°C, tau = 3600 - 0.7*(3600-600) = 3600 - 2100 = 1500 s.
+        // After 1500 s, frost = 10.0 * exp(-1) ≈ 10.0 * 0.3679 ≈ 3.679.
+        // After 6000 s, frost = 10.0 * exp(-4) ≈ 10.0 * 0.0183 ≈ 0.183.
+        for _ in 0..100 {
+            tracker.advance(60.0, 0.0, false, 7.0);
+        }
+        // After 6000 s (~1.67 h), frost should have decayed substantially.
+        assert!(
+            tracker.accumulated_frost_s < 1.0,
+            "frost must decay below 1.0 after 6000 s at 7°C, got {:.6}",
+            tracker.accumulated_frost_s
+        );
+        assert!(
+            tracker.accumulated_frost_s > 0.0,
+            "exponential decay approaches but never reaches zero"
+        );
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "decay must not trigger defrost"
+        );
+    }
+
+    #[test]
+    fn frost_does_not_decay_when_oat_below_freezing() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.accumulated_frost_s = 10.0;
+
+        // Advance at OAT = -5°C (below decay threshold) with no frost conditions.
+        tracker.advance(3600.0, 0.0, false, -5.0);
+
+        assert!(
+            (tracker.accumulated_frost_s - 10.0).abs() < 1e-12,
+            "frost must not decay when OAT <= 0°C, got {:.6}",
+            tracker.accumulated_frost_s
+        );
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+    }
+
+    #[test]
+    fn frost_decay_prevents_spurious_defrost_after_hiatus() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let time_fraction: f64 = 0.2;
+        // interval = 210 / 0.2 = 1050 s
+
+        // Phase 1: heating season — accumulate frost with cold OAT.
+        // Each 60s step accumulates 60 * 0.2 = 12 s of frost.
+        // After 50 steps (3000 s), frost = 600.0 — not enough to trigger defrost
+        // (threshold is 1050 s).
+        for _ in 0..50 {
+            tracker.advance(60.0, time_fraction, true, -5.0);
+        }
+        let frost_after_heating = tracker.accumulated_frost_s;
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        assert!(
+            frost_after_heating > 0.0,
+            "frost must accumulate during heating"
+        );
+
+        // Phase 2: spring off-period — warm OAT, no heating calls.
+        // At OAT = 10°C, tau = 600 s. After 3600 s = 6 * tau,
+        // frost = frost_after_heating * exp(-6) ≈ frost_after_heating * 0.0025.
+        for _ in 0..60 {
+            tracker.advance(60.0, 0.0, false, 10.0);
+        }
+        assert!(
+            tracker.accumulated_frost_s < frost_after_heating * 0.01,
+            "frost must decay substantially during spring hiatus, {:.6} >= {:.6}",
+            tracker.accumulated_frost_s,
+            frost_after_heating * 0.01
+        );
+
+        // Phase 3: resume heating — frost must be too small to trigger defrost.
+        // The decayed frost value is far below the interval threshold (=1050 s),
+        // so the first heating call must stay in Accumulating.
+        tracker.advance(60.0, time_fraction, true, -5.0);
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "first heating call after hiatus must not trigger spurious defrost"
         );
     }
 }

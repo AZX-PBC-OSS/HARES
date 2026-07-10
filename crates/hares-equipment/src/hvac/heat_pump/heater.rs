@@ -1247,8 +1247,12 @@ impl HeatPumpHeaterCore {
 
         // Advance the discrete defrost FSM BEFORE compute_step so the current
         // state is visible during step computation.
-        self.defrost_cycle_tracker
-            .advance(dt_s, defrost_conditions.1, defrost_conditions.0);
+        self.defrost_cycle_tracker.advance(
+            dt_s,
+            defrost_conditions.1,
+            defrost_conditions.0,
+            env.weather.outdoor_temp_c,
+        );
 
         let step = self.compute_step(env, dt_min)?;
 

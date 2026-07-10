@@ -94,3 +94,20 @@ pub const DEFAULT_DEFROST_CYCLE_DURATION_S: f64 = 210.0;
 /// Maximum defrost cycle duration [s]. Hard cap prevents runaway defrost; 10 min
 /// is the practical upper bound for residential equipment safety.
 pub const MAX_DEFROST_CYCLE_DURATION_S: f64 = 600.0;
+
+// Frost decay during extended off-periods.
+// Engineering estimate — no primary source exists for temperature-indexed frost
+// sublimation time constants on outdoor coils. OCHRE's defrost model is
+// stateless (no accumulator, no decay concept) and EnergyPlus's DOE-2.1E-derived
+// defrost formulas are steady-state humidity-driven multipliers, not a
+// temperature-indexed exponential decay τ. The qualitative direction is
+// physically sound: warmer air holds more energy for sublimation, so decay
+// accelerates as OAT rises. Linear interpolation between the two anchor points
+// at 0°C (~1 h τ) and 10°C (~10 min τ). Exact values vary with wind speed and
+// coil geometry.
+/// Decay time constant at 0°C OAT [s]. Below 0°C, frost does not decay.
+pub const FROST_DECAY_TAU_AT_0C_S: f64 = 3600.0;
+/// Decay time constant at 10°C OAT [s].
+pub const FROST_DECAY_TAU_AT_10C_S: f64 = 600.0;
+/// OAT below which frost decay is disabled [°C].
+pub const FROST_DECAY_CLEAR_TEMP_C: f64 = 0.0;
