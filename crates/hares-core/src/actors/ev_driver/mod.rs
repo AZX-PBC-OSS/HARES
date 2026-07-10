@@ -639,6 +639,12 @@ impl EvDriverActor {
 
     /// Check if tomorrow's expected trip would leave perceived SOC dangerously low.
     /// If so, the driver overrides their strategy and charges to full.
+    ///
+    /// Computes the anxiety threshold using the day's actual drive_kwh from
+    /// `todays_event` when available, blended via `max(day_specific, expected_daily_miles)`
+    /// so the threshold is never lower than the static mean — ensuring minimum
+    /// protection even on below-average days. Falls back to `expected_daily_miles`
+    /// when `todays_event` is None (non-driving day).
     fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
         if self.range_anxiety_miles <= 0.0 {
             return false;
@@ -646,10 +652,47 @@ impl EvDriverActor {
         let ambient_c = env.weather.outdoor_temp_c;
         let soc = self.perceived_soc();
         let temp_mult = temp_efficiency_multiplier(ambient_c);
-        let anxiety_kwh = (self.expected_daily_miles + self.range_anxiety_miles)
+
+        let day_specific_miles = match self.todays_event {
+            Some(event) => event.drive_kwh / self.fuel_economy_kwh_per_mi.max(0.01),
+            None => self.expected_daily_miles,
+        };
+
+        let miles_for_anxiety = day_specific_miles.max(self.expected_daily_miles);
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(event) = self.todays_event {
+                let trip_miles = event.drive_kwh / self.fuel_economy_kwh_per_mi.max(0.01);
+                debug_assert!(
+                    (miles_for_anxiety - trip_miles.max(self.expected_daily_miles)).abs() < 1e-9,
+                    "anxiety miles must be computed from day-specific drive_kwh \
+                     (blended with expected_daily_miles via max)"
+                );
+            }
+        }
+
+        let anxiety_kwh = (miles_for_anxiety + self.range_anxiety_miles)
             * self.fuel_economy_kwh_per_mi
             * temp_mult;
         let anxiety_soc = anxiety_kwh / self.capacity_kwh.max(0.01);
+
+        #[cfg(feature = "observe")]
+        {
+            let day_drive_kwh = self.todays_event.map(|e| e.drive_kwh).unwrap_or(0.0);
+            let triggered = soc < anxiety_soc;
+            tracing::debug!(
+                actor = %self.name,
+                anxiety_soc,
+                day_drive_kwh,
+                miles_term = miles_for_anxiety,
+                range_anxiety_miles = self.range_anxiety_miles,
+                perceived_soc = soc,
+                triggered,
+                "EV driver range anxiety evaluation"
+            );
+        }
+
         soc < anxiety_soc
     }
 
@@ -3778,6 +3821,155 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ======= Range anxiety day-specific tests (T-0430) =======
+
+    /// Helper: build an actor with specific drive parameters and directly set
+    /// todays_event with the given drive_kwh so the day-specific anxiety
+    /// calculation is exercised without a full drive cycle.
+    fn make_anxiety_actor(
+        expected_daily_miles: f64,
+        fuel_economy_kwh_per_mi: f64,
+        capacity_kwh: f64,
+        range_anxiety_miles: f64,
+        estimated_soc: f64,
+        todays_drive_kwh: Option<f64>,
+    ) -> EvDriverActor {
+        let mut actor = EvDriverActor::new(
+            "AnxietyDriver",
+            "EV1",
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(expected_daily_miles),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(600.0),
+            None,
+            if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
+            fuel_economy_kwh_per_mi,
+            capacity_kwh,
+            7.2,
+            30.0,
+            range_anxiety_miles,
+            0.0,
+            0.0,
+            seed_from_u64(42),
+        );
+        actor.estimated_soc = estimated_soc;
+        actor.phase = DriverPhase::HomePluggedIn;
+        if let Some(drive_kwh) = todays_drive_kwh {
+            actor.todays_event = Some(DayEvent {
+                departure_minute: 480,
+                arrival_minute: 1080,
+                drive_kwh,
+            });
+        }
+        actor
+    }
+
+    #[test]
+    fn range_anxiety_uses_day_specific_drive_on_high_mileage_day() {
+        // LongCommuterL2-like parameters: mean=75 mi, fuel=0.251 kWh/mi,
+        // capacity=65 kWh, range_anxiety=20 mi.
+        // Day-specific drive_kwh = 115 mi * 0.251 = 28.865 kWh (2-sigma high).
+        // Static-mean anxiety: (75+20)*0.251*1.11/65 ≈ 0.407
+        // Day-specific anxiety: (115+20)*0.251*1.11/65 ≈ 0.579
+        // SOC at 0.45 should NOT trigger with static mean but SHOULD trigger
+        // with day-specific value. Since we use max(day, mean), the threshold
+        // is 0.579 and 0.45 < 0.579 → true.
+        let actor = make_anxiety_actor(
+            75.0,                // expected_daily_miles
+            0.251,               // fuel_economy_kwh_per_mi
+            65.0,                // capacity_kwh
+            20.0,                // range_anxiety_miles
+            0.45,                // estimated_soc
+            Some(115.0 * 0.251), // todays_drive_kwh: 115 mi at 0.251 kWh/mi
+        );
+
+        let env = env_at_minute(0);
+        assert!(
+            actor.needs_range_anxiety_override(&env),
+            "SOC 0.45 should trigger range anxiety on 115-mi day (threshold ~0.579), \
+             but static-mean-only would be ~0.407 and miss it"
+        );
+    }
+
+    #[test]
+    fn range_anxiety_threshold_never_below_static_mean() {
+        // On a below-average day, the threshold must not drop below the
+        // static-mean baseline — the blended `max` approach ensures this.
+        // Actor: mean=30 mi, fuel=0.3 kWh/mi, cap=60 kWh, anxiety=20 mi.
+        // Static-mean anxiety_soc: (30+20)*0.3*1.11/60 ≈ 0.278
+        // Day with only 5 mi → drive_kwh=1.5. Day-specific-only would give
+        // (5+20)*0.3*1.11/60 ≈ 0.139 — too low, anxiety wouldn't fire
+        // when it should. With max(5, 30) = 30, threshold stays at 0.278.
+        let actor = make_anxiety_actor(
+            30.0,      // expected_daily_miles
+            0.3,       // fuel_economy_kwh_per_mi
+            60.0,      // capacity_kwh
+            20.0,      // range_anxiety_miles
+            0.25,      // estimated_soc (below static-mean threshold 0.278)
+            Some(1.5), // todays_drive_kwh: 5 mi * 0.3 kWh/mi
+        );
+
+        let env = env_at_minute(0);
+        assert!(
+            actor.needs_range_anxiety_override(&env),
+            "SOC 0.25 should trigger range anxiety even on a below-average day \
+             because blended max(5, 30) uses static-mean baseline 30 mi → threshold ~0.278"
+        );
+    }
+
+    #[test]
+    fn long_commuter_l2_115_mile_day_soc_0_45_triggers_range_anxiety() {
+        // Regression test: LongCommuterL2 archetype with daily_drive_miles_mean=75.0,
+        // daily_drive_miles_stddev=20.0. A 2-sigma draw of ~115 miles produces
+        // drive_kwh = 115 * 0.251 = 28.865 kWh. The vehicle (Chevy Bolt EV: 65 kWh,
+        // 0.251 kWh/mi) needs ~0.493 SOC for the trip.
+        // Static-mean threshold = (75+20)*0.251*1.11/65 ≈ 0.407.
+        // Day-specific threshold = (115+20)*0.251*1.11/65 ≈ 0.579.
+        // At SOC=0.45: static-mean says "no anxiety" (0.45 > 0.407) — driver stranded.
+        // Day-specific says "anxiety" (0.45 < 0.579) — driver saved.
+
+        // Verify with the actual actor that 0.45 triggers with day-specific miles.
+        let actor = make_anxiety_actor(
+            75.0,                // expected_daily_miles (from daily_drive_miles_mean)
+            0.251,               // fuel_economy_kwh_per_mi (Chevy Bolt EV)
+            65.0,                // capacity_kwh (Chevy Bolt EV)
+            20.0,                // range_anxiety_miles (default)
+            0.45,                // SOC at 0.45
+            Some(115.0 * 0.251), // drive_kwh for 115 mi at 0.251 kWh/mi
+        );
+
+        let env = env_at_minute(0);
+        let ambient_c = env.weather.outdoor_temp_c;
+        let temp_mult = temp_efficiency_multiplier(ambient_c);
+
+        // Compute expected thresholds for documentation and verification.
+        let static_mean_threshold = (75.0 + 20.0) * 0.251 * temp_mult / 65.0;
+        let day_specific_threshold = (115.0 + 20.0) * 0.251 * temp_mult / 65.0;
+
+        // The static-mean-only threshold must be below 0.45 (proving the old code
+        // would fail to protect the driver).
+        assert!(
+            static_mean_threshold < 0.45,
+            "static-mean threshold {static_mean_threshold:.3} should be below SOC 0.45 \
+             (otherwise the bug scenario is not reproducible)"
+        );
+
+        // The day-specific threshold must be above 0.45 (proving the fix works).
+        assert!(
+            day_specific_threshold > 0.45,
+            "day-specific threshold {day_specific_threshold:.3} should be above SOC 0.45 \
+             (the fix must catch this case)"
+        );
+
+        assert!(
+            actor.needs_range_anxiety_override(&env),
+            "LongCommuterL2 with 115-mi day at SOC 0.45 must trigger range anxiety; \
+             static-mean threshold={static_mean_threshold:.3}, \
+             day-specific threshold={day_specific_threshold:.3}"
+        );
     }
 
     #[test]
