@@ -1257,11 +1257,13 @@ impl Equipment for Battery {
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            debug_assert!(
-                self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0,
-                "capacity_kwh must be finite and non-negative, got {}",
-                self.capacity_kwh
-            );
+            if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
+                    value: self.capacity_kwh,
+                    tolerance: 0.0,
+                });
+            }
         }
 
         // -- Compute electrical model --
@@ -1468,12 +1470,13 @@ impl Equipment for Battery {
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
-                debug_assert!(
-                    self.capacity_kwh_nominal > 0.0 || soh <= 0.0,
-                    "capacity_kwh_nominal underflow: rated={}, soh={soh}, nominal={}",
-                    self.capacity_kwh_rated,
-                    self.capacity_kwh_nominal
-                );
+                if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_capacity_nominal_underflow".to_string(),
+                        value: self.capacity_kwh_nominal,
+                        tolerance: 0.0,
+                    });
+                }
             }
             tracing::debug!(
                 soh,
@@ -1487,26 +1490,34 @@ impl Equipment for Battery {
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
                 const EPS: f64 = 1e-15;
-                debug_assert!(
-                    self.degradation.b1_accum.abs() < EPS,
-                    "b1_accum must be zero after update_daily, got {}",
-                    self.degradation.b1_accum
-                );
-                debug_assert!(
-                    self.degradation.b2_accum().abs() < EPS,
-                    "b2_accum must be zero after update_daily, got {}",
-                    self.degradation.b2_accum()
-                );
-                debug_assert!(
-                    self.degradation.b3_accum().abs() < EPS,
-                    "b3_accum must be zero after update_daily, got {}",
-                    self.degradation.b3_accum()
-                );
-                debug_assert!(
-                    self.rainflow.sum_squared_dod_daily().abs() < EPS,
-                    "sum_squared_dod_daily must be zero after reset_daily, got {}",
-                    self.rainflow.sum_squared_dod_daily()
-                );
+                if self.degradation.b1_accum.abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b1_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b1_accum,
+                        tolerance: EPS,
+                    });
+                }
+                if self.degradation.b2_accum().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b2_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b2_accum(),
+                        tolerance: EPS,
+                    });
+                }
+                if self.degradation.b3_accum().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b3_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b3_accum(),
+                        tolerance: EPS,
+                    });
+                }
+                if self.rainflow.sum_squared_dod_daily().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_sum_squared_dod_daily_nonzero_after_daily".to_string(),
+                        value: self.rainflow.sum_squared_dod_daily(),
+                        tolerance: EPS,
+                    });
+                }
             }
 
             self.last_daily_update_day = current_day;
@@ -1517,12 +1528,13 @@ impl Equipment for Battery {
         // boundary was crossed).
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            debug_assert!(
-                self.last_daily_update_day == current_day,
-                "last_daily_update_day ({}) must equal current_day ({}) after boundary block",
-                self.last_daily_update_day,
-                current_day
-            );
+            if self.last_daily_update_day != current_day {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_last_daily_update_day_mismatch".to_string(),
+                    value: self.last_daily_update_day as f64,
+                    tolerance: 0.0,
+                });
+            }
         }
 
         // -- Rainflow tracking (current step belongs to the new day) --
@@ -1848,15 +1860,16 @@ impl Equipment for Battery {
                 {
                     let stored_min = self.soc_target_min.unwrap_or(self.min_soc);
                     let stored_max = self.soc_target_max.unwrap_or(self.max_soc);
-                    debug_assert!(
-                        self.soc_target.is_none()
-                            || stored_min < self.soc_target.unwrap()
-                                && self.soc_target.unwrap() < stored_max,
-                        "SOCTarget invariant violated: \
-                         min_soc={stored_min} >= target_soc={target:?} \
-                         or target >= max_soc={stored_max}",
-                        target = self.soc_target,
-                    );
+                    if !(self.soc_target.is_none()
+                        || stored_min < self.soc_target.unwrap()
+                            && self.soc_target.unwrap() < stored_max)
+                    {
+                        return Err(HaresError::InvariantViolation {
+                            check_name: "battery_soc_target_bounds".to_string(),
+                            value: self.soc_target.unwrap_or(-1.0),
+                            tolerance: 0.0,
+                        });
+                    }
                 }
             }
             ControlSignal::GridConnect { connected } => {

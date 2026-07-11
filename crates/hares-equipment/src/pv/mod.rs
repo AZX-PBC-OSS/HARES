@@ -1087,10 +1087,13 @@ impl Equipment for PV {
         // does not exceed 35%, which would indicate a likely misconfiguration.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            debug_assert!(
-                (0.0..=1.0).contains(&soiling_ratio),
-                "soiling_ratio {soiling_ratio} out of range [0.0, 1.0]"
-            );
+            if !(0.0..=1.0).contains(&soiling_ratio) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "pv_soiling_ratio_bounds".to_string(),
+                    value: soiling_ratio,
+                    tolerance: 0.0,
+                });
+            }
             let static_soiling_in_losses = if self.soiling_config.is_some() {
                 0.0 // removed by reconciliation
             } else {
@@ -1226,15 +1229,17 @@ impl Equipment for PV {
         // where q_setpoint_kvar = 0.0 was indistinguishable from "unset".
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
+            // q_setpoint_source == 1 is ReactiveSetpoint.
             if self.q_setpoint_active
-                && self.q_setpoint_source == 1 // ReactiveSetpoint
+                && self.q_setpoint_source == 1
                 && self.q_setpoint_kvar == Some(0.0)
+                && (final_q_kvar - 0.0_f64).abs() >= 1e-12
             {
-                debug_assert!(
-                    (final_q_kvar - 0.0_f64).abs() < 1e-12,
-                    "T-0424 invariant: ReactiveSetpoint {{ kvar: 0.0 }} was active \
-                     but final_q_kvar = {final_q_kvar} (expected 0.0); PF override likely occurred"
-                );
+                return Err(HaresError::InvariantViolation {
+                    check_name: "pv_reactive_setpoint_zero_q".to_string(),
+                    value: final_q_kvar,
+                    tolerance: 1e-12,
+                });
             }
         }
 

@@ -286,13 +286,17 @@ impl Equipment for ProtocolBridge {
         match signal {
             ControlSignal::ProtocolNative { protocol, payload } => {
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                debug_assert!(
-                    self.descriptor
-                        .control_capabilities
-                        .contains(ControlCapabilities::PROTOCOL_NATIVE),
-                    "ProtocolBridge received ProtocolNative signal but PROTOCOL_NATIVE \
-                     capability is missing — capability-gating logic may be bypassed"
-                );
+                if !self
+                    .descriptor
+                    .control_capabilities
+                    .contains(ControlCapabilities::PROTOCOL_NATIVE)
+                {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "protocol_bridge_capability_check".to_string(),
+                        value: 0.0,
+                        tolerance: 0.0,
+                    });
+                }
 
                 if payload.is_empty() {
                     return Err(HaresError::Control(

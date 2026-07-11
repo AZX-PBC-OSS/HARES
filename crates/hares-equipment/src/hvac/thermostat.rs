@@ -423,12 +423,13 @@ impl ThermostatFsm {
                         ThermostatMode::Deadband
                     } else {
                         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        debug_assert!(
-                            heat_turn_on < cool_turn_on,
-                            "deadband collision: heat_turn_on={} >= cool_turn_on={}",
-                            heat_turn_on,
-                            cool_turn_on,
-                        );
+                        if heat_turn_on >= cool_turn_on {
+                            return Err(HaresError::InvariantViolation {
+                                check_name: "thermostat_deadband_turn_on_order".to_string(),
+                                value: heat_turn_on,
+                                tolerance: cool_turn_on,
+                            });
+                        }
 
                         if zone_temp < heat_turn_on {
                             ThermostatMode::Heating
@@ -472,12 +473,13 @@ impl ThermostatFsm {
                         ThermostatMode::Deadband
                     } else {
                         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        debug_assert!(
-                            heat_turn_on < cool_turn_on,
-                            "deadband collision: heat_turn_on={} >= cool_turn_on={}",
-                            heat_turn_on,
-                            cool_turn_on,
-                        );
+                        if heat_turn_on >= cool_turn_on {
+                            return Err(HaresError::InvariantViolation {
+                                check_name: "thermostat_deadband_turn_on_order".to_string(),
+                                value: heat_turn_on,
+                                tolerance: cool_turn_on,
+                            });
+                        }
 
                         if zone_temp < heat_turn_on {
                             ThermostatMode::Heating
@@ -609,10 +611,13 @@ impl ThermostatFsm {
             }
 
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            debug_assert!(
-                corrected.cooling_c > corrected.heating_c + deadband_c,
-                "auto-corrected setpoints must satisfy cooling > heating + deadband"
-            );
+            if corrected.cooling_c <= corrected.heating_c + deadband_c {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "thermostat_auto_corrected_setpoint_deadband".to_string(),
+                    value: corrected.cooling_c - corrected.heating_c,
+                    tolerance: deadband_c,
+                });
+            }
         }
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -628,15 +633,13 @@ impl ThermostatFsm {
                 } => *d,
                 _ => 2.0 * hysteresis,
             };
-            debug_assert!(
-                final_effective.cooling_c > final_effective.heating_c + check_deadband,
-                "deadband invariant violated after auto-correction guard: \
-                 heating={}, cooling={}, gap={}, required_deadband={}",
-                final_effective.heating_c,
-                final_effective.cooling_c,
-                final_effective.cooling_c - final_effective.heating_c,
-                check_deadband,
-            );
+            if final_effective.cooling_c <= final_effective.heating_c + check_deadband {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "thermostat_final_setpoint_deadband".to_string(),
+                    value: final_effective.cooling_c - final_effective.heating_c,
+                    tolerance: check_deadband,
+                });
+            }
         }
 
         self.runtime_setpoints = Some(candidate);

@@ -200,10 +200,13 @@ pub trait Equipment: Send + Sync {
             // Belt-and-suspenders: re-verify that numeric bounds pass before
             // dispatching to equipment-specific logic.  A fire here means
             // validate_numeric_bounds is non-deterministic (should never happen).
-            debug_assert!(
-                signal.validate_numeric_bounds().is_ok(),
-                "invariant violation: numeric bounds validation failed for {signal:?}"
-            );
+            if signal.validate_numeric_bounds().is_err() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "equipment_revalidate_numeric_bounds".to_string(),
+                    value: 0.0,
+                    tolerance: 0.0,
+                });
+            }
         }
         self.apply_control_unchecked(signal)
     }

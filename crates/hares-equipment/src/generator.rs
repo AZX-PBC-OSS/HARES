@@ -1302,10 +1302,15 @@ impl Equipment for Generator {
 
         // Invariant: parasitic load must never exceed gross output.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            parasitic_kw >= 0.0 && parasitic_kw <= output_kw + f64::EPSILON,
-            "Parasitic load {parasitic_kw:.3} kW exceeds gross output {output_kw:.3} kW"
-        );
+        {
+            if !(parasitic_kw >= 0.0 && parasitic_kw <= output_kw + f64::EPSILON) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "generator_parasitic_exceeds_output".to_string(),
+                    value: parasitic_kw,
+                    tolerance: output_kw,
+                });
+            }
+        }
 
         let net_output_kw = output_kw - parasitic_kw;
 
@@ -1389,11 +1394,12 @@ impl Equipment for Generator {
         // fall below the idle consumption floor.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            if is_running {
-                debug_assert!(
-                    fuel_w >= idle_fuel_w - f64::EPSILON * idle_fuel_w.abs().max(1.0),
-                    "generator fuel_w ({fuel_w} W) must not fall below idle_fuel_w ({idle_fuel_w} W) when running"
-                );
+            if is_running && fuel_w < idle_fuel_w - f64::EPSILON * idle_fuel_w.abs().max(1.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "generator_fuel_below_idle_floor".to_string(),
+                    value: fuel_w,
+                    tolerance: idle_fuel_w,
+                });
             }
         }
 
@@ -1501,15 +1507,22 @@ impl Equipment for Generator {
         // Invariant: heat_rec_ratio must be in [0, 1] and effective <= available.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            debug_assert!(
-                (0.0..=1.0).contains(&heat_rec_ratio),
-                "heat_rec_ratio must be in [0, 1], got {heat_rec_ratio}"
-            );
-            debug_assert!(
-                q_thermal_effective_w
-                    <= q_thermal_available_w + 10.0 * f64::EPSILON * q_thermal_available_w.abs(),
-                "q_thermal_effective ({q_thermal_effective_w} W) must not exceed q_thermal_available ({q_thermal_available_w} W)"
-            );
+            if !((0.0..=1.0).contains(&heat_rec_ratio)) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "generator_heat_rec_ratio_bounds".to_string(),
+                    value: heat_rec_ratio,
+                    tolerance: 0.0,
+                });
+            }
+            if q_thermal_effective_w
+                > q_thermal_available_w + 10.0 * f64::EPSILON * q_thermal_available_w.abs()
+            {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "generator_thermal_effective_exceeds_available".to_string(),
+                    value: q_thermal_effective_w,
+                    tolerance: q_thermal_available_w,
+                });
+            }
         }
 
         // Invariant: energy conservation within the generator.
@@ -1517,10 +1530,13 @@ impl Equipment for Generator {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             let margin = 10.0 * f64::EPSILON * fuel_w.abs().max(1.0);
-            debug_assert!(
-                q_thermal_available_w <= total_waste_w + margin,
-                "generator per-stream heat recovery ({q_thermal_available_w} W) exceeds available waste heat ({total_waste_w} W)"
-            );
+            if q_thermal_available_w > total_waste_w + margin {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "generator_heat_recovery_exceeds_waste".to_string(),
+                    value: q_thermal_available_w,
+                    tolerance: total_waste_w,
+                });
+            }
         }
 
         // Invariant: when CHP is active with a fluid port, the thermal power
@@ -1541,11 +1557,13 @@ impl Equipment for Generator {
                 // are not accidentally writing zero or a wrong value — it catches the class
                 // of bug where energy is computed (telemetry reports it) but never reaches
                 // any accumulator.
-                debug_assert!(
-                    q_thermal_effective_w > 0.0,
-                    "generator CHP active with fluid port but q_thermal_effective_w is \
-                     non-positive ({q_thermal_effective_w} W); energy routing gap"
-                );
+                if q_thermal_effective_w <= 0.0 {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "generator_chp_thermal_routing_gap".to_string(),
+                        value: q_thermal_effective_w,
+                        tolerance: 0.0,
+                    });
+                }
             }
         }
 
@@ -1690,11 +1708,13 @@ impl Equipment for Generator {
                 if computed_flow > 0.0 {
                     let delta_t = self.supply_temp_c - self.return_temp_c;
                     let fluid_energy = computed_flow * CP_LIQUID_WATER_J_KG_K * delta_t;
-                    debug_assert!(
-                        (fluid_energy - q_thermal_effective_w).abs() < 1.0,
-                        "CHP fluid port energy {fluid_energy:.2} W diverges from \
-                         q_thermal_effective_w {q_thermal_effective_w:.2} W"
-                    );
+                    if (fluid_energy - q_thermal_effective_w).abs() >= 1.0 {
+                        return Err(HaresError::InvariantViolation {
+                            check_name: "generator_chp_fluid_port_energy_divergence".to_string(),
+                            value: (fluid_energy - q_thermal_effective_w).abs(),
+                            tolerance: 1.0,
+                        });
+                    }
                 }
 
                 // Observer capture: record computed flow for diagnostics.

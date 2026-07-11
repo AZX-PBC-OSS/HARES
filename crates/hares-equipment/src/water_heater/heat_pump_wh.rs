@@ -897,10 +897,15 @@ impl Equipment for HeatPumpWH {
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
         );
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            cop.is_finite() && (0.0..=8.0).contains(&cop),
-            "HPWH COP {cop} not in [0.0, 8.0]"
-        );
+        {
+            if !cop.is_finite() || !(0.0..=8.0).contains(&cop) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "hpwh_cop_bounds".to_string(),
+                    value: cop,
+                    tolerance: 0.0,
+                });
+            }
+        }
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
         self.telemetry

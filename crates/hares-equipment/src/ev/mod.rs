@@ -1076,7 +1076,7 @@ impl Ev {
         );
     }
 
-    fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {
+    fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) -> crate::Result<()> {
         // OCHRE Battery.py:315-346: calculate_degradation() runs *before*
         // degradation_data.append() so the midnight timestep belongs to the
         // *next* day's degradation window.  HARES mirrors this ordering:
@@ -1100,12 +1100,13 @@ impl Ev {
             self.battery_capacity_kwh = self.battery_capacity_kwh_rated * soh;
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
-                debug_assert!(
-                    self.battery_capacity_kwh > 0.0 || soh <= 0.0,
-                    "battery_capacity_kwh underflow: rated={}, soh={soh}, current={}",
-                    self.battery_capacity_kwh_rated,
-                    self.battery_capacity_kwh
-                );
+                if !(self.battery_capacity_kwh > 0.0 || soh <= 0.0) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "ev_battery_capacity_kwh_underflow".to_string(),
+                        value: self.battery_capacity_kwh,
+                        tolerance: 0.0,
+                    });
+                }
             }
 
             self.degradation.reset_day_tracking(self.soc);
@@ -1118,6 +1119,7 @@ impl Ev {
         self.rainflow.push(self.soc);
         self.degradation
             .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
+        Ok(())
     }
 
     fn run_charging_physics(
@@ -1315,7 +1317,7 @@ impl Equipment for Ev {
             }
         }
 
-        self.update_degradation(env, dt.as_secs_f64());
+        self.update_degradation(env, dt.as_secs_f64())?;
         self.write_telemetry();
         let mode = if self.active_power_kw > 1e-9 {
             OperatingMode::Charging

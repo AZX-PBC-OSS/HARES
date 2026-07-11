@@ -313,10 +313,13 @@ pub(super) fn calculate_shr(
     };
 
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert!(
-        t_adp <= db_in_c,
-        "apparatus dew point {t_adp} exceeds entering dry-bulb {db_in_c}"
-    );
+    if t_adp > db_in_c {
+        return Err(HaresError::InvariantViolation {
+            check_name: "coil_apparatus_dew_point_exceeds_entering_db".to_string(),
+            value: t_adp,
+            tolerance: db_in_c,
+        });
+    }
 
     let supply_temp_c = t_adp + bf * (db_in_c - t_adp);
 

@@ -821,6 +821,16 @@ impl CoolingCore {
                     ),
                 });
             }
+            for (i, ao) in self.coil_ao_by_stage.iter().enumerate() {
+                self.telemetry.insert(format!("cooler_ao_stage_{i}"), *ao);
+                self.descriptor.telemetry_fields.push(TelemetryField {
+                    name: format!("cooler_ao_stage_{i}"),
+                    unit: "kg/s".to_string(),
+                    description: format!(
+                        "Coil Ao factor (apparent UA/cp) for cooling speed stage {i} (diagnostic)"
+                    ),
+                });
+            }
         }
         self.core_output = CoreOutput::default();
         Ok(())
@@ -1142,10 +1152,15 @@ impl CoolingCore {
         // to exclude physically impossible values from telemetry.
         .clamp(0.0, 8.0);
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            cop.is_finite() && (0.0..=8.0).contains(&cop),
-            "AC cooling COP {cop} not in [0.0, 8.0]"
-        );
+        {
+            if !(cop.is_finite() && (0.0..=8.0).contains(&cop)) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "ac_cooling_cop_range".to_string(),
+                    value: cop,
+                    tolerance: 0.0,
+                });
+            }
+        }
         self.telemetry.set(tk::COP, cop);
         self.telemetry
             .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
@@ -1569,6 +1584,7 @@ impl CoolingCore {
             &self.hvac.config.cooling_capacities_w,
             self.hvac.config.airflow_m3_s_per_w,
             rated_shr,
+            &self.stage_shrs,
         )?;
         Ok(())
     }
@@ -1715,16 +1731,14 @@ impl CoolingCore {
                     // through to this path; ThermalSetpoint and MaxCapacityFraction
                     // are handled by explicit arms above.
                     let required = signal.required_capability();
-                    if self.descriptor.control_capabilities.contains(required) {
-                        debug_assert!(
-                            matches!(signal, ControlSignal::ThermalSetpointDelta { .. }),
-                            "CoolingCore '{}': signal {:?} (capability {:?}) \
-                             reached the hvac catch-all path — add an explicit \
-                             match arm in apply_control_unchecked for this signal variant",
-                            self.descriptor.equipment_type,
-                            signal,
-                            required,
-                        );
+                    if self.descriptor.control_capabilities.contains(required)
+                        && !matches!(signal, ControlSignal::ThermalSetpointDelta { .. })
+                    {
+                        return Err(HaresError::InvariantViolation {
+                            check_name: "ac_catchall_signal_type".to_string(),
+                            value: 0.0,
+                            tolerance: 0.0,
+                        });
                     }
                 }
                 #[cfg(feature = "observe")]
@@ -4149,6 +4163,44 @@ mod tests {
         assert!(
             cop < 100.0,
             "COP must have been clamped below 100 (raw ~1033), got {cop}"
+        );
+    }
+
+    /// Two-stage central AC with per-stage SHR [0.80, 0.70]: coil Ao values
+    /// must differ between stages, confirming each stage uses its own SHR
+    /// rather than the first stage's rated SHR for all stages.
+    #[test]
+    fn multi_stage_shr_produces_different_ao_by_stage() {
+        let cfg = ac_config_with(|typed| {
+            typed.stage_capacities_w = Some(vec![8_000.0, 12_000.0]);
+            typed.stage_eirs = Some(vec![0.33, 0.30]);
+            typed.stage_shrs = Some(vec![0.80, 0.70]);
+            typed.number_of_speeds = 2;
+            typed.startup_cd = Some(0.0);
+        });
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert_eq!(
+            eq.core.coil_ao_by_stage.len(),
+            2,
+            "two-stage AC must have two Ao entries"
+        );
+        assert!(
+            (eq.core.coil_ao_by_stage[0] - eq.core.coil_ao_by_stage[1]).abs() > 1e-6,
+            "Ao values differ between stages when per-stage SHR differs"
+        );
+        assert_eq!(
+            eq.core.stage_shrs,
+            vec![0.80, 0.70],
+            "per-stage SHR values preserved after init"
+        );
+        // rated_shr is set to stage_shrs[0] for backward compatibility.
+        assert!(
+            (eq.core.rated_shr - 0.80).abs() < 1e-9,
+            "rated_shr should equal stage_shrs[0]"
         );
     }
 }

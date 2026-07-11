@@ -1,6 +1,7 @@
 //! Defrost control for heat-pump heating: OnDemand (humidity-based) and Timed modes.
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
+use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -280,7 +281,7 @@ impl DefrostCycleTracker {
         time_fraction: f64,
         conditions_favor_frost: bool,
         outdoor_db_c: f64,
-    ) {
+    ) -> crate::Result<()> {
         #[cfg_attr(
             not(any(debug_assertions, feature = "check_invariants", feature = "observe")),
             allow(unused_variables)
@@ -334,28 +335,33 @@ impl DefrostCycleTracker {
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            debug_assert!(
-                self.accumulated_frost_s >= 0.0,
-                "accumulated_frost_s {:.6} must be non-negative",
-                self.accumulated_frost_s
-            );
-            debug_assert!(
-                (0.0..=1.0).contains(&self.ewma_time_fraction),
-                "ewma_time_fraction {:.6} must be in [0.0, 1.0]",
-                self.ewma_time_fraction
-            );
+            if self.accumulated_frost_s < 0.0 {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "defrost_accumulated_frost_negative".to_string(),
+                    value: self.accumulated_frost_s,
+                    tolerance: 0.0,
+                });
+            }
+            if !(0.0..=1.0).contains(&self.ewma_time_fraction) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "defrost_ewma_time_fraction_bounds".to_string(),
+                    value: self.ewma_time_fraction,
+                    tolerance: 0.0,
+                });
+            }
             // When OAT exceeds the defrost-enable temperature, accumulated frost
             // must not have increased during this advance call (it should hold
             // steady or decay). This guards against stale frost accumulation during
             // warm off-periods.
-            if outdoor_db_c >= DEFROST_ENABLE_TEMP_C && !conditions_favor_frost {
-                debug_assert!(
-                    frost_before >= self.accumulated_frost_s - 1e-12,
-                    "accumulated_frost_s must not increase when OAT ({:.2}°C) >= defrost-enable \
-                     threshold ({:.2}°C) and conditions do not favor frost",
-                    outdoor_db_c,
-                    DEFROST_ENABLE_TEMP_C
-                );
+            if outdoor_db_c >= DEFROST_ENABLE_TEMP_C
+                && !conditions_favor_frost
+                && frost_before < self.accumulated_frost_s - 1e-12
+            {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "defrost_frost_increased_when_warm".to_string(),
+                    value: self.accumulated_frost_s,
+                    tolerance: frost_before,
+                });
             }
         }
 
@@ -382,6 +388,8 @@ impl DefrostCycleTracker {
                 "defrost FSM state transition"
             );
         }
+
+        Ok(())
     }
 
     /// Whether the compressor should suppress heating output this step.
@@ -951,7 +959,7 @@ mod defrost_tests {
     fn tracker_accumulates_frost_when_conditions_favor_frost() {
         let mut tracker = DefrostCycleTracker::new();
         let time_fraction = 0.2;
-        tracker.advance(60.0, time_fraction, true, 0.0);
+        tracker.advance(60.0, time_fraction, true, 0.0).unwrap();
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         let expected = 60.0 * 0.2;
         assert!(
@@ -964,7 +972,7 @@ mod defrost_tests {
     #[test]
     fn tracker_does_not_accumulate_when_no_frost() {
         let mut tracker = DefrostCycleTracker::new();
-        tracker.advance(60.0, 0.0, false, 0.0);
+        tracker.advance(60.0, 0.0, false, 0.0).unwrap();
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         assert_eq!(tracker.accumulated_frost_s, 0.0);
     }
@@ -983,7 +991,7 @@ mod defrost_tests {
         // Simulate steps until just before threshold
         let steps_before: usize = (interval_s / frost_per_step).floor() as usize;
         for _ in 0..steps_before {
-            tracker.advance(dt, time_fraction, true, 0.0);
+            tracker.advance(dt, time_fraction, true, 0.0).unwrap();
         }
         assert_eq!(
             tracker.state,
@@ -992,7 +1000,7 @@ mod defrost_tests {
         );
 
         // One more step crosses the threshold
-        tracker.advance(dt, time_fraction, true, 0.0);
+        tracker.advance(dt, time_fraction, true, 0.0).unwrap();
         assert_eq!(
             tracker.state,
             DefrostCycleState::Defrosting,
@@ -1014,12 +1022,12 @@ mod defrost_tests {
         let dt = 60.0;
         // 3 steps = 180s, not yet 210s
         for _ in 0..3 {
-            tracker.advance(dt, 1.0, true, 0.0);
+            tracker.advance(dt, 1.0, true, 0.0).unwrap();
         }
         assert_eq!(tracker.state, DefrostCycleState::Defrosting);
 
         // 4th step = 240s > 210s → back to Accumulating
-        tracker.advance(dt, 1.0, true, 0.0);
+        tracker.advance(dt, 1.0, true, 0.0).unwrap();
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
@@ -1039,10 +1047,10 @@ mod defrost_tests {
 
         // 3 steps = 180s = max_duration
         for _ in 0..2 {
-            tracker.advance(60.0, 1.0, true, 0.0);
+            tracker.advance(60.0, 1.0, true, 0.0).unwrap();
         }
         assert_eq!(tracker.state, DefrostCycleState::Defrosting);
-        tracker.advance(60.0, 1.0, true, 0.0);
+        tracker.advance(60.0, 1.0, true, 0.0).unwrap();
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
@@ -1059,7 +1067,7 @@ mod defrost_tests {
     #[test]
     fn tracker_zero_time_fraction_does_not_accumulate() {
         let mut tracker = DefrostCycleTracker::new();
-        tracker.advance(60.0, 0.0, true, 0.0);
+        tracker.advance(60.0, 0.0, true, 0.0).unwrap();
         assert_eq!(tracker.accumulated_frost_s, 0.0);
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
     }
@@ -1074,7 +1082,7 @@ mod defrost_tests {
         tracker.defrost_elapsed_s = 200.0;
 
         // Advance with conditions_favor_frost = false — should still progress
-        tracker.advance(60.0, 0.0, false, 0.0);
+        tracker.advance(60.0, 0.0, false, 0.0).unwrap();
         // 260s > 210s → back to Accumulating
         assert_eq!(
             tracker.state,
@@ -1093,7 +1101,7 @@ mod defrost_tests {
         // After 1500 s, frost = 10.0 * exp(-1) ≈ 10.0 * 0.3679 ≈ 3.679.
         // After 6000 s, frost = 10.0 * exp(-4) ≈ 10.0 * 0.0183 ≈ 0.183.
         for _ in 0..100 {
-            tracker.advance(60.0, 0.0, false, 7.0);
+            tracker.advance(60.0, 0.0, false, 7.0).unwrap();
         }
         // After 6000 s (~1.67 h), frost should have decayed substantially.
         assert!(
@@ -1118,7 +1126,7 @@ mod defrost_tests {
         tracker.accumulated_frost_s = 10.0;
 
         // Advance at OAT = -5°C (below decay threshold) with no frost conditions.
-        tracker.advance(3600.0, 0.0, false, -5.0);
+        tracker.advance(3600.0, 0.0, false, -5.0).unwrap();
 
         assert!(
             (tracker.accumulated_frost_s - 10.0).abs() < 1e-12,
@@ -1140,7 +1148,7 @@ mod defrost_tests {
         // After 50 steps (3000 s), frost = 600.0 — not enough to trigger defrost
         // (threshold is 1050 s).
         for _ in 0..50 {
-            tracker.advance(60.0, time_fraction, true, -5.0);
+            tracker.advance(60.0, time_fraction, true, -5.0).unwrap();
         }
         let frost_after_heating = tracker.accumulated_frost_s;
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
@@ -1153,7 +1161,7 @@ mod defrost_tests {
         // At OAT = 10°C, tau = 600 s. After 3600 s = 6 * tau,
         // frost = frost_after_heating * exp(-6) ≈ frost_after_heating * 0.0025.
         for _ in 0..60 {
-            tracker.advance(60.0, 0.0, false, 10.0);
+            tracker.advance(60.0, 0.0, false, 10.0).unwrap();
         }
         assert!(
             tracker.accumulated_frost_s < frost_after_heating * 0.01,
@@ -1165,7 +1173,7 @@ mod defrost_tests {
         // Phase 3: resume heating — frost must be too small to trigger defrost.
         // The decayed frost value is far below the interval threshold (=1050 s),
         // so the first heating call must stay in Accumulating.
-        tracker.advance(60.0, time_fraction, true, -5.0);
+        tracker.advance(60.0, time_fraction, true, -5.0).unwrap();
         assert_eq!(
             tracker.state,
             DefrostCycleState::Accumulating,
@@ -1188,7 +1196,7 @@ mod defrost_tests {
         let mut tfs = [0.1_f64, 0.3_f64].into_iter().cycle();
         for _ in 0..200 {
             let tf = tfs.next().unwrap();
-            tracker.advance(dt, tf, true, 0.0);
+            tracker.advance(dt, tf, true, 0.0).unwrap();
         }
         let error = (tracker.ewma_time_fraction - 0.2).abs();
         assert!(
@@ -1207,14 +1215,14 @@ mod defrost_tests {
         tracker.max_defrost_duration_s = 1_000_000.0;
         let dt = 60.0;
         let tf = 0.3;
-        tracker.advance(dt, tf, true, 0.0);
+        tracker.advance(dt, tf, true, 0.0).unwrap();
         assert!(
             tracker.ewma_time_fraction > 0.0 && tracker.ewma_time_fraction < tf,
             "ewma {:.6} should be between 0 and {tf} after one step",
             tracker.ewma_time_fraction
         );
         for _ in 0..199 {
-            tracker.advance(dt, tf, true, 0.0);
+            tracker.advance(dt, tf, true, 0.0).unwrap();
         }
         assert!(
             (tracker.ewma_time_fraction - tf).abs() < 0.01,
@@ -1234,14 +1242,14 @@ mod defrost_tests {
 
         // Build up EWMA and trigger a defrost cycle.
         for _ in 0..200 {
-            tracker.advance(dt, tf, true, 0.0);
+            tracker.advance(dt, tf, true, 0.0).unwrap();
         }
         assert!(tracker.ewma_time_fraction > 0.0);
 
         // Force into Defrosting and then complete the cycle.
         tracker.state = DefrostCycleState::Defrosting;
         tracker.defrost_elapsed_s = 200.0;
-        tracker.advance(dt, tf, true, 0.0);
+        tracker.advance(dt, tf, true, 0.0).unwrap();
         // Should have transitioned back to Accumulating.
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         assert_eq!(
@@ -1272,7 +1280,7 @@ mod defrost_tests {
         tracker.cycle_duration_s = 1_000_000.0;
         tracker.max_defrost_duration_s = 1_000_000.0;
         for _ in 0..200 {
-            tracker.advance(dt, tfs.next().unwrap(), true, 0.0);
+            tracker.advance(dt, tfs.next().unwrap(), true, 0.0).unwrap();
         }
         assert!(
             (tracker.ewma_time_fraction - 0.2).abs() < 0.02,
@@ -1288,7 +1296,7 @@ mod defrost_tests {
         let mut steps = 0u32;
         for _ in 0..500 {
             let old_state = tracker.state;
-            tracker.advance(dt, tfs.next().unwrap(), true, 0.0);
+            tracker.advance(dt, tfs.next().unwrap(), true, 0.0).unwrap();
             steps += 1;
             if old_state == DefrostCycleState::Accumulating
                 && tracker.state == DefrostCycleState::Defrosting
@@ -1330,7 +1338,7 @@ mod defrost_tests {
         for _ in 0..120 {
             let tf = tfs.next().unwrap();
             let old_state = tracker.state;
-            tracker.advance(dt, tf, true, -5.0);
+            tracker.advance(dt, tf, true, -5.0).unwrap();
             if old_state == DefrostCycleState::Accumulating
                 && tracker.state == DefrostCycleState::Defrosting
             {
@@ -1351,7 +1359,7 @@ mod defrost_tests {
         // After 3600 s at 10°C (tau = 600 s), decay factor = exp(-6) ≈ 0.0025.
         // The remaining post-defrost frost is negligible after decay.
         for _ in 0..60 {
-            tracker.advance(dt, 0.0, false, 10.0);
+            tracker.advance(dt, 0.0, false, 10.0).unwrap();
         }
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
         assert!(
@@ -1366,7 +1374,7 @@ mod defrost_tests {
         for _ in 0..120 {
             let tf = tfs.next().unwrap();
             let old_state = tracker.state;
-            tracker.advance(dt, tf, true, -5.0);
+            tracker.advance(dt, tf, true, -5.0).unwrap();
             if old_state == DefrostCycleState::Accumulating
                 && tracker.state == DefrostCycleState::Defrosting
             {

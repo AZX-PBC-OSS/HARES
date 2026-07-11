@@ -1252,7 +1252,7 @@ impl HeatPumpHeaterCore {
             defrost_conditions.1,
             defrost_conditions.0,
             env.weather.outdoor_temp_c,
-        );
+        )?;
 
         let step = self.compute_step(env, dt_min)?;
 
@@ -1381,10 +1381,15 @@ impl HeatPumpHeaterCore {
         // to exclude physically impossible values from telemetry.
         .clamp(0.0, 10.0);
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            cop.is_finite() && (0.0..=10.0).contains(&cop),
-            "ASHP heating COP {cop} not in [0.0, 10.0]"
-        );
+        {
+            if !(cop.is_finite() && (0.0..=10.0).contains(&cop)) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "ashp_heater_cop_range".to_string(),
+                    value: cop,
+                    tolerance: 0.0,
+                });
+            }
+        }
         self.telemetry.set(tk::COP, cop);
         // Runtime fraction = duty cycle (PLR) when on, 0 when off.
         let rtf = if self.operating_mode != OperatingMode::Off {
