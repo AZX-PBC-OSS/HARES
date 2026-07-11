@@ -58,6 +58,8 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DUTY_CYCLE, 0.0);
     telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
     telemetry.insert(tk::MODE_DURATION_S, 0.0);
+    telemetry.insert(tk::MIN_ON_TIME_S, 0.0);
+    telemetry.insert(tk::MIN_OFF_TIME_S, 0.0);
     telemetry
 }
 
@@ -332,6 +334,16 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MODE_DURATION_S.to_string(),
             unit: "s".to_string(),
             description: "Seconds since the last thermostat mode change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MIN_ON_TIME_S.to_string(),
+            unit: "s".to_string(),
+            description: "Minimum compressor on-time for short-cycle protection".to_string(),
+        },
+        TelemetryField {
+            name: tk::MIN_OFF_TIME_S.to_string(),
+            unit: "s".to_string(),
+            description: "Minimum compressor off-time for short-cycle protection".to_string(),
         },
     ]
 }

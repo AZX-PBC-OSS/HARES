@@ -41,9 +41,10 @@ use hares_io::{
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
-    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MODE_SUFFIX,
-    PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
-    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
+    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
+    MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, PAN_HEATER_POWER_SUFFIX,
+    POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX, PvPanelDefaults,
+    REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
@@ -527,6 +528,8 @@ fn resolve_v8_columns(
             (tk::COMPRESSOR_KW, COMPRESSOR_POWER_KW_SUFFIX),
             (tk::FAN_ELECTRIC_W, FAN_ELECTRIC_POWER_SUFFIX),
             (tk::FAN_POWER_W, FAN_POWER_W_SUFFIX),
+            (tk::MIN_ON_TIME_S, MIN_ON_TIME_SUFFIX),
+            (tk::MIN_OFF_TIME_S, MIN_OFF_TIME_SUFFIX),
         ];
         for &(key, suffix) in hvac_defs {
             let col_name = format!("{instance_name} {suffix}");
@@ -13728,7 +13731,17 @@ master_seed = 42
             "missing runtime cooling setpoint column"
         );
 
-        // Verify all 25 output-scope keys are accounted for.
+        // Thermostat short-cycle protection columns (per-equipment):
+        assert!(
+            column_names.contains(&"ASHP Heater Min On Time (s)"),
+            "missing min on time column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Min Off Time (s)"),
+            "missing min off time column"
+        );
+
+        // Verify all 27 output-scope keys are accounted for.
         // 7 legacy (FAN_KW, SHR, DEFROST_CYCLE_STATE, BACKUP_ER_KW,
         //   RUNTIME_FRACTION, LATENT_GAINS_W, DUCT_LOSS_W)
         // + 4 setpoint chain
@@ -13737,14 +13750,15 @@ master_seed = 42
         // + 3 HP detail
         // + 2 PV
         // + 2 EV
-        // = 25 total keys
+        // + 2 thermostat short-cycle protection
+        // = 27 total keys
         //
         // 7 legacy output keys are verified by existing tests
         // (verbosity_7 tests for fan, SHR, defrost, ER, RTF, latent, duct).
-        // The 18 new keys are verified above.
+        // The 20 new keys are verified above.
         assert_eq!(
             tk::OUTPUT_SCOPE_KEYS.len(),
-            25,
+            27,
             "OUTPUT_SCOPE_KEYS length changed; ensure all are tested above"
         );
     }

@@ -250,11 +250,15 @@ struct HeaterState {
     er_was_on: bool,
     thermostat_hysteresis_c: f64,
     time_at_current_speed_s: f64,
+    // --- Thermostat short-cycle protection (survives warmup restart) ---
+    min_on_time_s: f64,
+    min_off_time_s: f64,
 }
 
 // Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
-const HEATER_CHECKPOINT_VERSION: u32 = 2;
+// Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
+const HEATER_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct HeaterControl {
@@ -1499,6 +1503,10 @@ impl HeatPumpHeaterCore {
         .max(0) as f64
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
+        self.telemetry
+            .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
+        self.telemetry
+            .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
         if step.latent_gain_w > 0.0 {
             tracing::debug!(
                 heating_latent_w = step.latent_gain_w,
@@ -2392,6 +2400,8 @@ impl HeatPumpHeaterCore {
                 er_was_on: self.er_was_on,
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
+                min_on_time_s: self.hvac.thermostat_fsm.min_on_time_s,
+                min_off_time_s: self.hvac.thermostat_fsm.min_off_time_s,
             },
             HEATER_CHECKPOINT_VERSION,
             "Heater",
@@ -2438,6 +2448,8 @@ impl HeatPumpHeaterCore {
         self.max_oat_supplemental_c = decoded.max_oat_supplemental_c;
         self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.hvac.runtime.time_at_current_speed_s = decoded.time_at_current_speed_s;
+        self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
+        self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -2531,6 +2543,7 @@ mod tests {
     };
 
     use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
+    use crate::hvac::ThermostatMode;
     use crate::hvac::heating_config::HvacSetpointConfig;
     use crate::{
         DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
@@ -6673,6 +6686,99 @@ mod tests {
             (restored.core.hvac.runtime.time_at_current_speed_s - accumulated).abs() < 1e-9,
             "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
             restored.core.hvac.runtime.time_at_current_speed_s
+        );
+    }
+
+    #[test]
+    fn checkpoint_min_on_off_time_s() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.hysteresis_c = Some(0.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+        });
+        let environment = env(16.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        eq.core.hvac.thermostat_fsm.min_on_time_s = 120.0;
+        eq.core.hvac.thermostat_fsm.min_off_time_s = 180.0;
+
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat_fsm.min_on_time_s, 0.0,
+            "fresh instance must have default min_on_time_s=0"
+        );
+        assert_eq!(
+            restored.core.hvac.thermostat_fsm.min_off_time_s, 0.0,
+            "fresh instance must have default min_off_time_s=0"
+        );
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            (restored.core.hvac.thermostat_fsm.min_on_time_s - 120.0).abs() < 1e-9,
+            "min_on_time_s must survive checkpoint round-trip; expected 120.0, got {}",
+            restored.core.hvac.thermostat_fsm.min_on_time_s
+        );
+        assert!(
+            (restored.core.hvac.thermostat_fsm.min_off_time_s - 180.0).abs() < 1e-9,
+            "min_off_time_s must survive checkpoint round-trip; expected 180.0, got {}",
+            restored.core.hvac.thermostat_fsm.min_off_time_s
+        );
+
+        let t0 = environment.current_time;
+        restored.core.hvac.thermostat_fsm.mode = ThermostatMode::Heating;
+        restored.core.hvac.thermostat_fsm.mode_start_at = Some(t0);
+
+        let t60 = t0 + ChronoDuration::seconds(60);
+        assert!(
+            !restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Deadband, t60),
+            "min_on_time_s=120 must block Heating→Deadband at 60s after restore"
+        );
+        let t120 = t0 + ChronoDuration::seconds(120);
+        assert!(
+            restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Deadband, t120),
+            "min_on_time_s=120 must release at 120s after restore"
+        );
+
+        restored.core.hvac.thermostat_fsm.mode = ThermostatMode::Deadband;
+        restored.core.hvac.thermostat_fsm.mode_start_at = Some(t120);
+
+        let t180 = t120 + ChronoDuration::seconds(60);
+        assert!(
+            !restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Heating, t180),
+            "min_off_time_s=180 must block Deadband→Heating at 60s after restore"
+        );
+        let t300 = t120 + ChronoDuration::seconds(180);
+        assert!(
+            restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Heating, t300),
+            "min_off_time_s=180 must release at 180s after restore"
         );
     }
 

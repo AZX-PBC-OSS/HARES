@@ -168,11 +168,15 @@ struct AirConditionerState {
     last_bypass_factor: f64,
     thermostat_hysteresis_c: f64,
     time_at_current_speed_s: f64,
+    // --- Thermostat short-cycle protection (survives warmup restart) ---
+    min_on_time_s: f64,
+    min_off_time_s: f64,
 }
 
 // Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
-const AC_CHECKPOINT_VERSION: u32 = 2;
+// Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
+const AC_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct PerformanceResult {
@@ -1299,6 +1303,10 @@ impl CoolingCore {
         .max(0) as f64
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
+        self.telemetry
+            .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
+        self.telemetry
+            .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
@@ -1723,6 +1731,8 @@ impl CoolingCore {
                 last_bypass_factor: self.last_bypass_factor,
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
+                min_on_time_s: self.hvac.thermostat_fsm.min_on_time_s,
+                min_off_time_s: self.hvac.thermostat_fsm.min_off_time_s,
             },
             AC_CHECKPOINT_VERSION,
             "AirConditioner",
@@ -1764,6 +1774,8 @@ impl CoolingCore {
         self.last_bypass_factor = decoded.last_bypass_factor;
         self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.hvac.runtime.time_at_current_speed_s = decoded.time_at_current_speed_s;
+        self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
+        self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -1954,6 +1966,7 @@ mod tests {
     };
 
     use super::{AirConditioner, CoolingCore, RoomAC, SpeedControlMode};
+    use crate::hvac::ThermostatMode;
 
     use crate::{
         CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
@@ -3536,6 +3549,76 @@ mod tests {
             (restored.core.hvac.runtime.time_at_current_speed_s - accumulated).abs() < 1e-9,
             "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
             restored.core.hvac.runtime.time_at_current_speed_s
+        );
+    }
+
+    #[test]
+    fn checkpoint_min_on_off_time_s() {
+        let cfg = ac_config_with(|typed| {
+            typed.hysteresis_c = Some(0.0);
+        });
+        let environment = env(28.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        eq.core.hvac.thermostat_fsm.min_on_time_s = 120.0;
+        eq.core.hvac.thermostat_fsm.min_off_time_s = 180.0;
+
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat_fsm.min_on_time_s, 0.0,
+            "fresh instance must have default min_on_time_s=0"
+        );
+        assert_eq!(
+            restored.core.hvac.thermostat_fsm.min_off_time_s, 0.0,
+            "fresh instance must have default min_off_time_s=0"
+        );
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            (restored.core.hvac.thermostat_fsm.min_on_time_s - 120.0).abs() < 1e-9,
+            "min_on_time_s must survive checkpoint round-trip; expected 120.0, got {}",
+            restored.core.hvac.thermostat_fsm.min_on_time_s
+        );
+        assert!(
+            (restored.core.hvac.thermostat_fsm.min_off_time_s - 180.0).abs() < 1e-9,
+            "min_off_time_s must survive checkpoint round-trip; expected 180.0, got {}",
+            restored.core.hvac.thermostat_fsm.min_off_time_s
+        );
+
+        let t0 = environment.current_time;
+        restored.core.hvac.thermostat_fsm.mode = ThermostatMode::Cooling;
+        restored.core.hvac.thermostat_fsm.mode_start_at = Some(t0);
+
+        let t60 = t0 + ChronoDuration::seconds(60);
+        assert!(
+            !restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Deadband, t60),
+            "min_on_time_s=120 must block Cooling→Deadband at 60s after restore"
+        );
+        let t120 = t0 + ChronoDuration::seconds(120);
+        assert!(
+            restored
+                .core
+                .hvac
+                .thermostat_fsm
+                .can_transition_mode(ThermostatMode::Deadband, t120),
+            "min_on_time_s=120 must release at 120s after restore"
         );
     }
 

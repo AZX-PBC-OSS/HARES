@@ -125,6 +125,10 @@ pub const PV_IRRADIANCE_SUFFIX: &str = "Irradiance (W/m2)";
 pub const EV_CONNECTION_STATE_SUFFIX: &str = "Connection State (-)";
 pub const EV_CHARGING_LEVEL_SUFFIX: &str = "Charging Level (-)";
 
+/// Per-equipment thermostat short-cycle protection column suffixes for verbosity 8.
+pub const MIN_ON_TIME_SUFFIX: &str = "Min On Time (s)";
+pub const MIN_OFF_TIME_SUFFIX: &str = "Min Off Time (s)";
+
 /// Maps an equipment spec name to its `EndUse` category based on the canonical
 /// equipment naming conventions used by the HPXML resolver and registry.
 ///
@@ -730,6 +734,16 @@ pub fn build_schema(
                 ));
                 fields.push(Field::new(
                     format!("{name} {FAN_POWER_W_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {MIN_ON_TIME_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {MIN_OFF_TIME_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));

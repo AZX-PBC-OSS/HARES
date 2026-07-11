@@ -180,6 +180,16 @@ pub const RUNTIME_HEATING_SETPOINT_C: &str = "runtime_heating_setpoint_c";
 /// scope: output
 pub const RUNTIME_COOLING_SETPOINT_C: &str = "runtime_cooling_setpoint_c";
 
+// ── Thermostat short-cycle protection ──────────────────────────────────────
+
+/// Minimum compressor on-time [s] from thermostat FSM.
+/// scope: output
+pub const MIN_ON_TIME_S: &str = "min_on_time_s";
+
+/// Minimum compressor off-time [s] from thermostat FSM.
+/// scope: output
+pub const MIN_OFF_TIME_S: &str = "min_off_time_s";
+
 // ── Operating state ─────────────────────────────────────────────────────────
 
 /// scope: internal — mode output comes from CoreOutput, not telemetry key
@@ -853,6 +863,9 @@ pub const OUTPUT_SCOPE_KEYS: &[&str] = &[
     SCHEDULE_COOLING_SETPOINT_C,
     RUNTIME_HEATING_SETPOINT_C,
     RUNTIME_COOLING_SETPOINT_C,
+    // Thermostat short-cycle protection — per-equipment columns
+    MIN_ON_TIME_S,
+    MIN_OFF_TIME_S,
     // Equipment temperatures — per-equipment columns at v8
     SUPPLY_TEMP_C,
     SUPPLY_AIR_TEMP_C,
@@ -921,7 +934,7 @@ mod tests {
         // Verify key count matches what we expect (update when adding output keys).
         assert_eq!(
             OUTPUT_SCOPE_KEYS.len(),
-            25,
+            27,
             "OUTPUT_SCOPE_KEYS length changed — update this assertion and check column coverage"
         );
     }
@@ -989,6 +1002,9 @@ mod tests {
             SCHEDULE_COOLING_SETPOINT_C,
             RUNTIME_HEATING_SETPOINT_C,
             RUNTIME_COOLING_SETPOINT_C,
+            // Thermostat short-cycle protection
+            MIN_ON_TIME_S,
+            MIN_OFF_TIME_S,
             // Operating state
             OPERATING_MODE,
             STATE,
@@ -1229,6 +1245,9 @@ mod tests {
             SCHEDULE_COOLING_SETPOINT_C,
             RUNTIME_HEATING_SETPOINT_C,
             RUNTIME_COOLING_SETPOINT_C,
+            // Thermostat short-cycle protection
+            MIN_ON_TIME_S,
+            MIN_OFF_TIME_S,
             // Operating state
             OPERATING_MODE,
             STATE,

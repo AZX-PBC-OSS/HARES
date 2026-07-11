@@ -20,7 +20,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(35);
+    let mut telemetry = Telemetry::with_capacity(37);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
@@ -58,6 +58,8 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::DUTY_CYCLE, 0.0);
     telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
     telemetry.insert(tk::MODE_DURATION_S, 0.0);
+    telemetry.insert(tk::MIN_ON_TIME_S, 0.0);
+    telemetry.insert(tk::MIN_OFF_TIME_S, 0.0);
     telemetry.insert(tk::PUMP_POWER_KW, 0.0);
     telemetry.insert(tk::COOLING_OAT_LOCKOUT, 0.0);
     telemetry
@@ -241,6 +243,16 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MODE_DURATION_S.to_string(),
             unit: "s".to_string(),
             description: "Seconds since the last thermostat mode change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MIN_ON_TIME_S.to_string(),
+            unit: "s".to_string(),
+            description: "Minimum compressor on-time for short-cycle protection".to_string(),
+        },
+        TelemetryField {
+            name: tk::MIN_OFF_TIME_S.to_string(),
+            unit: "s".to_string(),
+            description: "Minimum compressor off-time for short-cycle protection".to_string(),
         },
         TelemetryField {
             name: tk::COOLING_OAT_LOCKOUT.to_string(),

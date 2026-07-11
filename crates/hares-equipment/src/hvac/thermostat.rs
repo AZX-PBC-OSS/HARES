@@ -347,7 +347,20 @@ impl ThermostatFsm {
         } else {
             self.min_off_time_s
         };
-        elapsed_s >= min_s
+        let allowed = elapsed_s >= min_s;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if !allowed && min_s > 0.0 {
+            tracing::warn!(
+                current_mode = ?self.mode,
+                proposed_mode = ?proposed,
+                elapsed_s,
+                min_s,
+                min_on_time_s = self.min_on_time_s,
+                min_off_time_s = self.min_off_time_s,
+                "can_transition_mode: blocked by min on/off time — short-cycle guards active"
+            );
+        }
+        allowed
     }
 
     /// Core thermostat hysteresis + cycle-time logic. Returns the resolved mode.
