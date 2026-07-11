@@ -590,7 +590,20 @@ impl CoolingCore {
                 super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
 
-        self.init_from_typed(config, env)
+        self.init_from_typed(config, env)?;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.is_room_ac && !self.latent_degradation.is_active() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "room_ac_latent_degradation_inactive".to_string(),
+                    value: 0.0,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     fn init_from_typed(
@@ -640,6 +653,21 @@ impl CoolingCore {
             let cd = derived.unwrap_or(0.20);
             self.hvac.runtime.plf_cooling_degradation_coeff = cd;
             self.hvac.runtime.startup.c_d = cd;
+
+            // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
+            // Removal to Begin), suggested value 1000 s (V26-1-0 IDD §Coil:Cooling:DX);
+            // zero means the latent degradation model is disabled.  Room ACs are
+            // single-speed cycling units where part-load re-evaporation is more
+            // relevant than for variable-speed central systems; the same default
+            // applies regardless of equipment class — there is no room-AC-specific
+            // field split in the IDD.  Other parameters: gamma=1.5 (N9),
+            // Nmax=3 cyc/hr (N10), tau=45 s (N12).
+            self.latent_degradation = LatentDegradationParams {
+                twet_rated_s: 1000.0,
+                gamma_rated: 1.5,
+                max_cycling_rate: 3.0,
+                latent_time_constant_s: 45.0,
+            };
         } else {
             let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
             cfg.validate()?;
@@ -831,6 +859,22 @@ impl CoolingCore {
                     ),
                 });
             }
+            self.telemetry
+                .insert("latent_degradation_active".to_string(), 0.0);
+            self.descriptor.telemetry_fields.push(TelemetryField {
+                name: "latent_degradation_active".to_string(),
+                unit: "-".to_string(),
+                description: "1.0 if Henderson-Rengarajan latent degradation is active this step"
+                    .to_string(),
+            });
+            self.telemetry
+                .insert("shr_before_degradation".to_string(), self.rated_shr);
+            self.descriptor.telemetry_fields.push(TelemetryField {
+                name: "shr_before_degradation".to_string(),
+                unit: "-".to_string(),
+                description: "Steady-state SHR before Henderson-Rengarajan latent degradation"
+                    .to_string(),
+            });
         }
         self.core_output = CoreOutput::default();
         Ok(())
@@ -1557,6 +1601,20 @@ impl CoolingCore {
         } else {
             steady_state_shr
         };
+
+        #[cfg(feature = "observe")]
+        {
+            self.telemetry.set(
+                "latent_degradation_active",
+                if self.latent_degradation.is_active() {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+            self.telemetry
+                .set("shr_before_degradation", steady_state_shr);
+        }
 
         self.hvac.config.shr = shr;
 
@@ -5511,8 +5569,8 @@ mod defaults_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, HumidityAccumulator, PortSlots, ThermalAccumulator,
-        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, GridState, HumidityAccumulator, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{AirConditioner, RoomAC};
@@ -5557,6 +5615,48 @@ mod defaults_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
+    fn make_env_coarse(zone_temp_c: f64, time_res_s: i64, humidity_ratio: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 35.0,
+                outdoor_humidity_ratio: 0.012,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(time_res_s),
             price_signal: Default::default(),
             electrical: Default::default(),
         }
@@ -5724,8 +5824,13 @@ mod defaults_tests {
         );
     }
 
+    // Room AC initialised without explicit latent degradation params must
+    // have the Henderson-Rengarajan model active with EnergyPlus defaults
+    // (twet=1000 s, gamma=1.5, Nmax=3 cyc/hr, tau=45 s).
+    // At part load (RTF < 1) the model must return SHR > steady-state SHR,
+    // reflecting moisture re-evaporation during the off cycle.
     #[test]
-    fn room_ac_does_not_have_latent_degradation() {
+    fn room_ac_defaults_latent_degradation_active_and_raises_shr_at_part_load() {
         let cfg = EquipmentConfig::from_typed(
             "RAC".to_string(),
             "Room AC".to_string(),
@@ -5750,7 +5855,7 @@ mod defaults_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                shr: None,
+                shr: Some(0.75),
                 startup_cd: None,
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
@@ -5760,13 +5865,64 @@ mod defaults_tests {
         )
         .unwrap();
 
-        let env = make_env(28.0);
+        let env = make_env_coarse(28.0, 900, 0.016);
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
 
         assert!(
-            !eq.core.latent_degradation.is_active(),
-            "Room AC must not have latent degradation active after init"
+            eq.core.latent_degradation.is_active(),
+            "latent degradation must be active after init for room AC"
+        );
+        assert!(
+            (eq.core.latent_degradation.twet_rated_s - 1000.0).abs() < 1e-9,
+            "twet_rated_s must be 1000 s (EnergyPlus Coil:Cooling:DX suggested default), got {}",
+            eq.core.latent_degradation.twet_rated_s
+        );
+        assert!(
+            (eq.core.latent_degradation.gamma_rated - 1.5).abs() < 1e-9,
+            "gamma_rated must be 1.5, got {}",
+            eq.core.latent_degradation.gamma_rated
+        );
+        assert!(
+            (eq.core.latent_degradation.max_cycling_rate - 3.0).abs() < 1e-9,
+            "max_cycling_rate must be 3.0 cyc/hr, got {}",
+            eq.core.latent_degradation.max_cycling_rate
+        );
+        assert!(
+            (eq.core.latent_degradation.latent_time_constant_s - 45.0).abs() < 1e-9,
+            "latent_time_constant_s must be 45 s, got {}",
+            eq.core.latent_degradation.latent_time_constant_s
+        );
+
+        // At 900 s timestep (≥ 300 s Auto threshold), use_ideal_capacity returns
+        // true and the equipment enters the solver-driven ideal-capacity path.
+        // A 65%-rated IdealCapacity signal (2275 W ≈ 65% of 3500 W) combined with
+        // a humid-climate humidity_ratio (0.016) produces a non-trivial
+        // steady_state_shr < 1.0 that the degradation model can meaningfully raise.
+        // This avoids the round-2 failure mode (RTF=1.0 early-return) AND the
+        // round-3 failure mode (steady_state_shr already saturated at 1.0).
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -2275.0, // ~65% of 3500 W rated capacity
+            degraded: false,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+
+        let reported_shr = eq.telemetry().get(tk::SHR).unwrap_or(0.0);
+        assert!(
+            reported_shr > 0.75,
+            "SHR with latent degradation at part load must exceed rated SHR 0.75, got {reported_shr:.4}"
+        );
+        assert!(
+            reported_shr <= 1.0,
+            "SHR must be <= 1.0, got {reported_shr:.4}"
         );
     }
 }
