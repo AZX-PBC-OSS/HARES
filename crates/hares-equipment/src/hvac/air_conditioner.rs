@@ -757,7 +757,11 @@ impl CoolingCore {
             // Per-stage SHR values if provided.
             self.stage_shrs = cfg.stage_shrs.clone().unwrap_or_default();
             if !self.stage_shrs.is_empty() {
-                self.rated_shr = self.stage_shrs[0].clamp(0.0, 1.0);
+                // AHRI 210/240 rated cooling test conditions correspond to
+                // full-load (last stage) operation, not the first/lowest speed.
+                // The Henderson-Rengarajan latent degradation model uses rated_shr
+                // as its baseline for computing rated_latent_w (line 1277).
+                self.rated_shr = self.stage_shrs[self.stage_shrs.len() - 1].clamp(0.0, 1.0);
             }
 
             self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
@@ -873,6 +877,33 @@ impl CoolingCore {
                 name: "shr_before_degradation".to_string(),
                 unit: "-".to_string(),
                 description: "Steady-state SHR before Henderson-Rengarajan latent degradation"
+                    .to_string(),
+            });
+            // AHRI full-load SHR baseline for latent degradation model.
+            self.telemetry
+                .insert("rated_shr".to_string(), self.rated_shr);
+            self.descriptor.telemetry_fields.push(TelemetryField {
+                name: "rated_shr".to_string(),
+                unit: "-".to_string(),
+                description: "Rated sensible heat ratio at AHRI full-load conditions \
+                             (baseline for latent degradation model)"
+                    .to_string(),
+            });
+            let rated_cap_w = self
+                .hvac
+                .config
+                .cooling_capacities_w
+                .last()
+                .copied()
+                .unwrap_or(0.0);
+            let rated_latent_w = rated_cap_w * (1.0 - self.rated_shr);
+            self.telemetry
+                .insert("rated_latent_w".to_string(), rated_latent_w);
+            self.descriptor.telemetry_fields.push(TelemetryField {
+                name: "rated_latent_w".to_string(),
+                unit: "W".to_string(),
+                description: "Rated latent capacity (W) at AHRI full-load conditions \
+                             (baseline for Henderson-Rengarajan latent degradation model)"
                     .to_string(),
             });
         }
@@ -4255,10 +4286,88 @@ mod tests {
             vec![0.80, 0.70],
             "per-stage SHR values preserved after init"
         );
-        // rated_shr is set to stage_shrs[0] for backward compatibility.
+        // AHRI 210/240 rated conditions correspond to full-load (last) stage.
         assert!(
-            (eq.core.rated_shr - 0.80).abs() < 1e-9,
-            "rated_shr should equal stage_shrs[0]"
+            (eq.core.rated_shr - 0.70).abs() < 1e-9,
+            "rated_shr should equal full-load stage SHR (last element of stage_shrs)"
+        );
+    }
+
+    /// When per-stage SHRs are provided on a multi-speed AC, `rated_shr`
+    /// must be the full-load (last) stage value, not the lowest speed's.
+    /// (number_of_speeds validation permits 1, 2, or 4; ticket T-0436 uses
+    /// a 3-stage example for illustration but the test uses 4 stages for
+    /// compatibility with the existing validation constraint.)
+    #[test]
+    fn rated_shr_is_full_load_stage_shr() {
+        let cfg = ac_config_with(|typed| {
+            typed.stage_capacities_w = Some(vec![5_000.0, 6_500.0, 8_000.0, 10_000.0]);
+            typed.stage_eirs = Some(vec![0.35, 0.33, 0.32, 0.30]);
+            typed.stage_shrs = Some(vec![0.82, 0.76, 0.74, 0.72]);
+            typed.number_of_speeds = 4;
+            typed.startup_cd = Some(0.0);
+        });
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert!(
+            (eq.core.rated_shr - 0.72).abs() < 1e-9,
+            "rated_shr ({}) must equal full-load stage SHR (0.72), not lowest stage (0.82)",
+            eq.core.rated_shr
+        );
+    }
+
+    /// Regression: with per-stage SHRs [0.85, 0.70], `rated_shr` must be 0.70
+    /// so that the Henderson-Rengarajan latent degradation baseline
+    /// `rated_latent_w = rated_cap_w * (1.0 - rated_shr)` uses the correct
+    /// full-load SHR rather than the incorrect first-stage SHR.
+    #[test]
+    fn rated_latent_baseline_uses_full_load_shr() {
+        let cfg = ac_config_with(|typed| {
+            typed.stage_capacities_w = Some(vec![6_000.0, 10_000.0]);
+            typed.stage_eirs = Some(vec![0.35, 0.30]);
+            typed.stage_shrs = Some(vec![0.85, 0.70]);
+            typed.number_of_speeds = 2;
+            typed.startup_cd = Some(0.0);
+        });
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert!(
+            (eq.core.rated_shr - 0.70).abs() < 1e-9,
+            "rated_shr ({}) must be full-load stage SHR (0.70), not lowest stage (0.85)",
+            eq.core.rated_shr
+        );
+
+        let rated_cap_w = eq
+            .core
+            .hvac
+            .config
+            .cooling_capacities_w
+            .last()
+            .copied()
+            .unwrap();
+        // rated_latent_w = rated_cap_w * (1.0 - rated_shr)
+        // Correct:  10_000 * (1.0 - 0.70) = 3_000 W
+        // Old bug:  10_000 * (1.0 - 0.85) = 1_500 W (understates latent baseline)
+        let actual_rated_latent_w = rated_cap_w * (1.0 - eq.core.rated_shr);
+        let buggy_rated_latent_w = rated_cap_w * (1.0 - 0.85);
+        assert!(
+            (actual_rated_latent_w - 3_000.0).abs() < 1e-9,
+            "rated_latent_w ({}) should be 3_000 W with full-load SHR=0.70",
+            actual_rated_latent_w
+        );
+        assert!(
+            (buggy_rated_latent_w - 1_500.0).abs() < 1e-9,
+            "old bug would compute rated_latent_w=1_500 W using wrong first-stage SHR=0.85"
+        );
+        assert!(
+            actual_rated_latent_w > buggy_rated_latent_w,
+            "fix produces larger rated_latent_w baseline (3_000 > 1_500)"
         );
     }
 }
