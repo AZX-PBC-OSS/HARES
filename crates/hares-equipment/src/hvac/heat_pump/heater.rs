@@ -2125,8 +2125,19 @@ impl HeatPumpHeaterCore {
         // off while zone temp is still rising (heat pump is winning the load).
         // Time-based safety release: if soft lockout has been active longer than
         // er_hard_lockout_time_s * 2 it releases regardless of zone temp trend.
+        // OCHRE HVAC.py:1338: temp_indoor >= self.temp_indoor_prev (non-strict).
+        // Using >= prevents ER engagement when zone temperature plateaus after a
+        // setpoint increase, matching OCHRE's intent to give the heat pump time
+        // to satisfy the new load before supplemental resistance is enabled.
         let zone_rising =
-            self.prev_zone_temp_c.is_finite() && zone.temperature_c > self.prev_zone_temp_c;
+            self.prev_zone_temp_c.is_finite() && zone.temperature_c >= self.prev_zone_temp_c;
+
+        #[cfg(feature = "observe")]
+        {
+            self.telemetry
+                .set(tk::ZONE_RISING, if zone_rising { 1.0 } else { 0.0 });
+        }
+
         let soft_lockout_max_s = self.er_hard_lockout_time_s * 2.0;
         let soft_lockout_timeout =
             soft_lockout_max_s > 0.0 && self.soft_lockout_elapsed_s >= soft_lockout_max_s;
@@ -2140,6 +2151,23 @@ impl HeatPumpHeaterCore {
             self.er_soft_lockout = true;
             self.soft_lockout_elapsed_s += dt_s;
         } else {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if self.er_soft_lockout {
+                    let release_cause = if soft_lockout_timeout {
+                        "timeout"
+                    } else {
+                        "!zone_rising"
+                    };
+                    tracing::debug!(
+                        release_cause,
+                        elapsed_s = self.soft_lockout_elapsed_s,
+                        zone_temp_c = zone.temperature_c,
+                        prev_zone_temp_c = self.prev_zone_temp_c,
+                        "ER soft lockout released",
+                    );
+                }
+            }
             self.er_soft_lockout = false;
             // Only reset elapsed when zone stopped rising (natural release).
             // After timeout release, keep elapsed high to prevent re-arm.
@@ -4223,8 +4251,9 @@ mod tests {
             );
         }
 
-        // After 600 s the lockout expires; ER should be permitted.
-        let t_after = make_env(16.0, 0.0, 600);
+        // After 600 s the lockout expires; zone temp must decline for soft lockout
+        // to release (zone_rising uses >= per OCHRE HVAC.py:1338).
+        let t_after = make_env(15.0, 0.0, 600);
         let mode_after = eq.update_control(&t_after);
         assert!(
             matches!(
@@ -4272,14 +4301,68 @@ mod tests {
             "ER must stay off under soft lockout while zone temp is rising, got {mode_rising:?}"
         );
 
-        // Once zone temp stops rising, soft lockout clears.
-        let mode_stable = eq.update_control(&make_env(17.0, 0.0, 120));
+        // Once zone temp declines, soft lockout clears (>= requires actual decline,
+        // not just plateau).
+        let mode_stable = eq.update_control(&make_env(16.5, 0.0, 120));
         assert!(
             matches!(
                 mode_stable,
                 OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
             ),
-            "ER must be allowed once zone temp stops rising, got {mode_stable:?}"
+            "ER must be allowed once zone temp declines, got {mode_stable:?}"
+        );
+    }
+
+    // OCHRE HVAC.py:1338 uses non-strict >= for zone_rising so that a plateaued
+    // zone temperature (not yet declining) keeps ER locked out. With strict >
+    // the soft lockout would release one timestep early.
+    #[test]
+    fn er_soft_lockout_blocks_er_while_zone_temp_is_plateaued() {
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(60.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(16.0, 0.0, 0)).unwrap();
+
+        // Raise setpoint to 21°C to trigger hard lockout.
+        eq.core
+            .hvac
+            .apply_control_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                deadband_c: None,
+            })
+            .ok();
+
+        // Step within hard lockout period (t=0, zone=16°C).
+        eq.update_control(&make_env(16.0, 0.0, 0));
+
+        // Step after hard lockout expires but with zone temp equal to previous
+        // (true plateau at 16°C). With >= this must keep ER locked out
+        // (16.0 >= 16.0 = true); with > (the old behaviour) ER would be released
+        // (16.0 > 16.0 = false).
+        let mode_plateau = eq.update_control(&make_env(16.0, 0.0, 60));
+        assert!(
+            !matches!(
+                mode_plateau,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "ER must stay off under soft lockout while zone temp is plateaued (zone_rising >=), \
+             got {mode_plateau:?}"
+        );
+
+        // Once zone temp actually declines, soft lockout clears.
+        let mode_declining = eq.update_control(&make_env(15.5, 0.0, 120));
+        assert!(
+            matches!(
+                mode_declining,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "ER must be allowed once zone temp declines, got {mode_declining:?}"
         );
     }
 
@@ -5584,6 +5667,72 @@ mod tests {
             "ER soft lockout must release after er_hard_lockout_time_s * 2 ({:.0}s) \
              even when zone temperature keeps rising",
             lockout_s * 2.0,
+        );
+    }
+
+    // Full ER lockout sequence integration test: exercises hard lockout → soft
+    // lockout with plateaued temp → release on decline. Verifies parity with
+    // OCHRE behaviour (HVAC.py:1338 uses non-strict >= for zone_rising).
+    #[test]
+    fn er_full_lockout_sequence_hard_lockout_soft_lockout_plateau_release() {
+        let lockout_s = 60.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(lockout_s);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(16.5, 0.0, 0)).unwrap();
+
+        // === Phase 1: Hard lockout ===
+        // Raise setpoint from 18°C to 21°C (+3°C > 0.1°C threshold).
+        eq.core
+            .hvac
+            .apply_control_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                deadband_c: None,
+            })
+            .ok();
+
+        // t=0s: hard lockout armed, zone temp at initial value.
+        let mode_hard = eq.update_control(&make_env(16.5, 0.0, 0));
+        assert!(
+            !matches!(
+                mode_hard,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "ER must be blocked during hard lockout, got {mode_hard:?}"
+        );
+
+        // === Phase 2: Soft lockout with plateaued zone temp ===
+        // t=60s: hard lockout just expired (60s lockout for 60s step),
+        // zone temperature plateaued at 16.5°C (equal to prev, so zone_rising is true
+        // under >= comparison; with > the old behaviour would be zone_rising = false
+        // and ER would release one timestep early). ER must remain blocked.
+        let mode_plateau = eq.update_control(&make_env(16.5, 0.0, 60));
+        assert!(
+            !matches!(
+                mode_plateau,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "ER must stay off under soft lockout while zone temp is plateaued, \
+             got {mode_plateau:?}"
+        );
+
+        // === Phase 3: Release on decline ===
+        // t=120s: zone temperature declining from 16.5°C to 16.0°C.
+        // This is a genuine decline (not just plateau/rise), so soft lockout clears.
+        let mode_release = eq.update_control(&make_env(16.0, 0.0, 120));
+        assert!(
+            matches!(
+                mode_release,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "ER must be allowed once zone temp declines, got {mode_release:?}"
         );
     }
 

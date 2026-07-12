@@ -37,6 +37,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::ER_LOCKOUT_TEMP_C, 0.0);
     telemetry.insert(tk::ER_SETPOINT_OFFSET_C, 0.0);
     telemetry.insert(tk::ER_HARD_LOCKOUT_TIME_S, 0.0);
+    telemetry.insert(tk::ZONE_RISING, 0.0);
     telemetry.insert(tk::BACKUP_CAPACITY_W, 0.0);
     telemetry.insert(tk::BACKUP_EIR, 0.0);
     telemetry.insert(tk::ER_STAGES_ON, 0.0);
@@ -344,6 +345,13 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MIN_OFF_TIME_S.to_string(),
             unit: "s".to_string(),
             description: "Minimum compressor off-time for short-cycle protection".to_string(),
+        },
+        TelemetryField {
+            name: tk::ZONE_RISING.to_string(),
+            unit: "bool".to_string(),
+            description:
+                "1 when zone temperature has not yet declined after ER hard lockout expired (soft lockout active); 0 otherwise"
+                    .to_string(),
         },
     ]
 }
