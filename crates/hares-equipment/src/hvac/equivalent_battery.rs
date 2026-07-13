@@ -102,11 +102,25 @@ impl HvacEquipment {
 
         let setpoints = self.effective_setpoints();
         let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
-        let offset = self
-            .thermostat_fsm
-            .thermostat
-            .deadband_offset
-            .clamp(0.0, 1.0);
+        let offset = self.thermostat_fsm.thermostat.deadband_offset;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                (0.0..=1.0).contains(&offset),
+                "deadband_offset must be in [0.0, 1.0], got {offset}"
+            );
+        }
+        let offset = offset.clamp(0.0, 1.0);
+
+        // Turn-on / turn-off threshold temperatures for both heating and cooling
+        // modes. Computed once for observer diagnostics and reused in the match
+        // arms below. Matching thermostat FSM update_mode (thermostat.rs:403-409),
+        // OCHRE deadband_offset convention (HVAC.py:628-633).
+        let t_heat_on = setpoints.heating_c - hysteresis * (1.0 - offset);
+        let t_heat_off = setpoints.heating_c + hysteresis * offset;
+        let t_cool_off = setpoints.cooling_c - hysteresis * offset;
+        let t_cool_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
 
         let (max_power_kw, energy_kwh, min_energy_kwh, max_energy_kwh, _ref_temp_c) = match self
             .thermostat_fsm
@@ -118,18 +132,12 @@ impl HvacEquipment {
                     (None, None, 0.0, None, REF_TEMP_HEATING_C)
                 } else {
                     let max_kw = power_w_to_kw(rated_w);
-                    // Turn-on / turn-off thresholds matching thermostat FSM update_mode
-                    // (thermostat.rs:403-409). OCHRE deadband_offset convention
-                    // (HVAC.py:628-633): turn_on at setpoint - hysteresis * (1 - offset),
-                    // turn_off at setpoint + hysteresis * offset.
-                    let t_on = setpoints.heating_c - hysteresis * (1.0 - offset);
-                    let t_off = setpoints.heating_c + hysteresis * offset;
                     let ref_temp = REF_TEMP_HEATING_C;
                     // hvac_direction = +1.0 for heating: positive energy = warmer than ref.
                     let hvac_dir = 1.0;
                     let energy = zone_capacitance_kwh_per_k * (zone_temp_c - ref_temp) * hvac_dir;
-                    let min_e = zone_capacitance_kwh_per_k * (t_on - ref_temp) * hvac_dir;
-                    let max_e = zone_capacitance_kwh_per_k * (t_off - ref_temp) * hvac_dir;
+                    let min_e = zone_capacitance_kwh_per_k * (t_heat_on - ref_temp) * hvac_dir;
+                    let max_e = zone_capacitance_kwh_per_k * (t_heat_off - ref_temp) * hvac_dir;
                     (Some(max_kw), Some(energy), min_e, Some(max_e), ref_temp)
                 }
             }
@@ -139,19 +147,13 @@ impl HvacEquipment {
                     (None, None, 0.0, None, REF_TEMP_COOLING_C)
                 } else {
                     let max_kw = power_w_to_kw(rated_w);
-                    // Turn-on / turn-off thresholds matching thermostat FSM update_mode
-                    // (thermostat.rs:403-409). OCHRE deadband_offset convention
-                    // (HVAC.py:628-633): turn_off at setpoint - hysteresis * offset,
-                    // turn_on at setpoint + hysteresis * (1 - offset).
-                    let t_off = setpoints.cooling_c - hysteresis * offset;
-                    let t_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
                     let ref_temp = REF_TEMP_COOLING_C;
                     // hvac_direction = -1.0 for cooling: positive energy = cooler than ref
                     // (stored "coolth").
                     let hvac_dir = -1.0;
                     let energy = zone_capacitance_kwh_per_k * (zone_temp_c - ref_temp) * hvac_dir;
-                    let min_e = zone_capacitance_kwh_per_k * (t_on - ref_temp) * hvac_dir;
-                    let max_e = zone_capacitance_kwh_per_k * (t_off - ref_temp) * hvac_dir;
+                    let min_e = zone_capacitance_kwh_per_k * (t_cool_on - ref_temp) * hvac_dir;
+                    let max_e = zone_capacitance_kwh_per_k * (t_cool_off - ref_temp) * hvac_dir;
                     (Some(max_kw), Some(energy), min_e, Some(max_e), ref_temp)
                 }
             }
@@ -223,6 +225,14 @@ impl HvacEquipment {
                     baseline_power_kw,
                     rated_eir,
                     capacity_ideal_w,
+                    t_min_heat_c = t_heat_on,
+                    t_max_heat_c = t_heat_off,
+                    t_min_cool_c = t_cool_off,
+                    t_max_cool_c = t_cool_on,
+                    deadband_offset = offset,
+                    hysteresis_c = hysteresis,
+                    heating_setpoint_c = setpoints.heating_c,
+                    cooling_setpoint_c = setpoints.cooling_c,
                     "EquivalentBatteryModel parameters computed"
                 );
             }
@@ -817,5 +827,155 @@ mod tests {
             (ebm.baseline_power_kw - capacity_w * config_eir / 1_000.0).abs() < 1e-10,
             "baseline should be capacity_w * eir / 1000"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Deadband offset tests (T-0442)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn heating_fill_fraction_matches_asymmetric_deadband() {
+        let setpoint = 21.0;
+        let hysteresis = 1.0;
+        let offset = 0.2;
+        let capacitance = 5.0;
+        let zone_temp = 20.5;
+
+        let t_on: f64 = setpoint - hysteresis * (1.0 - offset);
+        let t_off: f64 = setpoint + hysteresis * offset;
+        assert!(
+            (t_on - 20.2).abs() < 1e-10,
+            "t_on should be 20.2, got {t_on}"
+        );
+        assert!(
+            (t_off - 21.2).abs() < 1e-10,
+            "t_off should be 21.2, got {t_off}"
+        );
+
+        let eq = heating_equipment(setpoint, 10_000.0, hysteresis, offset);
+        let ebm =
+            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        let soc = (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh) / range;
+        let expected_fill = (zone_temp - t_on) / (t_off - t_on);
+        assert!(
+            (soc - expected_fill).abs() < 1e-10,
+            "fill fraction {soc} should be {expected_fill} = (zone - t_on) / (t_off - t_on)"
+        );
+    }
+
+    #[test]
+    fn symmetric_deadband_gives_different_fill() {
+        let setpoint = 21.0;
+        let hysteresis = 1.0;
+        let offset = 0.2;
+        let capacitance = 5.0;
+        let zone_temp = 20.5;
+
+        // Symmetric (old, incorrect) computation: t_on = setpoint - hysteresis,
+        // t_off = setpoint. This is what the buggy code produced before the fix.
+        let t_on_sym: f64 = setpoint - hysteresis;
+        let t_off_sym: f64 = setpoint;
+        let fill_sym: f64 = (zone_temp - t_on_sym) / (t_off_sym - t_on_sym);
+        assert!((fill_sym - 0.5).abs() < 1e-10);
+
+        // Asymmetric (correct) computation matching thermostat FSM and OCHRE.
+        let t_on_asym: f64 = setpoint - hysteresis * (1.0 - offset);
+        let t_off_asym: f64 = setpoint + hysteresis * offset;
+        let fill_asym: f64 = (zone_temp - t_on_asym) / (t_off_asym - t_on_asym);
+        assert!((fill_asym - 0.3).abs() < 1e-10);
+
+        assert!(
+            (fill_sym - fill_asym).abs() > 1e-6,
+            "symmetric fill {fill_sym} and asymmetric fill {fill_asym} should differ"
+        );
+
+        let eq = heating_equipment(setpoint, 10_000.0, hysteresis, offset);
+        let ebm =
+            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        let soc = (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh) / range;
+
+        assert!(
+            (soc - fill_asym).abs() < 1e-10,
+            "EBM SoC {soc} should equal asymmetric fill {fill_asym}, not symmetric {fill_sym}"
+        );
+        assert!(
+            (soc - fill_sym).abs() > 1e-6,
+            "EBM SoC {soc} should NOT equal symmetric fill {fill_sym}"
+        );
+    }
+
+    /// Integration-style regression test: sweeps zone temperatures across the
+    /// deadband for both heating and cooling, verifying the EBM state-of-charge
+    /// aligns linearly with the thermostat FSM switching points at every step.
+    #[test]
+    fn ebm_soc_tracks_fsm_switching_points_across_deadband() {
+        let capacitance = 5.0;
+
+        // --- heating ---
+        let setpoint_h = 21.0;
+        let hysteresis = 1.0;
+        let offset = 0.2;
+        let t_on_h = setpoint_h - hysteresis * (1.0 - offset);
+        let t_off_h = setpoint_h + hysteresis * offset;
+        let deadband_h = t_off_h - t_on_h;
+
+        let eq_h = heating_equipment(setpoint_h, 10_000.0, hysteresis, offset);
+        let ebm_ref =
+            eq_h.make_equivalent_battery_model(t_on_h, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let min_h = ebm_ref.min_energy_kwh;
+        let max_h = ebm_ref.max_energy_kwh.unwrap();
+        let range_h = max_h - min_h;
+
+        for fraction in [0.00, 0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+            let zone = t_on_h + fraction * deadband_h;
+            let ebm =
+                eq_h.make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+            let soc = (ebm.energy_kwh.unwrap() - min_h) / range_h;
+            assert!(
+                (soc - fraction).abs() < 1e-10,
+                "heating: at zone={zone} (frac={fraction}), SoC={soc} should be {fraction}"
+            );
+        }
+
+        // --- cooling ---
+        let setpoint_c = 24.0;
+        let t_off_c = setpoint_c - hysteresis * offset;
+        let t_on_c = setpoint_c + hysteresis * (1.0 - offset);
+        let deadband_c = t_on_c - t_off_c;
+
+        let eq_c = cooling_equipment(setpoint_c, 10_000.0, hysteresis, offset);
+        let ebm_ref =
+            eq_c.make_equivalent_battery_model(t_on_c, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let min_c = ebm_ref.min_energy_kwh;
+        let max_c = ebm_ref.max_energy_kwh.unwrap();
+        let range_c = max_c - min_c;
+
+        for fraction in [0.00, 0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+            let zone = t_on_c - fraction * deadband_c;
+            let ebm =
+                eq_c.make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+            let soc = (ebm.energy_kwh.unwrap() - min_c) / range_c;
+            assert!(
+                (soc - fraction).abs() < 1e-10,
+                "cooling: at zone={zone} (frac={fraction}), SoC={soc} should be {fraction}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
+    fn deadband_offset_below_zero_panics() {
+        let eq = heating_equipment(21.0, 10_000.0, 1.0, -0.1);
+        let _ = eq.make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
+    }
+
+    #[test]
+    #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
+    fn deadband_offset_above_one_panics() {
+        let eq = heating_equipment(21.0, 10_000.0, 1.0, 1.1);
+        let _ = eq.make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
     }
 }
