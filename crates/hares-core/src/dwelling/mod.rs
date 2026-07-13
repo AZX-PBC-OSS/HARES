@@ -54,7 +54,7 @@ use hares_io::{
 };
 
 use hares_physics::constants::{
-    GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
+    GAS_THERMS_PER_HOUR_TO_W, J_PER_KWH, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
     OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
 };
 use hares_physics::pv_sizing::RoofInfo;
@@ -1844,6 +1844,18 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         &equipment_specs,
     )?;
 
+    // ── Zone thermal capacitances for EBM ─────────────────────────────────
+    //
+    // Convert envelope solver zone capacitances [J/K] to [kWh/K] and store
+    // in a lookup map. Injected into each HVAC equipment's config before
+    // init() so the equivalent battery model can compute energy state and
+    // baseline power from the building's actual thermal mass.
+    let zone_cap_kwh_per_k: HashMap<ZoneId, f64> = solvers
+        .zone_capacitances_j_k
+        .iter()
+        .map(|(zone_id, cap_j_k)| (*zone_id, *cap_j_k / J_PER_KWH))
+        .collect();
+
     // ── Autosize HVAC capacities at design conditions ──────────────────────
     //
     // When HPXML omits HeatingCapacity/CoolingCapacity, compute the required
@@ -2111,6 +2123,11 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         );
         merged_cfg.zone_map = Some(zone_map.clone());
         merged_cfg.rng_seed = Some(sub_rng.get_seed());
+        if let Some(zone_id) = merged_cfg.zone_id() {
+            if let Some(&cap) = zone_cap_kwh_per_k.get(&zone_id) {
+                merged_cfg.zone_capacitance_kwh_per_k = cap;
+            }
+        }
         match eq.init(&merged_cfg, &initial_env) {
             Ok(()) => equipment.push(eq),
             Err(err) => {

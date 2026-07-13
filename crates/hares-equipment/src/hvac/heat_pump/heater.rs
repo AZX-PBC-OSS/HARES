@@ -20,7 +20,8 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, lookup_zone, outage_forces_off,
+        apply_heating_control_unchecked, compute_and_write_ebm_telemetry, equipment_id_from_config,
+        lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
         zone_id_from_config_or_default,
     },
 };
@@ -708,6 +709,7 @@ impl HeatPumpHeaterCore {
             crate::hvac::reactive::LOOP_PUMP_ZIP,
         );
         self.telemetry = default_heater_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.telemetry.set(
             tk::BIQUADRATIC_CURVE_SOURCE,
             self.hvac.config.biquadratic_curve_source.telemetry_value(),
@@ -1527,6 +1529,15 @@ impl HeatPumpHeaterCore {
             OperatingMode::Cooling => sp.cooling_c,
             _ => sp.heating_c + self.dr_setpoint_offset_c,
         };
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            delivered_thermal_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),

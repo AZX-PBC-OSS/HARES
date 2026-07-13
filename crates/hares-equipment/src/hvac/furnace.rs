@@ -24,8 +24,8 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, outage_forces_off, update_heating_control,
-        zone_id_from_config_or_default,
+        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone, outage_forces_off,
+        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
     },
 };
 
@@ -201,6 +201,7 @@ impl Equipment for ElectricFurnace {
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_furnace_default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -353,6 +354,15 @@ impl Equipment for ElectricFurnace {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            thermal_output_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -575,6 +585,7 @@ impl Equipment for GasFurnace {
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_furnace_default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -731,6 +742,15 @@ impl Equipment for GasFurnace {
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         let active_setpoint_c = sp.heating_c;
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            thermal_output_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -1047,6 +1067,36 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
             unit: "s".to_string(),
             description: "Seconds since the last thermostat mode change".to_string(),
         },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
+        },
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1145,6 +1195,36 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MODE_DURATION_S.to_string(),
             unit: "s".to_string(),
             description: "Seconds since the last thermostat mode change".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
         },
     ];
     fields.extend(setpoint_telemetry_fields());

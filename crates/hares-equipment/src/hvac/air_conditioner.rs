@@ -35,7 +35,8 @@ use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        equipment_id_from_config, lookup_zone, outage_forces_off, zone_id_from_config_or_default,
+        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone, outage_forces_off,
+        register_ebm_telemetry_keys, zone_id_from_config_or_default,
     },
 };
 
@@ -832,6 +833,7 @@ impl CoolingCore {
         self.fan_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
         self.telemetry = default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         // Per-stage SHR telemetry for diagnostic CSV output.
         // Gated on `observe` feature — these channels are diagnostic-only and
         // document which SEER-scaled SHR profile was applied to each cooler
@@ -1307,6 +1309,16 @@ impl CoolingCore {
             .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
         self.telemetry
             .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        let capacity_ideal_w = post_dse_sensible_w + post_dse_latent_w;
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            capacity_ideal_w,
+            &mut self.telemetry,
+        );
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,

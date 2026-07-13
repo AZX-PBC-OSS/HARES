@@ -195,6 +195,11 @@ pub struct EquipmentConfig {
     /// equipment streams are non-overlapping and deterministic.
     #[serde(skip, default)]
     pub rng_seed: Option<[u8; 32]>,
+    /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
+    /// Populated by the dwelling from envelope solver zone capacitances at
+    /// construction time; 0.0 means EBM is disabled for this equipment.
+    #[serde(skip, default)]
+    pub zone_capacitance_kwh_per_k: f64,
     #[cfg(test)]
     #[serde(skip, default)]
     test_extras: HashMap<String, ConfigValue>,
@@ -210,6 +215,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_seed: None,
+            zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -271,6 +277,24 @@ impl EquipmentConfig {
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
         self.raw_data()
             .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
+    }
+
+    /// Extract the zone ID from either `Raw` or `Typed` payloads.
+    /// Returns `None` when `zone_id` is absent or invalid (0, non-integer, out of range).
+    pub fn zone_id(&self) -> Option<hares_types::ZoneId> {
+        let raw = self.get_f64(KEY_ZONE_ID).or_else(|| match &self.payload {
+            ConfigPayload::Typed { data, .. } => data.get(KEY_ZONE_ID).and_then(|v| v.as_f64()),
+            ConfigPayload::Raw { .. } => None,
+        })?;
+        if raw == 0.0
+            || !raw.is_finite()
+            || raw.fract() != 0.0
+            || raw < 0.0
+            || raw > u16::MAX as f64
+        {
+            return None;
+        }
+        Some(hares_types::ZoneId(raw as u16))
     }
 
     /// Test-only mutable extras for fixture tweaks.
@@ -373,6 +397,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_seed: None,
+            zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         })
@@ -389,6 +414,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_seed: None,
+            zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }

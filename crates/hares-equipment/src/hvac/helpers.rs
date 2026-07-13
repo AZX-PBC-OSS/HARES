@@ -9,7 +9,7 @@
 
 use hares_types::normalize_ascii;
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
+    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, Telemetry, ZoneId,
 };
 
 use crate::{ConfigPayload, EquipmentConfig};
@@ -497,6 +497,65 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
     }
 }
 
+// ── Equivalent Battery Model telemetry helpers ───────────────────────────
+
+/// Register EBM telemetry keys on an equipment's telemetry map.
+///
+/// Call once during equipment init. Pre-registers all six EBM keys with 0.0
+/// so the telemetry output schema is stable regardless of whether the EBM
+/// gate (`zone_capacitance_kwh_per_k > 0`) is open at runtime.
+pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
+    telemetry.insert(hares_types::telemetry_keys::EBM_EFFICIENCY, 0.0);
+    telemetry.insert(hares_types::telemetry_keys::EBM_BASELINE_POWER_KW, 0.0);
+    telemetry.insert(hares_types::telemetry_keys::EBM_ENERGY_KWH, 0.0);
+    telemetry.insert(hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH, 0.0);
+    telemetry.insert(hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH, 0.0);
+    telemetry.insert(hares_types::telemetry_keys::EBM_MAX_POWER_KW, 0.0);
+}
+
+/// Compute the equivalent battery model and write results to telemetry.
+///
+/// Called at the end of each equipment `step()`. Uses the zone capacitance
+/// stored on `hvac.config.zone_capacitance_kwh_per_k` (set by the dwelling
+/// from envelope solver zone capacitances during construction). When
+/// `zone_capacitance_kwh_per_k <= 0.0` (EBM disabled), returns immediately
+/// without writing — the pre-registered 0.0 placeholders remain.
+///
+/// `capacity_ideal_w` is the current thermal load being served [W], passed
+/// from the equipment's step() as the actual delivered thermal output
+/// (sensible + latent cooling for AC, heating W for heating equipment).
+/// This is used as the EBM's `capacity_ideal` input (OCHRE HVAC.py:640),
+/// yielding `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`.
+///
+/// OCHRE computes `capacity_ideal` from a per-step steady-state solve
+/// (`self.solve_ideal_capacity()`, HVAC.py:434-435) called unconditionally.
+/// HARES uses the delivered thermal output as a proxy — it equals the
+/// steady-state load when the thermostat is maintaining setpoint, and is
+/// zero when the equipment is off (no load being served). A proper
+/// `solve_ideal_capacity()` that computes the hold load even during off
+/// cycles is deferred to T-1711.
+pub fn compute_and_write_ebm_telemetry(
+    hvac: &HvacEquipment,
+    zone_temp_c: f64,
+    capacity_ideal_w: f64,
+    telemetry: &mut Telemetry,
+) {
+    use hares_types::telemetry_keys as tk;
+
+    let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
+    if cap_kwh <= 0.0 {
+        return;
+    }
+    let rated_eir = hvac.eir_at_stage(0);
+    let ebm = hvac.make_equivalent_battery_model(zone_temp_c, cap_kwh, rated_eir, capacity_ideal_w);
+    telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
+    telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
+    telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_kwh);
+    telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_kwh.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_kw.unwrap_or(0.0));
+}
+
 #[cfg(test)]
 mod tests {
     use hares_types::FuelType;
@@ -509,8 +568,9 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, equipment_id_from_config, loop_id_from_config, parse_fuel_type,
-        parse_zone_id_key, resolve_duct_dse, zone_id_from_config, zone_id_from_config_or_default,
+        DuctDseContext, compute_and_write_ebm_telemetry, equipment_id_from_config,
+        loop_id_from_config, parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys,
+        resolve_duct_dse, zone_id_from_config, zone_id_from_config_or_default,
     };
 
     #[test]
@@ -815,6 +875,70 @@ mod tests {
         assert!(
             (0.0..1.0).contains(&basement_dse),
             "basement DSE {basement_dse} must be in (0,1) — class-default leakage must not be zero"
+        );
+    }
+
+    #[test]
+    fn ebm_telemetry_writes_nonzero_baseline_when_capacitance_and_load_are_nonzero() {
+        use crate::hvac::ThermalSetpoints;
+        use crate::hvac::hvac_core::{HvacEquipment, HvacEquipmentType};
+        use crate::hvac::thermostat::{ThermostatConfig, ThermostatFsm, ThermostatMode};
+        use hares_types::Telemetry;
+        use hares_types::telemetry_keys as tk;
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, hares_types::ZoneId(1));
+        hvac.thermostat_fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        });
+        hvac.thermostat_fsm.thermostat = ThermostatConfig {
+            hysteresis_c: 1.0,
+            deadband_offset: 0.2,
+            ..ThermostatConfig::default()
+        };
+        hvac.thermostat_fsm.mode = ThermostatMode::Heating;
+        hvac.config.heating_capacities_w = vec![10_000.0];
+        hvac.config.eir_by_stage = vec![0.25];
+        hvac.config.zone_capacitance_kwh_per_k = 2.0;
+
+        let mut telemetry = Telemetry::new();
+        register_ebm_telemetry_keys(&mut telemetry);
+
+        compute_and_write_ebm_telemetry(&hvac, 18.0, 3000.0, &mut telemetry);
+
+        let efficiency = telemetry.get(tk::EBM_EFFICIENCY).unwrap();
+        let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
+        assert!(
+            efficiency > 0.0,
+            "EBM efficiency should be COP = 1/EIR = 1/0.25 = 4.0, got {efficiency}"
+        );
+        assert!(
+            baseline > 0.0,
+            "EBM baseline_power_kw should be > 0 when capacity_ideal_w > 0, got {baseline}"
+        );
+        let expected_baseline = 3000.0 * 0.25 / 1000.0;
+        assert!(
+            (baseline - expected_baseline).abs() < 1e-9,
+            "EBM baseline_power_kw should be capacity_ideal_w * eir / 1000 = {expected_baseline}, got {baseline}"
+        );
+    }
+
+    #[test]
+    fn ebm_telemetry_noop_when_capacitance_is_zero() {
+        use crate::hvac::hvac_core::{HvacEquipment, HvacEquipmentType};
+        use hares_types::Telemetry;
+        use hares_types::telemetry_keys as tk;
+
+        let hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, hares_types::ZoneId(1));
+        let mut telemetry = Telemetry::new();
+        register_ebm_telemetry_keys(&mut telemetry);
+
+        compute_and_write_ebm_telemetry(&hvac, 20.0, 5000.0, &mut telemetry);
+
+        let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
+        assert_eq!(
+            baseline, 0.0,
+            "EBM baseline should stay at 0.0 when zone_capacitance_kwh_per_k is 0 (disabled)"
         );
     }
 }

@@ -348,6 +348,10 @@ pub struct HvacConfig {
     pub eir_plr_coefficients: Option<Vec<[f64; 3]>>,
     pub min_time_per_speed_s: f64,
     pub biquadratic_curve_source: BiquadraticCurveSource,
+    /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
+    /// Populated at init from `EquipmentConfig.zone_capacitance_kwh_per_k`;
+    /// 0.0 means EBM is disabled (no telemetry output).
+    pub zone_capacitance_kwh_per_k: f64,
 }
 
 /// Runtime state updated every simulation timestep.
@@ -459,6 +463,7 @@ impl HvacEquipment {
                 eir_plr_coefficients: None,
                 min_time_per_speed_s: 300.0,
                 biquadratic_curve_source: BiquadraticCurveSource::Identity,
+                zone_capacitance_kwh_per_k: 0.0,
             },
             thermostat_fsm: ThermostatFsm::new(ThermalSetpoints {
                 heating_c: 20.0,
@@ -739,6 +744,8 @@ impl HvacEquipment {
         // Initialize stage-disable state with all speeds enabled so
         // max_enabled_speed is valid before any DR signal is applied.
         self.set_disabled_speeds(&[]);
+
+        self.config.zone_capacitance_kwh_per_k = config.zone_capacitance_kwh_per_k;
 
         Ok(())
     }

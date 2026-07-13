@@ -23,8 +23,9 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, loop_id_from_config, outage_forces_off, update_heating_control,
-        zone_id_from_config_or_default,
+        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone,
+        loop_id_from_config, outage_forces_off, register_ebm_telemetry_keys,
+        update_heating_control, zone_id_from_config_or_default,
     },
 };
 
@@ -257,6 +258,7 @@ impl Equipment for ElectricBoiler {
                 self.eir
             )));
         }
+        self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
@@ -264,6 +266,7 @@ impl Equipment for ElectricBoiler {
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_boiler_default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -384,6 +387,15 @@ impl Equipment for ElectricBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            thermal_output_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -630,6 +642,7 @@ impl Equipment for GasBoiler {
         self.eir_max = 1.0 / fuel_efficiency;
         self.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
         self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
+        self.hvac.config.eir_by_stage = vec![self.eir_max];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
@@ -637,6 +650,7 @@ impl Equipment for GasBoiler {
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_boiler_default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -784,6 +798,15 @@ impl Equipment for GasBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            thermal_output_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -1016,6 +1039,36 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
+        },
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1073,6 +1126,36 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
         },
     ];
     fields.extend(setpoint_telemetry_fields());
@@ -2275,6 +2358,68 @@ mod tests {
             eq.core_output().flows.reactive_power_kvar,
             Some(0.0),
             "off equipment must report Some(0.0)"
+        );
+    }
+
+    #[test]
+    fn gas_boiler_ebm_efficiency_matches_inverse_eir_max_after_init() {
+        // AFUE=0.80 → eir_max = 1/0.80 = 1.25 → EBM COP = 1/1.25 = 0.80.
+        // Verifies that GasBoiler::init() populates eir_by_stage with eir_max
+        // so the EBM reads the correct EIR, not the empty-vec fallback of 1.0.
+        let cfg = gb_config(10_000.0, 0.80);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let expected_eir_max = 1.0 / 0.80;
+        let expected_efficiency = 1.0 / expected_eir_max;
+        let actual = eq.telemetry().get(tk::EBM_EFFICIENCY).unwrap();
+        assert!(
+            (actual - expected_efficiency).abs() < 1e-9,
+            "GasBoiler EBM efficiency should be 1/eir_max = 1/{expected_eir_max} = {expected_efficiency}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn electric_boiler_ebm_efficiency_matches_inverse_eir_after_init() {
+        // EIR=1.05 → EBM COP = 1/1.05.
+        // Verifies that ElectricBoiler::init() populates eir_by_stage with
+        // the configured EIR so the EBM uses the correct value, not the
+        // empty-vec fallback of 1.0.
+        let cfg = eb_config(8_000.0, 1.05);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let expected_efficiency = 1.0 / 1.05;
+        let actual = eq.telemetry().get(tk::EBM_EFFICIENCY).unwrap();
+        assert!(
+            (actual - expected_efficiency).abs() < 1e-9,
+            "ElectricBoiler EBM efficiency should be 1/1.05 = {expected_efficiency}, got {actual}"
         );
     }
 }

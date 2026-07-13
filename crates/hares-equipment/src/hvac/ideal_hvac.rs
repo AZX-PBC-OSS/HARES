@@ -28,7 +28,9 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{equipment_id_from_config, zone_id_from_config_or_default},
+    helpers::{
+        equipment_id_from_config, register_ebm_telemetry_keys, zone_id_from_config_or_default,
+    },
 };
 
 /// Biquadratic curve pair (capacity + EIR) with shared input bounds.
@@ -512,6 +514,7 @@ impl Equipment for IdealHvac {
         self.thermostat_fsm.thermostat.validate(env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = ideal_hvac_default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -1116,6 +1119,36 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
         },
     ]
 }

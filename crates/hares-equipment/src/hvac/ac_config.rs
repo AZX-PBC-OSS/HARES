@@ -109,6 +109,36 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
         },
         TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
+        },
+        TelemetryField {
             name: tk::SHR.to_string(),
             unit: "-".to_string(),
             description: "Sensible heat ratio".to_string(),

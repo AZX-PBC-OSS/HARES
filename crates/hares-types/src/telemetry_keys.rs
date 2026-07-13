@@ -285,6 +285,40 @@ pub const COP: &str = "cop";
 /// scope: internal
 pub const EIR: &str = "eir";
 
+/// Equivalent battery model efficiency (COP = 1/EIR) reported by HVAC equipment.
+///
+/// scope: internal
+pub const EBM_EFFICIENCY: &str = "ebm_efficiency";
+
+/// Equivalent battery model baseline power [kW] — steady-state electrical draw
+/// to hold the setpoint against envelope losses.
+///
+/// scope: internal
+pub const EBM_BASELINE_POWER_KW: &str = "ebm_baseline_power_kw";
+
+/// Equivalent battery model current energy state [kWh].
+///
+/// scope: internal
+pub const EBM_ENERGY_KWH: &str = "ebm_energy_kwh";
+
+/// Equivalent battery model minimum energy state [kWh] — energy at thermostat
+/// turn-on threshold.
+///
+/// scope: internal
+pub const EBM_MIN_ENERGY_KWH: &str = "ebm_min_energy_kwh";
+
+/// Equivalent battery model maximum energy state [kWh] — energy at thermostat
+/// turn-off threshold.
+///
+/// scope: internal
+pub const EBM_MAX_ENERGY_KWH: &str = "ebm_max_energy_kwh";
+
+/// Equivalent battery model maximum power [kW] — equipment rated capacity in
+/// electrical units.
+///
+/// scope: internal
+pub const EBM_MAX_POWER_KW: &str = "ebm_max_power_kw";
+
 /// scope: output
 pub const SHR: &str = "shr";
 
@@ -1045,6 +1079,12 @@ mod tests {
             // Efficiency
             COP,
             EIR,
+            EBM_EFFICIENCY,
+            EBM_BASELINE_POWER_KW,
+            EBM_ENERGY_KWH,
+            EBM_MIN_ENERGY_KWH,
+            EBM_MAX_ENERGY_KWH,
+            EBM_MAX_POWER_KW,
             SHR,
             CAP_MULT,
             ETA_ELECTRIC,
@@ -1289,6 +1329,12 @@ mod tests {
             // Efficiency
             COP,
             EIR,
+            EBM_EFFICIENCY,
+            EBM_BASELINE_POWER_KW,
+            EBM_ENERGY_KWH,
+            EBM_MIN_ENERGY_KWH,
+            EBM_MAX_ENERGY_KWH,
+            EBM_MAX_POWER_KW,
             SHR,
             CAP_MULT,
             ETA_ELECTRIC,

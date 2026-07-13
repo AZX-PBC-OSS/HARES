@@ -24,8 +24,8 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        equipment_id_from_config, outage_forces_off, update_heating_control,
-        zone_id_from_config_or_default,
+        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone, outage_forces_off,
+        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
     },
 };
 
@@ -149,10 +149,12 @@ impl Equipment for ElectricBaseboard {
                 self.eir
             )));
         }
+        self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = default_telemetry();
+        register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -223,6 +225,15 @@ impl Equipment for ElectricBaseboard {
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(20.0);
+        compute_and_write_ebm_telemetry(
+            &self.hvac,
+            zone_temp_c,
+            thermal_output_w,
+            &mut self.telemetry,
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -371,6 +382,36 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active cooling setpoint from thermostat schedule".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
+            unit: "-".to_string(),
+            description: "EBM efficiency (COP = 1/EIR)".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM baseline power to hold setpoint".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM current energy state".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM minimum energy at turn-on threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "EBM maximum energy at turn-off threshold".to_string(),
+        },
+        TelemetryField {
+            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "EBM maximum electrical power".to_string(),
         },
     ]
 }
@@ -839,5 +880,42 @@ mod tests {
             );
             assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
         }
+    }
+
+    #[test]
+    fn electric_baseboard_ebm_efficiency_matches_inverse_eir_after_init() {
+        // EIR=1.5 → EBM COP = 1/1.5.
+        // Verifies that ElectricBaseboard::init() populates eir_by_stage with
+        // the configured EIR so the EBM uses the correct value, not the
+        // empty-vec fallback of 1.0.
+        let cfg = EquipmentConfig::from_typed(
+            "BB".to_string(),
+            "Electric Baseboard".to_string(),
+            ElectricBaseboardConfig {
+                zone_id: Some(1),
+                capacity_w: 3_000.0,
+                eir: 1.5,
+                ..ElectricBaseboardConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let expected_efficiency = 1.0 / 1.5;
+        let actual = eq.telemetry().get(tk::EBM_EFFICIENCY).unwrap();
+        assert!(
+            (actual - expected_efficiency).abs() < 1e-9,
+            "ElectricBaseboard EBM efficiency should be 1/1.5 = {expected_efficiency}, got {actual}"
+        );
     }
 }
