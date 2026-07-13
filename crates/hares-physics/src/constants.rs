@@ -207,6 +207,10 @@ pub const SECONDS_PER_HOUR: f64 = 3_600.0;
 /// Seconds per day [s/day]. Exact by definition.
 pub const SECONDS_PER_DAY: f64 = 86_400.0;
 
+/// Joules per kilowatt-hour [J/kWh]. 1 kWh = 1000 W × 3600 s = 3,600,000 J.
+/// Exact by definition.
+pub const J_PER_KWH: f64 = 3_600_000.0;
+
 /// Minutes per day [min/day]. Exact by definition.
 pub const MINUTES_PER_DAY: f64 = 1_440.0;
 
