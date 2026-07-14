@@ -434,6 +434,13 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         );
     }
 
+    let first_bucket_count = first_buckets.len();
+    let first_min = first_buckets.keys().min().copied();
+    let first_max = first_buckets.keys().max().copied();
+    let mut per_dwelling_bucket_counts: Vec<usize> = vec![first_bucket_count];
+    let mut per_dwelling_bucket_ranges: Vec<(Option<i64>, Option<i64>)> =
+        vec![(first_min, first_max)];
+
     let mut bucket_intersection: BTreeSet<i64> = first_buckets.keys().copied().collect();
     for (_, columns, buckets) in successful.iter().skip(1) {
         if columns != first_columns {
@@ -450,11 +457,49 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
             );
             return empty_batch();
         }
+
+        per_dwelling_bucket_counts.push(buckets.len());
+        let min_key = buckets.keys().min().copied();
+        let max_key = buckets.keys().max().copied();
+        per_dwelling_bucket_ranges.push((min_key, max_key));
+
         let keys: BTreeSet<i64> = buckets.keys().copied().collect();
         bucket_intersection = bucket_intersection
             .intersection(&keys)
             .copied()
             .collect::<BTreeSet<_>>();
+    }
+
+    let intersection_size = bucket_intersection.len();
+    let has_non_empty_dwelling = per_dwelling_bucket_counts.iter().any(|&c| c > 0);
+
+    if bucket_intersection.is_empty() && has_non_empty_dwelling {
+        tracing::warn!(
+            n_dwellings = successful.len(),
+            per_dwelling_bucket_counts = ?per_dwelling_bucket_counts,
+            per_dwelling_bucket_ranges = ?per_dwelling_bucket_ranges,
+            "bucket intersection is empty: dwellings have non-overlapping time ranges",
+        );
+    } else if per_dwelling_bucket_counts
+        .iter()
+        .any(|&c| c > 0 && intersection_size * 2 < c)
+    {
+        tracing::warn!(
+            n_dwellings = successful.len(),
+            per_dwelling_bucket_counts = ?per_dwelling_bucket_counts,
+            intersection_bucket_count = intersection_size,
+            "bucket intersection dropped >50% of timesteps for at least one dwelling",
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::info!(
+            target: "observe",
+            intersection_bucket_count = intersection_size,
+            per_dwelling_bucket_counts = ?per_dwelling_bucket_counts,
+            "fleet aggregation bucket intersection diagnostics",
+        );
     }
 
     let mut timestamps = StringBuilder::new();
@@ -1159,6 +1204,73 @@ mod tests {
         );
         assert_eq!(fleet.aggregate_timeseries.num_columns(), 1);
         assert_eq!(fleet.per_dwelling_metrics.len(), 2);
+    }
+
+    #[test]
+    fn build_aggregate_non_overlapping_time_ranges_returns_empty_batch() {
+        // Dwelling A: January–June 2021 hourly (181 days ≈ 4344 hours)
+        // Dwelling B: July–December 2021 hourly (184 days ≈ 4416 hours)
+        // These ranges have zero overlap, so the intersection is empty.
+        let t0_jan = DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let t1_jul = DateTime::parse_from_rfc3339("2021-07-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+
+        let mut buckets_a: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        for h in 0..48i64 {
+            buckets_a.insert(t0_jan + h * 3600, vec![Some(h as f64)]);
+        }
+
+        let mut buckets_b: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        for h in 0..48i64 {
+            buckets_b.insert(t1_jul + h * 3600, vec![Some(100.0 + h as f64)]);
+        }
+
+        let columns = vec!["Total Electric Power (kW)".to_string()];
+
+        let batch = build_aggregate_batch(vec![
+            (1.0, columns.clone(), buckets_a.clone()),
+            (1.0, columns.clone(), buckets_b.clone()),
+        ]);
+
+        assert_eq!(
+            batch.num_rows(),
+            0,
+            "non-overlapping time ranges should produce empty batch"
+        );
+        assert_eq!(batch.num_columns(), 2, "Time column + one numeric column");
+    }
+
+    #[test]
+    fn build_aggregate_partial_overlap_returns_correct_intersection() {
+        // Dwelling A: buckets [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] (10 buckets)
+        // Dwelling B: buckets [5, 6, 7, 8, 9] (5 buckets)
+        // Intersection: [5, 6, 7, 8, 9] (5 buckets — exactly 50% dropped from A's 10)
+        let mut buckets_a: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        for i in 0..10i64 {
+            buckets_a.insert(i, vec![Some(i as f64)]);
+        }
+
+        let mut buckets_b: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        for i in 5..10i64 {
+            buckets_b.insert(i, vec![Some(i as f64 * 10.0)]);
+        }
+
+        let columns = vec!["Total Electric Power (kW)".to_string()];
+
+        let batch = build_aggregate_batch(vec![
+            (1.0, columns.clone(), buckets_a.clone()),
+            (1.0, columns.clone(), buckets_b.clone()),
+        ]);
+
+        // Intersection should have 5 rows (buckets 5-9), not 0 and not 10
+        assert_eq!(
+            batch.num_rows(),
+            5,
+            "partial overlap should return only the intersecting buckets"
+        );
     }
 
     #[test]
