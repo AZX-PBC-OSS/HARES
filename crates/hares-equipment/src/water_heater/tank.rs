@@ -40,7 +40,12 @@ pub struct StratifiedTankConfig {
 /// Draw-step summary values used by water heater implementations and tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawResult {
-    /// Instantaneous outlet temperature at the beginning of the draw.
+    /// Volume-weighted average temperature of water drawn from the tank,
+    /// computed from pre-injection node temperatures over the drawn volume [°C].
+    ///
+    /// OCHRE Water.py:335-347: segment-averaged outlet from pre-draw node
+    /// temperatures.  For draws fully contained within the top node, this
+    /// collapses to the top-node temperature.
     pub outlet_temp_c: f64,
     /// Thermal energy removed from the tank by the draw [J].
     pub energy_out_j: f64,
@@ -297,8 +302,9 @@ impl StratifiedTank {
     /// `heat_injections` is a slice of `(node_index, power_w)` pairs representing
     /// element or condenser heat to inject during this step. Heat injection and
     /// draw are integrated in the same Euler step (matching OCHRE's single-step
-    /// ODE integration). Outlet temperature is snapshotted from the **pre-heating**
-    /// top-node value (OCHRE Water.py:284).
+    /// ODE integration). Outlet temperature is the segment-average of the
+    /// **pre-heating** node temperatures over the drawn volume
+    /// (OCHRE Water.py:335-347).
     ///
     /// Use [`step_tempered`] when the draw comes from a mixing-valve schedule
     /// that specifies a fixture delivery temperature.
@@ -321,15 +327,46 @@ impl StratifiedTank {
         }
 
         self.apply_conduction_and_standby(ambient_temp_c, dt)?;
-        // Snapshot post-conduction/pre-injection temps for energy accounting.
-        // energy_out_j must reflect the water actually in the tank before element
-        // heat is added, not the heated water.
         self.scratch_pre_injection_temps
             .copy_from_slice(&self.node_temps_c);
         self.apply_heat_injections(heat_injections, dt)?;
         let draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         self.mix_inversions();
         self.recompute_skin_loss_w(ambient_temp_c);
+
+        #[cfg(feature = "observe")]
+        {
+            let post_injection_top = self.node_temps_c[0];
+            let pre_injection_top = self.scratch_pre_injection_temps[0];
+            let divergence_k = post_injection_top - draw.outlet_temp_c;
+            tracing::debug!(
+                outlet_temp_c = draw.outlet_temp_c,
+                pre_injection_top_c = pre_injection_top,
+                post_injection_top_c = post_injection_top,
+                divergence_k,
+                "step: pre-injection outlet vs post-injection top-node divergence"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
+            if has_heat {
+                let expected = Self::segment_average_temp(
+                    &self.node_edges_m3,
+                    &self.scratch_pre_injection_temps,
+                    0.0,
+                    draw_volume_m3,
+                );
+                debug_assert!(
+                    (draw.outlet_temp_c - expected).abs() < 1e-9,
+                    "outlet_temp_c ({}) must match pre-injection segment average ({})",
+                    draw.outlet_temp_c,
+                    expected
+                );
+            }
+        }
+
         Ok(draw)
     }
 
@@ -435,11 +472,9 @@ impl StratifiedTank {
         // Unmet load: watts of heat the fixture didn't receive because the pre-step
         // outlet temperature fell below the fixture setpoint.
         // OCHRE Water.py:363: h_unmet_load = max(draw_tempered/60 * water_c * (t_fix - t_out), 0)
-        // outlet_est_c is snapped from the pre-conduction/pre-injection state at line 361
+        // outlet_est_c is snapped from the pre-conduction/pre-injection state at line 388
         // (OCHRE Water.py:284) — same-step element heat must not inflate the outlet and
-        // mask the deficit.  The draw outlet (`draw.outlet_temp_c`) is a post-injection
-        // segment average; using it here would under-report unmet load by the temperature
-        // rise that the element added to the drawn segment during this Euler step.
+        // mask the deficit.
         let unmet_load_w = if tempered_flow_m3_s > 0.0 {
             let deficit = (tmv.tempered_draw_temp_c - outlet_est_c).max(0.0);
             tempered_flow_m3_s
@@ -452,31 +487,28 @@ impl StratifiedTank {
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            // When elements fire, post-injection outlet_temp_c >= outlet_est_c,
-            // so the old value (computed from post-injection temps) under-reports
-            // the deficit.  Sanity-check the direction only when the top node
-            // was actually heated (outlet_temp_c > outlet_est_c); conduction
-            // cooling can reverse this, in which case no single inequality holds.
             let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
-            if tempered_flow_m3_s > 0.0 && has_heat && draw.outlet_temp_c > outlet_est_c {
-                let old_unmet = {
-                    let d = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
-                    tempered_flow_m3_s
-                        * water_density_kg_m3(draw.outlet_temp_c)
-                        * CP_LIQUID_WATER_J_KG_K
-                        * d
-                };
+            if has_heat {
+                let expected = Self::segment_average_temp(
+                    &self.node_edges_m3,
+                    &self.scratch_pre_injection_temps,
+                    0.0,
+                    clamped_draw,
+                );
                 debug_assert!(
-                    unmet_load_w >= old_unmet,
-                    "unmet_load_w ({unmet_load_w}) under-reports deficit: \
-                     old post-injection={old_unmet}, pre_est={outlet_est_c}, post={}",
-                    draw.outlet_temp_c
+                    (draw.outlet_temp_c - expected).abs() < 1e-9,
+                    "outlet_temp_c ({}) must match pre-injection segment average ({})",
+                    draw.outlet_temp_c,
+                    expected
                 );
             }
         }
 
         #[cfg(feature = "observe")]
         {
+            // divergence_k = pre-injection outlet_temp_c - pre-conduction outlet_est_c.
+            // Positive when conduction warms the top node (ambient > tank);
+            // negative when conduction cools it (tank > ambient).
             let divergence_k = draw.outlet_temp_c - outlet_est_c;
             let hot_vol_ratio = if raw_hot_draw_m3 > 0.0 {
                 hot_draw_volume_m3 / raw_hot_draw_m3
@@ -485,15 +517,15 @@ impl StratifiedTank {
             };
             let tmv_hot_entered = tmv.setpoint_temp_c > tmv.tempered_draw_temp_c;
             tracing::debug!(
-                outlet_est_c,
-                outlet_post_c = draw.outlet_temp_c,
+                outlet_pre_conduction_c = outlet_est_c,
+                outlet_pre_injection_c = draw.outlet_temp_c,
                 divergence_k,
                 unmet_load_w,
                 tmv_hot_entered,
                 hot_vol_ratio,
                 raw_hot_draw_m3,
                 hot_draw_volume_m3,
-                "step_tempered: pre/post-injection outlet divergence, hot-draw TMV"
+                "step_tempered: pre-conduction vs pre-injection outlet divergence, hot-draw TMV"
             );
         }
 
@@ -716,32 +748,62 @@ impl StratifiedTank {
         Ok(())
     }
 
+    /// Compute the volume-weighted average temperature of a segment from
+    /// `start_m3` to `end_m3` in the node-temperature profile.
+    ///
+    /// `edges_m3` is the cumulative-volume edge array (length n_nodes + 1).
+    /// `temps_c` are the per-node temperatures. Returns the integrated average;
+    /// when the segment spans one node the result collapses to that node's
+    /// temperature exactly.
+    ///
+    /// OCHRE Water.py:335-347 (`_water_draw_general` lines 16-104): the draw
+    /// outlet temperature is the segment average of the pre-draw node
+    /// temperatures over the drawn volume.
+    fn segment_average_temp(edges_m3: &[f64], temps_c: &[f64], start_m3: f64, end_m3: f64) -> f64 {
+        let volume = end_m3 - start_m3;
+        if volume <= 0.0 {
+            return temps_c.first().copied().unwrap_or(0.0);
+        }
+        let mut sum = 0.0_f64;
+        for i in 0..temps_c.len() {
+            let left = edges_m3[i].max(start_m3);
+            let right = edges_m3[i + 1].min(end_m3);
+            let overlap = (right - left).max(0.0);
+            if overlap > 0.0 {
+                sum += overlap * temps_c[i];
+            }
+        }
+        sum / volume
+    }
+
     /// Apply a draw to the tank, displacing water downward with mains water entering
-    /// from the bottom. Uses `scratch_pre_injection_temps` for energy accounting --
-    /// typically the pre-injection snapshot so that element heat does not inflate
-    /// the reported energy removed by the draw.
+    /// from the bottom.
+    ///
+    /// Both `outlet_temp_c` and `energy_out_j` are computed from the same pre-injection
+    /// snapshot (`scratch_pre_injection_temps`), so they are internally consistent:
+    /// `outlet_temp_c` is the segment-average temperature over the drawn volume, and
+    /// `energy_out_j` is the per-node overlap sum of ρ(T)·cp·T across that same volume.
+    /// Callers must populate `scratch_pre_injection_temps` before calling this method.
+    ///
+    /// OCHRE Water.py:335-347: segment-averaged outlet from pre-draw node temperatures.
     fn apply_draw(&mut self, draw_volume_m3: f64, mains_temp_c: f64) -> Result<DrawResult> {
         if draw_volume_m3 == 0.0 {
             return Ok(DrawResult {
-                outlet_temp_c: self.node_temps_c[0],
+                outlet_temp_c: self.scratch_pre_injection_temps[0],
                 energy_out_j: 0.0,
                 energy_in_j: 0.0,
                 unmet_load_w: 0.0,
             });
         }
 
-        // Volume-weighted average over the drawn segment (top of tank).
-        // For draws spanning multiple nodes this correctly blends temperatures
-        // rather than returning only the top-node snapshot.
-        let outlet_temp_c =
-            segment_average_temp(&self.node_edges_m3, &self.node_temps_c, 0.0, draw_volume_m3);
+        let outlet_temp_c = Self::segment_average_temp(
+            &self.node_edges_m3,
+            &self.scratch_pre_injection_temps,
+            0.0,
+            draw_volume_m3,
+        );
 
         self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
-        // Compute energy_out_j per sub-segment for consistency with the
-        // temperature-dependent density used in total-energy accounting.
-        // Using a single density at the volume-weighted average temperature
-        // would introduce an energy bookkeeping error equal to
-        // Σ(ρ(T_i)·T_i) vs ρ(T_avg)·T_avg across the drawn segment.
         let mut energy_out_j = 0.0_f64;
         let mut remaining_m3 = draw_volume_m3;
         let n = self.n_nodes();
@@ -881,18 +943,6 @@ fn overlap_length(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
     (a1.min(b1) - a0.max(b0)).max(0.0)
 }
 
-fn segment_average_temp(edges_m3: &[f64], temps_c: &[f64], start_m3: f64, end_m3: f64) -> f64 {
-    let volume = end_m3 - start_m3;
-    let mut energy = 0.0_f64;
-    for idx in 0..temps_c.len() {
-        let overlap = overlap_length(start_m3, end_m3, edges_m3[idx], edges_m3[idx + 1]);
-        if overlap > 0.0 {
-            energy += overlap * temps_c[idx];
-        }
-    }
-    energy / volume
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -970,9 +1020,11 @@ mod tests {
             .step(20.0, draw_volume, 10.0, &[], Duration::from_secs(60))
             .expect("draw step");
 
-        // Draw spans 1.5× top-node volume → blends node 0 (70°C) and half of node 1 (68°C).
-        // Volume-weighted average: (1.0*70 + 0.5*68) / 1.5 = 69.333...
-        let expected_outlet = (70.0 + 0.5 * 68.0) / 1.5;
+        // Outlet equals pre-injection segment-average temperature over the
+        // drawn volume. Draw = 1.5 × node_volume spans nodes 0 (70°C) and 1 (68°C):
+        //   (V·70 + 0.5V·68) / 1.5V = 69.333...°C.
+        // Pre-heating snapshot per OCHRE Water.py:335-347.
+        let expected_outlet = 70.0 - 2.0 / 3.0; // 69.333...
         assert!(
             (draw.outlet_temp_c - expected_outlet).abs() < 0.01,
             "outlet {:.4} expected {:.4}",
@@ -1562,14 +1614,17 @@ mod tests {
             draw.unmet_load_w
         );
 
-        // Post-injection outlet is higher → old code would report less unmet.
+        // With Option A (pre-injection outlet), outlet_temp_c reflects pre-injection
+        // state. When UA=0 (adiabatic tank), pre-conduction = pre-injection, so
+        // old_unmet == unmet_load_w.  The key invariant: outlet_temp_c is not
+        // inflated by same-step element heat, so the unmet deficit is correct.
         let old_unmet = {
             let deficit = (fixtureset_c - draw.outlet_temp_c).max(0.0);
             flow_m3_s * water_density_kg_m3(draw.outlet_temp_c) * CP_LIQUID_WATER_J_KG_K * deficit
         };
         assert!(
-            draw.unmet_load_w > old_unmet,
-            "unmet_load_w {:.1} should exceed post-injection value {old_unmet:.1}",
+            (draw.unmet_load_w - old_unmet).abs() < 1.0,
+            "unmet_load_w ({:.1}) must match pre-injection deficit ({old_unmet:.1})",
             draw.unmet_load_w
         );
     }
@@ -1607,11 +1662,14 @@ mod tests {
     }
 
     /// With nonzero element heat and nonzero draw in the same step, the outlet
-    /// temperature must equal the pre-step top-node value (not inflated by
-    /// current-step element heat). Validates that element heat does not leak
-    /// into outlet temperature.
+    /// temperature must equal the pre-injection segment-average temperature
+    /// (not inflated by current-step element heat). For this single-node draw,
+    /// the segment average collapses to the top-node value. Validates that
+    /// element heat does not leak into outlet temperature.
+    ///
+    /// OCHRE Water.py:335-347: outlet computed from pre-draw node temperatures.
     #[test]
-    fn outlet_temp_reflects_post_injection_segment_average() {
+    fn outlet_temp_reflects_pre_heating_top_node() {
         let mut tank = test_tank(6, 50.0);
         let node_vol = tank.node_volumes_m3()[0];
         let mcp = water_density_kg_m3(50.0) * node_vol * CP_LIQUID_WATER_J_KG_K;
@@ -1619,19 +1677,26 @@ mod tests {
         let element_power_w = 10_000.0;
         let dt = Duration::from_secs(60);
         let delta_t = element_power_w * dt.as_secs_f64() / mcp;
-        let expected_top = 50.0 + delta_t;
 
         let draw = tank
             .step(20.0, draw_volume, 15.0, &[(0, element_power_w)], dt)
             .expect("step with heat + draw");
 
-        // Outlet is the segment average of the drawn region AFTER element heat
-        // has been injected. For a half-node draw within the heated top node,
-        // outlet equals the post-injection top-node temperature.
+        // Outlet must equal the pre-injection segment-average temperature (50°C,
+        // since the draw is fully within node 0), NOT the post-injection value
+        // (50 + delta_t). The element adds ~delta_t °C, but that heat must not
+        // inflate outlet_temp_c.
         assert!(
-            (draw.outlet_temp_c - expected_top).abs() < 0.01,
-            "outlet ({:.4}) must reflect post-injection top-node temp ({expected_top:.4})",
-            draw.outlet_temp_c
+            (draw.outlet_temp_c - 50.0).abs() < 0.01,
+            "outlet ({:.4}) must reflect pre-injection temp (50.0), not post-injection (expected {:.4})",
+            draw.outlet_temp_c,
+            50.0 + delta_t
+        );
+        assert!(
+            draw.outlet_temp_c < 50.0 + delta_t - 0.1,
+            "outlet ({:.4}) must be substantially below post-injection temp ({:.4})",
+            draw.outlet_temp_c,
+            50.0 + delta_t
         );
         // energy_out_j still uses the pre-injection snapshot for accounting.
         let expected_energy_out =
@@ -1710,10 +1775,10 @@ mod tests {
             .expect("step 1");
 
         let expected_top_after_heat = 50.0 + delta_t;
-        // Zero-draw outlet reflects current (post-injection) top-node temperature.
+        // Zero-draw outlet reflects pre-injection top-node temperature.
         assert!(
-            (draw1.outlet_temp_c - expected_top_after_heat).abs() < 1e-10,
-            "zero-draw outlet must be post-injection top-node, expected {expected_top_after_heat:.6}, got {:.6}",
+            (draw1.outlet_temp_c - 50.0).abs() < 1e-10,
+            "zero-draw outlet must be pre-injection top-node 50.0, got {:.6}",
             draw1.outlet_temp_c,
         );
         assert!(
@@ -1838,10 +1903,11 @@ mod tests {
             .step(20.0, node_vol, mains_temp_c, &[], dt)
             .expect("draw step");
 
-        // Outlet = pre-step top-node temperature.
+        // Outlet = pre-injection segment average; for a single-node draw within
+        // the top node (65°C) this equals the top-node temperature.
         assert!(
             (draw.outlet_temp_c - 65.0).abs() < 1e-10,
-            "outlet_temp_c must equal pre-step top node 65.0, got {}",
+            "outlet_temp_c must equal pre-injection top-node segment average 65.0, got {}",
             draw.outlet_temp_c
         );
 
@@ -2221,34 +2287,50 @@ mod tests {
         );
     }
 
-    /// Multi-node draw: outlet is the volume-weighted average of drawn segment,
-    /// not a single-node snapshot. 12-node tank, upper half 55°C, lower half 20°C,
-    /// draw 1.5× top-node volume → outlet < 55.0, approximately 43.3°C.
+    /// Multi-node draw spanning two nodes at different temperatures: the
+    /// pre-injection segment average (below top-node temperature) is the
+    /// correct outlet, proving multi-node blending is active even without
+    /// heat injection.
+    ///
+    /// 12-node tank with gradient in top half: draw 2 full node volumes
+    /// (nodes 0 and 1 at 60°C and 56°C, UA=0, no heat). Outlet must be the
+    /// segment average 58.0°C, measurably below the 60°C top node.
     #[test]
     fn multi_node_draw_outlet_is_segment_average() {
         let mut tank = test_tank(12, 20.0);
         for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
-            *temp = if idx < 6 { 55.0 } else { 20.0 };
+            *temp = if idx < 6 {
+                60.0 - idx as f64 * 4.0 // 60, 56, 52, 48, 44, 40
+            } else {
+                20.0
+            };
         }
         let node_vol = tank.node_volumes_m3()[0];
-        let draw_vol = node_vol * 1.5;
+        let draw_vol = node_vol * 2.0; // spans nodes 0 and 1
         let draw = tank
             .step(20.0, draw_vol, 10.0, &[], Duration::from_secs(60))
             .expect("multi-node draw");
 
-        // segment_average over [0, 1.5 * node_vol]: 1.0×55 + 0.5×55 = 82.5 → /1.5 = 55.0
-        // Actually nodes 0..5 are 55°C so 1.5 nodes still within the 55°C region.
-        // All 12 nodes equal volume → top 6 are 55°C. Draw is 1.5 nodes from top.
-        // Node 0 = 55, node 1 = 55 → average of first 1.5 nodes = 55.0.
-        // Wait -- but conduction/standby with UA=0 changes nothing. Heat injections = empty.
-        // So post-injection temps are still [55,55,55,55,55,55,20,20,20,20,20,20].
-        // segment_average(0, 1.5V) = (V*55 + 0.5V*55) / 1.5V = 55.0.
-        // That's not testing multi-temp blending. Let me set a gradient instead.
-        assert!((draw.outlet_temp_c - 55.0).abs() < 0.01);
+        // Segment average: (V*60 + V*56) / 2V = 58.0°C.
+        assert!(
+            (draw.outlet_temp_c - 58.0).abs() < 0.01,
+            "outlet_temp_c ({:.4}) must equal segment average 58.0",
+            draw.outlet_temp_c,
+        );
+        // Outlet must be measurably below the top-node temperature, proving
+        // multi-node segment averaging is active.
+        assert!(
+            draw.outlet_temp_c < 60.0 - 0.5,
+            "outlet_temp_c ({:.4}) must be below top node 60.0 (multi-node blending)",
+            draw.outlet_temp_c,
+        );
     }
 
-    /// 12-node tank with gradient: drawing across nodes with different temps
-    /// yields a segment-average outlet strictly below the top-node temperature.
+    /// 12-node tank with gradient and concurrent element heat: outlet_temp_c
+    /// must equal the pre-injection segment-average temperature, which for
+    /// a multi-node draw spanning nodes at different temperatures is below
+    /// the top-node temperature. Verifies segment averaging is not collapsed
+    /// to a bare top-node scalar.
     #[test]
     fn gradient_draw_outlet_below_top_node() {
         let mut tank = test_tank(12, 20.0);
@@ -2261,23 +2343,37 @@ mod tests {
             };
         }
         let node_vol = tank.node_volumes_m3()[0];
-        // Draw 1.5 nodes: segment [0, 1.5V] spans node 0 (55°C) + half node 1 (50°C)
+        // Draw 1.5 nodes with 4500W into top node: outlet must equal pre-injection
+        // segment average (55*V + 50*0.5V) / 1.5V = 53.333...°C, not the top-node 55°C.
         let draw_vol = node_vol * 1.5;
         let draw = tank
-            .step(20.0, draw_vol, 10.0, &[], Duration::from_secs(60))
-            .expect("gradient draw");
+            .step(
+                20.0,
+                draw_vol,
+                10.0,
+                &[(0, 4500.0)],
+                Duration::from_secs(60),
+            )
+            .expect("gradient draw with heat");
 
-        let expected = (55.0 + 0.5 * 50.0) / 1.5; // ≈ 53.333
+        // Pre-injection segment average: 1 full node at 55°C + 0.5 node at 50°C.
+        let expected = (55.0 + 50.0 * 0.5) / 1.5;
         assert!(
-            draw.outlet_temp_c < 55.0,
-            "multi-node outlet must be below top-node temp, got {:.4}",
+            (draw.outlet_temp_c - expected).abs() < 0.01,
+            "outlet_temp_c ({:.4}) must equal pre-injection segment average ({expected:.4})",
             draw.outlet_temp_c,
         );
+        // Regression: outlet must be measurably below the top-node temperature,
+        // proving multi-node segment averaging is active.
         assert!(
-            (draw.outlet_temp_c - expected).abs() < 0.1,
-            "outlet {:.4} expected ~{:.4}",
+            draw.outlet_temp_c < 55.0 - 0.5,
+            "outlet_temp_c ({:.4}) must be below top node 55.0 (multi-node blending)",
             draw.outlet_temp_c,
-            expected,
+        );
+        // energy_out_j uses pre-injection temps and reflects the multi-node composition.
+        assert!(
+            draw.energy_out_j > 0.0,
+            "energy_out_j must be positive for nonzero draw"
         );
     }
 
@@ -2373,5 +2469,83 @@ mod tests {
             expected_energy_j,
         );
         assert_eq!(draw.unmet_load_w, 0.0);
+    }
+
+    /// Verify that `DrawResult.outlet_temp_c` carries the pre-injection
+    /// segment-average temperature even when element heat and draw occur in
+    /// the same step. The doc comment promises "pre-injection node temperatures"
+    /// (per OCHRE Water.py:335-347), so the value must not be inflated by
+    /// same-step heat injection.
+    #[test]
+    fn outlet_temp_c_excludes_same_step_heat_injection() {
+        let mut tank = test_tank(6, 45.0);
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_volume = node_vol * 0.3;
+        let dt = Duration::from_secs(60);
+
+        // Step with heat into node 0 + concurrent draw.
+        let draw = tank
+            .step(20.0, draw_volume, 12.0, &[(0, 4_500.0)], dt)
+            .expect("step with heat + draw");
+
+        // outlet_temp_c must be ~45°C (pre-injection), not elevated.
+        assert!(
+            (draw.outlet_temp_c - 45.0).abs() < 0.02,
+            "outlet_temp_c ({:.4}) must match pre-injection 45.0, not be inflated",
+            draw.outlet_temp_c
+        );
+
+        // The post-injection top node IS warmer (element fired).
+        let mcp = water_density_kg_m3(45.0) * node_vol * CP_LIQUID_WATER_J_KG_K;
+        let delta_t = 4_500.0 * dt.as_secs_f64() / mcp;
+        let post_injection_top = tank.node_temps()[0];
+        assert!(
+            post_injection_top > 45.0 + delta_t * 0.5,
+            "post-injection top node ({post_injection_top:.4}) must be warmer than 45.0 after heating"
+        );
+        assert!(
+            draw.outlet_temp_c < post_injection_top,
+            "outlet_temp_c ({:.4}) must be below post-injection top node ({post_injection_top:.4})",
+            draw.outlet_temp_c
+        );
+    }
+
+    /// Doc consistency: both the `DrawResult.outlet_temp_c` field doc and the
+    /// `step()` doc comment claim pre-injection semantics.  Validates that when
+    /// injection + draw coexist, the returned value is the pre-injection
+    /// segment-average temperature — consistent with both doc comments.
+    #[test]
+    fn outlet_temp_c_doc_comments_consistent_with_implementation() {
+        let mut tank = test_tank(4, 40.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[40.0, 38.0, 36.0, 34.0]);
+        }
+
+        let draw_volume = tank.node_volumes_m3()[0] * 0.8;
+        let draw = tank
+            .step(
+                20.0,
+                draw_volume,
+                12.0,
+                &[(0, 3_000.0)],
+                Duration::from_secs(60),
+            )
+            .expect("step with heat + draw");
+
+        // `DrawResult.outlet_temp_c` doc: "Volume-weighted average temperature
+        // of water drawn from the tank, computed from pre-injection node
+        // temperatures."
+        // `step()` doc: "segment-average of the pre-heating node temperatures
+        // over the drawn volume (OCHRE Water.py:335-347)."
+        //
+        // Both claim pre-injection; verify implementation matches.
+        // Draw = 0.8 node_vol, all within the 40°C top node → outlet = 40.0.
+        assert!(
+            (draw.outlet_temp_c - 40.0).abs() < 0.02,
+            "doc claims pre-injection segment-average; \
+             outlet_temp_c ({:.4}) must match 40.0",
+            draw.outlet_temp_c
+        );
     }
 }
