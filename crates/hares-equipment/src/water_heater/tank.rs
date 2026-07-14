@@ -409,18 +409,61 @@ impl StratifiedTank {
             );
         }
 
-        // Unmet load: watts of heat the fixture didn't receive because outlet_temp < setpoint.
+        // Unmet load: watts of heat the fixture didn't receive because the pre-step
+        // outlet temperature fell below the fixture setpoint.
         // OCHRE Water.py:363: h_unmet_load = max(draw_tempered/60 * water_c * (t_fix - t_out), 0)
-        // Here tempered_flow_m3_s is already in m³/s, so kg/s = flow_m3_s * density.
+        // outlet_est_c is snapped from the pre-conduction/pre-injection state at line 361
+        // (OCHRE Water.py:284) — same-step element heat must not inflate the outlet and
+        // mask the deficit.  The draw outlet (`draw.outlet_temp_c`) is a post-injection
+        // segment average; using it here would under-report unmet load by the temperature
+        // rise that the element added to the drawn segment during this Euler step.
         let unmet_load_w = if tempered_flow_m3_s > 0.0 {
-            let deficit = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
+            let deficit = (tmv.tempered_draw_temp_c - outlet_est_c).max(0.0);
             tempered_flow_m3_s
-                * water_density_kg_m3(draw.outlet_temp_c)
+                * water_density_kg_m3(outlet_est_c)
                 * CP_LIQUID_WATER_J_KG_K
                 * deficit
         } else {
             0.0
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // When elements fire, post-injection outlet_temp_c >= outlet_est_c,
+            // so the old value (computed from post-injection temps) under-reports
+            // the deficit.  Sanity-check the direction only when the top node
+            // was actually heated (outlet_temp_c > outlet_est_c); conduction
+            // cooling can reverse this, in which case no single inequality holds.
+            let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
+            if tempered_flow_m3_s > 0.0 && has_heat && draw.outlet_temp_c > outlet_est_c {
+                let old_unmet = {
+                    let d = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
+                    tempered_flow_m3_s
+                        * water_density_kg_m3(draw.outlet_temp_c)
+                        * CP_LIQUID_WATER_J_KG_K
+                        * d
+                };
+                debug_assert!(
+                    unmet_load_w >= old_unmet,
+                    "unmet_load_w ({unmet_load_w}) under-reports deficit: \
+                     old post-injection={old_unmet}, pre_est={outlet_est_c}, post={}",
+                    draw.outlet_temp_c
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            let divergence_k = draw.outlet_temp_c - outlet_est_c;
+            tracing::debug!(
+                outlet_est_c,
+                outlet_post_c = draw.outlet_temp_c,
+                divergence_k,
+                unmet_load_w,
+                "step_tempered: pre/post-injection outlet divergence"
+            );
+        }
+
         draw.unmet_load_w = unmet_load_w;
         Ok(draw)
     }
@@ -1447,6 +1490,87 @@ mod tests {
             )
             .expect("step");
         assert_eq!(draw.unmet_load_w, 0.0);
+    }
+
+    /// Unmet load in `step_tempered()` is computed from the pre-injection
+    /// outlet snapshot `outlet_est_c`, so same-step element heat does not
+    /// inflate the apparent outlet and under-report the deficit.
+    ///
+    /// Scenario: top node = 30°C, fixture setpoint = 40.6°C, 4500W element
+    /// fires into node 0 during a concurrent tempered draw.
+    /// Without the fix, post-injection outlet ≈ 31.65°C would mask ~2 kW
+    /// of unmet load. With the fix, `unmet_load_w` reflects the true 30°C
+    /// pre-heating state.
+    #[test]
+    fn unmet_load_from_pre_injection_outlet_not_post_heating() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 30.0);
+
+        let fixtureset_c = 40.6;
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: fixtureset_c,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+        let draw = tank
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .expect("step_tempered with heat");
+
+        // Pre-heating deficit: outlet_est_c = 30°C, deficit = 40.6 - 30.0 = 10.6°C.
+        // The tank has zero UA/conductivity, so outlet_est_c is exactly 30.0°C
+        // (no conduction drift before the snapshot) and this matches to float precision.
+        let density = water_density_kg_m3(30.0);
+        let expected_unmet = flow_m3_s * density * CP_LIQUID_WATER_J_KG_K * (fixtureset_c - 30.0);
+        assert!(
+            (draw.unmet_load_w - expected_unmet).abs() < 1e-6,
+            "unmet_load_w {:.6} diverges from pre-heating deficit {expected_unmet:.6}",
+            draw.unmet_load_w
+        );
+
+        // Post-injection outlet is higher → old code would report less unmet.
+        let old_unmet = {
+            let deficit = (fixtureset_c - draw.outlet_temp_c).max(0.0);
+            flow_m3_s * water_density_kg_m3(draw.outlet_temp_c) * CP_LIQUID_WATER_J_KG_K * deficit
+        };
+        assert!(
+            draw.unmet_load_w > old_unmet,
+            "unmet_load_w {:.1} should exceed post-injection value {old_unmet:.1}",
+            draw.unmet_load_w
+        );
+    }
+
+    /// `unmet_load_w` is identical whether or not a nonzero `HeatInjection` is
+    /// supplied during the step, because the computation uses the pre-injection
+    /// snapshot `outlet_est_c` which is independent of element heat.
+    #[test]
+    fn unmet_load_identical_with_and_without_heat_injection() {
+        use super::TemperedDrawConfig;
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+
+        let mut tank_no_heat = test_tank(6, 30.0);
+        let draw_no_heat = tank_no_heat
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[], tmv, dt)
+            .expect("step_tempered without heat");
+
+        let mut tank_with_heat = test_tank(6, 30.0);
+        let draw_with_heat = tank_with_heat
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .expect("step_tempered with heat");
+
+        assert!(
+            (draw_no_heat.unmet_load_w - draw_with_heat.unmet_load_w).abs() < 1e-6,
+            "unmet_load_w without heat ({}) differs from with heat ({})",
+            draw_no_heat.unmet_load_w,
+            draw_with_heat.unmet_load_w
+        );
     }
 
     /// With nonzero element heat and nonzero draw in the same step, the outlet
