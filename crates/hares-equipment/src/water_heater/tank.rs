@@ -362,18 +362,41 @@ impl StratifiedTank {
 
         // --- TMV mixing-valve calculation (OCHRE Water.py:305-325) ---
         // For hot draws (e.g. dishwasher): reduce draw if outlet > hot_draw_temp_c.
-        let hot_draw_volume_m3 = if tmv.setpoint_temp_c > tmv.hot_draw_temp_c {
-            // Setpoint exceeds delivery target -- tank water needs blending.
+        // OCHRE Water.py:305: if self.tempered_draw_temp < self.setpoint_temp:
+        // The guard compares setpoint against tempered_draw_temp (not hot_draw_temp)
+        // so that TMV activates for hot draws whenever the tank could produce
+        // water hotter than the tempered delivery target, not only when hotter
+        // than the hot delivery target itself.
+        let raw_hot_draw_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let hot_draw_volume_m3 = if tmv.setpoint_temp_c > tmv.tempered_draw_temp_c {
+            // Setpoint exceeds tempered delivery target -- TMV applies to hot draws.
             if outlet_est_c <= tmv.hot_draw_temp_c {
-                hot_flow_m3_s * dt.as_secs_f64()
+                raw_hot_draw_m3
             } else {
                 let vol_ratio =
                     (tmv.hot_draw_temp_c - mains_temp_c) / (outlet_est_c - mains_temp_c).max(1e-9);
-                hot_flow_m3_s * dt.as_secs_f64() * vol_ratio.clamp(0.0, 1.0)
+                raw_hot_draw_m3 * vol_ratio.clamp(0.0, 1.0)
             }
         } else {
-            hot_flow_m3_s * dt.as_secs_f64()
+            raw_hot_draw_m3
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // OCHRE Water.py:305 -- when TMV is active and the tank is hotter
+            // than the hot delivery target, the draw volume must be strictly
+            // less than the raw (unmixed) volume.
+            let tmv_active = tmv.setpoint_temp_c > tmv.tempered_draw_temp_c;
+            let above_hot_target = outlet_est_c > tmv.hot_draw_temp_c;
+            if raw_hot_draw_m3 > 0.0 && tmv_active && above_hot_target {
+                debug_assert!(
+                    hot_draw_volume_m3 < raw_hot_draw_m3,
+                    "TMV should reduce hot-draw volume when outlet ({outlet_est_c} °C) > hot_draw_temp ({hot} °C): \
+                     got {hot_draw_volume_m3} >= {raw_hot_draw_m3}",
+                    hot = tmv.hot_draw_temp_c,
+                );
+            }
+        }
 
         // For fixture draws: reduce draw if outlet > tempered_draw_temp_c.
         let tempered_draw_volume_m3 = if tempered_flow_m3_s > 0.0 {
@@ -455,12 +478,22 @@ impl StratifiedTank {
         #[cfg(feature = "observe")]
         {
             let divergence_k = draw.outlet_temp_c - outlet_est_c;
+            let hot_vol_ratio = if raw_hot_draw_m3 > 0.0 {
+                hot_draw_volume_m3 / raw_hot_draw_m3
+            } else {
+                1.0
+            };
+            let tmv_hot_entered = tmv.setpoint_temp_c > tmv.tempered_draw_temp_c;
             tracing::debug!(
                 outlet_est_c,
                 outlet_post_c = draw.outlet_temp_c,
                 divergence_k,
                 unmet_load_w,
-                "step_tempered: pre/post-injection outlet divergence"
+                tmv_hot_entered,
+                hot_vol_ratio,
+                raw_hot_draw_m3,
+                hot_draw_volume_m3,
+                "step_tempered: pre/post-injection outlet divergence, hot-draw TMV"
             );
         }
 
@@ -2265,5 +2298,80 @@ mod tests {
             "single-node draw outlet should be 55.0, got {:.4}",
             draw.outlet_temp_c,
         );
+    }
+
+    /// Regression: overheated tank (70°C) with a hot draw — TMV must reduce the
+    /// draw volume because setpoint (51.7°C) > tempered_draw_temp (40.6°C) activates
+    /// the mixing valve for hot draws.  Without the fix (setpoint > hot_draw_temp = 51.7)
+    /// the valve never opens and the full 70°C volume is drawn, wasting stored energy.
+    ///
+    /// OCHRE Water.py:305: `if self.tempered_draw_temp < self.setpoint_temp:`.
+    #[test]
+    fn tmv_reduces_hot_draw_when_tank_overheated() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 70.0); // overheated tank
+        let mains_temp_c = 15.0;
+        let hot_flow_m3_s = 1e-4; // 0.1 L/s = 6 L/min
+        let dt = Duration::from_secs(60);
+        let raw_volume_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+
+        let draw = tank
+            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered hot draw");
+
+        // Full-energy draw if no TMV blending occurred:
+        // outlet ≈ 70°C (top node), volume = raw_volume_m3.
+        let density = water_density_kg_m3(70.0);
+        let full_draw_energy_j = raw_volume_m3 * density * CP_LIQUID_WATER_J_KG_K * 70.0;
+        assert!(
+            draw.energy_out_j < full_draw_energy_j,
+            "TMV should reduce hot-draw energy: {:.1} vs full {:.1}",
+            draw.energy_out_j,
+            full_draw_energy_j,
+        );
+        assert_eq!(
+            draw.unmet_load_w, 0.0,
+            "no unmet load when outlet exceeds fixture temp"
+        );
+    }
+
+    /// Boundary: when the tank top node is exactly at hot_draw_temp (51.7°C),
+    /// setpoint > tempered_draw is still true so TMV applies, but the outlet
+    /// temperature does not exceed the hot delivery target, so no blending
+    /// reduction occurs — the draw volume equals the raw volume.
+    #[test]
+    fn tmv_no_hot_draw_reduction_when_tank_at_hot_draw_temp() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 51.7); // exactly at hot_draw_temp
+        let mains_temp_c = 15.0;
+        let hot_flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+        let raw_volume_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+
+        let draw = tank
+            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered hot draw at boundary");
+
+        // With UA=0 and no conduction, the draw outlet is a segment-average
+        // of 51.7°C water; energy_out should match the raw draw energy.
+        let density = water_density_kg_m3(51.7);
+        let expected_energy_j = raw_volume_m3 * density * CP_LIQUID_WATER_J_KG_K * 51.7;
+        assert!(
+            (draw.energy_out_j - expected_energy_j).abs() < 1.0,
+            "boundary hot draw should use full volume: {:.1} vs {:.1}",
+            draw.energy_out_j,
+            expected_energy_j,
+        );
+        assert_eq!(draw.unmet_load_w, 0.0);
     }
 }
