@@ -329,6 +329,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         self.mix_inversions();
+        self.recompute_skin_loss_w(ambient_temp_c);
         Ok(draw)
     }
 
@@ -396,6 +397,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
         self.mix_inversions();
+        self.recompute_skin_loss_w(ambient_temp_c);
 
         // F5: warn when outlet falls below mains (physically impossible for a
         // passive tank; indicates numerical artefact or bad input).
@@ -528,6 +530,47 @@ impl StratifiedTank {
         total_merges
     }
 
+    /// Compute total skin (jacket) heat loss [W] from a temperature profile.
+    /// Positive means heat flowing OUT of the tank into the ambient zone.
+    ///
+    /// `Σ ua_per_node[i] × (temps[i] − ambient_temp_c)`
+    fn compute_skin_loss_w(&self, temps: &[f64], ambient_temp_c: f64) -> f64 {
+        temps
+            .iter()
+            .zip(self.ua_per_node.iter())
+            .map(|(t, ua)| ua * (t - ambient_temp_c))
+            .sum()
+    }
+
+    /// Recompute `last_skin_loss_w` from the current (post-mixing) temperature
+    /// profile so that observers, energy accounting, and zone-coupled heat gains
+    /// use the physically-stable mixed profile rather than the pre-mixing profile
+    /// which may contain inversions.
+    ///
+    /// EnergyPlus WaterThermalTanks.cc:8466-8519 adjusts Tavg during inversion
+    /// mixing so that Qloss bookkeeping uses the post-mixing profile; HARES
+    /// corrects the loss post-mixing instead.
+    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) {
+        let _pre_mix_loss = self.last_skin_loss_w;
+        self.last_skin_loss_w = self.compute_skin_loss_w(&self.node_temps_c, ambient_temp_c);
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            last_skin_loss_w = self.last_skin_loss_w,
+            skin_loss_correction_w = _pre_mix_loss - self.last_skin_loss_w,
+            "post-mixing skin loss correction"
+        );
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.last_skin_loss_w.is_finite(),
+                "post-mixing skin loss must be finite, got {}",
+                self.last_skin_loss_w
+            );
+        }
+    }
+
     pub fn save_state(&self) -> Result<Vec<u8>> {
         try_save_versioned(
             &StratifiedTankState {
@@ -580,11 +623,10 @@ impl StratifiedTank {
             self.scratch_delta_energy[idx + 1] -= transfer_j;
         }
 
-        let mut total_skin_loss_w = 0.0_f64;
+        let total_skin_loss_w = self.compute_skin_loss_w(&self.scratch_old_temps, ambient_temp_c);
         for idx in 0..self.n_nodes() {
             let loss_w = self.ua_per_node[idx] * (self.scratch_old_temps[idx] - ambient_temp_c);
             self.scratch_delta_energy[idx] -= loss_w * seconds;
-            total_skin_loss_w += loss_w;
         }
         self.last_skin_loss_w = total_skin_loss_w;
 
@@ -1029,6 +1071,95 @@ mod tests {
         // the total error is ~7,000 J on a ~42 MJ tank (~0.017 %).
         // Tolerance of 10 kJ covers worst-case mixing with margin.
         assert!((after - before).abs() <= 10_000.0);
+
+        // Regression: after a full step, last_skin_loss_w must reflect the
+        // post-mixing node temperatures, not the pre-mixing inverted profile.
+        let mut tank2 = test_tank_with_ua(6, 3.0);
+        // Inverted profile: top cold, bottom hot.
+        for (idx, temp) in tank2.node_temps_c.iter_mut().enumerate() {
+            *temp = 20.0 + idx as f64 * 5.0; // [20, 25, 30, 35, 40, 45] → warm bottom
+        }
+        tank2.node_temps_c.reverse(); // [45, 40, 35, 30, 25, 20] → cold bottom
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        tank2
+            .step(ambient, 0.0, 15.0, &[], dt)
+            .expect("step with inverted profile");
+
+        let expected_loss: f64 = tank2
+            .node_temps()
+            .iter()
+            .zip(tank2.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank2.skin_loss_w() - expected_loss).abs() < 1e-9,
+            "skin loss {:.6} must match post-mixing profile computation {:.6}",
+            tank2.skin_loss_w(),
+            expected_loss
+        );
+    }
+
+    /// After `step()` with an inverted temperature profile, `last_skin_loss_w`
+    /// must equal the skin loss computed manually from the final (post-mixing)
+    /// node temperatures rather than the pre-mixing inverted profile.
+    #[test]
+    fn skin_loss_uses_post_mixing_profile_not_inverted_profile() {
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 4,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 4.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 40.0,
+            element_nodes: [Some(0), Some(3)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: Some(0.5),
+        })
+        .expect("tank");
+
+        // Deliberate inversion: bottom-hot, top-cold.
+        // After PAV mixing with equal-volume nodes [40, 60, 70, 50]:
+        //   node 0=40 → 40 < 60 merge → average=[50,2], 50 < 70 merge → [56.67,3], 50 OK
+        //   Post-mixing: [56.67, 56.67, 56.67, 50.0]
+        //
+        // Pre-mixing boundary-node temps (40, 50) differ from post-mixing (56.67, 50),
+        // producing a measurable skin loss difference via the end-cap UA on node 0.
+        let original_temps = vec![40.0, 60.0, 70.0, 50.0];
+        tank.node_temps_c.copy_from_slice(&original_temps);
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        tank.step(ambient, 0.0, 15.0, &[], dt)
+            .expect("step with inversion");
+
+        // Compute expected skin loss from the actual final (post-mixing) node temps.
+        let expected_skin_loss: f64 = tank
+            .node_temps()
+            .iter()
+            .zip(tank.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-9,
+            "skin loss {:.6} must match post-mixing manual computation {:.6}",
+            tank.skin_loss_w(),
+            expected_skin_loss
+        );
+
+        // The pre-mixing loss should differ measurably from the corrected value.
+        let pre_mix_loss: f64 = original_temps
+            .iter()
+            .zip(tank.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - pre_mix_loss).abs() > 1e-9,
+            "skin loss correction must produce a measurable difference: pre {:.6}, post {:.6}",
+            pre_mix_loss,
+            tank.skin_loss_w()
+        );
     }
 
     #[test]
@@ -1519,12 +1650,13 @@ mod tests {
                 tank.node_temps()[idx]
             );
         }
-        // Skin loss must be the sum of all per-node UA × ΔT contributions.
+        // Skin loss must be the sum of all per-node UA × ΔT contributions,
+        // computed from the final (post-standby, post-mixing) node temperatures.
         let expected_skin_loss: f64 = (0..6)
-            .map(|i| tank.ua_per_node[i] * ((60.0 - i as f64 * 2.0) - ambient))
+            .map(|i| tank.ua_per_node[i] * (tank.node_temps()[i] - ambient))
             .sum();
         assert!(
-            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-6,
+            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-9,
             "skin_loss_w: expected {expected_skin_loss:.4}, got {:.4}",
             tank.skin_loss_w()
         );
