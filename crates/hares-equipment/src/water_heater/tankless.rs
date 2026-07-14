@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use hares_physics::constants::{
-    CP_LIQUID_WATER_J_KG_K, UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE,
+    CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
+    UEF_TO_EF_GAS_SLOPE,
 };
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
@@ -57,6 +58,12 @@ pub struct TanklessWH {
     fuel_type: FuelType,
     setpoint_c: f64,
     efficiency_factor: f64,
+    // si-guard-ignore: `GPM` in doc comment reflects HPXML user-facing config field unit; the
+    // value is converted to kg/s (SI) at init and never used imperially in simulation.
+    /// Minimum flow rate [kg/s] required for the burner to engage.
+    /// Typical tankless flow sensors require ~0.03 kg/s (≈0.5 GPM).
+    /// Defaults to 0.0 (no minimum) for backward compatibility.
+    min_flow_kg_s: f64,
     /// Immutable rated maximum thermal output (W). Never mutated by control signals.
     /// Mirrors OCHRE's `capacity_rated`.
     rated_thermal_power_w: f64,
@@ -134,6 +141,7 @@ impl TanklessWH {
             fuel_type,
             setpoint_c: DEFAULT_SETPOINT_C,
             efficiency_factor: DEFAULT_EF,
+            min_flow_kg_s: 0.0,
             rated_thermal_power_w: DEFAULT_MAX_THERMAL_POWER_W,
             power_limit_w: None,
             parasitic_power_w: 7.38,
@@ -230,6 +238,17 @@ impl TanklessWH {
         } else {
             raw_ef.max(1e-6)
         };
+
+        /* si-guard-ignore: `gpm` in field name `min_flow_gpm` is an HPXML-convention
+        config field; the value is immediately converted to kg/s (SI). */
+        self.min_flow_kg_s = c
+            .min_flow_kg_s
+            .or_else(|| {
+                c.min_flow_gpm
+                    .map(|v| v * GALLONS_PER_MINUTE_TO_KG_PER_SECOND)
+            }) // si-guard-ignore: `gpm` field name is HPXML convention; converted to kg/s
+            .unwrap_or(0.0)
+            .max(0.0);
 
         #[cfg(debug_assertions)]
         assert!(
@@ -370,7 +389,7 @@ impl Equipment for TanklessWH {
             .accumulate(draw_volume_l, env.current_time.hour());
 
         let (thermal_output_w, outlet_temp_c) =
-            if mode == OperatingMode::Heating && total_draw_kg_s > 0.0 {
+            if mode == OperatingMode::Heating && total_draw_kg_s > self.min_flow_kg_s {
                 // Unclamped thermal demand to reach setpoint.
                 let demand_w = total_draw_kg_s * CP_LIQUID_WATER_J_KG_K * delta_t_c * duty;
 
@@ -388,7 +407,7 @@ impl Equipment for TanklessWH {
                     (capacity_w, outlet_c)
                 }
             } else if mode == OperatingMode::Heating {
-                // Heating mode but zero flow: no output needed.
+                // Heating mode but flow at or below minimum threshold: no burner output.
                 (0.0, setpoint_c)
             } else {
                 // Off: outlet equals inlet.
@@ -834,6 +853,8 @@ mod tests {
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
         }
     }
 
@@ -1827,6 +1848,129 @@ mod tests {
             (ports.electrical.load_power_w - 10.0).abs() < 1.0,
             "parasitic power must be 10 W, got {} W",
             ports.electrical.load_power_w
+        );
+    }
+
+    // --- Minimum flow threshold tests ---
+
+    /// With min_flow_kg_s = 0.03, flow of 0.02 kg/s is below the threshold
+    /// and must produce zero thermal output.
+    #[test]
+    fn flow_below_min_threshold_produces_zero_thermal_output() {
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.02);
+        typed.min_flow_kg_s = Some(0.03);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        step_once(&mut eq);
+
+        assert_eq!(
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
+            0.0,
+            "flow 0.02 kg/s below min_flow_kg_s=0.03 must produce zero thermal output"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap(),
+            0.0,
+            "flow 0.02 kg/s below min_flow_kg_s=0.03 must produce zero fuel input"
+        );
+    }
+
+    /// With min_flow_kg_s = 0.03, flow of 0.04 kg/s exceeds the threshold
+    /// and must produce non-zero thermal output.
+    #[test]
+    fn flow_above_min_threshold_produces_thermal_output() {
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.04);
+        typed.min_flow_kg_s = Some(0.03);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        step_once(&mut eq);
+
+        assert!(
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
+            "flow 0.04 kg/s above min_flow_kg_s=0.03 must produce non-zero thermal output"
+        );
+        assert!(
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap() > 0.0,
+            "flow 0.04 kg/s above min_flow_kg_s=0.03 must produce non-zero fuel input"
+        );
+    }
+
+    /// When min_flow_kg_s is not specified (default 0.0), a very small
+    /// positive flow must still produce thermal output (backward compatibility).
+    #[test]
+    fn default_min_flow_threshold_allows_any_positive_flow() {
+        // 0.001 kg/s is a tiny flow — with default threshold 0.0 it must still fire.
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.001);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        step_once(&mut eq);
+
+        assert!(
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
+            "default min_flow_kg_s=0.0 must allow tiny positive flows to fire"
+        );
+    }
+
+    /// min_flow_gpm convenience input converts to kg/s and gates the burner
+    /// the same as min_flow_kg_s. 0.5 GPM ≈ 0.0315 kg/s; flow 0.02 kg/s
+    /// is below this threshold and must produce zero output.
+    #[test]
+    fn min_flow_gpm_convenience_input_gates_burner() {
+        use hares_physics::constants::GALLONS_PER_MINUTE_TO_KG_PER_SECOND;
+
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.02);
+        typed.min_flow_gpm = Some(0.5);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        let threshold = 0.5 * GALLONS_PER_MINUTE_TO_KG_PER_SECOND;
+        assert!(
+            threshold > 0.02,
+            "0.5 GPM ({threshold:.6} kg/s) must be above test flow 0.02 kg/s"
+        );
+
+        step_once(&mut eq);
+
+        assert_eq!(
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
+            0.0,
+            "flow 0.02 kg/s below min_flow_gpm=0.5 ({threshold:.6} kg/s) must produce zero output"
+        );
+    }
+
+    /// When both min_flow_kg_s and min_flow_gpm are set, min_flow_kg_s takes
+    /// precedence (it is the direct internal unit).
+    #[test]
+    fn min_flow_kg_s_takes_precedence_over_min_flow_gpm() {
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.02);
+        typed.min_flow_kg_s = Some(0.01);
+        typed.min_flow_gpm = Some(1.0);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        step_once(&mut eq);
+
+        assert!(
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
+            "flow 0.02 kg/s must fire when min_flow_kg_s=0.01 takes precedence"
         );
     }
 }

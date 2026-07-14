@@ -923,6 +923,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 mains_temp_c_source: None,
                 avg_water_draw_l_per_day: None,
                 zone_type: None,
+                min_flow_kg_s: None,
+                min_flow_gpm: None,
             },
         ),
         "Gas Tankless Water Heater" => typed_alias_config(
@@ -944,6 +946,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 mains_temp_c_source: None,
                 avg_water_draw_l_per_day: None,
                 zone_type: None,
+                min_flow_kg_s: None,
+                min_flow_gpm: None,
             },
         ),
         "Heat Pump Water Heater" | "HPWH" => typed_alias_config(

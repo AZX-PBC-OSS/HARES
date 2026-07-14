@@ -807,6 +807,8 @@ fn oracle_tankless_wh_24h_constant_draw() {
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
         },
     )
     .unwrap();

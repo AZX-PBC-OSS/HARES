@@ -184,6 +184,14 @@ pub const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
 /// 1 ft^3 = 0.028_316_846_592 m^3 and 1 min = 60 s.
 pub const CFM_TO_M3_S: f64 = 0.000_471_947_443_2;
 
+/// US gallons per minute to kg/s water mass flow rate.
+///
+/// 1 US gallon = 3.785411784 L (NIST SP 811, exact); nominal water density
+/// 1000 kg/m³. Used for tankless water heater minimum-flow threshold
+/// conversion from GPM (user-facing) to kg/s (internal SI).
+/// 1 GPM = 3.785411784 L/min × 1 kg/L / 60 s/min = 0.0630901964 kg/s.
+pub const GALLONS_PER_MINUTE_TO_KG_PER_SECOND: f64 = 0.063_090_196_4;
+
 /// Cubic meters per second to cubic feet per minute conversion factor.
 pub const CFM_PER_M3_S: f64 = 1.0 / CFM_TO_M3_S;
 

@@ -620,6 +620,8 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
             zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
         };
         Some(
             EquipmentConfig::from_typed(wh.name.clone(), "Tankless Water Heater".to_string(), cfg)

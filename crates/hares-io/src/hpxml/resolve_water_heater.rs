@@ -249,6 +249,8 @@ pub(super) fn resolve_water_heaters(
                     mains_temp_c_source: None,
                     avg_water_draw_l_per_day,
                     zone_type: zone_name.clone(),
+                    min_flow_kg_s: None,
+                    min_flow_gpm: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)?
             }
@@ -977,6 +979,8 @@ fn try_build_tankless_wh_config(
         mains_temp_c_source: None,
         avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
         zone_type: param_str(params, "zone_type"),
+        min_flow_kg_s: None,
+        min_flow_gpm: None,
     };
     EquipmentConfig::from_typed(name.to_string(), "Tankless Water Heater".to_string(), cfg).ok()
 }

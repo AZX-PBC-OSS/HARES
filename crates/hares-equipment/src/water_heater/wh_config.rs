@@ -417,6 +417,17 @@ pub struct TanklessWaterHeaterConfig {
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
     pub zone_type: Option<String>,
+    /// Minimum flow threshold [kg/s] below which the burner does not fire.
+    /// Typical tankless flow sensors require ~0.5 GPM (≈ 0.03 kg/s).
+    /// Defaults to 0.0 when `None` (preserves current behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_flow_kg_s: Option<f64>,
+    /// Minimum flow threshold [US GPM] as a convenience input.
+    /// Converted internally to kg/s via `GALLONS_PER_MINUTE_TO_KG_PER_SECOND`
+    /// and used only when `min_flow_kg_s` is `None`.
+    /// Defaults to `None` → 0.0 kg/s threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_flow_gpm: Option<f64>,
 }
 
 impl EquipmentTypedConfig for TanklessWaterHeaterConfig {
@@ -476,6 +487,8 @@ impl TanklessWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite("tankless_wh: min_flow_kg_s", self.min_flow_kg_s, 0.0, false)?;
+        check_finite("tankless_wh: min_flow_gpm", self.min_flow_gpm, 0.0, false)?;
         Ok(())
     }
 }
@@ -920,6 +933,8 @@ mod tests {
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: Some(227.0),
             zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
         };
         let ec = EquipmentConfig::from_typed(
             "tankless".to_string(),

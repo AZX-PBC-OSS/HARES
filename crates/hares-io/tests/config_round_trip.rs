@@ -387,6 +387,8 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
         }),
         avg_water_draw_l_per_day: Some(220.0),
         zone_type: None,
+        min_flow_kg_s: None,
+        min_flow_gpm: None,
     }
 }
 

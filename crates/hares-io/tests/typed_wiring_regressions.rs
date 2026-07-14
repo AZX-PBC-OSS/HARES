@@ -91,6 +91,8 @@ fn tankless_schedule_sources_round_trip_and_init() {
         }),
         avg_water_draw_l_per_day: Some(220.0),
         zone_type: None,
+        min_flow_kg_s: None,
+        min_flow_gpm: None,
     };
 
     let serialized = serde_json::to_value(&cfg).expect("serialize tankless config");

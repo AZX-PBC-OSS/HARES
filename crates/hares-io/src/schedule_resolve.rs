@@ -2222,6 +2222,8 @@ mod tests {
                 mains_temp_c_source: None,
                 avg_water_draw_l_per_day,
                 zone_type: None,
+                min_flow_kg_s: None,
+                min_flow_gpm: None,
             },
         )
         .unwrap();
