@@ -399,11 +399,14 @@ impl Equipment for TanklessWH {
                     // Within capacity: deliver setpoint temperature.
                     (demand_w, setpoint_c)
                 } else {
-                    // Over-capacity: clamp time-averaged output; outlet temp uses the
-                    // instantaneous rated power -- the heater fires at rated capacity during
-                    // its on-fraction regardless of duty or power-limit accounting.
-                    let outlet_c = inlet_temp_c
-                        + self.rated_thermal_power_w / (total_draw_kg_s * CP_LIQUID_WATER_J_KG_K);
+                    // Over-capacity: clamp time-averaged output. Outlet temperature
+                    // uses effective_max_w (rated power, optionally capped by PowerLimit).
+                    // The heater fires at effective_max_w during its on-fraction:
+                    // duty-cycle-only → effective_max_w == rated (100% fire during on-phase);
+                    // PowerLimit → effective_max_w < rated (firing rate is actively limited,
+                    // so the burner never reaches full nameplate rating).
+                    let outlet_c =
+                        inlet_temp_c + effective_max_w / (total_draw_kg_s * CP_LIQUID_WATER_J_KG_K);
                     (capacity_w, outlet_c)
                 }
             } else if mode == OperatingMode::Heating {
@@ -1511,6 +1514,59 @@ mod tests {
         assert!(
             fuel <= 10_000.0 + 1e-6,
             "fuel input ({fuel:.1} W) must not exceed 10,000 W limit"
+        );
+    }
+
+    /// PowerLimit + over-capacity: outlet temperature uses effective_max_w,
+    /// not the full rated_thermal_power_w. A PowerLimit signal reduces the
+    /// burner's firing rate, so the instantaneous outlet temperature during
+    /// the on-phase must reflect the limited thermal power, not nameplate rating.
+    #[test]
+    fn power_limit_over_capacity_outlet_temp_uses_effective_max_w() {
+        use hares_types::ControlSignal;
+
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.energy_factor = Some(0.8);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        // PowerLimit { max_power_kw: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
+        // With flow=1.0 kg/s, delta_T demands exceed 4,000 W → over-capacity.
+        eq.apply_control(&ControlSignal::PowerLimit {
+            max_power_kw: 5.0,
+            ramp_rate_kw_per_s: None,
+        })
+        .unwrap();
+
+        step_once(&mut eq);
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+
+        // effective_max_w = min(20_000, 4_000) = 4_000 W
+        let effective_max = 4_000.0;
+        // Time-averaged thermal output = effective_max * duty (duty=1.0) = 4,000 W
+        assert!(
+            (thermal - effective_max).abs() < 1e-6,
+            "thermal output must equal effective_max_w {effective_max} W, got {thermal}"
+        );
+        // Fuel input = thermal / efficiency = 4,000 / 0.8 = 5,000 W
+        assert!(
+            fuel <= 5_000.0 + 1e-6,
+            "fuel input ({fuel:.1} W) must not exceed 5,000 W (5 kW limit / 0.8 eff)"
+        );
+        // Outlet temp uses effective_max_w (4,000 W), not rated 20,000 W:
+        // correct = 20.0 + 4000.0 / (1.0 * CP) ≈ 20.96 °C
+        // wrong   = 20.0 + 20000.0 / (1.0 * CP) ≈ 24.78 °C
+        let expected_outlet = 20.0 + effective_max / (1.0 * CP_LIQUID_WATER_J_KG_K);
+        assert!(
+            (outlet - expected_outlet).abs() < 1e-6,
+            "outlet temp must use effective_max_w ({effective_max} W): expected {expected_outlet:.4}°C, got {outlet:.4}°C"
         );
     }
 
