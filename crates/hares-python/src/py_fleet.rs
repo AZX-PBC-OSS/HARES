@@ -222,6 +222,16 @@ impl PyFleet {
 
         let aggregated = aggregate(&success, resolution)
             .map_err(|e| PyValueError::new_err(format!("fleet aggregation failed: {e}")))?;
+
+        if aggregated.aggregate_timeseries.num_rows() == 0 && !success.is_empty() {
+            py.import("warnings")?.call_method1(
+                "warn",
+                ("Fleet aggregation produced an empty timeseries despite \
+                     successful dwellings. This may indicate column mismatches \
+                     across dwellings.",),
+            )?;
+        }
+
         let mut results = fleet_results_to_py(aggregated);
         results.failures = failures;
         results.n_succeeded = success.len();

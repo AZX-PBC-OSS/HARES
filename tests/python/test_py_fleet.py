@@ -398,3 +398,68 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     assert len(results.failures) == 1
     assert results.failures[0]["bldg_id"] == 2
     assert isinstance(results.failures[0]["error"], str)
+
+
+@pytest.mark.slow
+def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
+    """Verify simulate() emits a warning when heterogeneous equipment causes column mismatch.
+
+    Two dwellings with different equipment types produce different output
+    column sets (e.g., a battery-equipped dwelling has extra battery columns).
+    The fleet aggregator detects the mismatch and returns an empty aggregate
+    batch. The Python guard then emits a warning so callers can detect the
+    condition without inspecting the DataFrame shape.
+    """
+    import warnings
+
+    PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
+    if not _ochre_fixtures_available():
+        pytest.skip("OCHRE fixtures not available")
+
+    fixture_dir = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples"
+    schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+    weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, output_verbosity=1)
+
+    config1 = DwellingConfig(
+        hpxml=str(fixture_dir / "base.xml"),
+        schedule=schedule,
+        weather=weather,
+        config=sim_config,
+        bldg_id=1,
+    )
+    config2 = DwellingConfig(
+        hpxml=str(fixture_dir / "base-battery.xml"),
+        schedule=schedule,
+        weather=weather,
+        config=sim_config,
+        bldg_id=2,
+    )
+    fleet = PyFleet.from_buildings([config1, config2])
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        results = fleet.simulate()
+
+    # Both dwellings should complete (the guard emits a warning, not an error).
+    assert results.n_succeeded == 2, (
+        f"Expected both dwellings to succeed, got n_succeeded={results.n_succeeded}"
+    )
+
+    # The aggregate timeseries is empty because column sets differ across dwellings.
+    assert results.aggregate_timeseries.height == 0
+
+    # The Python guard must emit a warning so callers can detect the condition.
+    assert len(w) >= 1, (
+        f"Expected at least 1 warning for heterogeneous fleet, got {len(w)}"
+    )
+    assert any(
+        "empty timeseries" in str(warning.message).lower()
+        for warning in w
+    ), (
+        f"No 'empty timeseries' warning found; warnings: "
+        f"{[str(x.message) for x in w]}"
+    )

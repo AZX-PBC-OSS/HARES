@@ -232,7 +232,19 @@ pub fn aggregate(
         }
     }
 
+    let n_successful = successful.len();
     let aggregate_timeseries = build_aggregate_batch(successful);
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        if aggregate_timeseries.num_rows() == 0 && n_successful > 0 {
+            tracing::error!(
+                n_successful = n_successful,
+                "fleet aggregation invariant violated: aggregate timeseries is empty \
+                 despite successful dwelling(s)",
+            );
+        }
+    }
 
     Ok(FleetResults {
         per_dwelling_metrics,
@@ -376,9 +388,34 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         .map(|name| FleetAggregation::for_column(name))
         .collect();
 
+    #[cfg(feature = "observe")]
+    {
+        let all_schemas_match = successful
+            .iter()
+            .skip(1)
+            .all(|(_, cols, _)| cols == first_columns);
+        tracing::info!(
+            target: "observe",
+            n_columns = first_columns.len(),
+            all_schemas_match = all_schemas_match,
+            "fleet aggregate schema consistency",
+        );
+    }
+
     let mut bucket_intersection: BTreeSet<i64> = first_buckets.keys().copied().collect();
     for (_, columns, buckets) in successful.iter().skip(1) {
         if columns != first_columns {
+            let first_set: BTreeSet<_> = first_columns.iter().collect();
+            let other_set: BTreeSet<_> = columns.iter().collect();
+            let only_in_first: Vec<_> = first_set.difference(&other_set).collect();
+            let only_in_other: Vec<_> = other_set.difference(&first_set).collect();
+            tracing::warn!(
+                n_first = first_columns.len(),
+                n_other = columns.len(),
+                only_in_first = ?only_in_first,
+                only_in_other = ?only_in_other,
+                "column mismatch in fleet aggregation; returning empty batch",
+            );
             return empty_batch();
         }
         let keys: BTreeSet<i64> = buckets.keys().copied().collect();
@@ -466,7 +503,13 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         arrays.push(Arc::new(builder.finish()));
     }
 
-    RecordBatch::try_new(schema, arrays).unwrap_or_else(|_| empty_batch())
+    RecordBatch::try_new(schema, arrays).unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            "fleet aggregation: RecordBatch::try_new failed, returning empty batch",
+        );
+        empty_batch()
+    })
 }
 
 fn empty_batch() -> RecordBatch {
@@ -1045,5 +1088,44 @@ mod tests {
 
         let err = aggregate(&[d1, d2], AggregationResolution::Hourly).unwrap_err();
         assert!(matches!(err, FleetError::ZeroWeightFleet));
+    }
+
+    #[test]
+    fn column_mismatch_returns_empty_batch() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        let d1 = outcome(
+            1.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![
+                    ("Total Electric Power (kW)", vec![Some(10.0)]),
+                    ("Temperature - Indoor (C)", vec![Some(21.0)]),
+                ],
+            )),
+        );
+        let d2 = outcome(
+            1.0,
+            SimStatus::Ok,
+            sample_metrics(10.0, 1.0),
+            Some(batch(
+                &[t0],
+                vec![
+                    ("Total Electric Power (kW)", vec![Some(20.0)]),
+                    ("Battery SOC (-)", vec![Some(0.5)]),
+                ],
+            )),
+        );
+
+        let fleet = aggregate(&[d1, d2], AggregationResolution::FifteenMin).expect("aggregate");
+        assert_eq!(
+            fleet.aggregate_timeseries.num_rows(),
+            0,
+            "column mismatch should produce empty batch"
+        );
+        assert_eq!(fleet.aggregate_timeseries.num_columns(), 1);
+        assert_eq!(fleet.per_dwelling_metrics.len(), 2);
     }
 }
