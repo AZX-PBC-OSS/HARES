@@ -168,7 +168,7 @@ pub fn aggregate(
             });
         }
 
-        let Some((schema, rows)) = extract_rows(outcome) else {
+        let Some((schema, rows)) = extract_rows(outcome, index) else {
             continue;
         };
         if rows.is_empty() {
@@ -252,16 +252,48 @@ pub fn aggregate(
     })
 }
 
-fn extract_rows(outcome: &DwellingOutcome) -> Option<(Arc<Schema>, Vec<RecordBatch>)> {
+fn extract_rows(
+    outcome: &DwellingOutcome,
+    dwelling_index: usize,
+) -> Option<(Arc<Schema>, Vec<RecordBatch>)> {
     let batches = outcome.result.timeseries.as_ref()?;
     let first = batches.first()?;
     let schema = first.schema();
 
-    if !batches
-        .iter()
-        .all(|batch| batch.schema().fields() == schema.fields())
-    {
-        return None;
+    for (batch_idx, batch) in batches.iter().enumerate().skip(1) {
+        let batch_schema = batch.schema();
+        let batch_fields = batch_schema.fields();
+        if batch_fields != schema.fields() {
+            let expected_names: Vec<&str> =
+                schema.fields().iter().map(|f| f.name().as_str()).collect();
+            let actual_names: Vec<&str> = batch_fields.iter().map(|f| f.name().as_str()).collect();
+            let expected_set: BTreeSet<_> = expected_names.iter().copied().collect();
+            let actual_set: BTreeSet<_> = actual_names.iter().copied().collect();
+            let missing: Vec<_> = expected_set.difference(&actual_set).copied().collect();
+            let extra: Vec<_> = actual_set.difference(&expected_set).copied().collect();
+
+            tracing::warn!(
+                dwelling_index = dwelling_index,
+                batch_index = batch_idx,
+                expected_fields = ?expected_names,
+                mismatched_fields = ?actual_names,
+                missing = ?missing,
+                extra = ?extra,
+                "intra-dwelling schema mismatch in extract_rows; excluding dwelling from aggregation",
+            );
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::info!(
+                    target: "observe",
+                    dwelling_index = dwelling_index,
+                    reason = "intra_dwelling_schema_mismatch",
+                    "dwelling excluded from fleet aggregation due to intra-dwelling schema mismatch",
+                );
+            }
+
+            return None;
+        }
     }
 
     Some((schema, batches.clone()))
@@ -1127,5 +1159,33 @@ mod tests {
         );
         assert_eq!(fleet.aggregate_timeseries.num_columns(), 1);
         assert_eq!(fleet.per_dwelling_metrics.len(), 2);
+    }
+
+    #[test]
+    fn extract_rows_returns_none_on_intra_dwelling_schema_mismatch() {
+        let batch1 = batch(
+            &["2021-01-01T00:00:00Z"],
+            vec![("Total Electric Power (kW)", vec![Some(1.0)])],
+        );
+        let batch2 = batch(
+            &["2021-01-01T00:15:00Z"],
+            vec![("Temperature - Indoor (C)", vec![Some(21.0)])],
+        );
+
+        let outcome = DwellingOutcome {
+            result: SimulationResults {
+                timeseries_path: None,
+                timeseries: Some(vec![batch1, batch2]),
+                metrics: sample_metrics(10.0, 1.0),
+                warnings: Vec::new(),
+                status: hares_core::SimStatus::Ok,
+                elapsed: StdDuration::from_secs(1),
+            },
+            sample_weight: 1.0,
+            status: SimStatus::Ok,
+        };
+
+        let result = extract_rows(&outcome, 0);
+        assert!(result.is_none());
     }
 }
