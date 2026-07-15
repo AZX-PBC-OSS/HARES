@@ -71,6 +71,15 @@ pub(crate) struct InfiltrationCoupling {
     pub forced_flow_m3_s: f64,
     /// Natural ventilation flow [m³/s].
     pub nat_flow_m3_s: f64,
+    /// Natural ventilation stack-driven component [m³/s].
+    #[cfg(feature = "observe")]
+    pub q_stack_m3_s: f64,
+    /// Natural ventilation wind-driven component [m³/s].
+    #[cfg(feature = "observe")]
+    pub q_wind_m3_s: f64,
+    /// Natural ventilation discharge coefficient Cd used this timestep [-] min.
+    #[cfg(feature = "observe")]
+    pub cd_used: f64,
     /// Natural ventilation opening effectiveness Cw [0.0–0.55].
     /// Populated only when natural ventilation is active; 0.0 otherwise.
     #[cfg(feature = "observe")]
@@ -172,7 +181,9 @@ pub(crate) fn apply_infiltration_and_ventilation(
         }
 
         // Natural ventilation is only applied to the indoor/conditioned zone.
-        let q_nat_m3_s = if zone.id == config.indoor_zone_id {
+        // Returns (q_total, q_stack_adj, q_wind_adj, cd) — all in m³/s except cd (dimensionless).
+        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+        let (q_nat_m3_s, q_stack_m3_s, q_wind_m3_s, cd_used) = if zone.id == config.indoor_zone_id {
             config
                 .natural_ventilation
                 .as_ref()
@@ -185,16 +196,17 @@ pub(crate) fn apply_infiltration_and_ventilation(
                         w_out,
                         nv.max_outdoor_humidity_ratio,
                         env.weather.wind_speed_m_s,
-                        nv.stack_coeff,
-                        nv.wind_coeff,
                         zone.volume_m3,
                         nv.opening_azimuth_deg,
                         env.weather.wind_dir_deg,
+                        nv.dh_m,
+                        nv.opening_type,
+                        nv.zone_height_m,
                     )
                 })
-                .unwrap_or(0.0)
+                .unwrap_or((0.0, 0.0, 0.0, 0.0))
         } else {
-            0.0
+            (0.0, 0.0, 0.0, 0.0)
         };
 
         // Forced mechanical ventilation flow -- only for zones with explicit flow
@@ -290,6 +302,12 @@ pub(crate) fn apply_infiltration_and_ventilation(
             raw_inf_m3_s: q_inf_m3_s,
             forced_flow_m3_s,
             nat_flow_m3_s: q_nat_m3_s,
+            #[cfg(feature = "observe")]
+            q_stack_m3_s,
+            #[cfg(feature = "observe")]
+            q_wind_m3_s,
+            #[cfg(feature = "observe")]
+            cd_used,
             #[cfg(feature = "observe")]
             natural_ventilation_cw: config
                 .natural_ventilation
@@ -658,20 +676,19 @@ mod tests {
 
     /// Natural ventilation open: zone is warm (26°C), outdoor is cool and dry (15°C, W=0.005).
     ///
-    /// Hand-calculated from `natural_ventilation_flow_m3_s` formula with Cw = 0.55
+    /// Hand-calculated from the EnergyPlus wind-and-stack formula with Cw = 0.55
     /// (perpendicular wind: default opening azimuth 180° matches env wind_dir_deg 180°):
-    ///   A_eff   = 0.5 × 0.55 × 10000 = 2750 cm²
+    ///   Q_wind   = Cw × A × U = 0.55 × 0.5 × 2.0 = 0.55 m³/s
+    ///   Q_stack  = 0.0 (dh_m = 0.0, cross-ventilation with no height difference)
     ///   adj     = (26 − 22.778) / (26 − 15) = 3.222 / 11 ≈ 0.29291
-    ///   driver  = 0.000290 × 11 + 0.000150 × 4 = 0.003790
-    ///   q_nat   = 2750 × adj × √0.003790 / 1000
+    ///   q_total  = adj × sqrt(0.55² + 0²) = 0.29291 × 0.55 ≈ 0.16110 m³/s
     ///   (capped at 20 ACH = 20 × 300 / 3600 = 1.667 m³/s, not binding here)
     #[test]
     fn infiltration_natural_ventilation_open() {
         use crate::thermal_solver::config::NaturalVentilationConfig;
+        use hares_physics::infiltration::OpeningType;
 
         let open_area_m2 = 0.5_f64;
-        let stack_coeff = 0.000_290_f64;
-        let wind_coeff = 0.000_150_f64;
         let t_base_c = NaturalVentilationConfig::DEFAULT_T_BASE_C;
         let t_zone = 26.0_f64;
         let t_out = 15.0_f64;
@@ -683,8 +700,9 @@ mod tests {
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
             natural_ventilation: Some(NaturalVentilationConfig {
                 open_area_m2,
-                stack_coeff,
-                wind_coeff,
+                dh_m: 0.0,
+                zone_height_m: 2.5,
+                opening_type: OpeningType::CrossVentilation,
                 t_base_c,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
@@ -703,13 +721,13 @@ mod tests {
 
         let nat_flow = couplings[0].nat_flow_m3_s;
 
-        // Hand-calculated expected value: Cw = 0.55 for perpendicular wind (same azimuth 180°)
+        // Hand-calculated: Q_wind = 0.55 × 0.5 × 2.0 = 0.55 m³/s, Q_stack = 0, adj = 0.29291
         let cw = 0.55;
-        let nat_vent_area_cm2 = open_area_m2 * cw * 10_000.0;
+        let q_wind = cw * open_area_m2 * wind_m_s;
+        let q_stack = 0.0;
         let adj = ((t_zone - t_base_c) / (t_zone - t_out)).clamp(0.0, 1.0);
-        let driver = stack_coeff * (t_zone - t_out).abs() + wind_coeff * wind_m_s.powi(2);
         let q_expected =
-            (nat_vent_area_cm2 * adj * driver.sqrt() / 1000.0).min(20.0 * volume_m3 / 3600.0);
+            (adj * (q_wind * q_wind + q_stack * q_stack).sqrt()).min(20.0 * volume_m3 / 3600.0);
 
         assert!(
             (nat_flow - q_expected).abs() < 1e-9,
@@ -722,14 +740,16 @@ mod tests {
     #[test]
     fn infiltration_natural_ventilation_closed() {
         use crate::thermal_solver::config::NaturalVentilationConfig;
+        use hares_physics::infiltration::OpeningType;
 
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
             natural_ventilation: Some(NaturalVentilationConfig {
                 open_area_m2: 0.5,
-                stack_coeff: 0.000_290,
-                wind_coeff: 0.000_150,
+                dh_m: 0.0,
+                zone_height_m: 2.5,
+                opening_type: OpeningType::CrossVentilation,
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
@@ -756,6 +776,7 @@ mod tests {
     #[test]
     fn infiltration_natural_ventilation_indoor_only() {
         use crate::thermal_solver::config::NaturalVentilationConfig;
+        use hares_physics::infiltration::OpeningType;
 
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -765,8 +786,9 @@ mod tests {
             ],
             natural_ventilation: Some(NaturalVentilationConfig {
                 open_area_m2: 0.5,
-                stack_coeff: 0.000_290,
-                wind_coeff: 0.000_150,
+                dh_m: 0.0,
+                zone_height_m: 2.5,
+                opening_type: OpeningType::CrossVentilation,
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,

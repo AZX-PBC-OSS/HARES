@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::NodeId;
+pub use hares_physics::infiltration::OpeningType;
 use hares_physics::solar::GlazingCurve;
 use hares_types::ZoneId;
 use thiserror::Error;
@@ -166,17 +167,40 @@ pub struct MechanicalVentilationParams {
 
 /// Configuration for natural ventilation through operable windows.
 ///
-/// Implements the OCHRE/ResStock model: flow is driven by stack effect and wind
-/// through operable windows, gated by temperature and outdoor humidity conditions.
-/// Opening effectiveness (Cw) is computed per timestep from the angle between
-/// wind direction and opening normal, following the EnergyPlus linear interpolation
-/// (ASHRAE HoF 2009 Ch. 16.14, Equation 37; EnergyPlus `ZoneEquipmentManager.cc:6007–6023`).
+/// Implements the EnergyPlus `ZoneVentilation:WindandStackOpenArea` model:
+/// wind and stack flow components are computed separately and combined in
+/// quadrature following the EnergyPlus Engineering Reference §15.4 formula
+/// `Q = sqrt(Q_wind² + Q_stack²)` and ASHRAE HoF 2009 Ch. 16.14.
+///
+/// The stack term depends on the [`OpeningType`]:
+/// - [`CrossVentilation`](OpeningType::CrossVentilation): `Q_stack = Cd × A × sqrt(2·g·dh_m·|ΔT|/T_zone)`
+///   where `dh_m` is the vertical separation between inlet and outlet openings
+///   (EnergyPlus `DH` parameter).
+/// - [`SingleSided`](OpeningType::SingleSided): `Q_stack = Cd × A × sqrt(2·g·zone_height_m·|ΔT|/T_zone)`
+///   where `zone_height_m` is the characteristic opening height.
+///
+/// The wind term uses the wind-direction-dependent opening effectiveness `Cw`
+/// from [`compute_natural_ventilation_cw`](hares_physics::infiltration::compute_natural_ventilation_cw):
+/// `Q_wind = Cw × A × U_wind`
+/// (ASHRAE HoF 2009 Ch. 16.14, Equation 37).
+///
+/// Flow is gated by temperature and outdoor humidity conditions per the
+/// OCHRE/ResStock natural ventilation model.
 ///
 /// # Defaults
 /// - `t_base_c`: 22.778 °C (73 °F) -- OCHRE default comfort base temperature
 /// - `max_outdoor_humidity_ratio`: 0.0115 kg/kg -- Building America HSP threshold
 /// - `OPEN_AREA_FRACTION`: 0.067 -- matches OCHRE (0.67 × 0.5 × 0.2 of total window area)
 /// - `opening_azimuth_deg`: 180° (South-facing, common for passive cooling in northern hemisphere)
+/// - `opening_type`: [`CrossVentilation`](OpeningType::CrossVentilation)
+/// - `dh_m`: 0.0 -- no stack benefit unless explicitly set
+/// - `zone_height_m`: 2.5 m (typical residential ceiling height)
+///
+/// # References
+/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
+/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct (DH, DiscCoef)
+/// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: `Q = Cw × A × U`
+/// - EnergyPlus Engineering Reference §15.4: `Q = sqrt(Qw² + Qst²)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaturalVentilationConfig {
     /// Effective operable window area [m²].
@@ -184,10 +208,17 @@ pub struct NaturalVentilationConfig {
     /// Typically computed as `total_window_area_m2 * OPEN_AREA_FRACTION`.
     /// Use [`NaturalVentilationConfig::from_window_area`] to apply the standard fraction.
     pub open_area_m2: f64,
-    /// ELA stack coefficient [L/(s·cm⁴·K)] -- same table as infiltration ELA coefficients.
-    pub stack_coeff: f64,
-    /// ELA wind coefficient [L/(s·cm⁴·(m/s)²)] -- same table as infiltration ELA coefficients.
-    pub wind_coeff: f64,
+    /// Vertical separation between inlet and outlet openings [m].
+    ///
+    /// EnergyPlus `DH` parameter. Used for cross-ventilation stack computation.
+    /// Default 0.0 — produces no stack flow unless explicitly set.
+    pub dh_m: f64,
+    /// Zone height [m]; used as characteristic opening height for single-sided
+    /// stack computation. Typical residential value: 2.5 m.
+    pub zone_height_m: f64,
+    /// Opening type: single-sided or cross-ventilation.
+    /// Controls the discharge coefficient Cd and whether `dh_m` drives stack flow.
+    pub opening_type: OpeningType,
     /// Comfort base temperature [°C]. Flow is suppressed when `T_zone ≤ t_base_c`.
     pub t_base_c: f64,
     /// Maximum outdoor specific humidity [kg/kg] above which nat vent is suppressed.
@@ -210,13 +241,19 @@ impl NaturalVentilationConfig {
     pub const DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO: f64 = 0.0115;
     /// Default opening azimuth [°] -- South-facing, common for passive cooling in the northern hemisphere.
     pub const DEFAULT_OPENING_AZIMUTH_DEG: f64 = 180.0;
+    /// Default zone height [m] for single-sided stack computation.
+    pub const DEFAULT_ZONE_HEIGHT_M: f64 = 2.5;
 
     /// Construct from total window area; applies the standard 6.7% open-area fraction.
-    pub fn from_window_area(total_window_area_m2: f64, stack_coeff: f64, wind_coeff: f64) -> Self {
+    ///
+    /// Uses [`CrossVentilation`](OpeningType::CrossVentilation) with `dh_m = 0.0` —
+    /// no stack benefit until `dh_m` and `zone_height_m` are set explicitly.
+    pub fn from_window_area(total_window_area_m2: f64) -> Self {
         Self {
             open_area_m2: total_window_area_m2 * Self::OPEN_AREA_FRACTION,
-            stack_coeff,
-            wind_coeff,
+            dh_m: 0.0,
+            zone_height_m: Self::DEFAULT_ZONE_HEIGHT_M,
+            opening_type: OpeningType::CrossVentilation,
             t_base_c: Self::DEFAULT_T_BASE_C,
             max_outdoor_humidity_ratio: Self::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
             opening_azimuth_deg: Self::DEFAULT_OPENING_AZIMUTH_DEG,
@@ -768,6 +805,15 @@ pub struct EnvelopeComponentGains {
     pub forced_vent_m3_s: f64,
     /// Natural ventilation flow rate [m³/s].
     pub natural_vent_m3_s: f64,
+    /// Natural ventilation stack-driven flow component [m³/s].
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_q_stack_m3_s: f64,
+    /// Natural ventilation wind-driven flow component [m³/s].
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_q_wind_m3_s: f64,
+    /// Natural ventilation discharge coefficient Cd used this timestep [-] min.
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_cd_used: f64,
     /// Natural ventilation opening effectiveness Cw [0.0–0.55].
     #[cfg(feature = "observe")]
     pub natural_ventilation_cw: f64,

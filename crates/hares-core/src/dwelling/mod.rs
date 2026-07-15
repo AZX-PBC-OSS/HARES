@@ -5948,6 +5948,18 @@ impl Dwelling {
                 "Natural Ventilation Wind Angle (deg)",
                 gains.natural_ventilation_wind_angle_deg,
             ),
+            #[cfg(feature = "observe")]
+            (
+                "Natural Ventilation Q_Stack (m\u{b3}/s)",
+                gains.natural_ventilation_q_stack_m3_s,
+            ),
+            #[cfg(feature = "observe")]
+            (
+                "Natural Ventilation Q_Wind (m\u{b3}/s)",
+                gains.natural_ventilation_q_wind_m3_s,
+            ),
+            #[cfg(feature = "observe")]
+            ("Natural Ventilation Cd", gains.natural_ventilation_cd_used),
             ("Net Sensible Heat Gain - Indoor (W)", net_sensible_indoor_w),
             ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
             ("Interior LWR Exchange - Indoor (W)", gains.interior_lwr_w),

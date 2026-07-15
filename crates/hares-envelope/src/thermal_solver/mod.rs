@@ -41,8 +41,8 @@ pub use config::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
-    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig,
-    ThermalSolverError, WindowSolarProperties,
+    MechanicalVentilationParams, NaturalVentilationConfig, OpeningType, StateSpaceWiring,
+    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -1148,6 +1148,12 @@ impl ThermalSolver {
             raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
             natural_vent_m3_s: indoor_inf.map(|c| c.nat_flow_m3_s).unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_q_stack_m3_s: indoor_inf.map(|c| c.q_stack_m3_s).unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_q_wind_m3_s: indoor_inf.map(|c| c.q_wind_m3_s).unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_cd_used: indoor_inf.map(|c| c.cd_used).unwrap_or(0.0),
             #[cfg(feature = "observe")]
             natural_ventilation_cw: indoor_inf.map(|c| c.natural_ventilation_cw).unwrap_or(0.0),
             #[cfg(feature = "observe")]
@@ -3985,11 +3991,7 @@ mod tests {
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: MechanicalVentilationParams::default(),
-            natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
-                12.0,      // 12 m² total window area
-                0.000_106, // ELA stack coeff
-                0.000_143, // ELA wind coeff
-            )),
+            natural_ventilation: Some(NaturalVentilationConfig::from_window_area(12.0)),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
@@ -4075,9 +4077,7 @@ mod tests {
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: MechanicalVentilationParams::default(),
-            natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
-                12.0, 0.000_106, 0.000_143,
-            )),
+            natural_ventilation: Some(NaturalVentilationConfig::from_window_area(12.0)),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
@@ -6530,6 +6530,96 @@ mod tests {
             garage,
             by_zone.get(&garage).copied().unwrap_or(0.0),
             garage_jacket,
+        );
+    }
+
+    /// Natural ventilation observe fields `q_stack_m3_s`, `q_wind_m3_s`,
+    /// and `cd_used` populate correctly in `EnvelopeComponentGains` after a
+    /// solver step with cross-ventilation and `dh_m > 0`, proving the wiring
+    /// from `InfiltrationCoupling` through `ThermalSolver::prepare_inputs` is
+    /// correct.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn natural_ventilation_observe_fields_reach_component_gains() {
+        use hares_physics::infiltration::OpeningType;
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            interior_solar_zones: Vec::new(),
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: Some(NaturalVentilationConfig {
+                open_area_m2: 1.0,
+                dh_m: 2.0,
+                zone_height_m: 2.5,
+                opening_type: OpeningType::CrossVentilation,
+                t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
+            }),
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
+        };
+
+        let env = env_for_temp(26.0, 18.0);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 26.0).unwrap();
+        solver.x[0] = 26.0;
+        solver.prepare_inputs(&ports, &env);
+        let gains = solver.component_gains();
+
+        assert!(
+            gains.natural_ventilation_q_stack_m3_s > 0.0,
+            "q_stack_m3_s = {} must be > 0 with dh_m=2.0 and ΔT=8 K",
+            gains.natural_ventilation_q_stack_m3_s
+        );
+        assert!(
+            gains.natural_ventilation_q_wind_m3_s > 0.0,
+            "q_wind_m3_s = {} must be > 0 with wind_speed=3 m/s",
+            gains.natural_ventilation_q_wind_m3_s
+        );
+        assert!(
+            (gains.natural_ventilation_cd_used - 0.60).abs() < 1e-9,
+            "cd_used = {} for CrossVentilation, expected 0.60",
+            gains.natural_ventilation_cd_used
         );
     }
 

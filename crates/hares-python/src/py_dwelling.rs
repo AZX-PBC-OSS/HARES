@@ -2543,6 +2543,18 @@ fn snapshot_to_py(
                 "natural_ventilation_wind_angle_deg",
                 gains.natural_ventilation_wind_angle_deg,
             )?;
+            d.set_item(
+                "natural_ventilation_q_stack_m3_s",
+                gains.natural_ventilation_q_stack_m3_s,
+            )?;
+            d.set_item(
+                "natural_ventilation_q_wind_m3_s",
+                gains.natural_ventilation_q_wind_m3_s,
+            )?;
+            d.set_item(
+                "natural_ventilation_cd_used",
+                gains.natural_ventilation_cd_used,
+            )?;
         }
         d.set_item("port_convective_w", gains.port_convective_w)?;
         d.set_item("port_radiant_w", gains.port_radiant_w)?;

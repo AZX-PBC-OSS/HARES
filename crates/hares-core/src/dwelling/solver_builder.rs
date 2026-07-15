@@ -526,33 +526,6 @@ fn include_interior_lwr(
     is_conditioned_interior || is_attic_interior
 }
 
-fn natural_ventilation_coefficients(
-    thermal_cfg: &ThermalSolverConfig,
-    building_height_m: f64,
-) -> (f64, f64) {
-    thermal_cfg
-        .infiltration
-        .iter()
-        .find_map(|(zone_id, method)| (*zone_id == thermal_cfg.indoor_zone_id).then_some(*method))
-        .and_then(|method| match method {
-            hares_envelope::InfiltrationMethod::Ela {
-                stack_coeff,
-                wind_coeff,
-                ..
-            } => Some((stack_coeff, wind_coeff)),
-            _ => None,
-        })
-        .unwrap_or_else(|| {
-            hares_physics::infiltration::calculate_ela_coefficients(
-                0.0,
-                building_height_m,
-                0.0,
-                hares_physics::infiltration::TerrainClass::Suburban,
-                hares_physics::infiltration::SHIELDING_NORMAL,
-            )
-        })
-}
-
 /// Compute total operable window area and area-weighted opening azimuth
 /// from conditioned-zone windows.
 ///
@@ -1383,16 +1356,20 @@ pub(crate) fn build_default_solvers(
     // The 0.67 factor accounts for only ~67% of operable window area being openable at once;
     // HPXML FractionOperable indicates window type (operable vs fixed), not instantaneous
     // open state, so the 0.67 factor must be applied on top of FractionOperable.
+    //
+    // Stack-driven flow uses the EnergyPlus DH-based formula (Q_stack = Cd × A × sqrt(2·g·DH·|ΔT|/T_zone))
+    // instead of the repurposed ELA stack coefficient. Wind-driven flow uses the direction-dependent
+    // Cw from compute_natural_ventilation_cw (T-0452).
     {
         use hares_envelope::NaturalVentilationConfig;
         let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
-        let building_height_m = default_ceiling_height_m
-            * building
-                .zones
-                .iter()
-                .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
-                .count()
-                .max(1) as f64;
+        let n_conditioned = building
+            .zones
+            .iter()
+            .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+            .count()
+            .max(1) as f64;
+        let building_height_m = default_ceiling_height_m * n_conditioned;
 
         let (total_operable_area, opening_azimuth_deg) = compute_opening_azimuth_and_area(
             &building.windows,
@@ -1401,14 +1378,11 @@ pub(crate) fn build_default_solvers(
         );
         if total_operable_area > 0.0 {
             let open_area = total_operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
-            let (stack, wind) = natural_ventilation_coefficients(&thermal_cfg, building_height_m);
-            // Natural ventilation should use conditioned-zone ELA coefficients.
-            // Prefer explicit indoor ELA coefficients when available; otherwise
-            // derive conditioned defaults at full building height.
             thermal_cfg.natural_ventilation = Some(NaturalVentilationConfig {
                 open_area_m2: open_area,
-                stack_coeff: stack,
-                wind_coeff: wind,
+                dh_m: 0.0,
+                zone_height_m: building_height_m,
+                opening_type: hares_envelope::OpeningType::CrossVentilation,
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
@@ -1616,11 +1590,10 @@ mod tests {
         attic_infiltration_method, attic_interior_emissivity, compute_opening_azimuth_and_area,
         exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
         foundation_infiltration_method, garage_infiltration_method, include_interior_lwr,
-        interior_solar_absorptance, natural_ventilation_coefficients,
+        interior_solar_absorptance,
     };
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::InfiltrationMethod;
-    use hares_envelope::ThermalSolverConfig;
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_physics::infiltration::{
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
@@ -1911,71 +1884,6 @@ mod tests {
             exterior_emissivity(&window),
             EMISSIVITY_WINDOW,
             "window without explicit emittance should default to 0.84 (NFRC clear glass)"
-        );
-    }
-
-    #[test]
-    fn natural_ventilation_coefficients_prefer_indoor_zone_ela() {
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            infiltration: vec![
-                (
-                    ZoneId(1),
-                    InfiltrationMethod::Ela {
-                        ela_m2: 0.01,
-                        stack_coeff: 1.23,
-                        wind_coeff: 4.56,
-                    },
-                ),
-                (
-                    ZoneId(2),
-                    InfiltrationMethod::Ela {
-                        ela_m2: 0.02,
-                        stack_coeff: 9.87,
-                        wind_coeff: 6.54,
-                    },
-                ),
-            ],
-            ..ThermalSolverConfig::default()
-        };
-
-        let (stack_coeff, wind_coeff) = natural_ventilation_coefficients(&config, 6.0);
-        assert_eq!(stack_coeff, 1.23);
-        assert_eq!(wind_coeff, 4.56);
-    }
-
-    #[test]
-    fn natural_ventilation_coefficients_fallback_use_building_height() {
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
-            ..ThermalSolverConfig::default()
-        };
-        let building_height_m = 6.0;
-        let ceiling_height_m = 3.0;
-
-        let expected = calculate_ela_coefficients(
-            0.0,
-            building_height_m,
-            0.0,
-            TerrainClass::Suburban,
-            SHIELDING_NORMAL,
-        );
-        let ceiling_expected = calculate_ela_coefficients(
-            0.0,
-            ceiling_height_m,
-            0.0,
-            TerrainClass::Suburban,
-            SHIELDING_NORMAL,
-        );
-        let actual = natural_ventilation_coefficients(&config, building_height_m);
-
-        assert!((actual.0 - expected.0).abs() < 1e-12);
-        assert!((actual.1 - expected.1).abs() < 1e-12);
-        assert!(
-            (actual.0 - ceiling_expected.0).abs() > 1e-12
-                || (actual.1 - ceiling_expected.1).abs() > 1e-12,
-            "fallback must use full building height, not ceiling height"
         );
     }
 

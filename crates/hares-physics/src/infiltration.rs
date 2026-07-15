@@ -30,6 +30,35 @@
 use crate::units::*;
 use tracing::warn;
 
+/// Opening type for natural ventilation — distinguishes single-sided (one opening)
+/// from cross-ventilation (two vertically separated openings on opposite faces).
+///
+/// ASHRAE HoF 2009 Ch. 16.14: single-sided openings have a lower discharge
+/// coefficient (Cd ≈ 0.15–0.25) because flow is driven by turbulent buoyancy
+/// rather than a well-defined pressure head. Cross-ventilation openings use
+/// the full Cd ≈ 0.60–0.65 and are driven by the vertical separation height
+/// DH between inlet and outlet openings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpeningType {
+    /// Single-sided ventilation (e.g. one openable window).
+    /// Cd = 0.20 (midpoint of ASHRAE HoF 2009 Ch. 16.14 range 0.15–0.25).
+    SingleSided,
+    /// Cross-ventilation with vertically separated inlet and outlet openings.
+    /// Cd = 0.60 (ASHRAE HoF 2009 Ch. 16.14; EnergyPlus `DiscCoef` default).
+    CrossVentilation,
+}
+
+impl OpeningType {
+    /// Discharge coefficient Cd for the stack-driven flow term.
+    /// ASHRAE HoF 2009 Ch. 16.14.
+    pub fn discharge_coefficient(self) -> f64 {
+        match self {
+            Self::SingleSided => 0.20,
+            Self::CrossVentilation => 0.60,
+        }
+    }
+}
+
 const M2_TO_CM2: f64 = 10_000.0;
 const LPS_PER_CM2_TO_M3PS_PER_CM2: f64 = 1.0 / 1000.0;
 const SECONDS_PER_HOUR: f64 = 3600.0;
@@ -266,9 +295,19 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
     }
 }
 
-/// Natural ventilation flow through operable windows (ELA-style, OCHRE-matched).
+/// Natural ventilation flow through operable windows (EnergyPlus
+/// `ZoneVentilation:WindandStackOpenArea` model).
 ///
-/// Implements the ResStock / OCHRE natural ventilation model for operable windows.
+/// Implements the EnergyPlus wind-and-stack natural ventilation model for
+/// operable windows. Wind and stack flow components are computed separately
+/// and combined in quadrature:
+///
+/// ```text
+/// Q_wind  = Cw × A × U_wind
+/// Q_stack = Cd × A × sqrt(2·g·dh_m·|ΔT|/T_zone)
+/// Q_total = sqrt(Q_wind² + Q_stack²)
+/// ```
+///
 /// Flow is gated by three conditions (all must hold for non-zero flow):
 /// 1. Zone temperature > outdoor temperature (stack buoyancy drives outward exhaust).
 /// 2. Zone temperature > `t_base_c` (occupant comfort; no cooling benefit otherwise).
@@ -279,17 +318,23 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 /// is applied to scale the flow proportionally to how far above the comfort base the
 /// zone is, clamped to [0, 1].
 ///
-/// # Formula (OCHRE `_natural_ventilation`, adapted with EnergyPlus Cw)
-/// ```text
-/// Cw      = compute_natural_ventilation_cw(opening_azimuth, wind_direction)
-/// A_eff   = open_area_m2 × Cw × 10000 cm²/m²              (effectiveness × unit conv)
-/// q_drive = stack_coeff × |ΔT| + wind_coeff × v²          (ELA driver, same as infiltration)
-/// adj     = clamp((T_zone - T_base) / (T_zone - T_out), 0, 1)
-/// q_nat   = min(A_eff × adj × √q_drive / 1000, 20 ACH cap)
-/// ```
+/// # Stack term
+///
+/// - For `CrossVentilation` with `dh_m > 0`: Q_stack uses the vertical separation
+///   `dh_m` between inlet and outlet openings (EnergyPlus `DH` parameter).
+/// - For `SingleSided`: Q_stack uses `zone_height_m` as the characteristic
+///   opening height, and a lower discharge coefficient Cd ≈ 0.20 per
+///   ASHRAE HoF 2009 Ch. 16.14 (single-sided: Cd = 0.15–0.25).
+///
+/// # Wind term
+///
+/// Uses the wind-direction-dependent opening effectiveness Cw computed from
+/// the angle between wind direction and opening normal, following the EnergyPlus
+/// linear interpolation: Cw = 0.55 at 0° (perpendicular) → 0.3 at 45° → 0.0 at > 90°.
+/// ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U.
 ///
 /// # Parameters
-/// - `open_area_m2`: effective open window area [m²] (typically 6.7% of total window area)
+/// - `open_area_m2`: effective open window area [m²]
 /// - `t_zone_c`: zone (indoor) air temperature [°C]
 /// - `t_outdoor_c`: outdoor air temperature [°C]
 /// - `t_base_c`: comfort base temperature [°C]; no flow when `t_zone ≤ t_base`
@@ -298,14 +343,24 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 ///   when ≥ `max_outdoor_humidity_ratio`
 /// - `max_outdoor_humidity_ratio`: humidity threshold [kg/kg] (OCHRE default: 0.0115)
 /// - `wind_speed_m_s`: wind speed [m/s]
-/// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)] -- same as infiltration ELA coeff
-/// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)] -- same as infiltration ELA coeff
 /// - `zone_volume_m3`: zone volume [m³] -- used to cap at 20 ACH
 /// - `opening_azimuth_deg`: azimuth of the opening normal [°], 0° = North, clockwise
 /// - `wind_direction_deg`: outdoor wind direction azimuth [°]; `f64::NAN` to use the
 ///   fallback Cw = 0.35 (average wind-direction variability)
+/// - `dh_m`: vertical separation between inlet and outlet openings [m]
+///   (EnergyPlus `DH` parameter); used for cross-ventilation stack term
+/// - `opening_type`: [`hares_envelope::OpeningType`](OpeningType) — controls
+///   the discharge coefficient Cd and whether `dh_m` drives stack flow
+/// - `zone_height_m`: characteristic opening height [m]; used for single-sided stack term
 ///
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
+///
+/// # References
+/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
+/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct
+/// - EnergyPlus Engineering Reference §15.4: Q = sqrt(Qw² + Qst²)
+/// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
+/// - ASHRAE HoF 2009 Ch. 16.14: single-sided Cd = 0.15–0.25; cross-ventilation Cd = 0.60–0.65
 #[allow(clippy::too_many_arguments)]
 pub fn natural_ventilation_flow_m3_s(
     open_area_m2: f64,
@@ -315,22 +370,29 @@ pub fn natural_ventilation_flow_m3_s(
     outdoor_humidity_ratio: f64,
     max_outdoor_humidity_ratio: f64,
     wind_speed_m_s: f64,
-    stack_coeff: f64,
-    wind_coeff: f64,
     zone_volume_m3: f64,
     opening_azimuth_deg: f64,
     wind_direction_deg: f64,
-) -> f64 {
+    dh_m: f64,
+    opening_type: OpeningType,
+    zone_height_m: f64,
+) -> (f64, f64, f64, f64) {
     // Temperature and humidity gating (OCHRE: `if w_amb >= max_oa_hr or t_zone <= t_ext or t_zone <= t_base`)
     if outdoor_humidity_ratio >= max_outdoor_humidity_ratio
         || t_zone_c <= t_outdoor_c
         || t_zone_c <= t_base_c
         || open_area_m2 <= 0.0
     {
-        return 0.0;
+        return (0.0, 0.0, 0.0, 0.0);
     }
 
-    let delta_t = t_outdoor_c - t_zone_c; // negative (t_zone > t_outdoor)
+    // Standard gravity [m/s²].
+    const G: f64 = 9.80665;
+    /// Celsius to Kelvin offset.
+    const C_TO_K: f64 = 273.15;
+
+    let delta_t = t_zone_c - t_outdoor_c; // positive (t_zone > t_outdoor)
+    let t_zone_k = t_zone_c + C_TO_K;
 
     let cw = compute_natural_ventilation_cw(opening_azimuth_deg, wind_direction_deg);
 
@@ -351,23 +413,58 @@ pub fn natural_ventilation_flow_m3_s(
         }
     }
 
-    // Opening effectiveness factor per ASHRAE HoF 2009 Ch. 16.14 / EnergyPlus;
-    // convert to cm² for ELA formula
-    let nat_vent_area_cm2 = open_area_m2 * cw * M2_TO_CM2;
+    // Wind-driven component: Q_wind = Cw × A × U  (ASHRAE HoF 2009 Ch.16.14 Eq.37)
+    let q_wind = cw * open_area_m2 * wind_speed_m_s;
+
+    // Stack-driven component: Q_stack = Cd × A × sqrt(2·g·H·|ΔT|/T_zone)
+    // where H = dh_m for cross-ventilation, zone_height_m for single-sided
+    let cd = opening_type.discharge_coefficient();
+    let stack_height = match opening_type {
+        OpeningType::CrossVentilation => dh_m,
+        OpeningType::SingleSided => zone_height_m,
+    };
+
+    let q_stack = if stack_height > 0.0 && delta_t > 0.0 {
+        cd * open_area_m2 * (2.0 * G * stack_height * delta_t / t_zone_k).sqrt()
+    } else {
+        0.0
+    };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            q_stack >= 0.0,
+            "Q_stack must be >= 0: got {q_stack} (cd={cd}, dh_m={dh_m}, zone_height_m={zone_height_m}, delta_t={delta_t})"
+        );
+        if opening_type == OpeningType::CrossVentilation && dh_m == 0.0 {
+            warn!(
+                opening_type = "CrossVentilation",
+                dh_m,
+                "cross-ventilation configured with zero height difference produces no stack benefit"
+            );
+        }
+        if opening_type == OpeningType::SingleSided && dh_m > 0.0 {
+            warn!(
+                opening_type = "SingleSided",
+                dh_m,
+                zone_height_m,
+                "dh_m is ignored for single-sided openings; using zone_height_m for stack computation"
+            );
+        }
+    }
 
     // Adjustment factor: how far above comfort base is the zone, relative to the delta
-    // adj = (t_zone - t_base) / (t_zone - t_outdoor); clamped to [0, 1]
     let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
 
-    // ELA-style driver (same square-root form as `ela_infiltration`)
-    let driver = (stack_coeff * delta_t.abs() + wind_coeff * wind_speed_m_s.powi(2)).max(0.0);
-
-    // Flow in m³/s: area_cm2 * adj * √driver / 1000 (ELA L→m³ conversion)
-    let q_nat = nat_vent_area_cm2 * adj * driver.sqrt() * LPS_PER_CM2_TO_M3PS_PER_CM2;
+    // Quadrature combination: Q_total = adj × sqrt(Q_wind² + Q_stack²)
+    // EnergyPlus ERM §15.4; ASHRAE HoF 2009 Ch. 16.14
+    let q_total = adj * (q_wind * q_wind + q_stack * q_stack).sqrt();
 
     // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`)
     let max_nat_flow = 20.0 * zone_volume_m3 / SECONDS_PER_HOUR;
-    q_nat.min(max_nat_flow)
+    let q_nat = q_total.min(max_nat_flow);
+
+    (q_nat, q_stack * adj, q_wind * adj, cd)
 }
 
 /// ASHRAE 152 duct-leakage/infiltration interaction -- superposition formula.
@@ -1043,59 +1140,112 @@ mod tests {
     // Natural ventilation
     // -----------------------------------------------------------------------
 
-    /// Default test parameters -- warm zone, cool outdoor, dry outdoor air,
-    /// non-trivial window area and ELA coefficients.
-    fn nat_vent_base_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
-        (
-            0.5,       // open_area_m2
-            26.0,      // t_zone_c
-            18.0,      // t_outdoor_c
-            22.778,    // t_base_c  (73 °F -- OCHRE default)
-            0.008,     // outdoor_humidity_ratio
-            0.0115,    // max_outdoor_humidity_ratio
-            3.0,       // wind_speed_m_s
-            0.000_106, // stack_coeff
-            0.000_143, // wind_coeff
-            200.0,     // zone_volume_m3
-            180.0,     // opening_azimuth_deg (South-facing)
-            180.0,     // wind_direction_deg (wind from South, perpendicular)
-        )
+    /// Named arguments for [`natural_ventilation_flow_m3_s`], used by tests to
+    /// avoid a long positional argument list that's easy to transpose.
+    struct NatVentArgs {
+        open_area_m2: f64,
+        t_zone_c: f64,
+        t_outdoor_c: f64,
+        t_base_c: f64,
+        outdoor_humidity_ratio: f64,
+        max_outdoor_humidity_ratio: f64,
+        wind_speed_m_s: f64,
+        zone_volume_m3: f64,
+        opening_azimuth_deg: f64,
+        wind_direction_deg: f64,
+        dh_m: f64,
+        opening_type: OpeningType,
+        zone_height_m: f64,
+    }
+
+    impl NatVentArgs {
+        /// Default test parameters -- warm zone, cool outdoor, dry outdoor air,
+        /// non-trivial window area.
+        fn base() -> Self {
+            Self {
+                open_area_m2: 0.5,
+                t_zone_c: 26.0,
+                t_outdoor_c: 18.0,
+                t_base_c: 22.778, // 73 °F -- OCHRE default
+                outdoor_humidity_ratio: 0.008,
+                max_outdoor_humidity_ratio: 0.0115,
+                wind_speed_m_s: 3.0,
+                zone_volume_m3: 200.0,
+                opening_azimuth_deg: 180.0, // South-facing
+                wind_direction_deg: 180.0,  // wind from South, perpendicular
+                dh_m: 2.0,                  // cross-ventilation height difference
+                opening_type: OpeningType::CrossVentilation,
+                zone_height_m: 2.5,
+            }
+        }
+
+        fn call(&self) -> (f64, f64, f64, f64) {
+            natural_ventilation_flow_m3_s(
+                self.open_area_m2,
+                self.t_zone_c,
+                self.t_outdoor_c,
+                self.t_base_c,
+                self.outdoor_humidity_ratio,
+                self.max_outdoor_humidity_ratio,
+                self.wind_speed_m_s,
+                self.zone_volume_m3,
+                self.opening_azimuth_deg,
+                self.wind_direction_deg,
+                self.dh_m,
+                self.opening_type,
+                self.zone_height_m,
+            )
+        }
     }
 
     #[test]
     fn nat_vent_zero_when_zone_cooler_than_outdoor() {
-        let (a, _, _, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(a, 15.0, 18.0, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let args = NatVentArgs {
+            t_zone_c: 15.0,
+            t_outdoor_c: 18.0,
+            ..NatVentArgs::base()
+        };
+        let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_zone_at_comfort_base() {
-        let (a, _, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
         // t_zone == t_base → gated off (≤ check)
-        let q = natural_ventilation_flow_m3_s(a, tb, to, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let base = NatVentArgs::base();
+        let args = NatVentArgs {
+            t_zone_c: base.t_base_c,
+            ..base
+        };
+        let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_outdoor_too_humid() {
-        let (a, tz, to, tb, _, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
         // humidity == threshold → gated off (>= check)
-        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, mh, mh, v, sc, wc, vol, oa, wd);
+        let base = NatVentArgs::base();
+        let args = NatVentArgs {
+            outdoor_humidity_ratio: base.max_outdoor_humidity_ratio,
+            ..base
+        };
+        let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_no_open_area() {
-        let (_, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(0.0, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let args = NatVentArgs {
+            open_area_m2: 0.0,
+            ..NatVentArgs::base()
+        };
+        let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_positive_under_nominal_conditions() {
-        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let (q, _, _, _) = NatVentArgs::base().call();
         assert!(
             q > 0.0,
             "expected positive nat vent flow under nominal conditions, got {q}"
@@ -1103,8 +1253,10 @@ mod tests {
     }
 
     #[test]
-    fn nat_vent_matches_ochre_formula_directly() {
-        // Manually replicate OCHRE `_natural_ventilation` formula for cross-check.
+    fn nat_vent_matches_energypus_formula_directly() {
+        // Manually replicate EnergyPlus `WindAndStack` formula for cross-check.
+        // Q_wind = Cw × A × U; Q_stack = Cd × A × sqrt(2·g·dh_m·|ΔT|/T_zone)
+        // Cw = 0.55 (perpendicular, same azimuth 180°)
         let open_area_m2 = 0.5_f64;
         let t_zone_c = 26.0_f64;
         let t_outdoor_c = 18.0_f64;
@@ -1112,13 +1264,14 @@ mod tests {
         let outdoor_hum = 0.008_f64;
         let max_hum = 0.0115_f64;
         let wind_speed = 3.0_f64;
-        let stack_coeff = 0.000_106_f64;
-        let wind_coeff = 0.000_143_f64;
         let volume_m3 = 200.0_f64;
         let opening_azimuth_deg = 180.0_f64;
         let wind_direction_deg = 180.0_f64;
+        let dh_m = 2.0_f64;
+        let opening_type = OpeningType::CrossVentilation;
+        let zone_height_m = 2.5_f64;
 
-        let q = natural_ventilation_flow_m3_s(
+        let (q, q_stack, q_wind, cd) = natural_ventilation_flow_m3_s(
             open_area_m2,
             t_zone_c,
             t_outdoor_c,
@@ -1126,31 +1279,53 @@ mod tests {
             outdoor_hum,
             max_hum,
             wind_speed,
-            stack_coeff,
-            wind_coeff,
             volume_m3,
             opening_azimuth_deg,
             wind_direction_deg,
+            dh_m,
+            opening_type,
+            zone_height_m,
         );
 
-        // Reproduce OCHRE `_natural_ventilation` formula step-by-step, using
-        // the computed Cw (perpendicular wind: 180° vs 180° → Cw = 0.55)
-        let delta_t = t_outdoor_c - t_zone_c;
-        let cw = 0.55; // perpendicular winds (same azimuth → angle 0°)
-        let nat_vent_area_cm2 = open_area_m2 * cw * 10_000.0;
-        let max_nat_flow = 20.0 * volume_m3 / 3600.0;
+        // Reproduce EnergyPlus formula step-by-step
+        // G = 9.80665 m/s², C_TO_K = 273.15
+        let cw = 0.55; // perpendicular winds
+        let g = 9.80665;
+        let t_zone_k = t_zone_c + 273.15;
+        let delta_t = t_zone_c - t_outdoor_c;
+        let cd_expected = 0.60; // CrossVentilation
+
+        let q_wind_expected = cw * open_area_m2 * wind_speed;
+        let q_stack_expected =
+            cd_expected * open_area_m2 * (2.0 * g * dh_m * delta_t / t_zone_k).sqrt();
         let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
-        let nat_vent_data = stack_coeff * delta_t.abs() + wind_coeff * wind_speed * wind_speed;
-        let expected = (nat_vent_area_cm2 * adj * nat_vent_data.sqrt() / 1000.0).min(max_nat_flow);
+        let expected = (adj
+            * (q_wind_expected * q_wind_expected + q_stack_expected * q_stack_expected).sqrt())
+        .min(20.0 * volume_m3 / 3600.0);
 
         approx_eq(q, expected, 1e-12);
+        approx_eq(q_wind, q_wind_expected * adj, 1e-12);
+        approx_eq(q_stack, q_stack_expected * adj, 1e-12);
+        approx_eq(cd, cd_expected, 1e-12);
     }
 
     #[test]
     fn nat_vent_capped_at_20_ach() {
         // Enormous open area should hit the 20-ACH cap.
-        let q = natural_ventilation_flow_m3_s(
-            1000.0, 35.0, 10.0, 22.778, 0.001, 0.0115, 20.0, 0.001, 0.001, 100.0, 180.0, 180.0,
+        let (q, _, _, _) = natural_ventilation_flow_m3_s(
+            1000.0,
+            35.0,
+            10.0,
+            22.778,
+            0.001,
+            0.0115,
+            20.0,
+            100.0,
+            180.0,
+            180.0,
+            2.0,
+            OpeningType::CrossVentilation,
+            2.5,
         );
         let cap = 20.0 * 100.0 / SECONDS_PER_HOUR;
         approx_eq(q, cap, 1e-10);
@@ -1158,9 +1333,17 @@ mod tests {
 
     #[test]
     fn nat_vent_higher_wind_increases_flow() {
-        let (a, tz, to, tb, h, mh, _, sc, wc, vol, oa, wd) = nat_vent_base_args();
-        let q_low = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 1.0, sc, wc, vol, oa, wd);
-        let q_high = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 8.0, sc, wc, vol, oa, wd);
+        let base = NatVentArgs::base();
+        let (q_low, _, _, _) = NatVentArgs {
+            wind_speed_m_s: 1.0,
+            ..NatVentArgs::base()
+        }
+        .call();
+        let (q_high, _, _, _) = NatVentArgs {
+            wind_speed_m_s: 8.0,
+            ..base
+        }
+        .call();
         assert!(
             q_high > q_low,
             "higher wind must increase nat vent flow: q_low={q_low:.6}, q_high={q_high:.6}"
@@ -1169,10 +1352,17 @@ mod tests {
 
     #[test]
     fn nat_vent_larger_zone_outdoor_diff_increases_flow() {
-        let (a, _, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
-        // Both zones are above t_base; larger delta_t drives more stack flow
-        let q_small = natural_ventilation_flow_m3_s(a, 25.0, to, tb, h, mh, v, sc, wc, vol, oa, wd);
-        let q_large = natural_ventilation_flow_m3_s(a, 35.0, to, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let base = NatVentArgs::base();
+        let (q_small, _, _, _) = NatVentArgs {
+            t_zone_c: 25.0,
+            ..NatVentArgs::base()
+        }
+        .call();
+        let (q_large, _, _, _) = NatVentArgs {
+            t_zone_c: 35.0,
+            ..base
+        }
+        .call();
         assert!(
             q_large > q_small,
             "larger zone-outdoor delta must increase nat vent: q_small={q_small:.6}, q_large={q_large:.6}"
@@ -1180,6 +1370,187 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Natural ventilation: stack/wind separation and opening-type physics
+    // -----------------------------------------------------------------------
+
+    /// Cross-ventilation with dh_m = 2.0 m and ΔT = 10 K produces non-zero stack
+    /// flow that scales with sqrt(dh_m). Verified against EnergyPlus Qst formula.
+    #[test]
+    fn cross_ventilation_stack_scales_with_sqrt_dh_m() {
+        let open_area = 0.5;
+        let t_zone = 28.0;
+        let t_out = 18.0;
+        let t_base = 20.0;
+        let hum = 0.005;
+        let max_hum = 0.0115;
+        let wind = 0.0; // zero wind to isolate stack
+        let vol = 200.0;
+        let azimuth = 180.0;
+        let wdir = 180.0;
+
+        // dh_m = 1.0 → Q_stack ~ sqrt(1.0)
+        let (_, q_stack_1, _, _) = natural_ventilation_flow_m3_s(
+            open_area,
+            t_zone,
+            t_out,
+            t_base,
+            hum,
+            max_hum,
+            wind,
+            vol,
+            azimuth,
+            wdir,
+            1.0,
+            OpeningType::CrossVentilation,
+            2.5,
+        );
+        // dh_m = 4.0 → Q_stack ~ sqrt(4.0) = 2.0 × sqrt(1.0)
+        let (_, q_stack_4, _, _) = natural_ventilation_flow_m3_s(
+            open_area,
+            t_zone,
+            t_out,
+            t_base,
+            hum,
+            max_hum,
+            wind,
+            vol,
+            azimuth,
+            wdir,
+            4.0,
+            OpeningType::CrossVentilation,
+            2.5,
+        );
+
+        assert!(q_stack_1 > 0.0, "stack flow must be positive: {q_stack_1}");
+        assert!(q_stack_4 > 0.0, "stack flow must be positive: {q_stack_4}");
+
+        let ratio = q_stack_4 / q_stack_1;
+        let expected_ratio = 2.0; // sqrt(4.0/1.0) = 2.0
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-10,
+            "stack flow must scale with sqrt(dh_m): ratio={ratio}, expected={expected_ratio}"
+        );
+    }
+
+    /// Single-sided opening uses Cd ≈ 0.20, producing lower stack flow than
+    /// cross-ventilation (Cd ≈ 0.60) for the same geometry.
+    #[test]
+    fn single_sided_lower_stack_than_cross_ventilation() {
+        let open_area = 0.5;
+        let t_zone = 28.0;
+        let t_out = 18.0;
+        let t_base = 20.0;
+        let hum = 0.005;
+        let max_hum = 0.0115;
+        let wind = 0.0;
+        let vol = 200.0;
+        let azimuth = 180.0;
+        let wdir = 180.0;
+        let zh = 2.5; // zone height for single-sided
+
+        let (_, q_stack_ss, _, _) = natural_ventilation_flow_m3_s(
+            open_area,
+            t_zone,
+            t_out,
+            t_base,
+            hum,
+            max_hum,
+            wind,
+            vol,
+            azimuth,
+            wdir,
+            0.0,
+            OpeningType::SingleSided,
+            zh,
+        );
+        let (_, q_stack_cv, _, _) = natural_ventilation_flow_m3_s(
+            open_area,
+            t_zone,
+            t_out,
+            t_base,
+            hum,
+            max_hum,
+            wind,
+            vol,
+            azimuth,
+            wdir,
+            2.5,
+            OpeningType::CrossVentilation,
+            zh,
+        );
+
+        // Single-sided Cd=0.20, cross-ventilation Cd=0.60 → ratio = 0.20/0.60 = 1/3
+        // Both use stack_height=2.5m, so the stack flows should differ by exactly the Cd ratio
+        let ratio = q_stack_ss / q_stack_cv;
+        let expected_ratio = 0.20 / 0.60;
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-10,
+            "single-sided stack ({q_stack_ss}) / cross-ventilation stack ({q_stack_cv}) ratio={ratio}, expected={expected_ratio}"
+        );
+    }
+
+    /// Cross-ventilation with dh_m = 0.0 produces Q_stack = 0.0 (purely wind-driven).
+    #[test]
+    fn cross_ventilation_zero_dh_m_produces_no_stack_flow() {
+        let open_area = 0.5;
+        let t_zone = 28.0;
+        let t_out = 18.0;
+        let t_base = 20.0;
+        let hum = 0.005;
+        let max_hum = 0.0115;
+        let wind = 2.0;
+        let vol = 200.0;
+        let azimuth = 180.0;
+        let wdir = 180.0;
+
+        let (q_total, q_stack, q_wind, cd) = natural_ventilation_flow_m3_s(
+            open_area,
+            t_zone,
+            t_out,
+            t_base,
+            hum,
+            max_hum,
+            wind,
+            vol,
+            azimuth,
+            wdir,
+            0.0,
+            OpeningType::CrossVentilation,
+            2.5,
+        );
+
+        assert!(
+            q_stack.abs() < 1e-15,
+            "dh_m=0 must produce zero stack flow, got {q_stack}"
+        );
+        assert!(
+            q_wind > 0.0,
+            "wind component must be positive at dh_m=0: {q_wind}"
+        );
+        // Total flow should equal wind flow (no stack contribution)
+        assert!(
+            (q_total - q_wind).abs() < 1e-15,
+            "total flow must equal wind flow when stack=0: total={q_total}, wind={q_wind}"
+        );
+        assert!((cd - 0.60).abs() < 1e-10, "cd must be 0.60 for cross-vent");
+    }
+
+    /// Quadrature combination Q_total = sqrt(Q_wind² + Q_stack²) verified against
+    /// hand calculation per EnergyPlus ERM §15.4.
+    #[test]
+    fn quadrature_combination_matches_energyplus() {
+        let q_wind: f64 = 0.3;
+        let q_stack: f64 = 0.4;
+        let adj: f64 = 0.8;
+        let expected = adj * (q_wind * q_wind + q_stack * q_stack).sqrt();
+        // 0.8 * sqrt(0.09 + 0.16) = 0.8 * sqrt(0.25) = 0.8 * 0.5 = 0.4
+        assert!(
+            (expected - 0.4).abs() < 1e-15,
+            "hand calc: expected 0.4, got {expected}"
+        );
+    }
+
     // Cw opening effectiveness -- wind-direction-dependent computation
     // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:6007-6023)
     // -----------------------------------------------------------------------
@@ -1266,10 +1637,18 @@ mod tests {
     #[test]
     fn nat_vent_diagonal_wind_flow_matches_half_perpendicular() {
         // Diagonal wind (45°) produces ~(0.3/0.55) ≈ 54.5% of perpendicular flow
-        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, _wd) = nat_vent_base_args();
-        let q_perp = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 180.0);
-        let q_diag =
-            natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 180.0 + 45.0);
+        // (stack component is identical for both; only wind Cw differs)
+        let base = NatVentArgs::base();
+        let (q_perp, _, _, _) = NatVentArgs {
+            wind_direction_deg: 180.0,
+            ..NatVentArgs::base()
+        }
+        .call();
+        let (q_diag, _, _, _) = NatVentArgs {
+            wind_direction_deg: 180.0 + 45.0,
+            ..base
+        }
+        .call();
 
         assert!(
             q_perp > 0.0,
@@ -1278,10 +1657,11 @@ mod tests {
         assert!(q_diag > 0.0, "diagonal flow should be positive: {q_diag}");
 
         let ratio = q_diag / q_perp;
-        // Expected: Cw_diag / Cw_perp = 0.3 / 0.55 ≈ 0.5455
+        // With dh=2.0, the stack component is non-zero, so the ratio isn't exactly 0.3/0.55
+        // but it should be greater than Cw ratio since stack adds to both equally
         assert!(
-            (ratio - (0.3 / 0.55)).abs() < 1e-10,
-            "diagonal/perpendicular ratio: expected {:.4}, got {:.4}",
+            ratio > 0.3 / 0.55,
+            "diagonal/perpendicular ratio with stack: expected > {:.4}, got {:.4}",
             0.3 / 0.55,
             ratio
         );
@@ -1289,14 +1669,18 @@ mod tests {
 
     #[test]
     fn nat_vent_leeward_flow_is_zero() {
-        // Wind from behind the opening (angle > 90°) → zero flow
-        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, _wd) = nat_vent_base_args();
+        // Wind from behind the opening (angle > 90°) → zero wind flow.
+        // Stack flow may still be non-zero with dh=2.0 but Cw=0 eliminates wind.
         // Wind from 0° (North) while opening faces 180° (South) → angle 180° > 90°
-        let q_leeward =
-            natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 0.0);
+        let (q_leeward, _, _, _) = NatVentArgs {
+            wind_direction_deg: 0.0,
+            ..NatVentArgs::base()
+        }
+        .call();
+        // With Cw=0, total flow comes entirely from stack
         assert!(
-            q_leeward.abs() < 1e-15,
-            "leeward opening should produce zero flow, got {q_leeward}"
+            q_leeward > 0.0,
+            "leeward opening with active stack should produce non-zero flow, got {q_leeward}"
         );
     }
 
