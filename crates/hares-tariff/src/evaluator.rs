@@ -1,6 +1,6 @@
 use chrono::{DateTime, Datelike, Duration, Timelike};
 use chrono_tz::Tz;
-use hares_types::HaresError;
+use hares_types::{HaresError, season_contains_month};
 
 use crate::billing::{BillingPeriodSummary, BillingState, compute_tiered_energy_cost};
 use crate::types::{ElectricTariff, ExportMode};
@@ -59,6 +59,13 @@ pub struct TariffEvaluator {
     /// Observer: number of export price samples (for mean computation).
     #[cfg(feature = "observe")]
     pub export_price_count: u64,
+    /// Observer: whether a SeasonalSplit was supplied at construction time.
+    #[cfg(feature = "observe")]
+    pub seasonal_split_used: bool,
+    /// Observer: summer months detected from the SeasonalSplit (1-indexed),
+    /// captured once at tariff load time.
+    #[cfg(feature = "observe")]
+    pub seasonal_split_summer_months: Vec<u32>,
 }
 
 impl TariffEvaluator {
@@ -125,6 +132,35 @@ impl TariffEvaluator {
                 .unwrap_or(0) as u16
         };
 
+        let seasonal_split = tariff.seasonal_split.as_ref();
+
+        #[cfg(feature = "observe")]
+        let seasonal_split_used = seasonal_split.is_some();
+        #[cfg(feature = "observe")]
+        let seasonal_split_summer_months: Vec<u32> = seasonal_split
+            .map(|ss| (1..=12u32).filter(|&m| ss.is_summer(m as u8)).collect())
+            .unwrap_or_default();
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(split) = seasonal_split {
+            if split.has_seasonal() {
+                for m in 1..=12u8 {
+                    let split_summer = split.is_summer(m);
+                    let default_summer = (6..=9).contains(&m);
+                    if split_summer != default_summer {
+                        tracing::debug!(
+                            month = m,
+                            split_summer,
+                            default_summer,
+                            summer_start = split.summer_start_month,
+                            summer_end = split.summer_end_month,
+                            "SeasonalSplit reclassifies month relative to June–September default"
+                        );
+                    }
+                }
+            }
+        }
+
         for i in 0..num_steps {
             let ts = simulation_start + Duration::seconds(i as i64 * interval_seconds as i64);
             let civil = ts.with_timezone(&timezone);
@@ -135,7 +171,7 @@ impl TariffEvaluator {
 
             let mut matched_period: Option<&str> = None;
             for period in &tariff.tou_schedule {
-                if !period.season.contains_month(month) {
+                if !season_contains_month(period.season, seasonal_split, month) {
                     continue;
                 }
                 for tw in &period.schedule {
@@ -158,7 +194,10 @@ impl TariffEvaluator {
                         tariff
                             .energy_rates
                             .iter()
-                            .find(|er| er.period_name == name && er.season.contains_month(month))
+                            .find(|er| {
+                                er.period_name == name
+                                    && season_contains_month(er.season, seasonal_split, month)
+                            })
                             .map(|er| er.rate_per_kwh)
                             .unwrap_or(0.0)
                     };
@@ -179,7 +218,10 @@ impl TariffEvaluator {
                 tariff
                     .energy_rates
                     .iter()
-                    .find(|er| er.period_name == *ev_name && er.season.contains_month(month))
+                    .find(|er| {
+                        er.period_name == *ev_name
+                            && season_contains_month(er.season, seasonal_split, month)
+                    })
                     .map(|er| er.rate_per_kwh)
                     .unwrap_or(0.0)
             } else {
@@ -198,7 +240,10 @@ impl TariffEvaluator {
                             .export_rate
                             .tou_credits
                             .iter()
-                            .find(|er| er.period_name == name && er.season.contains_month(month))
+                            .find(|er| {
+                                er.period_name == name
+                                    && season_contains_month(er.season, seasonal_split, month)
+                            })
                             .map(|er| er.rate_per_kwh)
                             .unwrap_or(0.0)
                     } else {
@@ -214,7 +259,7 @@ impl TariffEvaluator {
             } else {
                 let mut matched = None;
                 for period in &tariff.demand_tou_schedule {
-                    if !period.season.contains_month(month) {
+                    if !season_contains_month(period.season, seasonal_split, month) {
                         continue;
                     }
                     for tw in &period.schedule {
@@ -321,6 +366,10 @@ impl TariffEvaluator {
             export_price_sum: 0.0,
             #[cfg(feature = "observe")]
             export_price_count: 0,
+            #[cfg(feature = "observe")]
+            seasonal_split_used,
+            #[cfg(feature = "observe")]
+            seasonal_split_summer_months,
         })
     }
 
@@ -367,7 +416,7 @@ impl TariffEvaluator {
         let month = self.months[ci];
 
         for block in &self.tariff.tiered_rates {
-            if !block.season.contains_month(month) {
+            if !season_contains_month(block.season, self.tariff.seasonal_split.as_ref(), month) {
                 continue;
             }
             for (i, threshold) in block.thresholds_kwh.iter().enumerate() {
@@ -557,6 +606,7 @@ impl TariffEvaluator {
                 self.billing_state.cumulative_import_kwh,
                 &self.tariff.tiered_rates,
                 month,
+                self.tariff.seasonal_split.as_ref(),
                 self.billing_state.cumulative_energy_cost_usd,
             );
             let export_credit = self.billing_state.cumulative_export_credit_usd;
@@ -591,7 +641,7 @@ impl TariffEvaluator {
         self.tariff
             .demand_rates
             .iter()
-            .filter(|dr| dr.season.contains_month(month))
+            .filter(|dr| season_contains_month(dr.season, self.tariff.seasonal_split.as_ref(), month))
             .map(|dr| {
                 let peak = match &dr.period_name {
                     // Coincident demand: use each rate's own ratchet, not a global one.
@@ -666,6 +716,7 @@ impl TariffEvaluator {
             self.billing_state.cumulative_import_kwh(),
             &self.tariff.tiered_rates,
             month,
+            self.tariff.seasonal_split.as_ref(),
             self.billing_state.cumulative_energy_cost_usd(),
         );
         let export_credit = self.billing_state.cumulative_export_credit_usd();
@@ -2385,5 +2436,225 @@ mod tests {
         let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         // Export price should come from tou_credits: 0.08
         assert_eq!(ev.current_export_price(), 0.08);
+    }
+
+    #[test]
+    fn evaluator_southern_hemisphere_seasonal_split_applies_summer_rates_in_january() {
+        use hares_types::SeasonalSplit;
+
+        let southern_summer = SeasonalSplit::new(12, 2).unwrap();
+        let tariff = ElectricTariff {
+            name: Some("southern-hemi".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: SUMMER_PEAK,
+                },
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Winter,
+                    rate_per_kwh: WINTER_PEAK,
+                },
+            ],
+            seasonal_split: Some(southern_summer),
+            ..Default::default()
+        };
+
+        // January 6, 2025 (Monday) — should be summer in southern hemisphere.
+        let jan = New_York.with_ymd_and_hms(2025, 1, 6, 12, 0, 0).unwrap();
+        let ev_jan =
+            TariffEvaluator::new(tariff.clone(), jan, jan + Duration::hours(1), 3600).unwrap();
+        assert_eq!(
+            ev_jan.current_price(),
+            SUMMER_PEAK,
+            "January should use summer rate with southern hemisphere split"
+        );
+
+        // July 7, 2025 (Monday) — should be winter in southern hemisphere.
+        let jul = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
+        let ev_jul =
+            TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
+        assert_eq!(
+            ev_jul.current_price(),
+            WINTER_PEAK,
+            "July should use winter rate with southern hemisphere split"
+        );
+    }
+
+    #[test]
+    fn evaluator_seasonal_split_none_fallback_june_september() {
+        // Split=None → June–September default.
+        let tariff = ElectricTariff {
+            name: Some("no-split".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: SUMMER_PEAK,
+                },
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Winter,
+                    rate_per_kwh: WINTER_PEAK,
+                },
+            ],
+            seasonal_split: None,
+            ..Default::default()
+        };
+
+        // July 7 (Monday) — summer per June–September default.
+        let jul = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
+        let ev_jul =
+            TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
+        assert_eq!(ev_jul.current_price(), SUMMER_PEAK);
+
+        // January 6 (Monday) — winter per June–September default.
+        let jan = New_York.with_ymd_and_hms(2025, 1, 6, 12, 0, 0).unwrap();
+        let ev_jan =
+            TariffEvaluator::new(tariff.clone(), jan, jan + Duration::hours(1), 3600).unwrap();
+        assert_eq!(ev_jan.current_price(), WINTER_PEAK);
+    }
+
+    #[test]
+    fn evaluator_seasonal_split_demand_charge_respects_split() {
+        use crate::types::DemandRate;
+        use hares_types::SeasonalSplit;
+
+        let southern_summer = SeasonalSplit::new(12, 2).unwrap();
+
+        fn make_demand_tariff(split: Option<SeasonalSplit>) -> ElectricTariff {
+            let summer_rate = 10.0;
+            let winter_rate = 5.0;
+            ElectricTariff {
+                name: Some("seasonal-demand".into()),
+                tou_schedule: vec![TouPeriod {
+                    name: "flat".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                }],
+                energy_rates: vec![EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.12,
+                }],
+                demand_rates: vec![
+                    DemandRate {
+                        period_name: None,
+                        season: SeasonFilter::Summer,
+                        rate_per_kw: summer_rate,
+                        ratchet: None,
+                    },
+                    DemandRate {
+                        period_name: None,
+                        season: SeasonFilter::Winter,
+                        rate_per_kw: winter_rate,
+                        ratchet: None,
+                    },
+                ],
+                seasonal_split: split,
+                ..Default::default()
+            }
+        }
+
+        // January — summer per southern hemisphere split (months 12, 1, 2).
+        let jan_start = make_start(2025, 1, 1);
+        let jan_end = make_start(2025, 2, 1);
+        let mut ev_jan = make_evaluator(
+            make_demand_tariff(Some(southern_summer)),
+            jan_start,
+            jan_end,
+            3600,
+        );
+        let summaries_jan = run_all_steps(&mut ev_jan, |_| 3.0);
+        let s = summaries_jan
+            .into_iter()
+            .next()
+            .expect("billing period should close");
+        // Peak = 3 kW, season = Summer => demand charge = 3 * 10 = 30
+        assert!(
+            (s.demand_charge_usd - 30.0).abs() < 0.01,
+            "January demand charge should use summer rate (30.0), got {}",
+            s.demand_charge_usd
+        );
+
+        // July — winter per southern hemisphere split.
+        let jul_start = make_start(2025, 7, 1);
+        let jul_end = make_start(2025, 8, 1);
+        let mut ev_jul = make_evaluator(
+            make_demand_tariff(Some(southern_summer)),
+            jul_start,
+            jul_end,
+            3600,
+        );
+        let summaries_jul = run_all_steps(&mut ev_jul, |_| 3.0);
+        let s = summaries_jul
+            .into_iter()
+            .next()
+            .expect("billing period should close");
+        // Peak = 3 kW, season = Winter => demand charge = 3 * 5 = 15
+        assert!(
+            (s.demand_charge_usd - 15.0).abs() < 0.01,
+            "July demand charge should use winter rate (15.0), got {}",
+            s.demand_charge_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_seasonal_split_tiered_rate_respects_split() {
+        use hares_types::SeasonalSplit;
+
+        let southern_summer = SeasonalSplit::new(12, 2).unwrap();
+        let tariff = ElectricTariff {
+            name: Some("southern-hemi-tiered".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.12,
+            }],
+            tiered_rates: vec![
+                TieredBlock {
+                    season: SeasonFilter::Summer,
+                    thresholds_kwh: vec![500.0],
+                    rates_per_kwh: vec![0.10, 0.20],
+                },
+                TieredBlock {
+                    season: SeasonFilter::Winter,
+                    thresholds_kwh: vec![700.0],
+                    rates_per_kwh: vec![0.08, 0.15],
+                },
+            ],
+            seasonal_split: Some(southern_summer),
+            ..Default::default()
+        };
+
+        // January (summer in southern hemisphere) → summer tiered block.
+        let jan = New_York.with_ymd_and_hms(2025, 1, 6, 12, 0, 0).unwrap();
+        let ev_jan =
+            TariffEvaluator::new(tariff.clone(), jan, jan + Duration::hours(1), 3600).unwrap();
+        assert_eq!(ev_jan.tier_rate_at(0.0), 0.10);
+        assert_eq!(ev_jan.tier_rate_at(600.0), 0.20);
+
+        // July (winter in southern hemisphere) → winter tiered block.
+        let jul = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
+        let ev_jul =
+            TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
+        assert_eq!(ev_jul.tier_rate_at(0.0), 0.08);
+        assert_eq!(ev_jul.tier_rate_at(800.0), 0.15);
     }
 }

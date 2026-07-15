@@ -929,6 +929,18 @@ impl SeasonalSplit {
         Ok(())
     }
 
+    /// Returns `true` if this split defines a meaningful seasonal division.
+    ///
+    /// A split covering all 12 months is equivalent to no seasonal split
+    /// and returns `false`.
+    pub fn has_seasonal(&self) -> bool {
+        if self.summer_start_month <= self.summer_end_month {
+            !(self.summer_start_month == 1 && self.summer_end_month == 12)
+        } else {
+            self.summer_start_month - self.summer_end_month != 1
+        }
+    }
+
     /// Returns `true` if the given 1-indexed month is in the summer range.
     ///
     /// Handles wrapping: if `summer_start_month > summer_end_month` the range
@@ -943,6 +955,28 @@ impl SeasonalSplit {
         } else {
             month >= self.summer_start_month || month <= self.summer_end_month
         }
+    }
+}
+
+/// Determines whether a given month falls within a season, optionally using
+/// a [`SeasonalSplit`] for the summer/winter boundary.
+///
+/// When a non-trivial `SeasonalSplit` is supplied (i.e. `has_seasonal()` is
+/// true), summer/winter are determined by the split's `is_summer()` method.
+/// Otherwise, the hardcoded June–September default is used as a fallback.
+pub fn season_contains_month(
+    season: SeasonFilter,
+    split: Option<&SeasonalSplit>,
+    month: u8,
+) -> bool {
+    let is_summer = match split {
+        Some(s) if s.has_seasonal() => s.is_summer(month),
+        _ => (6..=9).contains(&month),
+    };
+    match season {
+        SeasonFilter::All => true,
+        SeasonFilter::Summer => is_summer,
+        SeasonFilter::Winter => !is_summer,
     }
 }
 
@@ -1002,7 +1036,7 @@ mod tests {
 
     use super::{
         BillingCycle, BoundaryPolicy, DayFilter, DistributionKind, SCHEDULE_DOMAIN_ID,
-        ScheduleSource, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod,
+        ScheduleSource, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod, season_contains_month,
     };
 
     #[test]
@@ -2490,6 +2524,106 @@ mod tests {
         let split = SeasonalSplit::new(6, 9).unwrap();
         assert!(!split.is_summer(0));
         assert!(!split.is_summer(13));
+    }
+
+    #[test]
+    fn seasonal_split_has_seasonal_true_for_partial_range() {
+        let split = SeasonalSplit::new(6, 9).unwrap();
+        assert!(split.has_seasonal());
+    }
+
+    #[test]
+    fn seasonal_split_has_seasonal_false_for_full_year_non_wrapping() {
+        let split = SeasonalSplit::new(1, 12).unwrap();
+        assert!(!split.has_seasonal());
+    }
+
+    #[test]
+    fn seasonal_split_has_seasonal_false_for_full_year_wrapping() {
+        let split = SeasonalSplit::new(2, 1).unwrap();
+        assert!(!split.has_seasonal());
+    }
+
+    #[test]
+    fn season_contains_month_southern_hemisphere_summer() {
+        let split = SeasonalSplit::new(12, 2).unwrap();
+        assert!(split.has_seasonal());
+        let split_ref = Some(&split);
+        // December, January, February are summer
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 12));
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 1));
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 2));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 12));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 1));
+        // July is winter
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 7));
+        assert!(season_contains_month(SeasonFilter::Winter, split_ref, 7));
+        // All always passes
+        assert!(season_contains_month(SeasonFilter::All, split_ref, 7));
+        assert!(season_contains_month(SeasonFilter::All, split_ref, 12));
+    }
+
+    #[test]
+    fn season_contains_month_custom_range_may_to_october() {
+        let split = SeasonalSplit::new(5, 10).unwrap();
+        let split_ref = Some(&split);
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 5));
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 10));
+        assert!(season_contains_month(SeasonFilter::Winter, split_ref, 11));
+        assert!(season_contains_month(SeasonFilter::Winter, split_ref, 4));
+    }
+
+    #[test]
+    fn season_contains_month_fallback_when_none() {
+        // None → June–September default
+        assert!(season_contains_month(SeasonFilter::Summer, None, 7));
+        assert!(!season_contains_month(SeasonFilter::Summer, None, 12));
+        assert!(season_contains_month(SeasonFilter::Winter, None, 12));
+        assert!(!season_contains_month(SeasonFilter::Winter, None, 7));
+    }
+
+    #[test]
+    fn season_contains_month_fallback_when_full_year_split() {
+        let split = SeasonalSplit::new(1, 12).unwrap();
+        assert!(!split.has_seasonal());
+        let split_ref = Some(&split);
+        // Falls back to June–September default
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 7));
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 12));
+    }
+
+    #[test]
+    fn season_contains_month_fallback_matches_hardcoded_behavior() {
+        // Regression: when no split or has_seasonal() == false, results must
+        // match the existing hardcoded SeasonFilter::contains_month().
+        for m in 1..=12u8 {
+            for season in [
+                SeasonFilter::All,
+                SeasonFilter::Summer,
+                SeasonFilter::Winter,
+            ] {
+                assert_eq!(
+                    season_contains_month(season, None, m),
+                    season.contains_month(m),
+                    "mismatch for {season:?} month {m}"
+                );
+            }
+        }
+        let full_year = SeasonalSplit::new(1, 12).unwrap();
+        assert!(!full_year.has_seasonal());
+        for m in 1..=12u8 {
+            for season in [
+                SeasonFilter::All,
+                SeasonFilter::Summer,
+                SeasonFilter::Winter,
+            ] {
+                assert_eq!(
+                    season_contains_month(season, Some(&full_year), m),
+                    season.contains_month(m),
+                    "mismatch for {season:?} month {m} with full-year split"
+                );
+            }
+        }
     }
 
     #[test]

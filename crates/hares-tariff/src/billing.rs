@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone};
 use chrono_tz::Tz;
-use hares_types::BillingCycle;
+use hares_types::{BillingCycle, season_contains_month};
 
 use crate::types::{RatchetConfig, TieredBlock};
 
@@ -367,15 +367,21 @@ impl BillingState {
 /// `month`. Usage in each tier band is charged at that band's rate, producing a
 /// correctly blended cost.
 ///
+/// `seasonal_split` optionally defines the summer/winter boundary. When `None`,
+/// the hardcoded June–September default applies.
+///
 /// If no tiered block matches the month, returns `fallback_flat_cost` (the
 /// step-accumulated energy cost from the billing state).
 pub fn compute_tiered_energy_cost(
     import_kwh: f64,
     blocks: &[TieredBlock],
     month: u8,
+    seasonal_split: Option<&hares_types::SeasonalSplit>,
     fallback_flat_cost: f64,
 ) -> f64 {
-    let block = blocks.iter().find(|b| b.season.contains_month(month));
+    let block = blocks
+        .iter()
+        .find(|b| season_contains_month(b.season, seasonal_split, month));
     let block = match block {
         Some(b) => b,
         None => return fallback_flat_cost,
@@ -813,7 +819,7 @@ mod tests {
         //   500 * 0.10 = $50.00
         //   250 * 0.20 = $50.00
         //   total = $100.00
-        let cost = compute_tiered_energy_cost(750.0, &blocks, 7, 999.0);
+        let cost = compute_tiered_energy_cost(750.0, &blocks, 7, None, 999.0);
         assert!((cost - 100.0).abs() < 1e-10, "expected $100.00, got {cost}");
     }
 
@@ -831,7 +837,7 @@ mod tests {
         //   500 * 0.12 = $60.00
         //   200 * 0.25 = $50.00
         //   total = $134.00
-        let cost = compute_tiered_energy_cost(1000.0, &blocks, 1, 999.0);
+        let cost = compute_tiered_energy_cost(1000.0, &blocks, 1, None, 999.0);
         assert!((cost - 134.0).abs() < 1e-10, "expected $134.00, got {cost}");
     }
 
@@ -844,7 +850,7 @@ mod tests {
         }];
 
         // 200 kWh: entirely in first tier = 200 * 0.10 = $20.00
-        let cost = compute_tiered_energy_cost(200.0, &blocks, 1, 999.0);
+        let cost = compute_tiered_energy_cost(200.0, &blocks, 1, None, 999.0);
         assert!((cost - 20.0).abs() < 1e-10, "expected $20.00, got {cost}");
     }
 
@@ -857,7 +863,7 @@ mod tests {
             rates_per_kwh: vec![0.10, 0.20],
         }];
 
-        let cost = compute_tiered_energy_cost(750.0, &blocks, 1, 42.0);
+        let cost = compute_tiered_energy_cost(750.0, &blocks, 1, None, 42.0);
         assert!(
             (cost - 42.0).abs() < 1e-10,
             "expected fallback $42.00, got {cost}"
