@@ -28,6 +28,7 @@
 //! - EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 
 use crate::units::*;
+use tracing::warn;
 
 const M2_TO_CM2: f64 = 10_000.0;
 const LPS_PER_CM2_TO_M3PS_PER_CM2: f64 = 1.0 / 1000.0;
@@ -199,6 +200,72 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
     terrain_wind_speed(u_met, class.alpha(), class.delta_m(), height)
 }
 
+/// Compute the absolute angle between wind direction and opening normal.
+///
+/// Normalises the raw angular difference to [0°, 180°] using wraparound logic
+/// to handle the 0°/360° azimuth boundary.
+///
+/// # Angle convention
+/// - 0° = wind blowing directly toward the opening normal (perpendicular).
+/// - 90° = wind blowing parallel to the opening plane.
+/// - 180° = wind blowing from the opposite side (leeward).
+///
+/// # References
+/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6009`: angle = abs(wind_direction − eff_angle),
+///   corrected for > 180° wraparound.
+pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
+    let raw_diff = (wind_direction_deg - opening_azimuth_deg).abs() % 360.0;
+    if raw_diff > 180.0 {
+        360.0 - raw_diff
+    } else {
+        raw_diff
+    }
+}
+
+/// Compute natural ventilation opening effectiveness (Cw) from the angle between
+/// wind direction and opening normal, following the EnergyPlus linear interpolation.
+///
+/// EnergyPlus computes Cw at `ZoneEquipmentManager.cc:5988–6023` by calculating the
+/// absolute angle between wind direction and `EffAngle`, then linearly interpolating
+/// Cw between 0.55 at 0° and 0.3 at 45°, dropping to 0.0 at > 90°.
+///
+/// # Angle convention
+/// - 0° = wind blowing directly toward the opening (perpendicular), maximum effectiveness
+/// - 90° = wind blowing parallel to the opening plane, minimum non-zero effectiveness
+/// - > 90° = wind blowing from the opposite side, zero flow (leeward opening)
+///
+/// # Fallback (no wind direction data)
+/// Returns 0.35 (midpoint between 0.55 and 0.3) when wind direction is not
+/// available (`wind_direction_deg.is_nan()`), representing average wind-direction
+/// variability. This is more conservative than the previous hard-coded 0.6.
+///
+/// # Parameters
+/// - `opening_azimuth_deg`: azimuth of the opening normal [°], 0° = North, clockwise
+/// - `wind_direction_deg`: outdoor wind direction azimuth [°]; `f64::NAN` if unknown
+///
+/// # Returns
+/// Opening effectiveness Cw in [0.0, 0.55] where 0.55 is the maximum for
+/// perpendicular winds and 0.0 means no effective flow (leeward or > 90°).
+///
+/// # References
+/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6023`: angle, slope, and intercept.
+/// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q = Cw × A × U.
+/// - ASHRAE HoF 2009 Table: Cw = 0.5–0.6 for perpendicular winds, 0.25–0.35 for diagonal.
+pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
+    if wind_direction_deg.is_nan() {
+        return 0.35;
+    }
+
+    let angle = wind_incidence_angle_deg(opening_azimuth_deg, wind_direction_deg);
+
+    if angle > 90.0 {
+        0.0
+    } else {
+        let slope: f64 = (0.3 - 0.55) / 45.0;
+        slope.mul_add(angle, 0.55)
+    }
+}
+
 /// Natural ventilation flow through operable windows (ELA-style, OCHRE-matched).
 ///
 /// Implements the ResStock / OCHRE natural ventilation model for operable windows.
@@ -212,9 +279,10 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 /// is applied to scale the flow proportionally to how far above the comfort base the
 /// zone is, clamped to [0, 1].
 ///
-/// # Formula (OCHRE `_natural_ventilation`, no forced-vent interaction)
+/// # Formula (OCHRE `_natural_ventilation`, adapted with EnergyPlus Cw)
 /// ```text
-/// A_eff   = open_area_m2 × 0.6 × 10000 cm²/m²            (effectiveness × unit conv)
+/// Cw      = compute_natural_ventilation_cw(opening_azimuth, wind_direction)
+/// A_eff   = open_area_m2 × Cw × 10000 cm²/m²              (effectiveness × unit conv)
 /// q_drive = stack_coeff × |ΔT| + wind_coeff × v²          (ELA driver, same as infiltration)
 /// adj     = clamp((T_zone - T_base) / (T_zone - T_out), 0, 1)
 /// q_nat   = min(A_eff × adj × √q_drive / 1000, 20 ACH cap)
@@ -233,6 +301,9 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 /// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)] -- same as infiltration ELA coeff
 /// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)] -- same as infiltration ELA coeff
 /// - `zone_volume_m3`: zone volume [m³] -- used to cap at 20 ACH
+/// - `opening_azimuth_deg`: azimuth of the opening normal [°], 0° = North, clockwise
+/// - `wind_direction_deg`: outdoor wind direction azimuth [°]; `f64::NAN` to use the
+///   fallback Cw = 0.35 (average wind-direction variability)
 ///
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +318,8 @@ pub fn natural_ventilation_flow_m3_s(
     stack_coeff: f64,
     wind_coeff: f64,
     zone_volume_m3: f64,
+    opening_azimuth_deg: f64,
+    wind_direction_deg: f64,
 ) -> f64 {
     // Temperature and humidity gating (OCHRE: `if w_amb >= max_oa_hr or t_zone <= t_ext or t_zone <= t_base`)
     if outdoor_humidity_ratio >= max_outdoor_humidity_ratio
@@ -259,8 +332,28 @@ pub fn natural_ventilation_flow_m3_s(
 
     let delta_t = t_outdoor_c - t_zone_c; // negative (t_zone > t_outdoor)
 
-    // Effectiveness factor 0.6 per EnergyPlus/OCHRE; convert to cm² for ELA formula
-    let nat_vent_area_cm2 = open_area_m2 * 0.6 * M2_TO_CM2;
+    let cw = compute_natural_ventilation_cw(opening_azimuth_deg, wind_direction_deg);
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            (0.0..=0.55).contains(&cw),
+            "Cw {cw} out of plausible range [0.0, 0.55]"
+        );
+        if cw == 0.0 && open_area_m2 > 0.0 {
+            warn!(
+                cw,
+                open_area_m2,
+                opening_azimuth_deg,
+                wind_direction_deg,
+                "natural ventilation Cw is zero: wind is on the leeward side of the opening"
+            );
+        }
+    }
+
+    // Opening effectiveness factor per ASHRAE HoF 2009 Ch. 16.14 / EnergyPlus;
+    // convert to cm² for ELA formula
+    let nat_vent_area_cm2 = open_area_m2 * cw * M2_TO_CM2;
 
     // Adjustment factor: how far above comfort base is the zone, relative to the delta
     // adj = (t_zone - t_base) / (t_zone - t_outdoor); clamped to [0, 1]
@@ -952,7 +1045,7 @@ mod tests {
 
     /// Default test parameters -- warm zone, cool outdoor, dry outdoor air,
     /// non-trivial window area and ELA coefficients.
-    fn nat_vent_base_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+    fn nat_vent_base_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (
             0.5,       // open_area_m2
             26.0,      // t_zone_c
@@ -964,43 +1057,45 @@ mod tests {
             0.000_106, // stack_coeff
             0.000_143, // wind_coeff
             200.0,     // zone_volume_m3
+            180.0,     // opening_azimuth_deg (South-facing)
+            180.0,     // wind_direction_deg (wind from South, perpendicular)
         )
     }
 
     #[test]
     fn nat_vent_zero_when_zone_cooler_than_outdoor() {
-        let (a, _, _, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(a, 15.0, 18.0, tb, h, mh, v, sc, wc, vol);
+        let (a, _, _, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(a, 15.0, 18.0, tb, h, mh, v, sc, wc, vol, oa, wd);
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_zone_at_comfort_base() {
-        let (a, _, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let (a, _, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
         // t_zone == t_base → gated off (≤ check)
-        let q = natural_ventilation_flow_m3_s(a, tb, to, tb, h, mh, v, sc, wc, vol);
+        let q = natural_ventilation_flow_m3_s(a, tb, to, tb, h, mh, v, sc, wc, vol, oa, wd);
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_outdoor_too_humid() {
-        let (a, tz, to, tb, _, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let (a, tz, to, tb, _, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
         // humidity == threshold → gated off (>= check)
-        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, mh, mh, v, sc, wc, vol);
+        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, mh, mh, v, sc, wc, vol, oa, wd);
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_zero_when_no_open_area() {
-        let (_, tz, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(0.0, tz, to, tb, h, mh, v, sc, wc, vol);
+        let (_, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(0.0, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd);
         approx_eq(q, 0.0, 1e-15);
     }
 
     #[test]
     fn nat_vent_positive_under_nominal_conditions() {
-        let (a, tz, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
-        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol);
+        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, wd);
         assert!(
             q > 0.0,
             "expected positive nat vent flow under nominal conditions, got {q}"
@@ -1020,6 +1115,8 @@ mod tests {
         let stack_coeff = 0.000_106_f64;
         let wind_coeff = 0.000_143_f64;
         let volume_m3 = 200.0_f64;
+        let opening_azimuth_deg = 180.0_f64;
+        let wind_direction_deg = 180.0_f64;
 
         let q = natural_ventilation_flow_m3_s(
             open_area_m2,
@@ -1032,11 +1129,15 @@ mod tests {
             stack_coeff,
             wind_coeff,
             volume_m3,
+            opening_azimuth_deg,
+            wind_direction_deg,
         );
 
-        // Reproduce OCHRE `_natural_ventilation` formula step-by-step
+        // Reproduce OCHRE `_natural_ventilation` formula step-by-step, using
+        // the computed Cw (perpendicular wind: 180° vs 180° → Cw = 0.55)
         let delta_t = t_outdoor_c - t_zone_c;
-        let nat_vent_area_cm2 = open_area_m2 * 0.6 * 10_000.0;
+        let cw = 0.55; // perpendicular winds (same azimuth → angle 0°)
+        let nat_vent_area_cm2 = open_area_m2 * cw * 10_000.0;
         let max_nat_flow = 20.0 * volume_m3 / 3600.0;
         let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
         let nat_vent_data = stack_coeff * delta_t.abs() + wind_coeff * wind_speed * wind_speed;
@@ -1049,7 +1150,7 @@ mod tests {
     fn nat_vent_capped_at_20_ach() {
         // Enormous open area should hit the 20-ACH cap.
         let q = natural_ventilation_flow_m3_s(
-            1000.0, 35.0, 10.0, 22.778, 0.001, 0.0115, 20.0, 0.001, 0.001, 100.0,
+            1000.0, 35.0, 10.0, 22.778, 0.001, 0.0115, 20.0, 0.001, 0.001, 100.0, 180.0, 180.0,
         );
         let cap = 20.0 * 100.0 / SECONDS_PER_HOUR;
         approx_eq(q, cap, 1e-10);
@@ -1057,9 +1158,9 @@ mod tests {
 
     #[test]
     fn nat_vent_higher_wind_increases_flow() {
-        let (a, tz, to, tb, h, mh, _, sc, wc, vol) = nat_vent_base_args();
-        let q_low = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 1.0, sc, wc, vol);
-        let q_high = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 8.0, sc, wc, vol);
+        let (a, tz, to, tb, h, mh, _, sc, wc, vol, oa, wd) = nat_vent_base_args();
+        let q_low = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 1.0, sc, wc, vol, oa, wd);
+        let q_high = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 8.0, sc, wc, vol, oa, wd);
         assert!(
             q_high > q_low,
             "higher wind must increase nat vent flow: q_low={q_low:.6}, q_high={q_high:.6}"
@@ -1068,13 +1169,134 @@ mod tests {
 
     #[test]
     fn nat_vent_larger_zone_outdoor_diff_increases_flow() {
-        let (a, _, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let (a, _, to, tb, h, mh, v, sc, wc, vol, oa, wd) = nat_vent_base_args();
         // Both zones are above t_base; larger delta_t drives more stack flow
-        let q_small = natural_ventilation_flow_m3_s(a, 25.0, to, tb, h, mh, v, sc, wc, vol);
-        let q_large = natural_ventilation_flow_m3_s(a, 35.0, to, tb, h, mh, v, sc, wc, vol);
+        let q_small = natural_ventilation_flow_m3_s(a, 25.0, to, tb, h, mh, v, sc, wc, vol, oa, wd);
+        let q_large = natural_ventilation_flow_m3_s(a, 35.0, to, tb, h, mh, v, sc, wc, vol, oa, wd);
         assert!(
             q_large > q_small,
             "larger zone-outdoor delta must increase nat vent: q_small={q_small:.6}, q_large={q_large:.6}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cw opening effectiveness -- wind-direction-dependent computation
+    // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:6007-6023)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cw_perpendicular_wind() {
+        // Wind directly toward the opening (same azimuth) → maximum effectiveness
+        let cw = compute_natural_ventilation_cw(180.0, 180.0);
+        assert!(
+            (cw - 0.55).abs() < 1e-10,
+            "perpendicular: expected 0.55, got {cw}"
+        );
+    }
+
+    #[test]
+    fn cw_diagonal_wind_22_5_deg() {
+        // 22.5° from opening normal → Cw ≈ (0.55 + 0.3) / 2 = 0.425
+        let cw = compute_natural_ventilation_cw(180.0, 180.0 + 22.5);
+        assert!(
+            (cw - 0.425).abs() < 5e-15,
+            "22.5°: expected 0.425, got {cw}"
+        );
+    }
+
+    #[test]
+    fn cw_diagonal_wind_45_deg() {
+        let cw = compute_natural_ventilation_cw(180.0, 180.0 + 45.0);
+        assert!((cw - 0.3).abs() < 1e-10, "45°: expected 0.3, got {cw}");
+    }
+
+    #[test]
+    fn cw_at_67_5_deg() {
+        // EnergyPlus single-slope interpolation: 0.55 → 0.3 at 45° → 0.05 at 90°
+        let cw = compute_natural_ventilation_cw(180.0, 180.0 + 67.5);
+        let expected = 0.55 + (0.3 - 0.55) / 45.0 * 67.5;
+        assert!(
+            (cw - expected).abs() < 1e-10,
+            "67.5°: expected {expected}, got {cw}"
+        );
+    }
+
+    #[test]
+    fn cw_at_90_deg() {
+        // Wind parallel to the opening plane — EnergyPlus single-slope
+        // interpolation gives Cw = 0.05 at 90°, not 0.0 (hard-clip only at > 90°)
+        let cw = compute_natural_ventilation_cw(180.0, 180.0 + 90.0);
+        let expected = 0.55 + (0.3 - 0.55) / 45.0 * 90.0;
+        assert!(
+            (cw - expected).abs() < 1e-10,
+            "90°: expected {expected}, got {cw}"
+        );
+    }
+
+    #[test]
+    fn cw_leeward_120_deg() {
+        // Wind from behind the opening → zero
+        let cw = compute_natural_ventilation_cw(180.0, 180.0 + 120.0);
+        assert!((cw - 0.0).abs() < 1e-10, "120°: expected 0.0, got {cw}");
+    }
+
+    #[test]
+    fn cw_wraparound() {
+        // Wind from 350° towards opening at 10° → angle = 20°
+        // ASHRAE: angle must wrap across 0°/360° boundary
+        let cw = compute_natural_ventilation_cw(10.0, 350.0);
+        let expected_angle: f64 = 20.0;
+        let expected_cw: f64 = 0.55 - 0.25 * (expected_angle / 45.0);
+        assert!(
+            (cw - expected_cw).abs() < 1e-10,
+            "wraparound 350°→10°: expected Cw={expected_cw} for 20° angle, got {cw}"
+        );
+    }
+
+    #[test]
+    fn cw_fallback_no_wind_data() {
+        // NaN wind direction → use midpoint 0.35
+        let cw = compute_natural_ventilation_cw(180.0, f64::NAN);
+        assert!(
+            (cw - 0.35).abs() < 1e-10,
+            "fallback: expected 0.35, got {cw}"
+        );
+    }
+
+    #[test]
+    fn nat_vent_diagonal_wind_flow_matches_half_perpendicular() {
+        // Diagonal wind (45°) produces ~(0.3/0.55) ≈ 54.5% of perpendicular flow
+        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, _wd) = nat_vent_base_args();
+        let q_perp = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 180.0);
+        let q_diag =
+            natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 180.0 + 45.0);
+
+        assert!(
+            q_perp > 0.0,
+            "perpendicular flow should be positive: {q_perp}"
+        );
+        assert!(q_diag > 0.0, "diagonal flow should be positive: {q_diag}");
+
+        let ratio = q_diag / q_perp;
+        // Expected: Cw_diag / Cw_perp = 0.3 / 0.55 ≈ 0.5455
+        assert!(
+            (ratio - (0.3 / 0.55)).abs() < 1e-10,
+            "diagonal/perpendicular ratio: expected {:.4}, got {:.4}",
+            0.3 / 0.55,
+            ratio
+        );
+    }
+
+    #[test]
+    fn nat_vent_leeward_flow_is_zero() {
+        // Wind from behind the opening (angle > 90°) → zero flow
+        let (a, tz, to, tb, h, mh, v, sc, wc, vol, oa, _wd) = nat_vent_base_args();
+        // Wind from 0° (North) while opening faces 180° (South) → angle 180° > 90°
+        let q_leeward =
+            natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol, oa, 0.0);
+        assert!(
+            q_leeward.abs() < 1e-15,
+            "leeward opening should produce zero flow, got {q_leeward}"
         );
     }
 

@@ -168,11 +168,15 @@ pub struct MechanicalVentilationParams {
 ///
 /// Implements the OCHRE/ResStock model: flow is driven by stack effect and wind
 /// through operable windows, gated by temperature and outdoor humidity conditions.
+/// Opening effectiveness (Cw) is computed per timestep from the angle between
+/// wind direction and opening normal, following the EnergyPlus linear interpolation
+/// (ASHRAE HoF 2009 Ch. 16.14, Equation 37; EnergyPlus `ZoneEquipmentManager.cc:6007–6023`).
 ///
 /// # Defaults
 /// - `t_base_c`: 22.778 °C (73 °F) -- OCHRE default comfort base temperature
 /// - `max_outdoor_humidity_ratio`: 0.0115 kg/kg -- Building America HSP threshold
 /// - `OPEN_AREA_FRACTION`: 0.067 -- matches OCHRE (0.67 × 0.5 × 0.2 of total window area)
+/// - `opening_azimuth_deg`: 180° (South-facing, common for passive cooling in northern hemisphere)
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaturalVentilationConfig {
     /// Effective operable window area [m²].
@@ -188,6 +192,13 @@ pub struct NaturalVentilationConfig {
     pub t_base_c: f64,
     /// Maximum outdoor specific humidity [kg/kg] above which nat vent is suppressed.
     pub max_outdoor_humidity_ratio: f64,
+    /// Azimuth of the opening normal [°], 0° = North, clockwise.
+    ///
+    /// Default 180° (South-facing) is the common orientation for passive cooling
+    /// in the northern hemisphere. Used to compute the opening effectiveness Cw
+    /// from the angle between wind direction and opening normal per the EnergyPlus
+    /// linear interpolation (ASHRAE HoF 2009 Ch. 16.14, Eq. 37).
+    pub opening_azimuth_deg: f64,
 }
 
 impl NaturalVentilationConfig {
@@ -197,6 +208,8 @@ impl NaturalVentilationConfig {
     pub const DEFAULT_T_BASE_C: f64 = 22.778;
     /// Building America HSP outdoor humidity threshold [kg/kg].
     pub const DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO: f64 = 0.0115;
+    /// Default opening azimuth [°] -- South-facing, common for passive cooling in the northern hemisphere.
+    pub const DEFAULT_OPENING_AZIMUTH_DEG: f64 = 180.0;
 
     /// Construct from total window area; applies the standard 6.7% open-area fraction.
     pub fn from_window_area(total_window_area_m2: f64, stack_coeff: f64, wind_coeff: f64) -> Self {
@@ -206,6 +219,7 @@ impl NaturalVentilationConfig {
             wind_coeff,
             t_base_c: Self::DEFAULT_T_BASE_C,
             max_outdoor_humidity_ratio: Self::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+            opening_azimuth_deg: Self::DEFAULT_OPENING_AZIMUTH_DEG,
         }
     }
 }
@@ -754,6 +768,12 @@ pub struct EnvelopeComponentGains {
     pub forced_vent_m3_s: f64,
     /// Natural ventilation flow rate [m³/s].
     pub natural_vent_m3_s: f64,
+    /// Natural ventilation opening effectiveness Cw [0.0–0.55].
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_cw: f64,
+    /// Angle between wind direction and opening normal [°], in [0, 180].
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_wind_angle_deg: f64,
     /// Outdoor moist-air density used for infiltration/ventilation mass flow conversion [kg/m³].
     /// Computed per timestep from outdoor T, P, and humidity ratio via ASHRAE HoF 2021 Ch.1 Eq.28.
     /// Included in diagnostic CSV (verbosity ≥ 4) for altitude-aware density verification.

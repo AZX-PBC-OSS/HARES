@@ -8,6 +8,8 @@ use hares_physics::infiltration::{
     ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
     natural_ventilation_flow_m3_s,
 };
+#[cfg(feature = "observe")]
+use hares_physics::infiltration::{compute_natural_ventilation_cw, wind_incidence_angle_deg};
 use hares_types::{EnvironmentState, ZoneId};
 
 use super::H_FG_J_PER_KG;
@@ -69,6 +71,15 @@ pub(crate) struct InfiltrationCoupling {
     pub forced_flow_m3_s: f64,
     /// Natural ventilation flow [m³/s].
     pub nat_flow_m3_s: f64,
+    /// Natural ventilation opening effectiveness Cw [0.0–0.55].
+    /// Populated only when natural ventilation is active; 0.0 otherwise.
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_cw: f64,
+    /// Angle between wind direction and opening normal [°], in [0, 180].
+    /// 0° = wind perpendicular to opening; 90° = wind parallel; >90° = leeward.
+    /// Populated only when natural ventilation is active.
+    #[cfg(feature = "observe")]
+    pub natural_ventilation_wind_angle_deg: f64,
 }
 
 /// Computes infiltration and ventilation coupling terms and accumulates latent loads
@@ -177,6 +188,8 @@ pub(crate) fn apply_infiltration_and_ventilation(
                         nv.stack_coeff,
                         nv.wind_coeff,
                         zone.volume_m3,
+                        nv.opening_azimuth_deg,
+                        env.weather.wind_dir_deg,
                     )
                 })
                 .unwrap_or(0.0)
@@ -277,6 +290,22 @@ pub(crate) fn apply_infiltration_and_ventilation(
             raw_inf_m3_s: q_inf_m3_s,
             forced_flow_m3_s,
             nat_flow_m3_s: q_nat_m3_s,
+            #[cfg(feature = "observe")]
+            natural_ventilation_cw: config
+                .natural_ventilation
+                .as_ref()
+                .map(|nv| {
+                    compute_natural_ventilation_cw(nv.opening_azimuth_deg, env.weather.wind_dir_deg)
+                })
+                .unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_wind_angle_deg: config
+                .natural_ventilation
+                .as_ref()
+                .map(|nv| {
+                    wind_incidence_angle_deg(nv.opening_azimuth_deg, env.weather.wind_dir_deg)
+                })
+                .unwrap_or(0.0),
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
@@ -629,11 +658,12 @@ mod tests {
 
     /// Natural ventilation open: zone is warm (26°C), outdoor is cool and dry (15°C, W=0.005).
     ///
-    /// Hand-calculated from `natural_ventilation_flow_m3_s` formula:
-    ///   A_eff   = 0.5 × 0.6 × 10000 = 3000 cm²
+    /// Hand-calculated from `natural_ventilation_flow_m3_s` formula with Cw = 0.55
+    /// (perpendicular wind: default opening azimuth 180° matches env wind_dir_deg 180°):
+    ///   A_eff   = 0.5 × 0.55 × 10000 = 2750 cm²
     ///   adj     = (26 − 22.778) / (26 − 15) = 3.222 / 11 ≈ 0.29291
     ///   driver  = 0.000290 × 11 + 0.000150 × 4 = 0.003790
-    ///   q_nat   = 3000 × adj × √0.003790 / 1000
+    ///   q_nat   = 2750 × adj × √0.003790 / 1000
     ///   (capped at 20 ACH = 20 × 300 / 3600 = 1.667 m³/s, not binding here)
     #[test]
     fn infiltration_natural_ventilation_open() {
@@ -658,6 +688,7 @@ mod tests {
                 t_base_c,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
             ..ThermalSolverConfig::default()
         };
@@ -672,8 +703,9 @@ mod tests {
 
         let nat_flow = couplings[0].nat_flow_m3_s;
 
-        // Hand-calculated expected value from the implementation formula.
-        let nat_vent_area_cm2 = open_area_m2 * 0.6 * 10_000.0;
+        // Hand-calculated expected value: Cw = 0.55 for perpendicular wind (same azimuth 180°)
+        let cw = 0.55;
+        let nat_vent_area_cm2 = open_area_m2 * cw * 10_000.0;
         let adj = ((t_zone - t_base_c) / (t_zone - t_out)).clamp(0.0, 1.0);
         let driver = stack_coeff * (t_zone - t_out).abs() + wind_coeff * wind_m_s.powi(2);
         let q_expected =
@@ -701,6 +733,7 @@ mod tests {
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
             ..ThermalSolverConfig::default()
         };
@@ -737,6 +770,7 @@ mod tests {
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
             ..ThermalSolverConfig::default()
         };

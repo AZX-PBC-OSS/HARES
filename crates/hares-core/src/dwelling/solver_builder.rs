@@ -553,6 +553,51 @@ fn natural_ventilation_coefficients(
         })
 }
 
+/// Compute total operable window area and area-weighted opening azimuth
+/// from conditioned-zone windows.
+///
+/// Iterates over windows attached to conditioned-zone boundaries, accumulates
+/// total operable area (area × fraction_operable) and azimuth-weighted area,
+/// then returns the total operable area and the area-weighted average azimuth.
+///
+/// Falls back to `default_azimuth_deg` when no window has a known azimuth.
+///
+/// Uses a simple arithmetic mean (not a circular/vector mean), which is adequate
+/// for typical residential buildings where operable windows are not symmetrically
+/// distributed across the 0°/360° azimuth boundary.
+fn compute_opening_azimuth_and_area(
+    windows: &[hares_io::hpxml::Window],
+    boundaries: &[hares_io::hpxml::Boundary],
+    default_azimuth_deg: f64,
+) -> (f64, f64) {
+    let (total_operable_area, az_area_sum, az_weighted_sum) = windows
+        .iter()
+        .filter(|w| {
+            w.attached_to_wall_id
+                .as_ref()
+                .and_then(|wall_id| boundaries.iter().find(|b| b.id == *wall_id))
+                .map(|b| b.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Conditioned))
+                .unwrap_or(false)
+        })
+        .fold(
+            (0.0_f64, 0.0_f64, 0.0_f64),
+            |(area_sum, az_area, az_weighted), w| {
+                let eff = w.area_m2 * w.fraction_operable;
+                let (aa, aw) = match w.azimuth_deg {
+                    Some(az) => (eff, eff * az),
+                    None => (0.0, 0.0),
+                };
+                (area_sum + eff, az_area + aa, az_weighted + aw)
+            },
+        );
+    let azimuth = if total_operable_area > 0.0 && az_area_sum > 0.0 {
+        az_weighted_sum / az_area_sum
+    } else {
+        default_azimuth_deg
+    };
+    (total_operable_area, azimuth)
+}
+
 /// Annual weather averages needed for film coefficient computation.
 pub(crate) struct WeatherAverages {
     pub(crate) avg_wind_m_s: f64,
@@ -1349,20 +1394,11 @@ pub(crate) fn build_default_solvers(
                 .count()
                 .max(1) as f64;
 
-        let total_operable_area: f64 = building
-            .windows
-            .iter()
-            .filter(|w| {
-                w.attached_to_wall_id
-                    .as_ref()
-                    .and_then(|wall_id| building.boundaries.iter().find(|b| b.id == *wall_id))
-                    .map(|b| {
-                        b.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Conditioned)
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|w| w.area_m2 * w.fraction_operable)
-            .sum();
+        let (total_operable_area, opening_azimuth_deg) = compute_opening_azimuth_and_area(
+            &building.windows,
+            &building.boundaries,
+            NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
+        );
         if total_operable_area > 0.0 {
             let open_area = total_operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
             let (stack, wind) = natural_ventilation_coefficients(&thermal_cfg, building_height_m);
@@ -1376,6 +1412,7 @@ pub(crate) fn build_default_solvers(
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
                 max_outdoor_humidity_ratio:
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg,
             });
         }
     }
@@ -1576,10 +1613,10 @@ fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attic_infiltration_method, attic_interior_emissivity, exterior_emissivity,
-        exterior_solar_absorptance, foundation_height_m, foundation_infiltration_method,
-        garage_infiltration_method, include_interior_lwr, interior_solar_absorptance,
-        natural_ventilation_coefficients,
+        attic_infiltration_method, attic_interior_emissivity, compute_opening_azimuth_and_area,
+        exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
+        foundation_infiltration_method, garage_infiltration_method, include_interior_lwr,
+        interior_solar_absorptance, natural_ventilation_coefficients,
     };
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::InfiltrationMethod;
@@ -1939,6 +1976,292 @@ mod tests {
             (actual.0 - ceiling_expected.0).abs() > 1e-12
                 || (actual.1 - ceiling_expected.1).abs() > 1e-12,
             "fallback must use full building height, not ceiling height"
+        );
+    }
+
+    #[test]
+    fn opening_azimuth_weighted_by_operable_area() {
+        let boundaries = vec![
+            Boundary {
+                id: "wall-north".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 10.0,
+                azimuth_deg: Some(0.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            },
+            Boundary {
+                id: "wall-south".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 10.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            },
+            Boundary {
+                id: "wall-east-unknown".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 10.0,
+                azimuth_deg: Some(90.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            },
+            Boundary {
+                id: "wall-garage".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 10.0,
+                azimuth_deg: Some(270.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Garage),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            },
+        ];
+        let windows = vec![
+            // North window: 2 m², 50% operable → 1.0 m² operable at 0°
+            Window {
+                id: "north".to_string(),
+                area_m2: 2.0,
+                azimuth_deg: Some(0.0),
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.5,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: Some("wall-north".to_string()),
+            },
+            // South window: 1 m², 100% operable → 1.0 m² operable at 180°
+            Window {
+                id: "south".to_string(),
+                area_m2: 1.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 1.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: Some("wall-south".to_string()),
+            },
+            // East window: 3 m², 50% operable → 1.5 m² operable, azimuth=None
+            Window {
+                id: "east".to_string(),
+                area_m2: 3.0,
+                azimuth_deg: None,
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.5,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: Some("wall-east-unknown".to_string()),
+            },
+            // Fixed window: 5 m², 0% operable → excluded from operable area
+            Window {
+                id: "fixed".to_string(),
+                area_m2: 5.0,
+                azimuth_deg: Some(45.0),
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: Some("wall-north".to_string()),
+            },
+            // Garage window: should be excluded (not conditioned zone)
+            Window {
+                id: "garage".to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(270.0),
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 1.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: Some("wall-garage".to_string()),
+            },
+        ];
+
+        // Hand calculation:
+        // Operable windows: north (1.0 m² at 0°), south (1.0 m² at 180°).
+        // East window has None azimuth → excluded from azimuth average but contributes area.
+        // Fixed has 0 operable → excluded. Garage has non-conditioned zone → excluded.
+        // total_operable_area = 1.0 + 1.0 + 1.5 = 3.5
+        // az_area_sum = 1.0 + 1.0 = 2.0
+        // az_weighted_sum = 1.0×0 + 1.0×180 = 180
+        // azimuth = 180 / 2.0 = 90.0
+
+        let (total_area, azimuth) = compute_opening_azimuth_and_area(&windows, &boundaries, 180.0);
+
+        assert!(
+            (total_area - 3.5).abs() < 1e-10,
+            "total operable area: expected 3.5, got {total_area}"
+        );
+        assert!(
+            (azimuth - 90.0).abs() < 1e-10,
+            "area-weighted azimuth: expected 90.0, got {azimuth}"
+        );
+    }
+
+    #[test]
+    fn opening_azimuth_falls_back_to_default_when_no_azimuth_known() {
+        let boundaries = vec![Boundary {
+            id: "wall".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 10.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: vec![],
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: vec![],
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: None,
+            framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        }];
+        let windows = vec![Window {
+            id: "w".to_string(),
+            area_m2: 2.0,
+            azimuth_deg: None,
+            u_factor_w_m2_k: Some(2.0),
+            shgc: Some(0.5),
+            interior_shading_fraction: 1.0,
+            winter_shading_fraction: 1.0,
+            fraction_operable: 0.5,
+            exterior_shading_summer: 1.0,
+            exterior_shading_winter: 1.0,
+            attached_to_wall_id: Some("wall".to_string()),
+        }];
+
+        let (total_area, azimuth) = compute_opening_azimuth_and_area(&windows, &boundaries, 180.0);
+
+        assert!(
+            total_area > 0.0,
+            "should have operable area even without azimuth"
+        );
+        assert!(
+            (azimuth - 180.0).abs() < 1e-10,
+            "should fall back to default 180° when no azimuth known, got {azimuth}"
+        );
+    }
+
+    #[test]
+    fn opening_azimuth_zero_when_no_operable_windows() {
+        let boundaries = vec![Boundary {
+            id: "wall".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 10.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: vec![],
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: vec![],
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: None,
+            framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        }];
+        let windows = Vec::<Window>::new();
+
+        let (total_area, azimuth) = compute_opening_azimuth_and_area(&windows, &boundaries, 180.0);
+
+        assert!(
+            (total_area - 0.0).abs() < 1e-10,
+            "no windows → zero operable area, got {total_area}"
+        );
+        assert!(
+            (azimuth - 180.0).abs() < 1e-10,
+            "no windows → falls back to default azimuth"
         );
     }
 

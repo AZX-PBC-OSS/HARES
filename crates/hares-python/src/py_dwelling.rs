@@ -2536,6 +2536,14 @@ fn snapshot_to_py(
         d.set_item("infiltration_w", gains.infiltration_w)?;
         d.set_item("ventilation_w", gains.ventilation_w)?;
         d.set_item("natural_ventilation_w", gains.natural_ventilation_w)?;
+        #[cfg(feature = "observe")]
+        {
+            d.set_item("natural_ventilation_cw", gains.natural_ventilation_cw)?;
+            d.set_item(
+                "natural_ventilation_wind_angle_deg",
+                gains.natural_ventilation_wind_angle_deg,
+            )?;
+        }
         d.set_item("port_convective_w", gains.port_convective_w)?;
         d.set_item("port_radiant_w", gains.port_radiant_w)?;
         d.set_item("internal_gain_w", gains.internal_gain_w)?;

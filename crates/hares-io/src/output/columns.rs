@@ -553,6 +553,17 @@ pub fn build_schema(
             "Infiltration Heat Gain - Indoor (W)",
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Natural Ventilation Heat Gain - Indoor (W)",
+        ] {
+            fields.push(Field::new(*label, DataType::Float64, true));
+        }
+        #[cfg(feature = "observe")]
+        for label in &[
+            "Natural Ventilation Cw",
+            "Natural Ventilation Wind Angle (deg)",
+        ] {
+            fields.push(Field::new(*label, DataType::Float64, true));
+        }
+        for label in &[
             "Internal Heat Gain - Indoor (W)",
             "Interior LWR Exchange - Indoor (W)",
             "Opaque Surface Heat Gain - Indoor (W)",

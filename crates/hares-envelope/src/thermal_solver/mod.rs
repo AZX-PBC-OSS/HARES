@@ -1148,6 +1148,12 @@ impl ThermalSolver {
             raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
             natural_vent_m3_s: indoor_inf.map(|c| c.nat_flow_m3_s).unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_cw: indoor_inf.map(|c| c.natural_ventilation_cw).unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            natural_ventilation_wind_angle_deg: indoor_inf
+                .map(|c| c.natural_ventilation_wind_angle_deg)
+                .unwrap_or(0.0),
             air_density_kg_m3: {
                 moist_air_density_kg_m3(
                     env.weather.pressure_pa(),
