@@ -671,9 +671,40 @@ impl HvacEquipment {
         }
         // If the loaded coefficients are still identity and the equipment type
         // has physically-correct defaults available, substitute them.
+        //
+        // Speed count for default-curve substitution. The curve-length inference
+        // path (from_curves = biquadratic_coeffs.len() / 2) is intentionally NOT
+        // used here: identity has len == 1 (from_curves == 0), and non-identity
+        // curves cause maybe_substitute_defaults to return User before speed_count
+        // is ever consulted.
+        //
+        // Mini-split types hardcode 4 speeds to match the HPXML auto-generation
+        // convention (resolve_hvac.rs forces n_speeds = 4 when is_mini_split is
+        // true). This duplicates HeatPumpHeaterConfig::effective_number_of_speeds()
+        // / HeatPumpCoolerConfig::effective_number_of_speeds(), which encode the
+        // same rule from the is_mini_split config flag. The duplication is
+        // intentional: at this point in init the config is an opaque
+        // EquipmentConfig, and unwrapping the typed payload for every possible
+        // equipment type variant would add coupling without benefit — the rule is
+        // simple and the two copies agree in practice for all real HPXML-sourced
+        // configs. MiniSplitCool is included here despite having no defaults in
+        // default_biquadratic_coeffs (maybe_substitute_defaults returns Identity
+        // immediately for that variant); the cost of computing an unused value is
+        // trivial and keeping the branch uniform avoids a special case.
+        let speed_count = if matches!(
+            self.config.equipment_type,
+            HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool
+        ) {
+            4
+        } else {
+            extract_numeric(config, "number_of_speeds")
+                .map(|n| (n as usize).max(1))
+                .unwrap_or(1)
+        };
         self.config.biquadratic_curve_source = maybe_substitute_defaults(
             &mut self.config.biquadratic_coeffs,
             self.config.equipment_type,
+            speed_count,
         );
         // Per-stage biquadratic curve-count validation is deferred to
         // equipment-specific init (heater.rs, air_conditioner.rs, etc.)
@@ -3640,7 +3671,7 @@ mod tests {
     #[test]
     fn ashp_default_cap_curve_matches_ochre_csv_single_1() {
         use super::super::default_curves::default_biquadratic_coeffs;
-        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly).unwrap();
+        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1).unwrap();
         let expected_cap: [f64; 6] = [
             0.878143655,
             -0.002914855,
@@ -3670,7 +3701,7 @@ mod tests {
     #[test]
     fn mshp_default_cap_curve_matches_ochre_csv_variable_1() {
         use super::super::default_curves::default_biquadratic_coeffs;
-        let defaults = default_biquadratic_coeffs(HvacEquipmentType::MiniSplitHeat).unwrap();
+        let defaults = default_biquadratic_coeffs(HvacEquipmentType::MiniSplitHeat, 1).unwrap();
         let expected_cap: [f64; 6] = [1.002928121, -0.010386676, 0.0, 0.025961538, 0.0, 0.0];
         let expected_eir: [f64; 6] = [
             0.966475473,
@@ -3878,5 +3909,46 @@ mod tests {
         assert!(super::HvacEquipment::validate_biquadratic_curve_count(3, 2).is_err());
         // 4 coeffs for 3 speeds: 2 < 4 < 6 → rejected.
         assert!(super::HvacEquipment::validate_biquadratic_curve_count(4, 3).is_err());
+    }
+
+    #[test]
+    fn mshp_identity_substitution_produces_8_curves_for_4_speeds() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        assert_eq!(
+            hvac.config.biquadratic_coeffs.len(),
+            8,
+            "MSHP with identity curves must produce 8 interleaved entries (4 cap+EIR pairs)"
+        );
+        assert_eq!(
+            hvac.config.biquadratic_curve_source,
+            BiquadraticCurveSource::Default,
+            "MSHP with identity curves must report Default curve source"
+        );
+    }
+
+    #[test]
+    fn mshp_identity_substitution_pairs_match_defaults() {
+        use super::super::default_curves::default_biquadratic_coeffs;
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        // Verify each pair matches the MSHP single-speed defaults.
+        let expected = default_biquadratic_coeffs(HvacEquipmentType::MiniSplitHeat, 1).unwrap();
+        let cap_default = expected[0];
+        let eir_default = expected[1];
+        for speed in 0..4 {
+            assert_eq!(
+                hvac.config.biquadratic_coeffs[speed * 2],
+                cap_default,
+                "speed {speed} capacity curve must match MSHP default"
+            );
+            assert_eq!(
+                hvac.config.biquadratic_coeffs[speed * 2 + 1],
+                eir_default,
+                "speed {speed} EIR curve must match MSHP default"
+            );
+        }
     }
 }

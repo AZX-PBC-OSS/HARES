@@ -5,12 +5,16 @@
 //! of the identity placeholder `[1,0,0,0,0,0]`.
 //!
 //! Coefficients are sourced from OCHRE defaults CSVs:
-//!   - `defaults/hvac_heating/ASHP Heater.csv` column `Single_1`
-//!   - `defaults/hvac_heating/MSHP Heater.csv` column `Variable_1`
+//!   - `defaults/HVAC Heating/Biquadratic ASHP Heater.csv` — columns
+//!     `Single_1`, `Double_{1,2}`, `Variable_{1..4}` for per-speed ASHP
+//!     heating curves.
+//!   - `defaults/HVAC Heating/Biquadratic MSHP Heater.csv` — column
+//!     `Variable_1` (all Variable_* columns are numerically identical).
 //!
 //! Embedded as `const` arrays to avoid runtime file I/O in the constructor.
 //! Multi-speed defaults are loaded via `DefaultsStore` in the HPXML resolver
-//! (`apply_multispeed_parameters`); this module covers the single-speed gap.
+//! (`apply_multispeed_parameters`); this module covers the identity-substitution
+//! gap for equipment that arrives with no explicit biquadratic curves.
 
 use super::hvac_core::{DEFAULT_BIQUADRATIC_COEFFS, HvacEquipmentType};
 
@@ -40,6 +44,146 @@ const ASHP_SINGLE_HEATING_EIR: [f64; 6] = [
     -0.006480365,
     0.000456354,
     -0.00069764,
+];
+
+/// ASHP two-speed heating capacity curves (OCHRE `ASHP Heater.csv` columns `Double_1`, `Double_2`,
+/// rows `a_cap_t`–`f_cap_t`).
+///
+/// Verification at AHRI 210/240-2023 H1 (21.1 °C indoor, 8.3 °C outdoor):
+///   - Double_1 cap_ratio ≈ 0.997 ✓
+///   - Double_2 cap_ratio ≈ 1.009 ✓
+///
+/// H3 (21.1 °C indoor, −8.3 °C outdoor):
+///   - Double_1 cap_ratio ≈ 0.62 < 0.8 ✓
+///   - Double_2 cap_ratio ≈ 0.62 < 0.8 ✓
+const ASHP_TWO_SPEED_HEATING_CAPACITY: [[f64; 6]; 2] = [
+    [
+        0.84077409,
+        -0.001433659,
+        -0.00015034,
+        0.029628603,
+        0.000161676,
+        -0.00002349,
+    ],
+    [
+        0.831506971,
+        0.001839217,
+        -0.0001876,
+        0.026600206,
+        0.000191484,
+        -0.00006577,
+    ],
+];
+
+/// ASHP two-speed heating EIR curves (OCHRE `ASHP Heater.csv` columns `Double_1`, `Double_2`,
+/// rows `a_eir_t`–`f_eir_t`).
+///
+/// Verification at AHRI 210/240-2023 H3:
+///   - Double_1 EIR ≈ 1.76 > 1.0 ✓
+///   - Double_2 EIR ≈ 1.73 > 1.0 ✓
+const ASHP_TWO_SPEED_HEATING_EIR: [[f64; 6]; 2] = [
+    [
+        0.539472334,
+        0.016510315,
+        0.000838745,
+        -0.00403234,
+        0.001424042,
+        -0.002118063,
+    ],
+    [
+        0.787746797,
+        -0.000652315,
+        0.000788668,
+        -0.002320906,
+        0.000747604,
+        -0.001091731,
+    ],
+];
+
+/// ASHP variable-speed heating capacity curves (OCHRE `ASHP Heater.csv` columns
+/// `Variable_1`–`Variable_4`, rows `a_cap_t`–`f_cap_t`).
+///
+/// Verification at AHRI 210/240-2023 H1 (21.1 °C indoor, 8.3 °C outdoor):
+///   - Variable_1 cap_ratio ≈ 0.993 ✓
+///   - Variable_2 cap_ratio ≈ 1.000 ✓
+///   - Variable_3 cap_ratio ≈ 0.996 ✓
+///   - Variable_4 cap_ratio ≈ 1.000 ✓
+const ASHP_VARIABLE_HEATING_CAPACITY: [[f64; 6]; 4] = [
+    [
+        0.893321032,
+        -0.009733743,
+        0.00006364,
+        0.039113052,
+        -0.000002508,
+        -0.00027259,
+    ],
+    [
+        0.923734534,
+        -0.005970776,
+        0.0,
+        0.027816729,
+        0.000065917,
+        -0.00018925,
+    ],
+    [
+        0.96205422,
+        -0.009492778,
+        0.00010921,
+        0.024707831,
+        0.000034225,
+        -0.0001257,
+    ],
+    [
+        0.936079154,
+        -0.005481564,
+        -0.00000859,
+        0.024910532,
+        0.000053087,
+        -0.00015575,
+    ],
+];
+
+/// ASHP variable-speed heating EIR curves (OCHRE `ASHP Heater.csv` columns
+/// `Variable_1`–`Variable_4`, rows `a_eir_t`–`f_eir_t`).
+///
+/// Verification at AHRI 210/240-2023 H3 (−8.3 °C outdoor):
+///   - Variable_1 EIR ≈ 1.59 > 1.0 ✓
+///   - Variable_2 EIR ≈ 1.72 > 1.0 ✓
+///   - Variable_3 EIR ≈ 1.71 > 1.0 ✓
+///   - Variable_4 EIR ≈ 1.65 > 1.0 ✓
+const ASHP_VARIABLE_HEATING_EIR: [[f64; 6]; 4] = [
+    [
+        0.466648487,
+        0.020263329,
+        0.001268392,
+        -0.017016133,
+        0.003174996,
+        -0.003496096,
+    ],
+    [
+        0.450656859,
+        0.029290264,
+        0.000393145,
+        -0.009789518,
+        0.000539369,
+        -0.001180883,
+    ],
+    [
+        0.572518011,
+        0.022896249,
+        0.000266019,
+        -0.010667543,
+        0.000490922,
+        -0.000681369,
+    ],
+    [
+        0.668195855,
+        0.014671955,
+        0.000445963,
+        -0.011439229,
+        0.000497103,
+        -0.000690956,
+    ],
 ];
 
 /// MSHP variable-speed heating capacity curve (OCHRE `MSHP Heater.csv` column `Variable_1`, row `a_cap_t`–`f_cap_t`).
@@ -149,38 +293,95 @@ impl BiquadraticCurveSource {
     }
 }
 
-/// Return the default interleaved `[cap_0, eir_0]` biquadratic coefficient
-/// vector for the given `equipment_type`, or `None` if that type does not
-/// use biquadratic curves in the heating path (furnace, baseboard, etc.).
+/// Return the default interleaved `[cap_0, eir_0, cap_1, eir_1, ...]` biquadratic
+/// coefficient vector for the given `equipment_type` and `speed_count`, or `None`
+/// if that type does not use biquadratic curves in the heating path (furnace,
+/// baseboard, etc.).
+///
+/// ## Per-equipment-type behaviour
+///
+/// - **ASHP (heating):** For `speed_count` ∈ {1, 2, 4}, distinct per-stage
+///   coefficients are sourced from the OCHRE default CSVs
+///   (`vendors/OCHRE/ochre/defaults/HVAC Heating/Biquadratic ASHP Heater.csv`).
+///   For any other `speed_count`, the single-speed pair is replicated (with a
+///   `tracing::warn!`) — this is a genuine limitation because OCHRE provides
+///   only columns for `Single_1`, `Double_{1,2}`, and `Variable_{1..4}`.
+/// - **MSHP (heating):** All speed stages share identical capacity and EIR
+///   coefficients in the vendored OCHRE CSV
+///   (`vendors/OCHRE/ochre/defaults/HVAC Heating/Biquadratic MSHP Heater.csv` —
+///   `Variable_1` through `Variable_4` are byte-identical columns). Replication
+///   of the single-speed pair is therefore numerically correct.
+/// - **GSHP/WSHP (heating & cooling):** No per-speed OCHRE defaults exist.
+///   The single-speed pair is replicated with a `tracing::warn!` for
+///   `speed_count > 1`.
 ///
 /// Returns `Some` only for heat-pump types that need temperature-dependent
 /// capacity and EIR corrections. Non-HP types continue to use identity.
 pub(super) fn default_biquadratic_coeffs(
     equipment_type: HvacEquipmentType,
+    speed_count: usize,
 ) -> Option<Vec<[f64; 6]>> {
+    let count = speed_count.max(1);
+
     match equipment_type {
         HvacEquipmentType::AshpHeatPumpOnly | HvacEquipmentType::AshpHeatPumpAux => {
-            Some(vec![ASHP_SINGLE_HEATING_CAPACITY, ASHP_SINGLE_HEATING_EIR])
+            Some(match count {
+                1 => {
+                    vec![ASHP_SINGLE_HEATING_CAPACITY, ASHP_SINGLE_HEATING_EIR]
+                }
+                2 => interleave_per_speed(
+                    &ASHP_TWO_SPEED_HEATING_CAPACITY,
+                    &ASHP_TWO_SPEED_HEATING_EIR,
+                ),
+                4 => interleave_per_speed(
+                    &ASHP_VARIABLE_HEATING_CAPACITY,
+                    &ASHP_VARIABLE_HEATING_EIR,
+                ),
+                _ => {
+                    tracing::warn!(
+                        equipment_type = ?equipment_type,
+                        speed_count = count,
+                        "ASHP with {} speeds has no per-stage default curves in \
+                         the OCHRE CSV; replicating single-speed defaults. Per-stage \
+                         COP correction will be identical across speeds.",
+                        count,
+                    );
+                    replicate(ASHP_SINGLE_HEATING_CAPACITY, ASHP_SINGLE_HEATING_EIR, count)
+                }
+            })
         }
-        HvacEquipmentType::MiniSplitHeat => Some(vec![
-            MSHP_VARIABLE_HEATING_CAPACITY,
-            MSHP_VARIABLE_HEATING_EIR,
-        ]),
-        HvacEquipmentType::GshpHeatPumpHeating => {
-            Some(vec![GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR])
+        HvacEquipmentType::MiniSplitHeat => {
+            // MSHP Variable_1–4 columns are numerically identical; replication is correct.
+            let coeffs = replicate(
+                MSHP_VARIABLE_HEATING_CAPACITY,
+                MSHP_VARIABLE_HEATING_EIR,
+                count,
+            );
+            Some(coeffs)
         }
-        HvacEquipmentType::WshpHeatPumpHeating => {
-            // Water-source heat pumps use the same biquadratic coefficients as
-            // ground-source: both model a water-to-air coil with indoor DB and
-            // entering water temperature as the independent variables. The same
-            // curves from DOE/ORNL (Tang et al. 2013) FSEC-PF-463-13 apply.
-            Some(vec![GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR])
+        HvacEquipmentType::GshpHeatPumpHeating | HvacEquipmentType::WshpHeatPumpHeating => {
+            let coeffs = replicate(GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR, count);
+            if count > 1 {
+                tracing::warn!(
+                    equipment_type = ?equipment_type,
+                    speed_count = count,
+                    "multi-speed equipment ({speed_count} speeds) using replicated single-speed \
+                     biquadratic curves; per-stage COP correction will be identical across speeds",
+                );
+            }
+            Some(coeffs)
         }
-        HvacEquipmentType::GshpHeatPumpCooling => {
-            Some(vec![GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR])
-        }
-        HvacEquipmentType::WshpHeatPumpCooling => {
-            Some(vec![GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR])
+        HvacEquipmentType::GshpHeatPumpCooling | HvacEquipmentType::WshpHeatPumpCooling => {
+            let coeffs = replicate(GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR, count);
+            if count > 1 {
+                tracing::warn!(
+                    equipment_type = ?equipment_type,
+                    speed_count = count,
+                    "multi-speed equipment ({speed_count} speeds) using replicated single-speed \
+                     biquadratic curves; per-stage COP correction will be identical across speeds",
+                );
+            }
+            Some(coeffs)
         }
         HvacEquipmentType::GasFurnace
         | HvacEquipmentType::ElectricFurnace
@@ -189,6 +390,32 @@ pub(super) fn default_biquadratic_coeffs(
         | HvacEquipmentType::Baseboard
         | HvacEquipmentType::Other => None,
     }
+}
+
+/// Interleave per-speed cap/EIR coefficient arrays: `[cap[0], eir[0], cap[1], eir[1], ...]`.
+fn interleave_per_speed(caps: &[[f64; 6]], eirs: &[[f64; 6]]) -> Vec<[f64; 6]> {
+    assert_eq!(
+        caps.len(),
+        eirs.len(),
+        "cap and EIR per-speed arrays must have the same length"
+    );
+    let n = caps.len();
+    let mut coeffs = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        coeffs.push(caps[i]);
+        coeffs.push(eirs[i]);
+    }
+    coeffs
+}
+
+/// Build a replicated interleaved curve vector: `n` copies of `(cap, eir)`.
+fn replicate(cap: [f64; 6], eir: [f64; 6], n: usize) -> Vec<[f64; 6]> {
+    let mut coeffs = Vec::with_capacity(n * 2);
+    for _ in 0..n {
+        coeffs.push(cap);
+        coeffs.push(eir);
+    }
+    coeffs
 }
 
 /// Determine whether a coefficient vector represents the identity placeholder.
@@ -204,18 +431,24 @@ pub(super) fn is_identity(coeffs: &[[f64; 6]]) -> bool {
 /// If the coefficients are identity but the type has no defaults, returns
 /// `Identity`. If the coefficients are non-identity (user-supplied), returns
 /// `User`.
+///
+/// Warnings about replicated defaults for multi-speed equipment are emitted
+/// by `default_biquadratic_coeffs` when per-stage data is unavailable.
 pub(super) fn maybe_substitute_defaults(
     biquadratic_coeffs: &mut Vec<[f64; 6]>,
     equipment_type: HvacEquipmentType,
+    speed_count: usize,
 ) -> BiquadraticCurveSource {
     if !is_identity(biquadratic_coeffs) {
         return BiquadraticCurveSource::User;
     }
-    if let Some(defaults) = default_biquadratic_coeffs(equipment_type) {
-        tracing::info!(
-            equipment_type = ?equipment_type,
-            "substituting default biquadratic curves; original was identity"
-        );
+    if let Some(defaults) = default_biquadratic_coeffs(equipment_type, speed_count) {
+        if speed_count == 1 {
+            tracing::info!(
+                equipment_type = ?equipment_type,
+                "substituting default biquadratic curves; original was identity"
+            );
+        }
         *biquadratic_coeffs = defaults;
         BiquadraticCurveSource::Default
     } else {
@@ -322,7 +555,7 @@ mod tests {
     #[test]
     fn substitute_defaults_ashp_replaces_identity() {
         let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
-        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::AshpHeatPumpOnly);
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::AshpHeatPumpOnly, 1);
         assert_eq!(source, BiquadraticCurveSource::Default);
         assert_eq!(coeffs.len(), 2);
         assert_eq!(coeffs[0], ASHP_SINGLE_HEATING_CAPACITY);
@@ -333,7 +566,7 @@ mod tests {
     fn substitute_defaults_preserves_user_curves() {
         let user = [[0.9, 0.01, 0.0, 0.02, 0.0, 0.0]];
         let mut coeffs = user.to_vec();
-        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::AshpHeatPumpOnly);
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::AshpHeatPumpOnly, 1);
         assert_eq!(source, BiquadraticCurveSource::User);
         assert_eq!(coeffs, user);
     }
@@ -341,7 +574,7 @@ mod tests {
     #[test]
     fn substitute_defaults_furnace_stays_identity() {
         let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
-        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GasFurnace);
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GasFurnace, 1);
         assert_eq!(source, BiquadraticCurveSource::Identity);
         assert_eq!(coeffs, vec![DEFAULT_BIQUADRATIC_COEFFS]);
     }
@@ -513,7 +746,8 @@ mod tests {
     #[test]
     fn substitute_defaults_gshp_heating_replaces_identity() {
         let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
-        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpHeating);
+        let source =
+            maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpHeating, 1);
         assert_eq!(source, BiquadraticCurveSource::Default);
         assert_eq!(coeffs.len(), 2);
         assert_eq!(coeffs[0], GSHP_HEATING_CAPACITY);
@@ -523,7 +757,8 @@ mod tests {
     #[test]
     fn substitute_defaults_gshp_cooling_replaces_identity() {
         let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
-        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpCooling);
+        let source =
+            maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpCooling, 1);
         assert_eq!(source, BiquadraticCurveSource::Default);
         assert_eq!(coeffs.len(), 2);
         assert_eq!(coeffs[0], GSHP_COOLING_CAPACITY);
@@ -583,5 +818,221 @@ mod tests {
             result_h1 > 0.9,
             "MSHP capacity at AHRI H1 (21.1°C / 8.3°C) must still be near 1.0; got {result_h1}"
         );
+    }
+
+    #[test]
+    fn default_biquadratic_coeffs_speed_4_ashp_produces_8_interleaved_entries() {
+        let coeffs = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 4).unwrap();
+        // 4 speeds × 2 (cap + EIR) = 8 interleaved entries.
+        assert_eq!(coeffs.len(), 8, "speed_count=4 must produce 8 entries");
+
+        // Each pair must match the corresponding variable-speed ASHP constants
+        // from the OCHRE CSV (Variable_1–4), not replicated single-speed values.
+        for speed in 0..4 {
+            assert_eq!(
+                coeffs[speed * 2],
+                ASHP_VARIABLE_HEATING_CAPACITY[speed],
+                "speed {speed} capacity curve must match ASHP Variable_{} default",
+                speed + 1,
+            );
+            assert_eq!(
+                coeffs[speed * 2 + 1],
+                ASHP_VARIABLE_HEATING_EIR[speed],
+                "speed {speed} EIR curve must match ASHP Variable_{} default",
+                speed + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn default_biquadratic_coeffs_speed_1_returns_single_pair() {
+        let coeffs = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1).unwrap();
+        assert_eq!(coeffs.len(), 2, "speed_count=1 must produce 2 entries");
+        assert_eq!(coeffs[0], ASHP_SINGLE_HEATING_CAPACITY);
+        assert_eq!(coeffs[1], ASHP_SINGLE_HEATING_EIR);
+    }
+
+    #[test]
+    fn default_biquadratic_coeffs_speed_2_ashp_produces_distinct_two_speed_pairs() {
+        let coeffs = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 2).unwrap();
+        assert_eq!(coeffs.len(), 4, "speed_count=2 must produce 4 entries");
+        // Two distinct cap/EIR pairs from the Double_1 / Double_2 columns.
+        for speed in 0..2 {
+            assert_eq!(
+                coeffs[speed * 2],
+                ASHP_TWO_SPEED_HEATING_CAPACITY[speed],
+                "speed {speed} capacity curve must match ASHP Double_{} default",
+                speed + 1,
+            );
+            assert_eq!(
+                coeffs[speed * 2 + 1],
+                ASHP_TWO_SPEED_HEATING_EIR[speed],
+                "speed {speed} EIR curve must match ASHP Double_{} default",
+                speed + 1,
+            );
+        }
+        // The two speed stages must have genuinely different coefficients.
+        assert_ne!(
+            coeffs[0], coeffs[2],
+            "Double_1 and Double_2 capacity curves must differ"
+        );
+        assert_ne!(
+            coeffs[1], coeffs[3],
+            "Double_1 and Double_2 EIR curves must differ"
+        );
+    }
+
+    #[test]
+    fn ashp_variable_speed_capacity_h1_approximately_unity() {
+        for (i, coeffs) in ASHP_VARIABLE_HEATING_CAPACITY.iter().enumerate() {
+            let [c0, c1, c2, c3, c4, c5] = *coeffs;
+            let x1 = 21.1_f64;
+            let x2 = 8.3_f64;
+            let cap_ratio = c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2;
+            assert!(
+                (cap_ratio - 1.0).abs() < 0.05,
+                "ASHP Variable_{} cap_ratio at AHRI H1 must be 1.0 ± 5%; got {cap_ratio:.6}",
+                i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn ashp_variable_speed_capacity_h3_below_08() {
+        for (i, coeffs) in ASHP_VARIABLE_HEATING_CAPACITY.iter().enumerate() {
+            let [c0, c1, c2, c3, c4, c5] = *coeffs;
+            let x1 = 21.1_f64;
+            let x2 = -8.3_f64;
+            let cap_ratio = c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2;
+            assert!(
+                cap_ratio < 0.8,
+                "ASHP Variable_{} cap_ratio at AHRI H3 must be < 0.8; got {cap_ratio:.6}",
+                i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn ashp_variable_speed_eir_h3_exceeds_h1() {
+        for (i, coeffs) in ASHP_VARIABLE_HEATING_EIR.iter().enumerate() {
+            let [c0, c1, c2, c3, c4, c5] = *coeffs;
+            let eir = |x2: f64| -> f64 {
+                let x1 = 21.1_f64;
+                c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2
+            };
+            let eir_h1 = eir(8.3);
+            let eir_h3 = eir(-8.3);
+            assert!(
+                eir_h3 > eir_h1,
+                "ASHP Variable_{} EIR at H3 ({eir_h3:.4}) must exceed H1 ({eir_h1:.4})",
+                i + 1,
+            );
+            assert!(
+                eir_h3 > 1.0,
+                "ASHP Variable_{} EIR at H3 must exceed 1.0; got {eir_h3:.4}",
+                i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn ashp_two_speed_capacity_h1_approximately_unity() {
+        for (i, coeffs) in ASHP_TWO_SPEED_HEATING_CAPACITY.iter().enumerate() {
+            let [c0, c1, c2, c3, c4, c5] = *coeffs;
+            let x1 = 21.1_f64;
+            let x2 = 8.3_f64;
+            let cap_ratio = c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2;
+            assert!(
+                (cap_ratio - 1.0).abs() < 0.05,
+                "ASHP Double_{} cap_ratio at AHRI H1 must be 1.0 ± 5%; got {cap_ratio:.6}",
+                i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn ashp_two_speed_eir_h3_exceeds_h1() {
+        for (i, coeffs) in ASHP_TWO_SPEED_HEATING_EIR.iter().enumerate() {
+            let [c0, c1, c2, c3, c4, c5] = *coeffs;
+            let eir = |x2: f64| -> f64 {
+                let x1 = 21.1_f64;
+                c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2
+            };
+            let eir_h1 = eir(8.3);
+            let eir_h3 = eir(-8.3);
+            assert!(
+                eir_h3 > eir_h1,
+                "ASHP Double_{} EIR at H3 ({eir_h3:.4}) must exceed H1 ({eir_h1:.4})",
+                i + 1,
+            );
+            assert!(
+                eir_h3 > 1.0,
+                "ASHP Double_{} EIR at H3 must exceed 1.0; got {eir_h3:.4}",
+                i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn ashp_variable_speed_pairs_are_distinct_per_stage() {
+        // The four variable-speed pairs must genuinely differ from each other —
+        // not replicated single-speed values. Compare each pair against every
+        // other pair.
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(
+                    ASHP_VARIABLE_HEATING_CAPACITY[i],
+                    ASHP_VARIABLE_HEATING_CAPACITY[j],
+                    "ASHP Variable_{} and Variable_{} capacity curves must differ",
+                    i + 1,
+                    j + 1,
+                );
+                assert_ne!(
+                    ASHP_VARIABLE_HEATING_EIR[i],
+                    ASHP_VARIABLE_HEATING_EIR[j],
+                    "ASHP Variable_{} and Variable_{} EIR curves must differ",
+                    i + 1,
+                    j + 1,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_biquadratic_coeffs_speed_0_returns_single_pair() {
+        let coeffs = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 0).unwrap();
+        assert_eq!(
+            coeffs.len(),
+            2,
+            "speed_count=0 must produce 2 entries (floor at 1)"
+        );
+    }
+
+    #[test]
+    fn maybe_substitute_defaults_multi_speed_replicates_mshp_curves() {
+        let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::MiniSplitHeat, 4);
+        assert_eq!(source, BiquadraticCurveSource::Default);
+        assert_eq!(coeffs.len(), 8, "MSHP speed_count=4 must produce 8 entries");
+        for cap_idx in [0, 2, 4, 6] {
+            assert_eq!(coeffs[cap_idx], MSHP_VARIABLE_HEATING_CAPACITY);
+        }
+        for eir_idx in [1, 3, 5, 7] {
+            assert_eq!(coeffs[eir_idx], MSHP_VARIABLE_HEATING_EIR);
+        }
+    }
+
+    #[test]
+    fn maybe_substitute_defaults_multi_speed_preserves_user_curves() {
+        let user = [
+            [0.9, 0.01, 0.0, 0.02, 0.0, 0.0],
+            [0.8, 0.01, 0.0, 0.02, 0.0, 0.0],
+            [0.7, 0.01, 0.0, 0.02, 0.0, 0.0],
+            [0.6, 0.01, 0.0, 0.02, 0.0, 0.0],
+        ];
+        let mut coeffs = user.to_vec();
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::AshpHeatPumpOnly, 4);
+        assert_eq!(source, BiquadraticCurveSource::User);
+        assert_eq!(coeffs, user);
     }
 }
