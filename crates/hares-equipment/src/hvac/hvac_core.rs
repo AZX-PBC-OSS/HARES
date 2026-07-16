@@ -1,5 +1,7 @@
 //! Core HVAC equipment wrapper with thermostat state, step logic, and helpers.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use chrono::Duration as ChronoDuration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::CFM_PER_M3_S;
@@ -291,6 +293,32 @@ impl HvacEquipmentType {
     }
 }
 
+/// Per-equipment state for biquadratic curve-index clamping diagnostics.
+///
+/// Wraps atomic counters so `HvacConfig` can derive `Clone`/`PartialEq`/`Debug`
+/// while supporting lock-free per-timestep increment and read-and-reset.
+#[derive(Debug)]
+pub struct ClampState {
+    was_clamped: AtomicBool,
+    clamp_count: AtomicU64,
+}
+
+impl Clone for ClampState {
+    fn clone(&self) -> Self {
+        Self {
+            was_clamped: AtomicBool::new(self.was_clamped.load(Ordering::Relaxed)),
+            clamp_count: AtomicU64::new(self.clamp_count.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PartialEq for ClampState {
+    fn eq(&self, other: &Self) -> bool {
+        self.was_clamped.load(Ordering::Relaxed) == other.was_clamped.load(Ordering::Relaxed)
+            && self.clamp_count.load(Ordering::Relaxed) == other.clamp_count.load(Ordering::Relaxed)
+    }
+}
+
 /// Equipment configuration set once at initialization and never modified at runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HvacConfig {
@@ -348,6 +376,10 @@ pub struct HvacConfig {
     pub eir_plr_coefficients: Option<Vec<[f64; 3]>>,
     pub min_time_per_speed_s: f64,
     pub biquadratic_curve_source: BiquadraticCurveSource,
+    /// Rate-limiting and per-timestep counter for `evaluate_biquadratic`
+    /// curve-index clamping diagnostics. Supports lock-free increment under
+    /// `&self` so the hot path stays allocation-free.
+    pub biquadratic_clamp: ClampState,
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
     /// Populated at init from `EquipmentConfig.zone_capacitance_kwh_per_k`;
     /// 0.0 means EBM is disabled (no telemetry output).
@@ -463,6 +495,10 @@ impl HvacEquipment {
                 eir_plr_coefficients: None,
                 min_time_per_speed_s: 300.0,
                 biquadratic_curve_source: BiquadraticCurveSource::Identity,
+                biquadratic_clamp: ClampState {
+                    was_clamped: AtomicBool::new(false),
+                    clamp_count: AtomicU64::new(0),
+                },
                 zone_capacitance_kwh_per_k: 0.0,
             },
             thermostat_fsm: ThermostatFsm::new(ThermalSetpoints {
@@ -639,6 +675,10 @@ impl HvacEquipment {
             &mut self.config.biquadratic_coeffs,
             self.config.equipment_type,
         );
+        // Per-stage biquadratic curve-count validation is deferred to
+        // equipment-specific init (heater.rs, air_conditioner.rs, etc.)
+        // because heating_capacities_w / cooling_capacities_w are set after
+        // hvac_core::init() returns. See Known Limitations in T-0481.
         // OCHRE HVAC.py: biquadratic CSV files specify `min_Twb`, `max_Twb`,
         // `min_Tdb`, `max_Tdb` bounds. Load from config if provided.
         self.config.biquadratic_x1_bounds = load_bounds_pair(
@@ -812,6 +852,68 @@ impl HvacEquipment {
         self.thermostat_fsm.thermostat.use_ideal_capacity || auto_ideal
     }
 
+    /// Compute the clamped same-type index for a biquadratic curve lookup.
+    ///
+    /// When `curve_index` is out of bounds against a vector of length `n`,
+    /// clamps to the largest same-type index:
+    /// - Even indices (capacity curves) → last even index in [0..n)
+    /// - Odd indices (EIR curves) → last odd index in [0..n)
+    ///
+    /// Returns `None` when `n == 0`. Returns `Some(curve_index)` when in bounds.
+    /// This prevents cross-type substitution where an EIR curve would be
+    /// silently used as a capacity curve (or vice versa). OCHRE HVAC.py:814-818
+    /// raises an exception for this condition at init; the hot-path clamp is a
+    /// defence-in-depth fallback.
+    pub(crate) fn clamp_biquadratic_index(curve_index: usize, n: usize) -> Option<usize> {
+        if n == 0 {
+            return None;
+        }
+        if curve_index < n {
+            return Some(curve_index);
+        }
+        let clamped = if curve_index.is_multiple_of(2) {
+            if n >= 2 {
+                if n.is_multiple_of(2) { n - 2 } else { n - 1 }
+            } else {
+                0
+            }
+        } else {
+            if n >= 2 {
+                if n.is_multiple_of(2) { n - 1 } else { n - 2 }
+            } else {
+                0
+            }
+        };
+        Some(clamped)
+    }
+
+    /// Validate that interleaved biquadratic curve count matches speed stage count.
+    ///
+    /// A single identity curve (`n_coeffs == 1`) or a single cap+EIR pair shared
+    /// across all stages (`n_coeffs == 2`) are legitimate regardless of `n_speeds`.
+    /// When multiple pairs are provided, they must cover every speed stage —
+    /// partial per-stage curves are a configuration error.
+    ///
+    /// Rejects `2 < n_coeffs < n_speeds * 2` with a descriptive `HaresError::Equipment`.
+    /// OCHRE HVAC.py:814-818 raises an exception for this condition at init.
+    pub(crate) fn validate_biquadratic_curve_count(
+        n_coeffs: usize,
+        n_speeds: usize,
+    ) -> crate::Result<()> {
+        if n_coeffs > 2 && n_coeffs < n_speeds * 2 {
+            return Err(HaresError::Equipment(format!(
+                "biquadratic_coeffs has {} entries ({} cap+EIR pair(s)) but \
+                 equipment has {} speed stage(s); when providing per-stage \
+                 curves, each speed stage needs one cap+EIR pair, or provide \
+                 a single pair (2 entries) to share across all stages",
+                n_coeffs,
+                n_coeffs / 2,
+                n_speeds,
+            )));
+        }
+        Ok(())
+    }
+
     pub fn evaluate_biquadratic(
         &self,
         curve_index: usize,
@@ -823,8 +925,48 @@ impl HvacEquipment {
             .biquadratic_coeffs
             .get(curve_index)
             .copied()
-            .or_else(|| self.config.biquadratic_coeffs.last().copied())
-            .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+            .unwrap_or_else(|| {
+                let coeffs = &self.config.biquadratic_coeffs;
+                let n = coeffs.len();
+                let clamped = match Self::clamp_biquadratic_index(curve_index, n) {
+                    Some(idx) => idx,
+                    None => return DEFAULT_BIQUADRATIC_COEFFS,
+                };
+                if clamped != curve_index {
+                    if !self
+                        .config
+                        .biquadratic_clamp
+                        .was_clamped
+                        .load(Ordering::Relaxed)
+                    {
+                        self.config
+                            .biquadratic_clamp
+                            .was_clamped
+                            .store(true, Ordering::Relaxed);
+                        let curve_type = if curve_index.is_multiple_of(2) {
+                            "capacity"
+                        } else {
+                            "EIR"
+                        };
+                        tracing::warn!(
+                            curve_index,
+                            clamped_index = clamped,
+                            curve_type,
+                            coeff_count = n,
+                            "biquadratic curve index {} out of bounds ({curve_type} curve), \
+                             clamping to index {} (last same-type curve); \
+                             init-time validation should have caught this configuration mismatch",
+                            curve_index,
+                            clamped,
+                        );
+                    }
+                    self.config
+                        .biquadratic_clamp
+                        .clamp_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                coeffs[clamped]
+            });
         // Capacity curves (even indices) in real curve sets (len > 1 means
         // cap+EIR pairs are present, not a test fixture or identity fallback)
         // use a non-negative output clamp so that cold-climate simulation
@@ -846,6 +988,19 @@ impl HvacEquipment {
             output_max,
         };
         curve.evaluate(t_indoor_c, t_outdoor_c)
+    }
+
+    /// Read and reset the per-timestep biquadratic curve-index clamping counter.
+    ///
+    /// Returns the number of times `evaluate_biquadratic` clamped an out-of-bounds
+    /// curve index during the current timestep, then resets to zero. Callers should
+    /// invoke this once per timestep (after all curve evaluations) to feed the
+    /// `biquadratic_index_clamped` observe counter.
+    pub fn take_biquadratic_clamp_count(&self) -> u64 {
+        self.config
+            .biquadratic_clamp
+            .clamp_count
+            .swap(0, Ordering::Relaxed)
     }
 
     /// Evaluate the flow-fraction quadratic: `c[0] + c[1]*ff + c[2]*ff^2`.
@@ -3582,5 +3737,146 @@ mod tests {
 
         let shr_low = derive_default_shr(Some(1e-8), Some(1_000.0), false);
         assert!(shr_low >= 0.5, "SHR must be clamped to 0.5, got {shr_low}");
+    }
+
+    #[test]
+    fn biquadratic_oob_capacity_index_clamps_to_last_even_curve() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        // 6 curves = 3 speeds (cap+EIR pairs), indices 0,1,2,3,4,5.
+        // Last even (capacity) index = 4. Last odd (EIR) index = 5.
+        hvac.config.biquadratic_coeffs = vec![
+            [0.8, 0.0, 0.0, 0.0, 0.0, 0.0], // cap speed 0
+            [1.2, 0.0, 0.0, 0.0, 0.0, 0.0], // EIR speed 0
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0], // cap speed 1
+            [1.1, 0.0, 0.0, 0.0, 0.0, 0.0], // EIR speed 1
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0], // cap speed 2 (last even)
+            [3.0, 0.0, 0.0, 0.0, 0.0, 0.0], // EIR speed 2 (last odd)
+        ];
+        // Request capacity curve index 8 (OOB, even) → should clamp to 4 (last even, 2.0)
+        let result = hvac.evaluate_biquadratic(8, 20.0, 30.0);
+        assert!(
+            (result - 2.0).abs() < 1e-12,
+            "expected 2.0 from last even curve, got {result}"
+        );
+    }
+
+    #[test]
+    fn biquadratic_oob_eir_index_clamps_to_last_odd_curve() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        // Same setup as the capacity test: 6 curves, indices 0..5.
+        hvac.config.biquadratic_coeffs = vec![
+            [0.8, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        // Request EIR curve index 7 (OOB, odd) → should clamp to 5 (last odd, 3.0)
+        let result = hvac.evaluate_biquadratic(7, 20.0, 30.0);
+        assert!(
+            (result - 3.0).abs() < 1e-12,
+            "expected 3.0 from last odd curve, got {result}"
+        );
+    }
+
+    #[test]
+    fn biquadratic_oob_clamping_increments_counter() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        // Evaluate OOB capacity index → should clamp and increment counter
+        let _ = hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        let _ = hvac.evaluate_biquadratic(5, 20.0, 30.0);
+        assert_eq!(
+            hvac.take_biquadratic_clamp_count(),
+            2,
+            "two OOB calls → counter = 2"
+        );
+        // Counter resets after take
+        assert_eq!(
+            hvac.take_biquadratic_clamp_count(),
+            0,
+            "counter reset to 0 after take"
+        );
+    }
+
+    #[test]
+    fn biquadratic_oob_eir_clamps_to_zero_for_single_identity_curve() {
+        let hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        assert_eq!(
+            hvac.config.biquadratic_coeffs.len(),
+            1,
+            "default config has single identity curve"
+        );
+        let result = hvac.evaluate_biquadratic(1, 20.0, 30.0);
+        assert!(
+            result.is_finite(),
+            "EIR curve index 1 on n=1 must yield finite value (clamped to index 0), got {result}"
+        );
+        assert!(
+            (result - DEFAULT_BIQUADRATIC_COEFFS[0]).abs() < 1e-12,
+            "EIR curve index 1 on n=1 must clamp to the single identity curve value {}, got {result}",
+            DEFAULT_BIQUADRATIC_COEFFS[0],
+        );
+    }
+
+    #[test]
+    fn biquadratic_curve_count_rejects_partial_per_stage_coverage() {
+        // 4 speed stages require 8 biquadratic entries (4 cap+EIR pairs).
+        // 6 entries = 3 pairs → one pair short → rejected.
+        let result = super::HvacEquipment::validate_biquadratic_curve_count(6, 4);
+        assert!(
+            result.is_err(),
+            "6 coeffs for 4 speeds (3 pairs, need 4) must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("biquadratic_coeffs has 6 entries"),
+            "error must name the actual coeff count; got: {err}"
+        );
+        assert!(
+            err.contains("speed stage"),
+            "error must reference speed stages; got: {err}"
+        );
+    }
+
+    #[test]
+    fn biquadratic_curve_count_accepts_shared_pair_for_many_speeds() {
+        // Minisplit fixture: 4 speed stages, 2 biquadratic entries (1 pair shared).
+        super::HvacEquipment::validate_biquadratic_curve_count(2, 4).unwrap();
+    }
+
+    #[test]
+    fn biquadratic_curve_count_accepts_identity_curve() {
+        // 1 biquadratic entry (identity) for any number of speeds is valid.
+        super::HvacEquipment::validate_biquadratic_curve_count(1, 4).unwrap();
+        super::HvacEquipment::validate_biquadratic_curve_count(1, 1).unwrap();
+        super::HvacEquipment::validate_biquadratic_curve_count(1, 0).unwrap();
+    }
+
+    #[test]
+    fn biquadratic_curve_count_accepts_full_coverage() {
+        // Exact match: n_speeds * 2 entries → n_speeds cap+EIR pairs.
+        super::HvacEquipment::validate_biquadratic_curve_count(4, 2).unwrap();
+        super::HvacEquipment::validate_biquadratic_curve_count(8, 4).unwrap();
+        super::HvacEquipment::validate_biquadratic_curve_count(2, 1).unwrap();
+    }
+
+    #[test]
+    fn biquadratic_curve_count_accepts_zero_speeds() {
+        // No speed stages → nothing to validate against; always accepted.
+        super::HvacEquipment::validate_biquadratic_curve_count(100, 0).unwrap();
+        super::HvacEquipment::validate_biquadratic_curve_count(0, 0).unwrap();
+    }
+
+    #[test]
+    fn biquadratic_curve_count_rejects_intermediate_counts() {
+        // 3 coeffs for 2 speeds: 2 < 3 < 4 → rejected.
+        assert!(super::HvacEquipment::validate_biquadratic_curve_count(3, 2).is_err());
+        // 4 coeffs for 3 speeds: 2 < 4 < 6 → rejected.
+        assert!(super::HvacEquipment::validate_biquadratic_curve_count(4, 3).is_err());
     }
 }

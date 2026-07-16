@@ -343,6 +343,13 @@ pub const EIR_RATIO: &str = "eir_ratio";
 /// scope: internal
 pub const BIQUADRATIC_CURVE_SOURCE: &str = "biquadratic_curve_source";
 
+/// Counter incremented each timestep `evaluate_biquadratic` clamps an
+/// out-of-bounds curve index. Zero when no clamping occurred during the
+/// current timestep; non-zero when the fallback path fired.
+///
+/// scope: internal
+pub const BIQUADRATIC_INDEX_CLAMPED: &str = "biquadratic_index_clamped";
+
 // ── Battery / EV / storage ──────────────────────────────────────────────────
 
 /// scope: internal — SOC output comes from CoreOutput, not telemetry key
@@ -1093,6 +1100,7 @@ mod tests {
             CAP_RATIO_RAW,
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
+            BIQUADRATIC_INDEX_CLAMPED,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,
@@ -1343,6 +1351,7 @@ mod tests {
             CAP_RATIO_RAW,
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
+            BIQUADRATIC_INDEX_CLAMPED,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,

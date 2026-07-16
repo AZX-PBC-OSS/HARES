@@ -914,6 +914,18 @@ impl CoolingCore {
             });
         }
         self.core_output = CoreOutput::default();
+
+        let n_speeds = self
+            .hvac
+            .config
+            .cooling_capacities_w
+            .len()
+            .max(self.hvac.config.heating_capacities_w.len());
+        HvacEquipment::validate_biquadratic_curve_count(
+            self.hvac.config.biquadratic_coeffs.len(),
+            n_speeds,
+        )?;
+
         Ok(())
     }
 
@@ -1351,6 +1363,14 @@ impl CoolingCore {
         self.ideal_capacity_w = 0.0;
         // LoadFraction is a one-step post-thermostat multiplier.
         self.ctrl_load_fraction = 1.0;
+
+        #[cfg(feature = "observe")]
+        {
+            self.telemetry.set(
+                hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
+                self.hvac.take_biquadratic_clamp_count() as f64,
+            );
+        }
 
         Ok(())
     }
@@ -6533,5 +6553,114 @@ mod speed_selection_parity_tests {
             central_shr > 0.0,
             "central AC default SHR must be positive, got {central_shr}"
         );
+    }
+
+    /// Build a CoolingCore config with custom stage capacities and interleaved
+    /// biquadratic curves via the split capacity/EIR keys.
+    fn multi_speed_ac_config(
+        n_speeds: u8,
+        capacities_w: Vec<f64>,
+        n_cap_curves: usize,
+        n_eir_curves: usize,
+    ) -> EquipmentConfig {
+        let typed = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: *capacities_w.last().unwrap_or(&10_000.0),
+            eir: 3.412_141_633 / 14.0,
+            shr: Some(0.75),
+            number_of_speeds: n_speeds,
+            stage_capacities_w: Some(capacities_w),
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+            },
+            hysteresis_c: Some(1.0),
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: crate::DuctConfig::default(),
+            system_type: None,
+            startup_cd: Some(0.0),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        let mut cfg =
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed)
+                .unwrap();
+        let single_cap = format!(
+            "[{}]",
+            std::iter::repeat("[0.8,0,0,0,0,0]")
+                .take(n_cap_curves)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        cfg.test_extras_mut()
+            .insert("capacity_biquadratic_coeffs".to_string(), single_cap.into());
+        let single_eir = format!(
+            "[{}]",
+            std::iter::repeat("[1.2,0,0,0,0,0]")
+                .take(n_eir_curves)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        cfg.test_extras_mut()
+            .insert("eir_biquadratic_coeffs".to_string(), single_eir.into());
+        cfg
+    }
+
+    #[test]
+    fn init_rejects_partial_per_stage_biquadratic_curves_ac() {
+        // 4 speed stages, 2 capacity curves + 2 EIR curves → interleaved = 4 entries (2 pairs).
+        // n_coeffs=4, n_speeds=4, 4>2 && 4<8 → rejected.
+        let cfg = multi_speed_ac_config(4, vec![3_000.0, 5_000.0, 7_000.0, 10_000.0], 2, 2);
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        let env = minimal_env();
+        let result = core.init(&cfg, &env);
+        assert!(
+            result.is_err(),
+            "4 speeds with 2 cap+2 eir curves (2 pairs) must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cap+EIR pair"),
+            "error must describe cap+EIR pairs; got: {err}"
+        );
+    }
+
+    #[test]
+    fn init_accepts_shared_biquadratic_pair_for_multi_speed_ac() {
+        // 4 speed stages, 1 capacity + 1 EIR → interleaved = 2 entries (1 pair).
+        // n_coeffs=2 → accepted (shared pair across all stages).
+        let cfg = multi_speed_ac_config(4, vec![3_000.0, 5_000.0, 7_000.0, 10_000.0], 1, 1);
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        let env = minimal_env();
+        core.init(&cfg, &env).unwrap();
+    }
+
+    #[test]
+    fn init_accepts_full_per_stage_biquadratic_curves_ac() {
+        // 4 speed stages, 4 capacity + 4 EIR → interleaved = 8 entries (4 pairs).
+        // n_coeffs=8 == n_speeds*2=8 → accepted.
+        let cfg = multi_speed_ac_config(4, vec![3_000.0, 5_000.0, 7_000.0, 10_000.0], 4, 4);
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        let env = minimal_env();
+        core.init(&cfg, &env).unwrap();
     }
 }

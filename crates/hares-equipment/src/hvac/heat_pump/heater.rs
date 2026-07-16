@@ -1117,6 +1117,17 @@ impl HeatPumpHeaterCore {
             }
         }
 
+        let n_speeds = self
+            .hvac
+            .config
+            .heating_capacities_w
+            .len()
+            .max(self.hvac.config.cooling_capacities_w.len());
+        HvacEquipment::validate_biquadratic_curve_count(
+            self.hvac.config.biquadratic_coeffs.len(),
+            n_speeds,
+        )?;
+
         Ok(())
     }
 
@@ -1562,6 +1573,14 @@ impl HeatPumpHeaterCore {
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
 
+        #[cfg(feature = "observe")]
+        {
+            self.telemetry.set(
+                hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
+                self.hvac.take_biquadratic_clamp_count() as f64,
+            );
+        }
+
         Ok(())
     }
 
@@ -1606,14 +1625,16 @@ impl HeatPumpHeaterCore {
         // clamping.  Used by CAP_RATIO_RAW telemetry to distinguish clamped-zero
         // from genuine-near-zero capacity.  Input clamping is applied (same as
         // evaluate_biquadratic) but output clamping is NOT applied here.
-        let raw_coeffs = self
-            .hvac
-            .config
-            .biquadratic_coeffs
-            .get(speed_index * 2)
-            .copied()
-            .or_else(|| self.hvac.config.biquadratic_coeffs.last().copied())
-            .unwrap_or([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let raw_coeffs = {
+            let coeffs = &self.hvac.config.biquadratic_coeffs;
+            match super::super::hvac_core::HvacEquipment::clamp_biquadratic_index(
+                speed_index * 2,
+                coeffs.len(),
+            ) {
+                Some(idx) => coeffs[idx],
+                None => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }
+        };
         let x1_raw = zone.temperature_c.clamp(
             self.hvac.config.biquadratic_x1_bounds.0,
             self.hvac.config.biquadratic_x1_bounds.1,
@@ -1636,14 +1657,16 @@ impl HeatPumpHeaterCore {
             );
             cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
 
-            let raw_coeffs_high = self
-                .hvac
-                .config
-                .biquadratic_coeffs
-                .get((speed_index + 1) * 2)
-                .copied()
-                .or_else(|| self.hvac.config.biquadratic_coeffs.last().copied())
-                .unwrap_or([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            let raw_coeffs_high = {
+                let coeffs = &self.hvac.config.biquadratic_coeffs;
+                match super::super::hvac_core::HvacEquipment::clamp_biquadratic_index(
+                    (speed_index + 1) * 2,
+                    coeffs.len(),
+                ) {
+                    Some(idx) => coeffs[idx],
+                    None => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                }
+            };
             let cap_ratio_raw_high = biquadratic(&raw_coeffs_high, x1_raw, x2_raw);
             cap_ratio_raw = cap_ratio_raw * (1.0 - speed_frac) + cap_ratio_raw_high * speed_frac;
         }
@@ -8058,5 +8081,94 @@ mod ideal_capacity_tests {
             er_w > 0.0 && er_w <= ER_RATED_W + 1.0,
             "ER must be active (≤{ER_RATED_W:.0} W rated) when residual > 0; got {er_w:.1} W"
         );
+    }
+
+    /// Build a heater config with the given speed count and biquadratic coeff JSON.
+    /// Coefficients are non-identity to bypass default-curve substitution.
+    fn multi_speed_heater_config(
+        n_speeds: u8,
+        capacities_w: Vec<f64>,
+        biquadratic_json: &str,
+    ) -> EquipmentConfig {
+        use crate::{HeatPumpCommonConfig, HeatPumpHeaterConfig};
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Heater".to_string(),
+            "ASHP Heater".to_string(),
+            HeatPumpHeaterConfig {
+                common: HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    heating_capacity_w: Some(*capacities_w.last().unwrap_or(&8_000.0)),
+                    heating_eir: Some(0.33),
+                    stage_heating_capacities_w: Some(capacities_w),
+                    stage_heating_eirs: None,
+                    backup_capacity_w: Some(0.0),
+                    number_of_speeds: n_speeds,
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
+                    hysteresis_c: Some(1.0),
+                    min_compressor_fraction: 0.25,
+                    er_stages: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            biquadratic_json.to_string().into(),
+        );
+        cfg
+    }
+
+    #[test]
+    fn init_rejects_partial_per_stage_biquadratic_curves() {
+        let cfg = multi_speed_heater_config(
+            4,
+            vec![2_000.0, 4_000.0, 6_000.0, 8_000.0],
+            "[[0.8,0,0,0,0,0],[1.2,0,0,0,0,0],[0.9,0,0,0,0,0],[1.1,0,0,0,0,0]]",
+        );
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = make_env(19.0, 60);
+        let result = eq.init(&cfg, &env);
+        assert!(
+            result.is_err(),
+            "4 speeds with 4 coeffs (2 pairs) must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cap+EIR pair"),
+            "error must describe cap+EIR pairs; got: {err}"
+        );
+    }
+
+    #[test]
+    fn init_accepts_shared_biquadratic_pair_for_multi_speed() {
+        let cfg = multi_speed_heater_config(
+            4,
+            vec![2_000.0, 4_000.0, 6_000.0, 8_000.0],
+            "[[0.9,0,0,0,0,0],[1.1,0,0,0,0,0]]",
+        );
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = make_env(19.0, 60);
+        eq.init(&cfg, &env).unwrap();
+    }
+
+    #[test]
+    fn init_accepts_full_per_stage_biquadratic_curves() {
+        let cfg = multi_speed_heater_config(
+            4,
+            vec![2_000.0, 4_000.0, 6_000.0, 8_000.0],
+            "[[0.8,0,0,0,0,0],[1.2,0,0,0,0,0],\
+              [0.7,0,0,0,0,0],[1.3,0,0,0,0,0],\
+              [0.6,0,0,0,0,0],[1.4,0,0,0,0,0],\
+              [0.5,0,0,0,0,0],[1.5,0,0,0,0,0]]",
+        );
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = make_env(19.0, 60);
+        eq.init(&cfg, &env).unwrap();
     }
 }
