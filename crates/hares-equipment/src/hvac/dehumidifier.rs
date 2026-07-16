@@ -92,6 +92,13 @@ struct PerformanceSnapshot {
     plr: f64,
     plf: f64,
     rtf: f64,
+    /// Actual off-cycle parasitic electric draw [W] this step, already
+    /// scaled by the off-cycle fraction. EnergyPlus ZoneDehumidifier.cc:901:
+    /// OffCycleParasiticElecPower = (1 - RunTimeFraction) * OffCycleParasiticLoad.
+    /// Carried on the snapshot (not read from config) so the grid-outage gate
+    /// in `step()` zeroes it alongside `electric_power_w` — telemetry and port
+    /// contribution must never diverge.
+    parasitic_electric_w: f64,
 }
 
 pub struct Dehumidifier {
@@ -120,6 +127,18 @@ pub struct Dehumidifier {
     plf_min: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// Off-cycle parasitic electric load [W].
+    ///
+    /// When the unit is off, this constant load (standby electronics, controls,
+    /// crankcase heater) is drawn continuously. EnergyPlus
+    /// `ZoneDehumidifier.hh:93` accepts `OffCycleParasiticLoad` as user input
+    /// and applies it to the off-cycle portion of each timestep
+    /// (`ZoneDehumidifier.cc:852, 880–886`).
+    ///
+    /// When `is_on == true`, the on-cycle rated power (via energy factor) already
+    /// includes the parasitic implicitly; the parasitic is only applied to the
+    /// off-cycle fraction `(1 - RTF)` to avoid double-counting.
+    off_cycle_parasitic_load_w: Option<f64>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// compressor pf 0.96 on the total electric draw. Real power stays
     /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
@@ -186,6 +205,7 @@ impl Dehumidifier {
             part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
             plf_min: DEFAULT_PLF_MIN,
             zone_id_explicit,
+            off_cycle_parasitic_load_w: None,
             zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
@@ -212,14 +232,16 @@ impl Dehumidifier {
 
     fn performance_snapshot(&self, zone_temp_c: f64, zone_rh: f64) -> PerformanceSnapshot {
         if !self.is_on {
+            let parasitic = self.off_cycle_parasitic_load_w.unwrap_or(0.0);
             return PerformanceSnapshot {
                 water_removal_l_day: 0.0,
-                electric_power_w: 0.0,
+                electric_power_w: parasitic,
                 latent_removal_w: 0.0,
-                sensible_gain_w: 0.0,
+                sensible_gain_w: parasitic,
                 plr: 0.0,
                 plf: 1.0,
                 rtf: 0.0,
+                parasitic_electric_w: parasitic,
             };
         }
 
@@ -283,9 +305,10 @@ impl Dehumidifier {
             (self.rated_water_removal_l_day * self.fraction_load_served * wr_multiplier).max(0.0);
         let energy_factor_l_kwh = (self.rated_energy_factor_l_kwh * ef_multiplier).max(0.0);
 
-        // EnergyPlus CalcZoneDehumidifier lines 829–831, 852–855: average
-        // electric power is on-cycle power scaled by runtime fraction (RTF).
-        // EnergyPlus CalcZoneDehumidifier line 858: latent (moisture) output
+        // EnergyPlus CalcZoneDehumidifier lines 850, 852: average electric power
+        // is on-cycle power (ElectricPowerOnCycle, line 850) scaled by runtime
+        // fraction (RTF) as part of the blend at line 852.
+        // EnergyPlus CalcZoneDehumidifier line 855: latent (moisture) output
         // is scaled by PLR, not RTF — the two scalars are independent.
         let water_removal_kg_s = water_removal_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
         let electric_power_w_on = if energy_factor_l_kwh > 0.0 {
@@ -293,7 +316,13 @@ impl Dehumidifier {
         } else {
             0.0
         };
-        let electric_power_w = electric_power_w_on * rtf;
+        // EnergyPlus CalcZoneDehumidifier lines 852, 880–886: off-cycle
+        // parasitic load is applied to the off-cycle fraction (1 - RTF).
+        // The on-cycle rated power (via energy factor) already includes
+        // parasitic implicitly, so parasitic is only added to the off-cycle
+        // portion to avoid double-counting.
+        let parasitic = self.off_cycle_parasitic_load_w.unwrap_or(0.0);
+        let electric_power_w = electric_power_w_on * rtf + parasitic * (1.0 - rtf);
         let water_removal_kg_s_avg = water_removal_kg_s * plr;
         let latent_removal_w = water_removal_kg_s_avg * LATENT_HEAT_VAPORISATION_0C_J_KG;
         let sensible_gain_w = latent_removal_w + electric_power_w;
@@ -306,6 +335,10 @@ impl Dehumidifier {
             plr,
             plf,
             rtf,
+            // EnergyPlus ZoneDehumidifier.cc:901: the reported parasitic power
+            // is the off-cycle fraction of the configured load, matching the
+            // parasitic term already blended into electric_power_w above.
+            parasitic_electric_w: parasitic * (1.0 - rtf),
         }
     }
 
@@ -332,6 +365,8 @@ impl Dehumidifier {
         self.telemetry.set(tk::PART_LOAD_RATIO, snapshot.plr);
         self.telemetry.set(tk::PART_LOAD_FACTOR, snapshot.plf);
         self.telemetry.set(tk::RUNTIME_FRACTION, snapshot.rtf);
+        self.telemetry
+            .set(tk::PARASITIC_ELECTRIC_W, snapshot.parasitic_electric_w);
     }
 }
 
@@ -363,6 +398,8 @@ impl Dehumidifier {
             .plf_min
             .map(|v| v.clamp(0.0, 1.0))
             .unwrap_or(DEFAULT_PLF_MIN);
+
+        self.off_cycle_parasitic_load_w = cfg.off_cycle_parasitic_load_w;
 
         let target_rh_raw = cfg.target_rh.unwrap_or(DEFAULT_TARGET_RH_FRACTION);
         self.target_rh = parse_rh_fraction(target_rh_raw, "target_rh")?;
@@ -505,6 +542,7 @@ impl Equipment for Dehumidifier {
             plr: 0.0,
             plf: 1.0,
             rtf: 0.0,
+            parasitic_electric_w: 0.0,
         });
         Ok(())
     }
@@ -545,10 +583,27 @@ impl Equipment for Dehumidifier {
 
         let pressure_pa = env.weather.pressure_pa();
         let rh = hares_physics::psychrometrics::zone_relative_humidity(zone, pressure_pa);
-        let snapshot = self.performance_snapshot(
+        let raw = self.performance_snapshot(
             zone.temperature_c,
             rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
+        // Grid outage guard: off-cycle parasitic load (standby electronics,
+        // controls, crankcase heater) must not be drawn from a de-energized
+        // bus — matches the tankless.rs (lines 455-459), resistance.rs
+        // (lines 488-491), and heat_pump_wh.rs (lines 784-790) precedent.
+        // update_control already forces is_on=false when the bus is
+        // de-energized; this guard zeroes the parasitic contribution that
+        // performance_snapshot would otherwise return for the off-cycle case.
+        let snapshot = if !env.grid.bus_energized() {
+            PerformanceSnapshot {
+                electric_power_w: 0.0,
+                sensible_gain_w: 0.0,
+                parasitic_electric_w: 0.0,
+                ..raw
+            }
+        } else {
+            raw
+        };
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
         #[cfg(feature = "observe")]
         {
@@ -567,6 +622,17 @@ impl Equipment for Dehumidifier {
                     rtf = snapshot.rtf,
                     "rtf > plr: cycling losses applied"
                 );
+            }
+            if let Some(parasitic) = self.off_cycle_parasitic_load_w {
+                if !self.is_on {
+                    let parasitic_energy_j = parasitic * dt.as_secs_f64();
+                    tracing::debug!(
+                        dehumidifier = %self.descriptor.name,
+                        off_cycle_parasitic_w = parasitic,
+                        parasitic_energy_j,
+                        "dehumidifier off-cycle parasitic load active: {parasitic} W, accumulated {parasitic_energy_j} J this step"
+                    );
+                }
             }
         }
         // Rule R1: Q from the already-computed real power (whole-unit pf
@@ -682,6 +748,7 @@ impl Equipment for Dehumidifier {
             plr: 0.0,
             plf: 1.0,
             rtf: 0.0,
+            parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
         });
         self.core_output = CoreOutput::default();
         Ok(())
@@ -779,7 +846,7 @@ fn evaluate_normalized_curve(
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(14);
+    let mut telemetry = Telemetry::with_capacity(15);
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
@@ -800,6 +867,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 1.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PARASITIC_ELECTRIC_W, 0.0);
     telemetry
 }
 
@@ -876,6 +944,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::RUNTIME_FRACTION.to_string(),
             unit: "fraction".to_string(),
             description: "Runtime fraction: PLR / PLF".to_string(),
+        },
+        TelemetryField {
+            name: tk::PARASITIC_ELECTRIC_W.to_string(),
+            unit: "W".to_string(),
+            description: "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage".to_string(),
         },
     ]
 }
@@ -974,6 +1047,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap()
@@ -1037,6 +1111,52 @@ mod tests {
 
         // Restoration: humidistat control resumes.
         assert_eq!(eq.update_control(&env(0.60)), OperatingMode::Cooling);
+    }
+
+    /// Grid outage with off-cycle parasitic load configured: the parasitic
+    /// standby draw must be zeroed when the bus is de-energized, matching
+    /// the tankless.rs/resistance.rs/heat_pump_wh.rs precedent.
+    /// Off-cycle parasitic loads rely on grid electricity; they have no
+    /// source during an unpowered outage.
+    #[test]
+    fn parasitic_load_blocked_during_grid_outage() {
+        let cfg = config_with_parasitic(Some(5.0));
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        // Baseline: off at low RH, parasitic draws 5.0 W.
+        let mut slots_on = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots_on)
+            .unwrap();
+        assert_eq!(slots_on.electrical.load_power_w, 5.0);
+        assert_eq!(slots_on.thermal[0].sensible_gain_w, 5.0);
+        assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(5.0));
+
+        // Utility outage: zero parasitic; no electrical or sensible output.
+        let mut env_outage = env(0.40);
+        env_outage.grid.voltage_pu = 0.0;
+        assert_eq!(eq.update_control(&env_outage), OperatingMode::Off);
+        let mut slots_outage = ports();
+        eq.step(&env_outage, Duration::from_secs(60), &mut slots_outage)
+            .unwrap();
+        assert_eq!(slots_outage.electrical.load_power_w, 0.0);
+        assert_eq!(slots_outage.thermal[0].sensible_gain_w, 0.0);
+        assert_eq!(slots_outage.thermal[0].latent_gain_w, 0.0);
+        // Telemetry must agree with the port contribution: no phantom
+        // parasitic draw reported while the bus is de-energized.
+        assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(0.0));
+
+        // Islanded: bus energized by backup → parasitic resumes.
+        let mut env_islanded = env(0.40);
+        env_islanded.grid.voltage_pu = 0.0;
+        env_islanded.grid.island_bus_voltage_pu = Some(1.0);
+        assert_eq!(eq.update_control(&env_islanded), OperatingMode::Off);
+        let mut slots_islanded = ports();
+        eq.step(&env_islanded, Duration::from_secs(60), &mut slots_islanded)
+            .unwrap();
+        assert_eq!(slots_islanded.electrical.load_power_w, 5.0);
+        assert_eq!(slots_islanded.thermal[0].sensible_gain_w, 5.0);
+        assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(5.0));
     }
 
     #[test]
@@ -1597,6 +1717,7 @@ mod tests {
                     target_rh: Some(50.0),
                     part_load_curve_coeffs: coeffs,
                     plf_min: None,
+                    off_cycle_parasitic_load_w: None,
                 },
             )
             .unwrap()
@@ -1700,6 +1821,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap();
@@ -1849,6 +1971,7 @@ mod tests {
                     target_rh: Some(50.0),
                     part_load_curve_coeffs: coeffs,
                     plf_min,
+                    off_cycle_parasitic_load_w: None,
                 },
             )
             .unwrap()
@@ -1976,6 +2099,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap();
@@ -1992,6 +2116,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap();
@@ -2038,6 +2163,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap();
@@ -2054,6 +2180,7 @@ mod tests {
                 target_rh: Some(50.0),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         )
         .unwrap();
@@ -2077,5 +2204,115 @@ mod tests {
         let power_ef = eq_ef.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
 
         approx_eq(power_both, power_ef);
+    }
+
+    // ── Off-cycle parasitic load tests ────────────────────────────────────
+
+    fn config_with_parasitic(parasitic: Option<f64>) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "Parasitic Test".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+                off_cycle_parasitic_load_w: parasitic,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn off_with_parasitic_yields_nonzero_power() {
+        let cfg = config_with_parasitic(Some(5.0));
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        let mut slots = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        assert_eq!(eq.update_control(&env(0.40)), OperatingMode::Off);
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(5.0));
+        assert_eq!(eq.telemetry().get(tk::WATER_REMOVAL_L_DAY), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::LATENT_REMOVAL_W), Some(0.0));
+        // Parasitic load becomes sensible heat in the zone.
+        assert_eq!(eq.telemetry().get(tk::SENSIBLE_GAIN_W), Some(5.0));
+        assert_eq!(slots.electrical.load_power_w, 5.0);
+        // Parasitic power is reflected in the thermal port as sensible gain.
+        assert_eq!(slots.thermal[0].sensible_gain_w, 5.0);
+        assert_eq!(slots.thermal[0].latent_gain_w, 0.0);
+    }
+
+    #[test]
+    fn on_with_parasitic_no_double_count() {
+        // At full load (PLR=1.0, RTF=1.0), the parasitic must not be
+        // double-counted: on-cycle power already includes parasitic
+        // implicitly through the energy factor.
+        let cfg_parasitic = config_with_parasitic(Some(5.0));
+        let mut eq_parasitic = Dehumidifier::new(cfg_parasitic.clone());
+        eq_parasitic.init(&cfg_parasitic, &env(0.60)).unwrap();
+        eq_parasitic.update_control(&env(0.60));
+        let mut slots_p = ports();
+        eq_parasitic
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_p)
+            .unwrap();
+
+        let cfg_none = config_with_parasitic(None);
+        let mut eq_none = Dehumidifier::new(cfg_none.clone());
+        eq_none.init(&cfg_none, &env(0.60)).unwrap();
+        eq_none.update_control(&env(0.60));
+        let mut slots_n = ports();
+        eq_none
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_n)
+            .unwrap();
+
+        // At full load (RTF=1.0): electric_power_w = on_power * 1.0 + parasitic * 0.0.
+        // Both instances must produce the same electric power.
+        let power_parasitic = eq_parasitic.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+        let power_none = eq_none.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+        approx_eq(power_parasitic, power_none);
+        // EnergyPlus ZoneDehumidifier.cc:901: reported parasitic power is
+        // (1 - RTF) * configured load — zero at full load (RTF = 1.0), not
+        // the configured nameplate value.
+        assert_eq!(
+            eq_parasitic.telemetry().get(tk::PARASITIC_ELECTRIC_W),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn off_without_parasitic_returns_zero_power() {
+        let cfg = config_with_parasitic(None);
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        let mut slots = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        assert_eq!(eq.update_control(&env(0.40)), OperatingMode::Off);
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::SENSIBLE_GAIN_W), Some(0.0));
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+    }
+
+    #[test]
+    fn parasitic_telemetry_field_is_present() {
+        let cfg = config_with_parasitic(Some(5.0));
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        let mut slots = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(5.0));
     }
 }

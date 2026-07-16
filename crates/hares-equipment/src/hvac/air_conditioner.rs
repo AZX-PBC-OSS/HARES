@@ -6720,8 +6720,7 @@ mod speed_selection_parity_tests {
                 .unwrap();
         let single_cap = format!(
             "[{}]",
-            std::iter::repeat("[0.8,0,0,0,0,0]")
-                .take(n_cap_curves)
+            std::iter::repeat_n("[0.8,0,0,0,0,0]", n_cap_curves)
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -6729,8 +6728,7 @@ mod speed_selection_parity_tests {
             .insert("capacity_biquadratic_coeffs".to_string(), single_cap.into());
         let single_eir = format!(
             "[{}]",
-            std::iter::repeat("[1.2,0,0,0,0,0]")
-                .take(n_eir_curves)
+            std::iter::repeat_n("[1.2,0,0,0,0,0]", n_eir_curves)
                 .collect::<Vec<_>>()
                 .join(",")
         );

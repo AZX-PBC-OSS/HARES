@@ -720,6 +720,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 target_rh: Some(0.5),
                 part_load_curve_coeffs: None,
                 plf_min: None,
+                off_cycle_parasitic_load_w: None,
             },
         ),
         "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {

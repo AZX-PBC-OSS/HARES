@@ -1313,6 +1313,7 @@ fn try_build_dehumidifier_config(
         target_rh: params.get("target_rh").and_then(Value::as_f64),
         part_load_curve_coeffs: None,
         plf_min: None,
+        off_cycle_parasitic_load_w: None,
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Dehumidifier".to_string(), cfg)

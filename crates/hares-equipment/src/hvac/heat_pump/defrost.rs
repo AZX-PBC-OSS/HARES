@@ -1306,7 +1306,7 @@ mod defrost_tests {
                 // With instantaneous tf=0.1: interval = 2100 s → ~175 steps.
                 let expected = 210.0 / 0.2 / (dt * 0.2); // ≈ 87.5
                 assert!(
-                    steps >= 70 && steps <= 110,
+                    (70..=110).contains(&steps),
                     "first defrost trigger at step {steps}; expected near {expected:.0} (±25 %) \
                      with EWMA (≈ 88), not at the instantaneous-tf extremes (≈ 60 or ≈ 175)"
                 );

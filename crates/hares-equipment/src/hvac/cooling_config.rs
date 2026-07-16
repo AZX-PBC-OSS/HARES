@@ -468,6 +468,19 @@ pub struct DehumidifierConfig {
     /// EnergyPlus `ZoneDehumidifier.cc` lines 769–808.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_min: Option<f64>,
+    /// Off-cycle parasitic electric load [W].
+    ///
+    /// When the unit is off, this constant load (standby electronics, controls,
+    /// crankcase heater) is drawn continuously. EnergyPlus
+    /// `ZoneDehumidifier.hh:93` accepts `OffCycleParasiticLoad` as user input
+    /// and applies it to the off-cycle portion of each timestep
+    /// (`ZoneDehumidifier.cc:852, 880–886`).
+    ///
+    /// When `is_on == true`, the on-cycle rated power (via energy factor) already
+    /// includes the parasitic implicitly; the parasitic is only applied to the
+    /// off-cycle fraction `(1 - RTF)` to avoid double-counting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_cycle_parasitic_load_w: Option<f64>,
 }
 
 impl EquipmentTypedConfig for DehumidifierConfig {
@@ -506,6 +519,13 @@ impl DehumidifierConfig {
                 return Err(HaresError::Equipment(
                     "DehumidifierConfig: part_load_curve_coeffs must be finite".to_string(),
                 ));
+            }
+        }
+        if let Some(parasitic) = self.off_cycle_parasitic_load_w {
+            if !parasitic.is_finite() || parasitic < 0.0 {
+                return Err(HaresError::Equipment(format!(
+                    "DehumidifierConfig: off_cycle_parasitic_load_w must be finite and >= 0, got {parasitic}"
+                )));
             }
         }
         Ok(())
@@ -1075,12 +1095,19 @@ mod tests {
             target_rh: Some(0.50),
             part_load_curve_coeffs: None,
             plf_min: None,
+            off_cycle_parasitic_load_w: Some(5.0),
         };
         let ec = typed_config(cfg.clone());
         let recovered: DehumidifierConfig = ec.typed().unwrap();
         assert!(
             (recovered.capacity_liters_per_day.unwrap() - cfg.capacity_liters_per_day.unwrap())
                 .abs()
+                < 1e-12
+        );
+        assert!(
+            (recovered.off_cycle_parasitic_load_w.unwrap()
+                - cfg.off_cycle_parasitic_load_w.unwrap())
+            .abs()
                 < 1e-12
         );
     }
@@ -1097,6 +1124,7 @@ mod tests {
             target_rh: None,
             part_load_curve_coeffs: None,
             plf_min: None,
+            off_cycle_parasitic_load_w: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1113,6 +1141,7 @@ mod tests {
             target_rh: None,
             part_load_curve_coeffs: None,
             plf_min: None,
+            off_cycle_parasitic_load_w: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1134,6 +1163,23 @@ mod tests {
         );
         let result: crate::Result<DehumidifierConfig> = ec.typed();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn dehumidifier_rejects_negative_parasitic() {
+        let cfg = DehumidifierConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_liters_per_day: Some(14.195),
+            energy_factor: Some(2.0),
+            integrated_energy_factor: None,
+            fraction_served: None,
+            target_rh: None,
+            part_load_curve_coeffs: None,
+            plf_min: None,
+            off_cycle_parasitic_load_w: Some(-1.0),
+        };
+        assert!(cfg.validate().is_err());
     }
 
     // --- Regression tests for ticket 009 ---

@@ -278,6 +278,7 @@ fn sample_dehumidifier_config() -> DehumidifierConfig {
         target_rh: Some(0.50),
         part_load_curve_coeffs: None,
         plf_min: None,
+        off_cycle_parasitic_load_w: None,
     }
 }
 
