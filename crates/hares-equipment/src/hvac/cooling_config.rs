@@ -456,9 +456,9 @@ pub struct DehumidifierConfig {
     /// supports an optional `PartLoadCurve` (Curve:Cubic or Curve:Quadratic) on
     /// the `ZoneHVAC:Dehumidifier:DX` object.
     ///
-    /// Default: EnergyPlus-informed cubic `[0.7, 1.0, -0.7, 0.0]`
-    /// (PLF = 0.7 + 1.0·PLR − 0.7·PLR²), giving PLF=0.7 at PLR=0 and
-    /// PLF=1.0 at PLR=1.0.
+    /// Default: identity curve `[1.0, 0.0, 0.0, 0.0]` giving PLF = 1.0 for all
+    /// PLR (no cycling degradation), matching the EnergyPlus default when no
+    /// `PartLoadCurve` is configured (ZoneDehumidifier.cc lines 763–767).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_load_curve_coeffs: Option<[f64; 4]>,
     /// Lower clamp for PLF (part-load factor). Defaults to 0.7 per

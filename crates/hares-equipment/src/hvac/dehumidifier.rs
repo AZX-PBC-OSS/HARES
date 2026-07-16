@@ -60,14 +60,12 @@ const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-// Default cubic PLF curve coefficients derived from the ticket directive:
-// PLF = C0 + C1·PLR + C2·PLR² + C3·PLR³
-// Default values give PLF ≈ 0.7 at PLR=0 and PLF = 1.0 at PLR=1.0.
-// These match the shape described in H-1153 problem statement §2 but do
-// not correspond to any EnergyPlus-shipped default — EnergyPlus defaults
-// to PLF = 1.0 (no degradation) when no PartLoadCurve is configured
-// (ZoneDehumidifier.cc lines 763–767).
-const DEFAULT_PLF_CURVE_COEFFS: [f64; 4] = [0.7, 1.0, -0.7, 0.0];
+// Default PLF identity curve: PLF = 1.0 for all PLR (no cycling loss).
+// EnergyPlus defaults to PLF = 1.0 when no PartLoadCurve is configured
+// on the ZoneHVAC:Dehumidifier:DX object (ZoneDehumidifier.cc lines 763–767).
+// Users can supply custom cubic coefficients via `DehumidifierConfig::
+// part_load_curve_coeffs` to model cycling degradation.
+const DEFAULT_PLF_CURVE_COEFFS: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 // PLF lower clamp per EnergyPlus ZoneDehumidifier.cc lines 769–808.
 const DEFAULT_PLF_MIN: f64 = 0.7;
 const DEFAULT_PLF_MAX: f64 = 1.0;
@@ -246,9 +244,9 @@ impl Dehumidifier {
         //   PLF = PartLoadCurve->value(PLR)   if curve present
         //   PLF = 1.0                         otherwise (no degradation)
         //
-        // HARES uses a cubic curve by default; the default coefficients are an
-        // engineering choice matching the shape described in the ticket directive
-        // (not an EnergyPlus-shipped default).
+        // HARES defaults to the identity cubic [1,0,0,0] giving PLF = 1.0 at
+        // all PLR, matching the EnergyPlus default. Users can supply custom
+        // coefficients via DehumidifierConfig::part_load_curve_coeffs.
         let plf_raw = cubic(&self.part_load_curve_coeffs, plr);
 
         // EnergyPlus CalcZoneDehumidifier lines 769–808: clamps PLF to
@@ -535,6 +533,25 @@ impl Equipment for Dehumidifier {
             rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                dehumidifier = %self.descriptor.name,
+                plr = snapshot.plr,
+                plf = snapshot.plf,
+                rtf = snapshot.rtf,
+                "dehumidifier part-load cycle metrics"
+            );
+            if snapshot.rtf > snapshot.plr {
+                tracing::debug!(
+                    dehumidifier = %self.descriptor.name,
+                    plf = snapshot.plf,
+                    plr = snapshot.plr,
+                    rtf = snapshot.rtf,
+                    "rtf > plr: cycling losses applied"
+                );
+            }
+        }
         // Rule R1: Q from the already-computed real power (whole-unit pf
         // 0.96). The dehumidifier is a sealed unit whose energy-factor model
         // never splits the small internal fan from the compressor, so the
@@ -745,7 +762,7 @@ fn evaluate_normalized_curve(
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(13);
+    let mut telemetry = Telemetry::with_capacity(14);
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
@@ -1408,10 +1425,8 @@ mod tests {
         approx_eq(water_l_day, rated_l_day);
     }
 
-    /// At part load (PLR ≈ 0.5), the default cubic PLF curve evaluates to
-    /// 1.025 at PLR=0.5 (> 1.0) and clamps to 1.0 — this test verifies the
-    /// clamping behavior when the cubic exceeds the upper bound. The runtime
-    /// fraction should be PLR / PLF = 0.5 / 1.0 = 0.5.
+    /// At part load (PLR ≈ 0.5), the default identity PLF curve gives 1.0.
+    /// The runtime fraction is PLR / PLF = 0.5 / 1.0 = 0.5.
     #[test]
     fn plf_clamping_at_half_load() {
         let cfg = config();
@@ -1433,9 +1448,8 @@ mod tests {
         // plr = (0.50 - 0.4875) / (0.5125 - 0.4875) = 0.0125 / 0.025 = 0.5
         approx_eq(plr, 0.5);
 
-        // PLF at PLR=0.5 via cubic [0.7, 1.0, -0.7, 0.0]:
-        // PLF = 0.7 + 1.0*0.5 - 0.7*0.25 = 0.7 + 0.5 - 0.175 = 1.025
-        // Clamped to [0.7, 1.0] → 1.0
+        // PLF at PLR=0.5 via identity cubic [1.0, 0.0, 0.0, 0.0]:
+        // PLF = 1.0 for all PLR; clamped to [0.7, 1.0] → 1.0
         approx_eq(plf, 1.0);
 
         // RTF = PLR / PLF = 0.5 / 1.0 = 0.5
@@ -1455,10 +1469,10 @@ mod tests {
         assert!(wr_observed > 0.0, "unit should still be removing moisture");
     }
 
-    /// Verify PLF clamping at the PLR boundaries.
+    /// Verify PLF clamping at the PLR boundaries using a non-identity curve.
     ///
-    /// - At PLR = 0, PLF = 0.7 (the PLF_MIN floor, since the cubic gives 0.7).
-    /// - At PLR = 1.0, PLF = 1.0 (the PLF_MAX ceiling).
+    /// - At PLR = 0, the cubic [0.7, 1.0, -0.7, 0.0] gives 0.7, clamped to [0.7, 1.0] → 0.7.
+    /// - At PLR = 1.0, the same cubic gives 1.0, clamped to [1.0, 1.0] → 1.0.
     #[test]
     fn plf_clamping_at_boundaries() {
         // Analytical check of the default cubic curve.
@@ -1793,5 +1807,133 @@ mod tests {
             any_reactive,
             "the pf 0.96 twin must produce reactive power while running"
         );
+    }
+
+    /// Evaluate PLF curve with known coefficients [0.5, 0.5, 0.0, 0.0]
+    /// (PLF = 0.5 + 0.5·PLR) at PLR = 0.25, 0.50, 0.75, 1.0. Verify
+    /// RTF = PLR / PLF and derated electric power = rated_power_on · RTF,
+    /// and water removal scales by PLR independently.
+    ///
+    /// Uses `plf_min = 0.0` so the lower clamp does not interfere with
+    /// PLR < 0.7 test points.
+    #[test]
+    fn plf_curve_known_coeffs_at_plr_points() {
+        fn custom_config(coeffs: Option<[f64; 4]>, plf_min: Option<f64>) -> EquipmentConfig {
+            EquipmentConfig::from_typed(
+                "PLF Test".to_string(),
+                "Dehumidifier".to_string(),
+                crate::DehumidifierConfig {
+                    equipment_id: Some(9),
+                    zone_id: Some(1),
+                    capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                    energy_factor: Some(2.0),
+                    integrated_energy_factor: None,
+                    fraction_served: None,
+                    target_rh: Some(50.0),
+                    part_load_curve_coeffs: coeffs,
+                    plf_min,
+                },
+            )
+            .unwrap()
+        }
+
+        // PLF = 0.5 + 0.5·PLR (quadratic via cubic with C2=C3=0).
+        let coeffs = [0.5, 0.5, 0.0, 0.0];
+
+        // target_rh=0.50 → min_rh=0.4875, max_rh=0.5125, deadband=0.025.
+        // PLR = (zone_rh - 0.4875) / 0.025
+
+        let test_points: [(f64, f64, f64); 4] = [
+            // (zone_rh, expected_plr, expected_plf)
+            // PLR=0.25: rh = 0.4875 + 0.25*0.025 = 0.49375
+            (0.49375, 0.25, 0.5 + 0.5 * 0.25),
+            // PLR=0.50: rh = 0.4875 + 0.50*0.025 = 0.50000
+            (0.50, 0.50, 0.5 + 0.5 * 0.50),
+            // PLR=0.75: rh = 0.4875 + 0.75*0.025 = 0.50625
+            (0.50625, 0.75, 0.5 + 0.5 * 0.75),
+            // PLR=1.00: rh = 0.4875 + 1.00*0.025 = 0.51250
+            // PLF = 0.5+0.5=1.0, clamped to [max(0.0, 1.0), 1.0] = [1.0, 1.0] → 1.0
+            (0.5125, 1.0, 1.0),
+        ];
+
+        for (i, &(zone_rh, expected_plr, expected_plf)) in test_points.iter().enumerate() {
+            let cfg = custom_config(Some(coeffs), Some(0.0));
+            let mut eq = Dehumidifier::new(cfg.clone());
+            eq.init(&cfg, &env(zone_rh)).unwrap();
+
+            // Turn on by stepping above max_rh, then run at target.
+            eq.update_control(&env(0.53));
+            eq.update_control(&env(zone_rh));
+            let mut slots = ports();
+            eq.step(&env(zone_rh), Duration::from_secs(60), &mut slots)
+                .unwrap();
+
+            let plr = eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+            let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+            let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+            let ep_part = eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+            let wr_part = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+
+            approx_eq(plr, expected_plr);
+            approx_eq(plf, expected_plf);
+
+            let expected_rtf = (plr / plf).clamp(0.0, 1.0);
+            approx_eq(rtf, expected_rtf);
+
+            // Force full-load at same ambient to get base power / water removal.
+            eq.apply_control(&ControlSignal::ModeOverride {
+                mode: OperatingMode::Cooling,
+            })
+            .unwrap();
+            eq.update_control(&env(zone_rh));
+            let mut slots_full = ports();
+            eq.step(&env(zone_rh), Duration::from_secs(60), &mut slots_full)
+                .unwrap();
+            let ep_base = eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+            let wr_base = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+
+            // Electric power scales by RTF (EnergyPlus line 855).
+            approx_eq(ep_part, ep_base * rtf);
+            // Water removal scales by PLR (EnergyPlus line 858).
+            approx_eq(wr_part, wr_base * plr);
+
+            assert!(
+                ep_part > 0.0,
+                "point {i} (PLR={expected_plr}): electric power must be > 0"
+            );
+            assert!(
+                wr_part > 0.0,
+                "point {i} (PLR={expected_plr}): water removal must be > 0"
+            );
+        }
+    }
+
+    /// PLF curve defaults to constant 1.0 when not provided by the user,
+    /// producing RTF = PLR (no cycling loss).
+    ///
+    /// EnergyPlus ZoneDehumidifier.cc lines 763–767: when no PartLoadCurve
+    /// is configured, PLF = 1.0.
+    #[test]
+    fn plf_curve_default_identity_gives_rtf_equals_plr() {
+        let cfg = config(); // part_load_curve_coeffs: None → identity default
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.53)).unwrap();
+
+        // At PLR ≈ 0.75 (rh = 0.50625), identity curve gives PLF = 1.0,
+        // so RTF = 0.75 = PLR (no cycling loss).
+        eq.update_control(&env(0.53));
+        eq.update_control(&env(0.50625));
+        let mut slots = ports();
+        eq.step(&env(0.50625), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let plr = eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+        let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+
+        approx_eq(plf, 1.0);
+        approx_eq(rtf, plr);
+        // RTF = PLR means no cycling penalty — the unit is derated only by PLR,
+        // not by an additional PLF factor.
     }
 }
