@@ -199,14 +199,122 @@ fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSp
     SeasonalSplit::new(6, 9).ok()
 }
 
-fn season_for_months(months: &BTreeSet<u8>, summer_months: &BTreeSet<u8>) -> SeasonFilter {
+fn season_for_months(
+    months: &BTreeSet<u8>,
+    summer_months: &BTreeSet<u8>,
+    shoulder_months: Option<&BTreeSet<u8>>,
+) -> SeasonFilter {
     let has_summer = months.iter().any(|m| summer_months.contains(m));
-    let has_winter = months.iter().any(|m| !summer_months.contains(m));
-    match (has_summer, has_winter) {
-        (true, false) => SeasonFilter::Summer,
-        (false, true) => SeasonFilter::Winter,
+    let has_winter = months
+        .iter()
+        .any(|m| !summer_months.contains(m) && !shoulder_months.is_some_and(|sh| sh.contains(m)));
+    let has_shoulder = months
+        .iter()
+        .any(|m| shoulder_months.is_some_and(|sh| sh.contains(m)));
+
+    match (has_summer, has_shoulder, has_winter) {
+        (false, false, false) => SeasonFilter::All,
+        (true, false, false) => SeasonFilter::Summer,
+        (false, false, true) => SeasonFilter::Winter,
+        (false, true, false) => SeasonFilter::Shoulder,
         _ => SeasonFilter::All,
     }
+}
+
+/// Detect shoulder months by examining the non-summer months for a distinct
+/// sub-pattern. When 3+ distinct patterns exist across all 12 months, the months
+/// that differ from both the summer cluster and the December (winter) cluster
+/// are classified as shoulder.
+///
+/// Returns `None` when fewer than 3 distinct monthly patterns exist (binary
+/// or uniform season structure).
+fn detect_shoulder_months(
+    weekday: &Schedule,
+    weekend: &Schedule,
+    summer_months: &BTreeSet<u8>,
+) -> Option<BTreeSet<u8>> {
+    // Group all 12 months by their combined weekday+weekend pattern.
+    let mut clusters: BTreeMap<(Vec<u64>, Vec<u64>), BTreeSet<u8>> = BTreeMap::new();
+    for m in 0..12 {
+        clusters
+            .entry((weekday[m].clone(), weekend[m].clone()))
+            .or_default()
+            .insert((m + 1) as u8);
+    }
+
+    if clusters.len() < 3 {
+        return None;
+    }
+
+    // Find December's cluster (the winter baseline).
+    let dec_key = clusters
+        .iter()
+        .find(|(_, months)| months.contains(&12))
+        .map(|(k, _)| k.clone())?;
+
+    // Remove the known clusters: December (winter) and summer months.
+    let summer_key = clusters
+        .iter()
+        .find(|(_, months)| {
+            months.iter().any(|m| summer_months.contains(m)) && !months.contains(&12)
+        })
+        .map(|(k, _)| k.clone());
+
+    // The remaining cluster(s) are shoulder candidates.
+    let mut shoulder = BTreeSet::new();
+    for (key, months) in &clusters {
+        if Some(key) == summer_key.as_ref() {
+            continue;
+        }
+        if key == &dec_key {
+            continue;
+        }
+        shoulder.extend(months);
+    }
+
+    if shoulder.is_empty() {
+        None
+    } else {
+        Some(shoulder)
+    }
+}
+
+/// Build a `SeasonalSplit` from shoulder months. Returns `None` if shoulder
+/// is empty or non-contiguous. Mirrors the logic of `seasonal_split_from_months`.
+fn shoulder_split_from_months(shoulder_months: &BTreeSet<u8>) -> Option<(u8, u8)> {
+    if shoulder_months.is_empty() {
+        return None;
+    }
+
+    let months: Vec<u8> = shoulder_months.iter().copied().collect();
+    let n = months.len();
+
+    if n == 1 {
+        return Some((months[0], months[0]));
+    }
+
+    let min = months[0];
+    let max = months[n - 1];
+    let non_wrapping_contiguous = (max - min + 1) as usize == n;
+    if non_wrapping_contiguous {
+        return Some((min, max));
+    }
+
+    // Try wrapping (e.g., {10, 11, 4, 5}): check if complement is contiguous.
+    let all: BTreeSet<u8> = (1..=12).collect();
+    let complement: Vec<u8> = all.difference(shoulder_months).copied().collect();
+    if !complement.is_empty() {
+        let c_min = complement[0];
+        let c_max = complement[complement.len() - 1];
+        let complement_contiguous = (c_max - c_min + 1) as usize == complement.len();
+        if complement_contiguous {
+            let start = if c_max < 12 { c_max + 1 } else { 1 };
+            let end = if c_min > 1 { c_min - 1 } else { 12 };
+            return Some((start, end));
+        }
+    }
+
+    None
 }
 
 /// Detect an explicit season label from a `flatdemandstructure` tier object.
@@ -218,6 +326,9 @@ fn season_from_tier_label(tier: &Value) -> Option<SeasonFilter> {
             return Some(match s.to_lowercase().as_str() {
                 "summer" => SeasonFilter::Summer,
                 "winter" => SeasonFilter::Winter,
+                "shoulder" | "intermediate" | "spring" | "fall" | "autumn" => {
+                    SeasonFilter::Shoulder
+                }
                 "all" | "both" => SeasonFilter::All,
                 other => {
                     tracing::warn!(
@@ -501,6 +612,10 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     let summer_months = detect_summer_months(&weekday_sched, &weekend_sched)
         .unwrap_or_else(|| default_summer.clone());
 
+    // Detect shoulder months as a distinct intermediate season pattern.
+    // Only computed when >= 3 distinct monthly patterns exist.
+    let shoulder_months = detect_shoulder_months(&weekday_sched, &weekend_sched, &summer_months);
+
     let tariff_name = root.get("name").and_then(Value::as_str).map(String::from);
 
     // Build TOU periods and energy rates
@@ -516,7 +631,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     for &period_idx in &period_indices {
         let period_name = format!("period_{period_idx}");
         let months = months_for_period(&weekday_sched, &weekend_sched, period_idx);
-        let season = season_for_months(&months, &summer_months);
+        let season = season_for_months(&months, &summer_months, shoulder_months.as_ref());
         period_seasons.insert(period_idx, season);
 
         let weekday_ranges = hour_ranges_for_period(&weekday_sched, period_idx);
@@ -630,11 +745,18 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
                             );
                             SeasonFilter::Summer
                         }
-                        1 => SeasonFilter::Winter,
+                        1 => {
+                            if num_entries == 3 {
+                                SeasonFilter::Shoulder
+                            } else {
+                                SeasonFilter::Winter
+                            }
+                        }
+                        2 => SeasonFilter::Winter,
                         _ => {
                             tracing::warn!(
                                 index = idx,
-                                "flatdemandstructure has >2 entries; assigning All to extra entry"
+                                "flatdemandstructure has >3 entries; assigning All to extra entry"
                             );
                             SeasonFilter::All
                         }
@@ -662,7 +784,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
             for &period_idx in &demand_period_indices {
                 let period_name = format!("demand_{period_idx}");
                 let months = months_for_period(dwd, dwe, period_idx);
-                let season = season_for_months(&months, &summer_months);
+                let season = season_for_months(&months, &summer_months, shoulder_months.as_ref());
                 let weekday_ranges = hour_ranges_for_period(dwd, period_idx);
                 let weekend_ranges = hour_ranges_for_period(dwe, period_idx);
                 let windows = build_time_windows(&weekday_ranges, &weekend_ranges);
@@ -682,7 +804,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
                 let period_name = format!("demand_{idx}");
                 let season = if let (Some(wd), Some(we)) = (&demand_weekday, &demand_weekend) {
                     let months = months_for_period(wd, we, idx as u64);
-                    season_for_months(&months, &summer_months)
+                    season_for_months(&months, &summer_months, shoulder_months.as_ref())
                 } else {
                     SeasonFilter::All
                 };
@@ -715,11 +837,21 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     let minimum_charge = root.get("minmonthlycharge").and_then(Value::as_f64);
 
     // Determine seasonal split based on whether any period is season-specific
-    let has_seasonal = period_seasons
-        .values()
-        .any(|s| matches!(s, SeasonFilter::Summer | SeasonFilter::Winter));
+    let has_seasonal = period_seasons.values().any(|s| {
+        matches!(
+            s,
+            SeasonFilter::Summer | SeasonFilter::Winter | SeasonFilter::Shoulder
+        )
+    });
     let seasonal_split = if has_seasonal {
-        seasonal_split_from_months(&summer_months)
+        let mut split = seasonal_split_from_months(&summer_months);
+        if let (Some(ref mut s), Some(sh)) = (split.as_mut(), &shoulder_months) {
+            if let Some((start, end)) = shoulder_split_from_months(sh) {
+                s.shoulder_start = Some(start);
+                s.shoulder_end = Some(end);
+            }
+        }
+        split
     } else {
         None
     };
@@ -1209,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_demand_three_entries_without_labels_assigns_all_to_extra() {
+    fn flat_demand_three_entries_without_labels_assigns_shoulder() {
         let json = minimal_valid_json(
             r#""flatdemandstructure":[[{"rate":12.0}],[{"rate":8.0}],[{"rate":5.0}]]"#,
         );
@@ -1221,15 +1353,15 @@ mod tests {
             "should have three demand rates"
         );
 
-        // Position 0 = Summer (position heuristic), 1 = Winter, 2 = All (extra)
+        // Position 0 = Summer, 1 = Shoulder, 2 = Winter (array-position heuristic for 3 entries)
         let seasons: Vec<SeasonFilter> = tariff.demand_rates.iter().map(|d| d.season).collect();
         assert_eq!(seasons[0], SeasonFilter::Summer, "entry 0 should be Summer");
-        assert_eq!(seasons[1], SeasonFilter::Winter, "entry 1 should be Winter");
         assert_eq!(
-            seasons[2],
-            SeasonFilter::All,
-            "entry 2 (extra) should be All"
+            seasons[1],
+            SeasonFilter::Shoulder,
+            "entry 1 should be Shoulder"
         );
+        assert_eq!(seasons[2], SeasonFilter::Winter, "entry 2 should be Winter");
     }
 
     #[test]
@@ -1251,5 +1383,108 @@ mod tests {
             SeasonFilter::Winter,
             "entry 1 should be Winter (position heuristic)"
         );
+    }
+
+    #[test]
+    fn season_for_months_with_shoulder_classifies_shoulder_only_period() {
+        let months: BTreeSet<u8> = [4, 5].into_iter().collect();
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let shoulder: BTreeSet<u8> = [4, 5, 10].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months, &summer, Some(&shoulder)),
+            SeasonFilter::Shoulder
+        );
+    }
+
+    #[test]
+    fn season_for_months_with_shoulder_classifies_summer_only_period() {
+        let months: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let shoulder: BTreeSet<u8> = [4, 5, 10].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months, &summer, Some(&shoulder)),
+            SeasonFilter::Summer
+        );
+    }
+
+    #[test]
+    fn season_for_months_with_shoulder_classifies_winter_only_period() {
+        let months: BTreeSet<u8> = [1, 2, 3, 11, 12].into_iter().collect();
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let shoulder: BTreeSet<u8> = [4, 5, 10].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months, &summer, Some(&shoulder)),
+            SeasonFilter::Winter
+        );
+    }
+
+    #[test]
+    fn season_for_months_with_shoulder_mixed_returns_all() {
+        let months: BTreeSet<u8> = [1, 7].into_iter().collect(); // winter + summer
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let shoulder: BTreeSet<u8> = [4, 5, 10].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months, &summer, Some(&shoulder)),
+            SeasonFilter::All
+        );
+    }
+
+    #[test]
+    fn season_for_months_without_shoulder_is_backward_compatible() {
+        // Binary season: no shoulder months. Verify same results as old function.
+        let months: BTreeSet<u8> = [1, 2, 12].into_iter().collect();
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months, &summer, None),
+            SeasonFilter::Winter
+        );
+        let months_summer: BTreeSet<u8> = [7, 8].into_iter().collect();
+        assert_eq!(
+            season_for_months(&months_summer, &summer, None),
+            SeasonFilter::Summer
+        );
+    }
+
+    #[test]
+    fn detect_shoulder_months_none_for_binary_season() {
+        // Build schedules where only 2 distinct patterns exist.
+        let weekday: Schedule = (0..12)
+            .map(|m| {
+                if (6..=9).contains(&(m as u8 + 1)) {
+                    vec![1; 24]
+                } else {
+                    vec![2; 24]
+                }
+            })
+            .collect();
+        let weekend = weekday.clone();
+        let summer: BTreeSet<u8> = (6..=9).collect();
+        let shoulder = detect_shoulder_months(&weekday, &weekend, &summer);
+        assert!(shoulder.is_none(), "binary season should have no shoulder");
+    }
+
+    #[test]
+    fn detect_shoulder_months_finds_three_season() {
+        // Three distinct patterns: summer (Jun-Sep), shoulder (Apr-May, Oct), winter (rest)
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (6..=9).contains(&m) {
+                weekday.push(vec![1; 24]);
+            } else if m == 4 || m == 5 || m == 10 {
+                weekday.push(vec![2; 24]);
+            } else {
+                weekday.push(vec![3; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let summer: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let shoulder = detect_shoulder_months(&weekday, &weekend, &summer);
+        assert!(shoulder.is_some(), "three-season should detect shoulder");
+        let sh = shoulder.unwrap();
+        assert!(sh.contains(&4));
+        assert!(sh.contains(&5));
+        assert!(sh.contains(&10));
+        assert!(!sh.contains(&1));
+        assert!(!sh.contains(&7));
     }
 }

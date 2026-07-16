@@ -13,8 +13,9 @@ fn parse_season(s: &str) -> PyResult<SeasonFilter> {
         "all" => Ok(SeasonFilter::All),
         "summer" => Ok(SeasonFilter::Summer),
         "winter" => Ok(SeasonFilter::Winter),
+        "shoulder" => Ok(SeasonFilter::Shoulder),
         _ => Err(PyValueError::new_err(format!(
-            "unknown season '{s}', expected 'all', 'summer', or 'winter'"
+            "unknown season '{s}', expected 'all', 'summer', 'winter', or 'shoulder'"
         ))),
     }
 }
@@ -541,14 +542,24 @@ impl PyTariffBuilder {
     }
 
     /// Set custom summer/winter boundary months (1-indexed, inclusive).
+    /// Optionally configure a shoulder (spring/fall) season range.
+    #[pyo3(signature = (summer_start_month, summer_end_month, shoulder_start_month=None, shoulder_end_month=None))]
     fn set_seasonal_split(
         slf: Py<Self>,
         py: Python<'_>,
         summer_start_month: u8,
         summer_end_month: u8,
+        shoulder_start_month: Option<u8>,
+        shoulder_end_month: Option<u8>,
     ) -> PyResult<Py<Self>> {
-        let split = SeasonalSplit::new(summer_start_month, summer_end_month)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let split = match (shoulder_start_month, shoulder_end_month) {
+            (Some(s), Some(e)) => {
+                SeasonalSplit::with_shoulder(summer_start_month, summer_end_month, Some(s), Some(e))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+            }
+            _ => SeasonalSplit::new(summer_start_month, summer_end_month)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        };
         slf.borrow_mut(py).seasonal_split = Some(split);
         Ok(slf)
     }
@@ -732,14 +743,25 @@ impl PyGasTariffBuilder {
         slf
     }
 
+    /// Set custom summer/winter boundary months (1-indexed, inclusive).
+    /// Optionally configure a shoulder (spring/fall) season range.
+    #[pyo3(signature = (summer_start_month, summer_end_month, shoulder_start_month=None, shoulder_end_month=None))]
     fn set_seasonal_split(
         slf: Py<Self>,
         py: Python<'_>,
         summer_start_month: u8,
         summer_end_month: u8,
+        shoulder_start_month: Option<u8>,
+        shoulder_end_month: Option<u8>,
     ) -> PyResult<Py<Self>> {
-        let split = SeasonalSplit::new(summer_start_month, summer_end_month)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let split = match (shoulder_start_month, shoulder_end_month) {
+            (Some(s), Some(e)) => {
+                SeasonalSplit::with_shoulder(summer_start_month, summer_end_month, Some(s), Some(e))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+            }
+            _ => SeasonalSplit::new(summer_start_month, summer_end_month)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        };
         slf.borrow_mut(py).seasonal_split = Some(split);
         Ok(slf)
     }

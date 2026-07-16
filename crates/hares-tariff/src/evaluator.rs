@@ -66,6 +66,13 @@ pub struct TariffEvaluator {
     /// captured once at tariff load time.
     #[cfg(feature = "observe")]
     pub seasonal_split_summer_months: Vec<u32>,
+    /// Observer: whether shoulder months are configured on the SeasonalSplit.
+    #[cfg(feature = "observe")]
+    pub seasonal_split_has_shoulder: bool,
+    /// Observer: shoulder months detected from the SeasonalSplit (1-indexed),
+    /// captured once at tariff load time.
+    #[cfg(feature = "observe")]
+    pub shoulder_months: Vec<u32>,
 }
 
 impl TariffEvaluator {
@@ -140,6 +147,12 @@ impl TariffEvaluator {
         let seasonal_split_summer_months: Vec<u32> = seasonal_split
             .map(|ss| (1..=12u32).filter(|&m| ss.is_summer(m as u8)).collect())
             .unwrap_or_default();
+        #[cfg(feature = "observe")]
+        let seasonal_split_has_shoulder = seasonal_split.is_some_and(|ss| ss.has_shoulder());
+        #[cfg(feature = "observe")]
+        let shoulder_months: Vec<u32> = seasonal_split
+            .map(|ss| (1..=12u32).filter(|&m| ss.is_shoulder(m as u8)).collect())
+            .unwrap_or_default();
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if let Some(split) = seasonal_split {
@@ -155,6 +168,24 @@ impl TariffEvaluator {
                             summer_start = split.summer_start_month,
                             summer_end = split.summer_end_month,
                             "SeasonalSplit reclassifies month relative to June–September default"
+                        );
+                    }
+                }
+            }
+            if split.has_shoulder() {
+                for m in 1..=12u8 {
+                    if split.is_summer(m) && split.is_shoulder(m) {
+                        debug_assert!(
+                            false,
+                            "SeasonalSplit shoulder range overlaps with summer range at month {m}"
+                        );
+                        tracing::error!(
+                            month = m,
+                            summer_start = split.summer_start_month,
+                            summer_end = split.summer_end_month,
+                            shoulder_start = split.shoulder_start,
+                            shoulder_end = split.shoulder_end,
+                            "SeasonalSplit shoulder range overlaps with summer range; shoulder takes precedence"
                         );
                     }
                 }
@@ -370,6 +401,10 @@ impl TariffEvaluator {
             seasonal_split_used,
             #[cfg(feature = "observe")]
             seasonal_split_summer_months,
+            #[cfg(feature = "observe")]
+            seasonal_split_has_shoulder,
+            #[cfg(feature = "observe")]
+            shoulder_months,
         })
     }
 
@@ -747,7 +782,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono_tz::America::New_York;
-    use hares_types::{DayFilter, SeasonFilter, TimeWindow, TouPeriod};
+    use hares_types::{
+        BillingCycle, DayFilter, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod,
+    };
 
     use crate::types::{CppConfig, EnergyRate, ExportRate, FixedCharges, TieredBlock};
 
@@ -2656,5 +2693,122 @@ mod tests {
             TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
         assert_eq!(ev_jul.tier_rate_at(0.0), 0.08);
         assert_eq!(ev_jul.tier_rate_at(800.0), 0.15);
+    }
+
+    #[test]
+    fn three_season_tariff_produces_correct_seasonal_costs() {
+        // Tariff with three distinct seasons:
+        //   Summer (Jun-Sep): $0.30/kWh
+        //   Shoulder (Apr-May, Oct): $0.20/kWh
+        //   Winter (Nov-Mar): $0.10/kWh
+        let seasonal_split = SeasonalSplit::with_shoulder(6, 9, Some(4), Some(5)).unwrap();
+
+        let period_name = "all_hours".to_string();
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: period_name.clone(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: period_name.clone(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: period_name.clone(),
+                    season: SeasonFilter::Shoulder,
+                    rate_per_kwh: 0.20,
+                },
+                EnergyRate {
+                    period_name,
+                    season: SeasonFilter::Winter,
+                    rate_per_kwh: 0.10,
+                },
+            ],
+            seasonal_split: Some(seasonal_split),
+            billing_cycle: BillingCycle::Monthly,
+            ..Default::default()
+        };
+
+        // August (summer) — run 1 hour
+        let aug = New_York.with_ymd_and_hms(2025, 8, 15, 12, 0, 0).unwrap();
+        let ev_aug =
+            TariffEvaluator::new(tariff.clone(), aug, aug + Duration::hours(1), 3600).unwrap();
+        assert!((ev_aug.current_price() - 0.30).abs() < 1e-9);
+
+        // December (winter) — run 1 hour
+        let dec = New_York.with_ymd_and_hms(2025, 12, 15, 12, 0, 0).unwrap();
+        let ev_dec =
+            TariffEvaluator::new(tariff.clone(), dec, dec + Duration::hours(1), 3600).unwrap();
+        assert!((ev_dec.current_price() - 0.10).abs() < 1e-9);
+
+        // April (shoulder) — run 1 hour
+        let apr = New_York.with_ymd_and_hms(2025, 4, 15, 12, 0, 0).unwrap();
+        let ev_apr =
+            TariffEvaluator::new(tariff.clone(), apr, apr + Duration::hours(1), 3600).unwrap();
+        assert!((ev_apr.current_price() - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn three_season_tariff_billing_over_three_seasons() {
+        // Full year: verify costs across summer, shoulder, and winter months.
+        // 1 kWh in each hour for 1 hour per representative month.
+        // summer=Jun-Sep(6-9), shoulder=Apr-May(4-5), winter=Nov-Mar(11-3) + Oct(10)
+        let seasonal_split = SeasonalSplit::with_shoulder(6, 9, Some(4), Some(5)).unwrap();
+
+        let period_name = "peak".to_string();
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: period_name.clone(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: period_name.clone(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: period_name.clone(),
+                    season: SeasonFilter::Shoulder,
+                    rate_per_kwh: 0.20,
+                },
+                EnergyRate {
+                    period_name,
+                    season: SeasonFilter::Winter,
+                    rate_per_kwh: 0.10,
+                },
+            ],
+            seasonal_split: Some(seasonal_split),
+            billing_cycle: BillingCycle::Monthly,
+            ..Default::default()
+        };
+
+        // July (summer): 1 kWh → $0.30
+        let jul = New_York.with_ymd_and_hms(2025, 7, 15, 12, 0, 0).unwrap();
+        let mut ev =
+            TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
+        ev.step(1.0, 0.0, 3600.0, jul);
+        let summary = ev.finalize(jul + Duration::hours(1)).unwrap();
+        assert!((summary.energy_charge_usd - 0.30).abs() < 0.01);
+
+        // April (shoulder): 1 kWh → $0.20
+        let apr = New_York.with_ymd_and_hms(2025, 4, 15, 12, 0, 0).unwrap();
+        let mut ev =
+            TariffEvaluator::new(tariff.clone(), apr, apr + Duration::hours(1), 3600).unwrap();
+        ev.step(1.0, 0.0, 3600.0, apr);
+        let summary = ev.finalize(apr + Duration::hours(1)).unwrap();
+        assert!((summary.energy_charge_usd - 0.20).abs() < 0.01);
+
+        // December (winter): 1 kWh → $0.10
+        let dec = New_York.with_ymd_and_hms(2025, 12, 15, 12, 0, 0).unwrap();
+        let mut ev =
+            TariffEvaluator::new(tariff.clone(), dec, dec + Duration::hours(1), 3600).unwrap();
+        ev.step(1.0, 0.0, 3600.0, dec);
+        let summary = ev.finalize(dec + Duration::hours(1)).unwrap();
+        assert!((summary.energy_charge_usd - 0.10).abs() < 0.01);
     }
 }

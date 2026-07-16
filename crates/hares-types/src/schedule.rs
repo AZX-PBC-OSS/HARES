@@ -867,6 +867,9 @@ pub enum SeasonFilter {
     All,
     Summer,
     Winter,
+    /// Shoulder / intermediate season (e.g. spring and fall). When no shoulder
+    /// month range is configured, this behaves identically to [`All`].
+    Shoulder,
 }
 
 impl SeasonFilter {
@@ -875,6 +878,10 @@ impl SeasonFilter {
     /// - `Summer` = June through September (months 6..=9)
     /// - `Winter` = October through May (months 1..=5 and 10..=12)
     /// - `All` = always true
+    /// - `Shoulder` = always true (safest default — without shoulder range
+    ///   configuration, the period matches all months; use
+    ///   [`season_contains_month`] with a [`SeasonalSplit`] for accurate
+    ///   shoulder matching)
     ///
     /// Debug-asserts that `month` is in 1..=12; in release, returns `false`
     /// for out-of-range months.
@@ -887,19 +894,28 @@ impl SeasonFilter {
             Self::All => true,
             Self::Summer => (6..=9).contains(&month),
             Self::Winter => !(6..=9).contains(&month),
+            Self::Shoulder => true,
         }
     }
 }
 
-/// Configurable summer/winter boundary for tariffs that don't use the
+/// Configurable summer/winter/shoulder boundary for tariffs that don't use the
 /// default June–September split. Supports wrapping (e.g. southern hemisphere
-/// where summer might be Nov–Feb).
+/// where summer might be Nov–Feb). The shoulder range (spring/fall intermediate
+/// season) is optional — without it, the split is binary summer/winter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SeasonalSplit {
     /// First month of summer (1-indexed, inclusive).
     pub summer_start_month: u8,
     /// Last month of summer (1-indexed, inclusive).
     pub summer_end_month: u8,
+    /// First month of shoulder (1-indexed, inclusive). When `None`, the split
+    /// is binary (summer/winter only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shoulder_start: Option<u8>,
+    /// Last month of shoulder (1-indexed, inclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shoulder_end: Option<u8>,
 }
 
 impl SeasonalSplit {
@@ -913,10 +929,55 @@ impl SeasonalSplit {
         Ok(Self {
             summer_start_month,
             summer_end_month,
+            shoulder_start: None,
+            shoulder_end: None,
         })
     }
 
-    /// Validate that both months are in 1..=12.
+    /// Create a `SeasonalSplit` with an optional shoulder range.
+    ///
+    /// Both shoulder fields must be `Some` or both `None`. When `Some`, the
+    /// shoulder range must be disjoint from the summer range — validated at
+    /// construction time, returning an error on overlap.
+    pub fn with_shoulder(
+        summer_start_month: u8,
+        summer_end_month: u8,
+        shoulder_start: Option<u8>,
+        shoulder_end: Option<u8>,
+    ) -> Result<Self, HaresError> {
+        if !(1..=12).contains(&summer_start_month) || !(1..=12).contains(&summer_end_month) {
+            return Err(HaresError::Equipment(format!(
+                "SeasonalSplit months must be 1..=12, got start={summer_start_month}, end={summer_end_month}"
+            )));
+        }
+        match (shoulder_start, shoulder_end) {
+            (None, None) => {}
+            (Some(s), Some(e)) => {
+                if !(1..=12).contains(&s) || !(1..=12).contains(&e) {
+                    return Err(HaresError::Equipment(format!(
+                        "SeasonalSplit shoulder months must be 1..=12, got start={s}, end={e}"
+                    )));
+                }
+            }
+            _ => {
+                return Err(HaresError::Equipment(
+                    "SeasonalSplit shoulder_start and shoulder_end must be both Some or both None"
+                        .into(),
+                ));
+            }
+        }
+        let s = Self {
+            summer_start_month,
+            summer_end_month,
+            shoulder_start,
+            shoulder_end,
+        };
+        s.validate()?;
+        Ok(s)
+    }
+
+    /// Validate that all month fields are in 1..=12 and shoulder/summer ranges
+    /// are disjoint.
     pub fn validate(&self) -> Result<(), HaresError> {
         if !(1..=12).contains(&self.summer_start_month)
             || !(1..=12).contains(&self.summer_end_month)
@@ -925,6 +986,23 @@ impl SeasonalSplit {
                 "SeasonalSplit months must be 1..=12, got start={}, end={}",
                 self.summer_start_month, self.summer_end_month
             )));
+        }
+        if let (Some(s), Some(e)) = (self.shoulder_start, self.shoulder_end) {
+            if !(1..=12).contains(&s) || !(1..=12).contains(&e) {
+                return Err(HaresError::Tariff(format!(
+                    "SeasonalSplit shoulder months must be 1..=12, got start={s}, end={e}"
+                )));
+            }
+            for m in 1..=12u8 {
+                if season_range_contains(self.summer_start_month, self.summer_end_month, m)
+                    && season_range_contains(s, e, m)
+                {
+                    return Err(HaresError::Tariff(format!(
+                        "SeasonalSplit shoulder range [{s},{e}] overlaps with summer range [{},{}] at month {m}",
+                        self.summer_start_month, self.summer_end_month
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -941,6 +1019,11 @@ impl SeasonalSplit {
         }
     }
 
+    /// Returns `true` if shoulder months are configured.
+    pub fn has_shoulder(&self) -> bool {
+        self.shoulder_start.is_some() && self.shoulder_end.is_some()
+    }
+
     /// Returns `true` if the given 1-indexed month is in the summer range.
     ///
     /// Handles wrapping: if `summer_start_month > summer_end_month` the range
@@ -950,33 +1033,77 @@ impl SeasonalSplit {
         if !(1..=12).contains(&month) {
             return false;
         }
-        if self.summer_start_month <= self.summer_end_month {
-            month >= self.summer_start_month && month <= self.summer_end_month
-        } else {
-            month >= self.summer_start_month || month <= self.summer_end_month
+        season_range_contains(self.summer_start_month, self.summer_end_month, month)
+    }
+
+    /// Returns `true` if the given 1-indexed month is in the shoulder range.
+    ///
+    /// Handles wrapping the same way as [`is_summer`]. Returns `false` if
+    /// shoulder is not configured.
+    pub fn is_shoulder(&self, month: u8) -> bool {
+        debug_assert!((1..=12).contains(&month), "month out of range: {month}");
+        if !(1..=12).contains(&month) {
+            return false;
+        }
+        match (self.shoulder_start, self.shoulder_end) {
+            (Some(start), Some(end)) => season_range_contains(start, end, month),
+            _ => false,
         }
     }
 }
 
+/// Returns `true` if `month` falls within the range `[start, end]` handling
+/// the wrapping case where `start > end` (range spans year boundary).
+fn season_range_contains(start: u8, end: u8, month: u8) -> bool {
+    if start <= end {
+        month >= start && month <= end
+    } else {
+        month >= start || month <= end
+    }
+}
+
 /// Determines whether a given month falls within a season, optionally using
-/// a [`SeasonalSplit`] for the summer/winter boundary.
+/// a [`SeasonalSplit`] for the summer/winter/shoulder boundary.
 ///
 /// When a non-trivial `SeasonalSplit` is supplied (i.e. `has_seasonal()` is
-/// true), summer/winter are determined by the split's `is_summer()` method.
-/// Otherwise, the hardcoded June–September default is used as a fallback.
+/// true), summer/winter are determined by the split's `is_summer()` method,
+/// and shoulder is determined by `is_shoulder()`. Otherwise, the hardcoded
+/// June–September default is used as a fallback for summer/winter.
+///
+/// When no shoulder range is configured in the split, `Shoulder` always
+/// returns `true` (safest fallback — matches all months).
 pub fn season_contains_month(
     season: SeasonFilter,
     split: Option<&SeasonalSplit>,
     month: u8,
 ) -> bool {
-    let is_summer = match split {
-        Some(s) if s.has_seasonal() => s.is_summer(month),
-        _ => (6..=9).contains(&month),
+    let (is_summer, is_shoulder) = match split {
+        Some(s) if s.has_seasonal() => (s.is_summer(month), s.is_shoulder(month)),
+        _ => ((6..=9).contains(&month), false),
     };
     match season {
         SeasonFilter::All => true,
-        SeasonFilter::Summer => is_summer,
-        SeasonFilter::Winter => !is_summer,
+        SeasonFilter::Summer => {
+            if split.is_some_and(|s| s.has_shoulder()) {
+                is_summer && !is_shoulder
+            } else {
+                is_summer
+            }
+        }
+        SeasonFilter::Winter => {
+            if split.is_some_and(|s| s.has_shoulder()) {
+                !is_summer && !is_shoulder
+            } else {
+                !is_summer
+            }
+        }
+        SeasonFilter::Shoulder => {
+            if split.is_some_and(|s| s.has_shoulder()) {
+                is_shoulder
+            } else {
+                true
+            }
+        }
     }
 }
 
@@ -2601,6 +2728,7 @@ mod tests {
                 SeasonFilter::All,
                 SeasonFilter::Summer,
                 SeasonFilter::Winter,
+                SeasonFilter::Shoulder,
             ] {
                 assert_eq!(
                     season_contains_month(season, None, m),
@@ -2616,6 +2744,7 @@ mod tests {
                 SeasonFilter::All,
                 SeasonFilter::Summer,
                 SeasonFilter::Winter,
+                SeasonFilter::Shoulder,
             ] {
                 assert_eq!(
                     season_contains_month(season, Some(&full_year), m),
@@ -2624,6 +2753,164 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn seasonal_split_is_shoulder_normal_range() {
+        let split = SeasonalSplit::with_shoulder(6, 9, Some(4), Some(5)).unwrap();
+        assert!(split.is_shoulder(4));
+        assert!(split.is_shoulder(5));
+        assert!(!split.is_shoulder(3));
+        assert!(!split.is_shoulder(6));
+        assert!(!split.is_shoulder(10));
+    }
+
+    #[test]
+    fn seasonal_split_is_shoulder_october() {
+        let split = SeasonalSplit::with_shoulder(6, 9, Some(10), Some(10)).unwrap();
+        assert!(split.is_shoulder(10));
+        assert!(!split.is_shoulder(9));
+        assert!(!split.is_shoulder(11));
+    }
+
+    #[test]
+    fn seasonal_split_is_shoulder_wrapping() {
+        // Shoulder wraps around year boundary (e.g. Nov+Apr = southern spring)
+        let split = SeasonalSplit::with_shoulder(12, 2, Some(10), Some(11)).unwrap();
+        assert!(split.is_shoulder(10));
+        assert!(split.is_shoulder(11));
+        assert!(!split.is_shoulder(9));
+        assert!(!split.is_shoulder(12));
+        assert!(!split.is_shoulder(3));
+    }
+
+    #[test]
+    fn seasonal_split_without_shoulder_returns_false() {
+        let split = SeasonalSplit::new(6, 9).unwrap();
+        assert!(!split.has_shoulder());
+        for m in 1..=12u8 {
+            assert!(!split.is_shoulder(m), "month {m} should not be shoulder");
+        }
+    }
+
+    #[test]
+    fn seasonal_split_with_shoulder_rejects_mixed_some_none() {
+        assert!(SeasonalSplit::with_shoulder(6, 9, Some(4), None).is_err());
+        assert!(SeasonalSplit::with_shoulder(6, 9, None, Some(4)).is_err());
+    }
+
+    #[test]
+    fn season_contains_month_shoulder_with_split() {
+        // summer=Jun-Sep(6-9), shoulder=Apr-May(4-5)+Oct(10)
+        let split = SeasonalSplit::with_shoulder(6, 9, Some(4), Some(5)).unwrap();
+        let split_ref = Some(&split);
+
+        // Summer months match Summer only
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 7));
+        assert!(!season_contains_month(SeasonFilter::Shoulder, split_ref, 7));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 7));
+
+        // Shoulder months match Shoulder only
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 4));
+        assert!(season_contains_month(SeasonFilter::Shoulder, split_ref, 4));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 4));
+
+        // Winter months (non-summer, non-shoulder) match Winter only
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 12));
+        assert!(!season_contains_month(
+            SeasonFilter::Shoulder,
+            split_ref,
+            12
+        ));
+        assert!(season_contains_month(SeasonFilter::Winter, split_ref, 12));
+
+        // All matches every month
+        assert!(season_contains_month(SeasonFilter::All, split_ref, 1));
+        assert!(season_contains_month(SeasonFilter::All, split_ref, 7));
+        assert!(season_contains_month(SeasonFilter::All, split_ref, 12));
+    }
+
+    #[test]
+    fn season_contains_month_shoulder_without_split_config_falls_back_to_all() {
+        // Without shoulder configured, Shoulder season matches every month (safe default)
+        let split = SeasonalSplit::new(6, 9).unwrap();
+        let split_ref = Some(&split);
+        for m in 1..=12u8 {
+            assert!(season_contains_month(SeasonFilter::Shoulder, split_ref, m));
+        }
+    }
+
+    #[test]
+    fn season_contains_month_shoulder_with_null_split_falls_back_to_all() {
+        for m in 1..=12u8 {
+            assert!(season_contains_month(SeasonFilter::Shoulder, None, m));
+        }
+    }
+
+    #[test]
+    fn season_contains_month_summer_excludes_shoulder_overlap() {
+        // Defence-in-depth: if an overlapping split is constructed outside
+        // of with_shoulder() (e.g. manual field assignment or deserialisation),
+        // season_contains_month must still exclude shoulder months from Summer
+        // (shoulder takes precedence). Construct the split directly to test this
+        // code path since with_shoulder() now rejects overlap at construction.
+        // summer=Jun-Sep(6-9), shoulder=Aug-Oct(8-10) — overlap at Aug(8), Sep(9)
+        let split = SeasonalSplit {
+            summer_start_month: 6,
+            summer_end_month: 9,
+            shoulder_start: Some(8),
+            shoulder_end: Some(10),
+        };
+        let split_ref = Some(&split);
+
+        // Month 8 (Aug) and 9 (Sep): overlap — Summer must NOT match (shoulder wins)
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 8));
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 9));
+
+        // Month 8 and 9: Shoulder must match
+        assert!(season_contains_month(SeasonFilter::Shoulder, split_ref, 8));
+        assert!(season_contains_month(SeasonFilter::Shoulder, split_ref, 9));
+
+        // Month 8 and 9: Winter must NOT match
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 8));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 9));
+
+        // Month 7 (Jul): pure summer, no overlap — Summer matches, Shoulder/Winter don't
+        assert!(season_contains_month(SeasonFilter::Summer, split_ref, 7));
+        assert!(!season_contains_month(SeasonFilter::Shoulder, split_ref, 7));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 7));
+
+        // Month 10 (Oct): pure shoulder, no overlap — Shoulder matches, Summer/Winter don't
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 10));
+        assert!(season_contains_month(SeasonFilter::Shoulder, split_ref, 10));
+        assert!(!season_contains_month(SeasonFilter::Winter, split_ref, 10));
+
+        // Month 12 (Dec): pure winter
+        assert!(!season_contains_month(SeasonFilter::Summer, split_ref, 12));
+        assert!(!season_contains_month(
+            SeasonFilter::Shoulder,
+            split_ref,
+            12
+        ));
+        assert!(season_contains_month(SeasonFilter::Winter, split_ref, 12));
+    }
+
+    #[test]
+    fn seasonal_split_with_shoulder_rejects_shoulder_summer_overlap() {
+        // Normal non-overlapping ranges succeed at construction
+        assert!(SeasonalSplit::with_shoulder(6, 9, Some(4), Some(5)).is_ok());
+
+        // Wrapping non-overlapping: summer Nov-Feb(11-2), shoulder Mar-Apr(3-4)
+        assert!(SeasonalSplit::with_shoulder(11, 2, Some(3), Some(4)).is_ok());
+
+        // Overlapping: summer Jun-Sep(6-9), shoulder Aug-Oct(8-10)
+        assert!(SeasonalSplit::with_shoulder(6, 9, Some(8), Some(10)).is_err());
+
+        // Overlapping wrapping: summer Nov-Feb(11-2), shoulder Dec-Mar(12-3)
+        assert!(SeasonalSplit::with_shoulder(11, 2, Some(12), Some(3)).is_err());
+
+        // Identical: summer Jun-Sep(6-9), shoulder Jun-Sep(6-9)
+        assert!(SeasonalSplit::with_shoulder(6, 9, Some(6), Some(9)).is_err());
     }
 
     #[test]
