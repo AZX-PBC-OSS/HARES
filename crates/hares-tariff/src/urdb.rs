@@ -393,19 +393,25 @@ fn detect_summer_months(
 /// Build a `SeasonalSplit` from a set of summer months.
 ///
 /// Finds a contiguous range (possibly wrapping around Dec-Jan) that covers all
-/// months in the set. If the set is non-contiguous (gaps that can't be explained
-/// by wrapping), logs a warning and falls back to the default June-September split.
-fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSplit> {
+/// months in the set. Returns `Ok(None)` for empty inputs (no seasonal variation).
+/// Returns `Err` when the months are non-contiguous even with year-end wrapping,
+/// rather than silently substituting an incorrect default.
+fn seasonal_split_from_months(
+    summer_months: &BTreeSet<u8>,
+) -> Result<Option<SeasonalSplit>, UrdbParseError> {
     if summer_months.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let months: Vec<u8> = summer_months.iter().copied().collect();
     let n = months.len();
 
-    // Single month: start == end
     if n == 1 {
-        return SeasonalSplit::new(months[0], months[0]).ok();
+        return SeasonalSplit::new(months[0], months[0])
+            .map(Some)
+            .map_err(|e| UrdbParseError {
+                message: format!("invalid seasonal split: {e}"),
+            });
     }
 
     // Try non-wrapping: check if months form a contiguous sequence
@@ -413,7 +419,11 @@ fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSp
     let max = months[n - 1];
     let non_wrapping_contiguous = (max - min + 1) as usize == n;
     if non_wrapping_contiguous {
-        return SeasonalSplit::new(min, max).ok();
+        return SeasonalSplit::new(min, max)
+            .map(Some)
+            .map_err(|e| UrdbParseError {
+                message: format!("invalid seasonal split: {e}"),
+            });
     }
 
     // Try wrapping (e.g., {11, 12, 1, 2}): find a rotation where months are contiguous.
@@ -425,19 +435,22 @@ fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSp
         let w_max = winter[winter.len() - 1];
         let winter_contiguous = (w_max - w_min + 1) as usize == winter.len();
         if winter_contiguous {
-            // Summer wraps: starts after winter ends, ends before winter starts
             let start = if w_max < 12 { w_max + 1 } else { 1 };
             let end = if w_min > 1 { w_min - 1 } else { 12 };
-            return SeasonalSplit::new(start, end).ok();
+            return SeasonalSplit::new(start, end)
+                .map(Some)
+                .map_err(|e| UrdbParseError {
+                    message: format!("invalid seasonal split: {e}"),
+                });
         }
     }
 
-    // Non-contiguous even with wrapping -- fall back to default
-    tracing::warn!(
-        ?summer_months,
-        "URDB detected non-contiguous summer months; falling back to June-September"
-    );
-    SeasonalSplit::new(6, 9).ok()
+    Err(UrdbParseError {
+        message: format!(
+            "non-contiguous summer months {:?}; cannot build a seasonal split from disjoint month ranges",
+            summer_months
+        ),
+    })
 }
 
 fn season_for_months(
@@ -520,25 +533,28 @@ fn detect_shoulder_months(
     }
 }
 
-/// Build a `SeasonalSplit` from shoulder months. Returns `None` if shoulder
-/// is empty or non-contiguous. Mirrors the logic of `seasonal_split_from_months`.
-fn shoulder_split_from_months(shoulder_months: &BTreeSet<u8>) -> Option<(u8, u8)> {
+/// Build a shoulder month range from shoulder months. Returns `Ok(None)` if
+/// shoulder is empty. Returns `Err` when the months are non-contiguous even
+/// with year-end wrapping. Mirrors the error-returning logic of `seasonal_split_from_months`.
+fn shoulder_split_from_months(
+    shoulder_months: &BTreeSet<u8>,
+) -> Result<Option<(u8, u8)>, UrdbParseError> {
     if shoulder_months.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let months: Vec<u8> = shoulder_months.iter().copied().collect();
     let n = months.len();
 
     if n == 1 {
-        return Some((months[0], months[0]));
+        return Ok(Some((months[0], months[0])));
     }
 
     let min = months[0];
     let max = months[n - 1];
     let non_wrapping_contiguous = (max - min + 1) as usize == n;
     if non_wrapping_contiguous {
-        return Some((min, max));
+        return Ok(Some((min, max)));
     }
 
     // Try wrapping (e.g., {10, 11, 4, 5}): check if complement is contiguous.
@@ -551,11 +567,16 @@ fn shoulder_split_from_months(shoulder_months: &BTreeSet<u8>) -> Option<(u8, u8)
         if complement_contiguous {
             let start = if c_max < 12 { c_max + 1 } else { 1 };
             let end = if c_min > 1 { c_min - 1 } else { 12 };
-            return Some((start, end));
+            return Ok(Some((start, end)));
         }
     }
 
-    None
+    Err(UrdbParseError {
+        message: format!(
+            "non-contiguous shoulder months {:?}; cannot build a shoulder range from disjoint month ranges",
+            shoulder_months
+        ),
+    })
 }
 
 /// Detect an explicit season label from a `flatdemandstructure` tier object.
@@ -1134,9 +1155,36 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         )
     });
     let seasonal_split = if has_seasonal {
-        let mut split = seasonal_split_from_months(&summer_months);
+        let split_result = seasonal_split_from_months(&summer_months);
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if summer_months.is_empty() {
+            debug_assert!(
+                split_result
+                    .as_ref()
+                    .ok()
+                    .and_then(|s| s.as_ref())
+                    .is_none(),
+                "empty summer_months must produce None, not a fallback SeasonalSplit"
+            );
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            let seasonal_split_error: Option<String> = match &split_result {
+                Ok(Some(_)) => None,
+                Ok(None) => Some("empty summer months".into()),
+                Err(e) => Some(e.message.clone()),
+            };
+            tracing::info!(
+                seasonal_split_error = seasonal_split_error,
+                "URDB seasonal split observer capture"
+            );
+        }
+
+        let mut split = split_result?;
         if let (Some(ref mut s), Some(sh)) = (split.as_mut(), &shoulder_months) {
-            if let Some((start, end)) = shoulder_split_from_months(sh) {
+            if let Some((start, end)) = shoulder_split_from_months(sh)? {
                 s.shoulder_start = Some(start);
                 s.shoulder_end = Some(end);
             }
@@ -2006,5 +2054,115 @@ mod tests {
         assert!(det.summer_months.contains(&8));
         assert!(!det.summer_months.contains(&1));
         assert!(!det.summer_months.contains(&12));
+    }
+
+    #[test]
+    fn seasonal_split_non_contiguous_returns_error() {
+        let months: BTreeSet<u8> = [5, 7, 9, 11].into_iter().collect();
+        let result = seasonal_split_from_months(&months);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("non-contiguous"),
+            "error should mention non-contiguous: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn seasonal_split_contiguous_northern_summer() {
+        let months: BTreeSet<u8> = [6, 7, 8, 9].into_iter().collect();
+        let result = seasonal_split_from_months(&months);
+        assert!(result.is_ok());
+        let split = result.unwrap();
+        assert!(split.is_some());
+        let s = split.unwrap();
+        assert_eq!(s.summer_start_month, 6);
+        assert_eq!(s.summer_end_month, 9);
+    }
+
+    #[test]
+    fn seasonal_split_wrapping_southern_summer() {
+        let months: BTreeSet<u8> = [11, 12, 1, 2].into_iter().collect();
+        let result = seasonal_split_from_months(&months);
+        assert!(result.is_ok());
+        let split = result.unwrap();
+        assert!(split.is_some());
+        let s = split.unwrap();
+        assert_eq!(s.summer_start_month, 11);
+        assert_eq!(s.summer_end_month, 2);
+    }
+
+    #[test]
+    fn seasonal_split_empty_returns_ok_none() {
+        let months: BTreeSet<u8> = BTreeSet::new();
+        let result = seasonal_split_from_months(&months);
+        assert!(result.is_ok());
+        let split = result.unwrap();
+        assert!(
+            split.is_none(),
+            "empty months must produce None, not a fallback"
+        );
+    }
+
+    #[test]
+    fn seasonal_split_single_month_returns_start_equals_end() {
+        let months: BTreeSet<u8> = [3].into_iter().collect();
+        let result = seasonal_split_from_months(&months);
+        assert!(result.is_ok());
+        let split = result.unwrap();
+        assert!(split.is_some());
+        let s = split.unwrap();
+        assert_eq!(s.summer_start_month, 3);
+        assert_eq!(s.summer_end_month, 3);
+    }
+
+    #[test]
+    fn parse_non_contiguous_summer_months_errors() {
+        // Build a schedule where summer months (period 2) appear only in
+        // months {5, 7, 9, 11} — non-contiguous even with wrapping.
+        // This should cause parse() to return an error.
+        let json = r#"{
+            "energyweekdayschedule": [
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            ],
+            "energyweekendschedule": [
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            ],
+            "energyratestructure": [[{"rate":0.10}],[{"rate":0.10}],[{"rate":0.25}]]
+        }"#;
+        let result = parse(json);
+        assert!(
+            result.is_err(),
+            "should error on non-contiguous summer months"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("non-contiguous"),
+            "error should mention non-contiguous: {}",
+            err.message
+        );
     }
 }
