@@ -35,6 +35,15 @@ impl UrdbParseError {
     }
 }
 
+/// Result of summer month detection with metadata for observability.
+#[derive(Debug, Clone)]
+struct SummerMonthDetection {
+    summer_months: BTreeSet<u8>,
+    method: &'static str,
+    diff_count: u32,
+    hemisphere: &'static str,
+}
+
 type Schedule = Vec<Vec<u64>>;
 
 fn extract_schedule(root: &Value, field: &str) -> Result<Schedule, UrdbParseError> {
@@ -106,16 +115,182 @@ fn months_for_period(weekday: &Schedule, weekend: &Schedule, period_idx: u64) ->
     months
 }
 
-/// Derive summer months from schedule data by comparing each month's rate
-/// periods against December (the reference winter month). Months whose
-/// 24-hour period pattern differs from December are classified as summer.
-/// Returns `None` if all months have identical patterns (no seasonal split).
-///
-/// Works for both hemispheres: if more than 6 months differ from December,
-/// December is likely a summer month (southern hemisphere), so the set is
-/// inverted -- the months matching December become summer.
-fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeSet<u8>> {
-    // December is index 11 (month 12, 0-indexed)
+/// Compare two schedule rows for equality using a tolerance-based comparison.
+/// While current URDB schedule rows contain integer period indices (`u64`),
+/// this comparison uses a tolerance check for robustness.
+fn schedule_rows_equal(a: &[u64], b: &[u64]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .all(|(&ai, &bi)| (ai as f64 - bi as f64).abs() < 1e-6)
+}
+
+/// Combined weekday + weekend pattern key for a month (48-element vector).
+fn schedule_pattern_key(weekday_row: &[u64], weekend_row: &[u64]) -> Vec<u64> {
+    let mut key = Vec::with_capacity(48);
+    key.extend_from_slice(weekday_row);
+    key.extend_from_slice(weekend_row);
+    key
+}
+
+/// Attempt to determine hemisphere from geographic metadata in the URDB JSON.
+fn geographic_hemisphere(root: &Value) -> Option<&'static str> {
+    if let Some(lat) = root.get("latitude").and_then(Value::as_f64) {
+        return if lat < 0.0 {
+            Some("southern")
+        } else {
+            Some("northern")
+        };
+    }
+
+    if let Some(country) = root.get("country").and_then(Value::as_str) {
+        let lower = country.to_lowercase();
+        let southern = [
+            "australia",
+            "new zealand",
+            "south africa",
+            "argentina",
+            "chile",
+            "brazil",
+            "indonesia",
+            "peru",
+            "bolivia",
+            "uruguay",
+            "paraguay",
+        ];
+        if southern.iter().any(|&c| lower.contains(c)) {
+            return Some("southern");
+        }
+    }
+
+    None
+}
+
+/// Default summer months for a given hemisphere.
+fn default_hemisphere_months(hemisphere: &str) -> BTreeSet<u8> {
+    match hemisphere {
+        "southern" => [11, 12, 1, 2, 3].into_iter().collect(),
+        _ => (6..=9).collect(),
+    }
+}
+
+/// Determine hemisphere from a set of summer months by comparing overlap with
+/// known northern vs southern summer month ranges.
+fn hemisphere_from_months(months: &BTreeSet<u8>) -> &'static str {
+    let northern_summer = [6u8, 7, 8, 9];
+    let southern_summer = [11u8, 12, 1, 2, 3];
+    let n_count = months
+        .iter()
+        .filter(|m| northern_summer.contains(m))
+        .count();
+    let s_count = months
+        .iter()
+        .filter(|m| southern_summer.contains(m))
+        .count();
+    if s_count > n_count {
+        "southern"
+    } else {
+        "northern"
+    }
+}
+
+/// Compute a simple distance between two pattern keys: sum of absolute differences.
+fn pattern_distance(a: &[u64], b: &[u64]) -> u64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x.abs_diff(*y)).sum()
+}
+
+/// Merge >2 pattern groups into 2 clusters by iterative merging of most similar pairs.
+fn merge_to_two_clusters(mut groups: Vec<(Vec<u64>, Vec<u8>)>) -> Vec<(Vec<u64>, Vec<u8>)> {
+    while groups.len() > 2 {
+        let mut best_i = 0;
+        let mut best_j = 1;
+        let mut best_dist = u64::MAX;
+
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                let dist = pattern_distance(&groups[i].0, &groups[j].0);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+
+        let (_, months_j) = groups.swap_remove(best_j);
+        let actual_i = if best_i > best_j { best_i - 1 } else { best_i };
+        groups[actual_i].1.extend(months_j);
+    }
+    groups
+}
+
+/// Compute the average energy rate for a schedule pattern key by mapping
+/// each period index to its actual rate from `energyratestructure`.
+fn average_rate(pattern_key: &[u64], rates: &[f64]) -> f64 {
+    if pattern_key.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = pattern_key
+        .iter()
+        .map(|&idx| rates.get(idx as usize).copied().unwrap_or(0.0))
+        .sum();
+    sum / pattern_key.len() as f64
+}
+
+/// Cluster the 12 monthly rows into 2 groups based on schedule pattern similarity.
+/// The group with the higher average energy rate (from `energyratestructure`) is
+/// classified as summer. Returns `None` if fewer than 2 distinct patterns exist.
+fn cluster_summer_months(
+    weekday: &Schedule,
+    weekend: &Schedule,
+    rates: &[f64],
+) -> Option<SummerMonthDetection> {
+    let mut groups: std::collections::BTreeMap<Vec<u64>, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for m in 0..12u8 {
+        let key = schedule_pattern_key(&weekday[m as usize], &weekend[m as usize]);
+        groups.entry(key).or_default().push(m + 1);
+    }
+
+    if groups.len() < 2 {
+        return None;
+    }
+
+    let patterns: Vec<(Vec<u64>, Vec<u8>)> = groups.into_iter().collect();
+
+    let clusters = if patterns.len() == 2 {
+        patterns
+    } else {
+        merge_to_two_clusters(patterns)
+    };
+
+    if clusters.len() != 2 {
+        return None;
+    }
+
+    let avg0 = average_rate(&clusters[0].0, rates);
+    let avg1 = average_rate(&clusters[1].0, rates);
+
+    let summer_idx = if avg0 >= avg1 { 0 } else { 1 };
+
+    let summer_months: BTreeSet<u8> = clusters[summer_idx].1.iter().copied().collect();
+    let hemisphere = hemisphere_from_months(&summer_months);
+
+    Some(SummerMonthDetection {
+        summer_months,
+        method: "clustering",
+        diff_count: 0,
+        hemisphere,
+    })
+}
+
+/// Improved December-reference detection with tolerance-based comparison and `>= 6` threshold.
+fn detect_by_december_reference(
+    weekday: &Schedule,
+    weekend: &Schedule,
+) -> Option<SummerMonthDetection> {
     let dec_wd = weekday.get(11)?;
     let dec_we = weekend.get(11)?;
 
@@ -123,8 +298,8 @@ fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeS
     for m in 0..12u8 {
         let wd = &weekday[m as usize];
         let we = &weekend[m as usize];
-        if wd != dec_wd || we != dec_we {
-            differ_from_dec.insert(m + 1); // 1-indexed
+        if !schedule_rows_equal(wd, dec_wd) || !schedule_rows_equal(we, dec_we) {
+            differ_from_dec.insert(m + 1);
         }
     }
 
@@ -132,20 +307,86 @@ fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeS
         return None;
     }
 
-    // If more than 6 months differ from December, December is likely summer
-    // (southern hemisphere). Invert: months matching December are winter,
-    // so the complement (months that differ) would be winter -- take the rest.
-    let summer = if differ_from_dec.len() > 6 {
+    let diff_count = differ_from_dec.len() as u32;
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    if diff_count == 6 {
+        tracing::warn!(
+            diff_count,
+            "borderline hemisphere classification: exactly 6 months differ from December"
+        );
+    }
+
+    let (summer, hemisphere) = if diff_count >= 6 {
         let all: BTreeSet<u8> = (1..=12).collect();
-        all.difference(&differ_from_dec).copied().collect()
+        let inverted: BTreeSet<u8> = all.difference(&differ_from_dec).copied().collect();
+        (inverted, "southern")
     } else {
-        differ_from_dec
+        (differ_from_dec, "northern")
     };
 
     if summer.is_empty() {
-        None
-    } else {
-        Some(summer)
+        return None;
+    }
+
+    Some(SummerMonthDetection {
+        summer_months: summer,
+        method: "december_reference",
+        diff_count,
+        hemisphere,
+    })
+}
+
+/// Derive summer months from schedule data. Uses three strategies in order of
+/// preference: geographic metadata, pattern clustering, and improved
+/// December-reference detection.
+fn detect_summer_months(
+    weekday: &Schedule,
+    weekend: &Schedule,
+    root: &Value,
+    rates: &[f64],
+) -> Option<SummerMonthDetection> {
+    let geo_hemisphere = geographic_hemisphere(root);
+
+    let schedule_detection = cluster_summer_months(weekday, weekend, rates)
+        .or_else(|| detect_by_december_reference(weekday, weekend));
+
+    match (geo_hemisphere, schedule_detection) {
+        (Some(geo_hemi), Some(sched_det)) => {
+            if geo_hemi == sched_det.hemisphere {
+                Some(SummerMonthDetection {
+                    summer_months: sched_det.summer_months,
+                    method: sched_det.method,
+                    diff_count: sched_det.diff_count,
+                    hemisphere: geo_hemi,
+                })
+            } else {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                tracing::warn!(
+                    geographic = geo_hemi,
+                    schedule_based = sched_det.hemisphere,
+                    "geographic metadata contradicts schedule-based hemisphere detection"
+                );
+                let summer_months = default_hemisphere_months(geo_hemi);
+                Some(SummerMonthDetection {
+                    summer_months,
+                    method: "geographic_metadata",
+                    diff_count: sched_det.diff_count,
+                    hemisphere: geo_hemi,
+                })
+            }
+        }
+        (Some(geo_hemi), None) => {
+            let summer_months = default_hemisphere_months(geo_hemi);
+            Some(SummerMonthDetection {
+                summer_months,
+                method: "geographic_metadata",
+                diff_count: 0,
+                hemisphere: geo_hemi,
+            })
+        }
+        (None, Some(sched_det)) => Some(sched_det),
+        (None, None) => None,
     }
 }
 
@@ -607,10 +848,59 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
 
     let period_indices = unique_period_indices(&weekday_sched, &weekend_sched);
 
+    // Build a rate-per-period-index lookup from energyratestructure for
+    // use by the clustering algorithm. The first tier's rate (rate + adj
+    // + components) is used as the representative rate for each period.
+    let energy_rates_by_period: Vec<f64> = energy_structure
+        .iter()
+        .map(|tiers| tiers.first().map(tier_rate).unwrap_or(0.0))
+        .collect();
+
     // Detect summer months from schedule data, defaulting to June-September.
     let default_summer: BTreeSet<u8> = (6..=9).collect();
-    let summer_months = detect_summer_months(&weekday_sched, &weekend_sched)
+    let detection_result = detect_summer_months(
+        &weekday_sched,
+        &weekend_sched,
+        &root,
+        &energy_rates_by_period,
+    );
+    let summer_months = detection_result
+        .as_ref()
+        .map(|d| d.summer_months.clone())
         .unwrap_or_else(|| default_summer.clone());
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    if let Some(ref det) = detection_result {
+        tracing::debug!(
+            hemisphere_detection_method = det.method,
+            detected_hemisphere = det.hemisphere,
+            hemisphere_diff_count = det.diff_count,
+            ?summer_months,
+            "URDB hemisphere detection result"
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let _method: &str = detection_result
+            .as_ref()
+            .map(|d| d.method)
+            .unwrap_or("none");
+        let _diff_count: u32 = detection_result.as_ref().map(|d| d.diff_count).unwrap_or(0);
+        let _hemisphere: &str = detection_result
+            .as_ref()
+            .map(|d| d.hemisphere)
+            .unwrap_or("none");
+        let _summer_indices: Vec<u32> = summer_months.iter().map(|&m| m as u32).collect();
+
+        tracing::info!(
+            hemisphere_detection_method = _method,
+            hemisphere_diff_count = _diff_count,
+            detected_hemisphere = _hemisphere,
+            summer_month_indices = ?_summer_indices,
+            "URDB hemisphere detection observer capture"
+        );
+    }
 
     // Detect shoulder months as a distinct intermediate season pattern.
     // Only computed when >= 3 distinct monthly patterns exist.
@@ -1486,5 +1776,235 @@ mod tests {
         assert!(sh.contains(&10));
         assert!(!sh.contains(&1));
         assert!(!sh.contains(&7));
+    }
+
+    fn empty_root() -> Value {
+        serde_json::from_str("{}").unwrap()
+    }
+
+    #[test]
+    fn december_reference_ge6_threshold_inverts() {
+        // Direct test of detect_by_december_reference with exactly 6 months
+        // differing from December. Verify the >= 6 threshold triggers inversion.
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (11..=12).contains(&m) || (1..=4).contains(&m) {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let result = detect_by_december_reference(&weekday, &weekend);
+
+        assert!(result.is_some());
+        let det = result.unwrap();
+        assert_eq!(det.hemisphere, "southern");
+        assert_eq!(det.diff_count, 6);
+        assert_eq!(det.method, "december_reference");
+    }
+
+    #[test]
+    fn detect_summer_six_months_differ_triggers_inversion() {
+        // Southern Hemisphere: summer months {11,12,1,2,3,4} (6 months) have
+        // high-rate pattern; winter months {5,6,7,8,9,10} (6 months) have low-rate.
+        // December (month 12) is high-rate (summer), so months 5-10 (6 months)
+        // differ from December. With >= 6 threshold, this inverts — the complement
+        // becomes summer, correctly classifying as Southern Hemisphere.
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (11..=12).contains(&m) || (1..=4).contains(&m) {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let root = empty_root();
+        let rates = vec![0.0, 0.10, 0.0, 0.25];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(result.is_some(), "should find seasonal variation");
+        let det = result.unwrap();
+        assert_eq!(
+            det.hemisphere, "southern",
+            "correctly classified as Southern Hemisphere"
+        );
+        assert!(det.summer_months.contains(&12));
+        assert!(det.summer_months.contains(&1));
+        assert!(det.summer_months.contains(&2));
+        assert!(det.summer_months.contains(&11));
+        assert!(!det.summer_months.contains(&6));
+        assert!(!det.summer_months.contains(&7));
+    }
+
+    #[test]
+    fn detect_summer_northern_by_clustering() {
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (6..=8).contains(&m) {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let root = empty_root();
+        let rates = vec![0.0, 0.10, 0.0, 0.25];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(result.is_some());
+        let det = result.unwrap();
+        assert_eq!(det.method, "clustering");
+        assert_eq!(det.hemisphere, "northern");
+        assert!(det.summer_months.contains(&6));
+        assert!(det.summer_months.contains(&7));
+        assert!(det.summer_months.contains(&8));
+        assert!(!det.summer_months.contains(&1));
+        assert!(!det.summer_months.contains(&12));
+    }
+
+    #[test]
+    fn detect_summer_southern_by_clustering() {
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if m == 12 || m == 1 || m == 2 {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let root = empty_root();
+        let rates = vec![0.0, 0.10, 0.0, 0.25];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(result.is_some());
+        let det = result.unwrap();
+        assert_eq!(det.method, "clustering");
+        assert_eq!(
+            det.hemisphere, "southern",
+            "Dec-Feb high-rate should be detected as southern"
+        );
+        assert!(det.summer_months.contains(&12));
+        assert!(det.summer_months.contains(&1));
+        assert!(det.summer_months.contains(&2));
+        assert!(!det.summer_months.contains(&6));
+    }
+
+    #[test]
+    fn detect_summer_geographic_metadata_overrides() {
+        // Geographic metadata with country "Australia" produces Southern Hemisphere
+        // summer months regardless of schedule pattern.
+        let root: Value =
+            serde_json::from_str(r#"{"country":"Australia","latitude":-33.87}"#).unwrap();
+        let weekday: Schedule = vec![vec![1; 24]; 12];
+        let weekend = weekday.clone();
+        let rates = vec![0.0, 0.10];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(
+            result.is_some(),
+            "geographic metadata should produce a result"
+        );
+        let det = result.unwrap();
+        assert_eq!(det.method, "geographic_metadata");
+        assert_eq!(det.hemisphere, "southern");
+        assert!(det.summer_months.contains(&12));
+        assert!(det.summer_months.contains(&1));
+        assert!(det.summer_months.contains(&2));
+        assert!(det.summer_months.contains(&3));
+        assert!(!det.summer_months.contains(&6));
+        assert!(!det.summer_months.contains(&7));
+    }
+
+    #[test]
+    fn detect_summer_no_seasonal_variation_defaults_northern() {
+        let weekday: Schedule = vec![vec![1; 24]; 12];
+        let weekend = weekday.clone();
+        let root = empty_root();
+        let rates = vec![0.0, 0.10];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(
+            result.is_none(),
+            "identical rows should produce no detection"
+        );
+
+        let json = r#"{
+            "energyweekdayschedule": [[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],
+            "energyweekendschedule": [[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],
+            "energyratestructure": [[{"rate": 0.10}]]
+        }"#;
+        let tariff = parse(json).unwrap();
+        assert!(
+            tariff.seasonal_split.is_none(),
+            "no seasonal split for identical months"
+        );
+    }
+
+    #[test]
+    fn geographic_metadata_agrees_with_clustering_preserves_schedule_months() {
+        // When geographic metadata agrees with the schedule-detected hemisphere,
+        // the schedule-derived summer months must be preserved — not replaced
+        // with a hardcoded default range.
+        let root: Value =
+            serde_json::from_str(r#"{"country":"Australia","latitude":-33.87}"#).unwrap();
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (10..=12).contains(&m) || (1..=3).contains(&m) {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let rates = vec![0.0, 0.10, 0.0, 0.25];
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+
+        assert!(result.is_some());
+        let det = result.unwrap();
+        assert_eq!(det.hemisphere, "southern");
+        // Schedule-derived months should cover Oct–Mar (6 months), not the
+        // hardcoded default of Nov–Mar (5 months).
+        assert!(det.summer_months.contains(&10));
+        assert!(det.summer_months.contains(&11));
+        assert!(det.summer_months.contains(&12));
+        assert!(det.summer_months.contains(&1));
+        assert!(det.summer_months.contains(&2));
+        assert!(det.summer_months.contains(&3));
+        assert_eq!(det.summer_months.len(), 6);
+        assert!(!det.summer_months.contains(&6));
+        assert!(!det.summer_months.contains(&7));
+    }
+
+    #[test]
+    fn clustering_uses_rate_not_period_index_for_summer_determination() {
+        // Period 0 has a HIGH rate (expensive), period 1 has a LOW rate (cheap).
+        // A non-rate-ascending period array like this is legal in URDB v7.
+        // Summer months (Jun–Aug) use period 0. The clustering algorithm must
+        // identify the high-rate cluster as summer based on actual $/kWh rates,
+        // not based on the raw period index (which would invert the result).
+        let mut weekday: Schedule = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (6..=8).contains(&m) {
+                weekday.push(vec![0; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let weekend = weekday.clone();
+        let rates = vec![0.40, 0.10]; // period 0 = expensive, period 1 = cheap
+        let result = cluster_summer_months(&weekday, &weekend, &rates);
+
+        assert!(result.is_some(), "should detect seasonal variation");
+        let det = result.unwrap();
+        assert_eq!(det.hemisphere, "northern");
+        assert_eq!(det.method, "clustering");
+        assert!(det.summer_months.contains(&6));
+        assert!(det.summer_months.contains(&7));
+        assert!(det.summer_months.contains(&8));
+        assert!(!det.summer_months.contains(&1));
+        assert!(!det.summer_months.contains(&12));
     }
 }
