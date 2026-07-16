@@ -440,7 +440,10 @@ pub struct DehumidifierConfig {
     /// Energy factor in L/kWh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_factor: Option<f64>,
-    /// Integrated energy factor in L/kWh (newer rating).
+    /// Integrated energy factor in L/kWh (composite rating per 10 CFR Part 430
+    /// Appendix X1). **Not currently supported.** HARES implements the
+    /// single-condition Energy Factor (EF) model (AHAM DH-1-2008, 26.7°C / 60% RH
+    /// rated condition) and ignores this field. Reserved for future IEF support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrated_energy_factor: Option<f64>,
     /// Fraction of dehumidification load served.

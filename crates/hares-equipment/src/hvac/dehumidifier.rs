@@ -344,10 +344,15 @@ impl Dehumidifier {
             .capacity_liters_per_day
             .unwrap_or(DEFAULT_RATED_WATER_REMOVAL_L_DAY);
 
-        self.rated_energy_factor_l_kwh = cfg
-            .integrated_energy_factor
-            .or(cfg.energy_factor)
-            .unwrap_or(1.8);
+        if cfg.integrated_energy_factor.is_some() {
+            tracing::warn!(
+                equipment = %self.descriptor.name,
+                "integrated_energy_factor (IEF, composite rating per 10 CFR Part 430 \
+                 Appendix X1) is not supported; only the single-condition Energy Factor \
+                 (EF, AHAM DH-1-2008) model is implemented. IEF value will be ignored."
+            );
+        }
+        self.rated_energy_factor_l_kwh = cfg.energy_factor.unwrap_or(1.8);
 
         self.fraction_load_served = cfg.fraction_served.unwrap_or(1.0).clamp(0.0, 1.0);
 
@@ -395,6 +400,18 @@ impl Dehumidifier {
             self.water_removal_curve.evaluate(RATED_DB_C, RATED_RH);
         self.energy_factor_curve_rated_value =
             self.energy_factor_curve.evaluate(RATED_DB_C, RATED_RH);
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                equipment = %self.descriptor.name,
+                rating_type = "EF",
+                normalisation_temperature_c = RATED_DB_C,
+                normalisation_rh = RATED_RH,
+                "dehumidifier using single-condition Energy Factor (EF) model; \
+                 normalised at AHAM DH-1-2008 rated condition (26.7°C, 60% RH)"
+            );
+        }
 
         Ok(())
     }
@@ -1935,5 +1952,130 @@ mod tests {
         approx_eq(rtf, plr);
         // RTF = PLR means no cycling penalty — the unit is derated only by PLR,
         // not by an additional PLF factor.
+    }
+
+    /// Providing `integrated_energy_factor` without `energy_factor` must
+    /// fall back to the default EF (1.8 L/kWh) because IEF is not supported.
+    ///
+    /// At rated conditions (26.7°C / 60% RH, PLR=1.0, RTF=1.0), the
+    /// electric power directly reflects the energy factor used. If IEF=3.0
+    /// were accepted, power would be ~460 W; with the correct default EF=1.8,
+    /// power is ~767 W — matching a control dehumidifier with no EF set.
+    #[test]
+    fn ief_only_falls_back_to_default_ef() {
+        let cfg_ief_only = EquipmentConfig::from_typed(
+            "IEF-only Test".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: None,
+                integrated_energy_factor: Some(3.0),
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+            },
+        )
+        .unwrap();
+        let cfg_no_ef = EquipmentConfig::from_typed(
+            "No-EF Control".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: None,
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+            },
+        )
+        .unwrap();
+
+        let mut eq_ief = Dehumidifier::new(cfg_ief_only.clone());
+        eq_ief.init(&cfg_ief_only, &env(0.60)).unwrap();
+        eq_ief.update_control(&env(0.60));
+        let mut slots_ief = ports();
+        eq_ief
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_ief)
+            .unwrap();
+        let power_ief = eq_ief.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        let mut eq_none = Dehumidifier::new(cfg_no_ef.clone());
+        eq_none.init(&cfg_no_ef, &env(0.60)).unwrap();
+        eq_none.update_control(&env(0.60));
+        let mut slots_none = ports();
+        eq_none
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_none)
+            .unwrap();
+        let power_none = eq_none.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        approx_eq(power_ief, power_none);
+    }
+
+    /// Providing both `energy_factor` and `integrated_energy_factor`
+    /// must use `energy_factor` and ignore `integrated_energy_factor`.
+    ///
+    /// If IEF=3.0 were erroneously used, power would be ~460 W at rated
+    /// conditions. With EF=2.0 correctly selected, power is ~690 W — matching
+    /// a control dehumidifier with EF=2.0 and no IEF.
+    #[test]
+    fn both_ef_and_ief_uses_ef() {
+        let cfg_both = EquipmentConfig::from_typed(
+            "Both EF+IEF Test".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: Some(3.0),
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+            },
+        )
+        .unwrap();
+        let cfg_ef_only = EquipmentConfig::from_typed(
+            "EF-only Control".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+            },
+        )
+        .unwrap();
+
+        let mut eq_both = Dehumidifier::new(cfg_both.clone());
+        eq_both.init(&cfg_both, &env(0.60)).unwrap();
+        eq_both.update_control(&env(0.60));
+        let mut slots_both = ports();
+        eq_both
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_both)
+            .unwrap();
+        let power_both = eq_both.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        let mut eq_ef = Dehumidifier::new(cfg_ef_only.clone());
+        eq_ef.init(&cfg_ef_only, &env(0.60)).unwrap();
+        eq_ef.update_control(&env(0.60));
+        let mut slots_ef = ports();
+        eq_ef
+            .step(&env(0.60), Duration::from_secs(60), &mut slots_ef)
+            .unwrap();
+        let power_ef = eq_ef.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        approx_eq(power_both, power_ef);
     }
 }
