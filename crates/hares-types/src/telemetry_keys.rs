@@ -350,6 +350,15 @@ pub const BIQUADRATIC_CURVE_SOURCE: &str = "biquadratic_curve_source";
 /// scope: internal
 pub const BIQUADRATIC_INDEX_CLAMPED: &str = "biquadratic_index_clamped";
 
+/// `speed_frac` value recorded when the MultiSpeedInterpolated high-side
+/// curve index is clamped to the last valid stage (i.e. `speed_index + 1`
+/// would have exceeded `num_speeds - 1`). Setting only this key when the
+/// clamp fires (rather than the always-set `speed_frac`) allows offline
+/// analysis of peak-capacity interpolation frequency and magnitude.
+///
+/// scope: internal
+pub const HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC: &str = "high_side_curve_clamped_speed_frac";
+
 // ── Battery / EV / storage ──────────────────────────────────────────────────
 
 /// scope: internal — SOC output comes from CoreOutput, not telemetry key
@@ -1101,6 +1110,7 @@ mod tests {
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
             BIQUADRATIC_INDEX_CLAMPED,
+            HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,
@@ -1352,6 +1362,7 @@ mod tests {
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
             BIQUADRATIC_INDEX_CLAMPED,
+            HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,

@@ -53,6 +53,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DEFROST_ACCUMULATED_FROST_S, 0.0);
     telemetry.insert(tk::DEFROST_ELAPSED_S, 0.0);
     telemetry.insert(tk::SPEED_FRAC, 0.0);
+    telemetry.insert(tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC, 0.0);
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
     telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
@@ -305,6 +306,12 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::SPEED_FRAC.to_string(),
             unit: "-".to_string(),
             description: "Interpolation weight between speed stages [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC.to_string(),
+            unit: "-".to_string(),
+            description: "speed_frac recorded when high-side curve index clamped to last valid stage; 0 means no clamping this step"
+                .to_string(),
         },
         TelemetryField {
             name: tk::PART_LOAD_RATIO.to_string(),

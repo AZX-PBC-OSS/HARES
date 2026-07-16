@@ -1417,11 +1417,14 @@ impl CoolingCore {
                 self.hvac.config.zone_id
             )));
         }
+        self.telemetry
+            .set(tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC, 0.0);
 
         let is_variable_speed =
             self.hvac.config.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
         let mut speed_index = self.hvac.runtime.last_speed_index;
         let speed_frac = self.hvac.runtime.last_speed_frac;
+        let num_speeds = self.hvac.n_speed_stages();
         let mut variable_selection = SpeedSelection {
             speed_index,
             speed_frac,
@@ -1530,9 +1533,31 @@ impl CoolingCore {
         if self.hvac.config.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
+            // Clamp high-side speed index to last valid stage so curve index
+            // remains within the interleaved biquadratic_coeffs array.
+            // When speed_index is already at the last stage (num_speeds - 1),
+            // the high-side interpolation uses the same stage's curve —
+            // equivalent to zero-delta extrapolation rather than reading
+            // beyond the curve array.
+            let hi_speed = (speed_index + 1).min(num_speeds - 1);
+            if speed_index + 1 >= num_speeds {
+                tracing::warn!(
+                    speed_index,
+                    num_speeds,
+                    speed_frac,
+                    "MultiSpeedInterpolated high-side curve index clamped: cooling high-side"
+                );
+                #[cfg(feature = "observe")]
+                {
+                    self.telemetry.set(
+                        hares_types::telemetry_keys::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+                        speed_frac,
+                    );
+                }
+            }
             let (_, _, _, cap_ratio_high, eir_ratio_high) = curve_inputs(
                 stage_cap_w,
-                speed_index + 1,
+                hi_speed,
                 &self.hvac,
                 zone,
                 env,
@@ -3422,9 +3447,9 @@ mod tests {
         // (cap_ratio≈1.0); stage 1 cap curve has c0=2.0 (cap_ratio≈2.0).
         // When stage 1 is set, sensible_w must exceed the rated 4 kW capacity.
         let cfg = ac_config_with(|typed| {
-            typed.number_of_speeds = 1;
-            typed.stage_capacities_w = Some(vec![4_000.0]);
-            typed.stage_eirs = Some(vec![0.33]);
+            typed.number_of_speeds = 2;
+            typed.stage_capacities_w = Some(vec![4_000.0, 4_000.0]);
+            typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
             typed.hysteresis_c = Some(0.0);
@@ -3449,6 +3474,95 @@ mod tests {
         assert!(
             perf.sensible_cooling_w > 4_000.0,
             "stage-1 biquadratic (c0=2.0) must double cap_ratio; got sensible_w={}",
+            perf.sensible_cooling_w
+        );
+    }
+
+    #[test]
+    fn multi_speed_max_stage_high_side_clamping() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.stage_capacities_w = Some(vec![4_000.0, 4_000.0]);
+            typed.stage_eirs = Some(vec![0.33, 0.33]);
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = Some(0.0);
+            typed.hysteresis_c = Some(0.0);
+        });
+        let environment = env(26.0, 0.010, 19.0, 35.0);
+
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        core.init(&cfg, &environment).unwrap();
+
+        core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        core.operating_mode = OperatingMode::Cooling;
+        core.hvac.runtime.duty_cycle = 1.0;
+        core.hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        core.hvac.runtime.last_speed_index = 1;
+        core.hvac.runtime.last_speed_frac = 0.5;
+
+        let perf = core.calculate_performance(&environment, 15.0).unwrap();
+
+        assert!(
+            perf.sensible_cooling_w > 0.0,
+            "sensible cooling must be positive; got {}",
+            perf.sensible_cooling_w
+        );
+        assert!(
+            perf.compressor_kw.is_finite() && perf.compressor_kw >= 0.0,
+            "compressor power must be finite and non-negative; got {}",
+            perf.compressor_kw
+        );
+        assert!(
+            perf.shr > 0.0 && perf.shr <= 1.0,
+            "SHR must be in (0, 1]; got {}",
+            perf.shr
+        );
+    }
+
+    #[test]
+    fn multi_speed_max_stage_overprovisioned_curve_uses_last_valid_pair() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.stage_capacities_w = Some(vec![4_000.0, 4_000.0]);
+            typed.stage_eirs = Some(vec![0.33, 0.33]);
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = Some(0.0);
+            typed.hysteresis_c = Some(0.0);
+        });
+        let environment = env(26.0, 0.010, 19.0, 35.0);
+
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        core.init(&cfg, &environment).unwrap();
+
+        core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        core.operating_mode = OperatingMode::Cooling;
+        core.hvac.runtime.duty_cycle = 1.0;
+        core.hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        core.hvac.runtime.last_speed_index = 1;
+        core.hvac.runtime.last_speed_frac = 0.5;
+
+        let perf = core.calculate_performance(&environment, 15.0).unwrap();
+
+        assert!(
+            perf.sensible_cooling_w > 0.0,
+            "sensible cooling must be positive; got {}",
+            perf.sensible_cooling_w
+        );
+        assert!(
+            perf.sensible_cooling_w < 10_000.0,
+            "sensible cooling must not use over-provisioned pair (c0=100.0 would produce ~202kW); got {}",
             perf.sensible_cooling_w
         );
     }

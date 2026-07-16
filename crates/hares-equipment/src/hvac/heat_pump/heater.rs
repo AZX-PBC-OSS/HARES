@@ -1590,6 +1590,9 @@ impl HeatPumpHeaterCore {
 
         let speed_index = self.hvac.runtime.last_speed_index;
         let speed_frac = self.hvac.runtime.last_speed_frac;
+        let num_speeds = self.hvac.n_speed_stages();
+        self.telemetry
+            .set(tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC, 0.0);
         let (stage_capacity_w, stage_eir) = if matches!(
             self.hvac.config.speed_control_mode,
             SpeedControlMode::MultiSpeedInterpolated | SpeedControlMode::VariableSpeedIdeal
@@ -1649,8 +1652,34 @@ impl HeatPumpHeaterCore {
         if self.hvac.config.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
+            // Clamp high-side speed index to last valid stage so curve index
+            // remains within the interleaved biquadratic_coeffs array.
+            // When speed_index is already at the last stage (num_speeds - 1),
+            // the high-side interpolation uses the same stage's curve —
+            // equivalent to zero-delta extrapolation rather than reading
+            // beyond the curve array.
+            debug_assert!(
+                speed_index < num_speeds,
+                "speed_index {speed_index} out of range at interpolation"
+            );
+            let hi_speed = (speed_index + 1).min(num_speeds - 1);
+            if speed_index + 1 >= num_speeds {
+                tracing::warn!(
+                    speed_index,
+                    num_speeds,
+                    speed_frac,
+                    "MultiSpeedInterpolated high-side curve index clamped: capacity high-side"
+                );
+                #[cfg(feature = "observe")]
+                {
+                    self.telemetry.set(
+                        hares_types::telemetry_keys::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+                        speed_frac,
+                    );
+                }
+            }
             let (_, cap_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
-                (speed_index + 1) * 2,
+                hi_speed * 2,
                 zone.temperature_c,
                 self.source_temp.compute(env),
                 1.0,
@@ -1660,7 +1689,7 @@ impl HeatPumpHeaterCore {
             let raw_coeffs_high = {
                 let coeffs = &self.hvac.config.biquadratic_coeffs;
                 match super::super::hvac_core::HvacEquipment::clamp_biquadratic_index(
-                    (speed_index + 1) * 2,
+                    hi_speed * 2,
                     coeffs.len(),
                 ) {
                     Some(idx) => coeffs[idx],
@@ -1713,8 +1742,26 @@ impl HeatPumpHeaterCore {
         if self.hvac.config.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
+            // Clamp high-side speed index to last valid stage (same rationale
+            // as the capacity interpolation block above).
+            let hi_speed = (speed_index + 1).min(num_speeds - 1);
+            if speed_index + 1 >= num_speeds {
+                tracing::warn!(
+                    speed_index,
+                    num_speeds,
+                    speed_frac,
+                    "MultiSpeedInterpolated high-side curve index clamped: EIR high-side"
+                );
+                #[cfg(feature = "observe")]
+                {
+                    self.telemetry.set(
+                        hares_types::telemetry_keys::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+                        speed_frac,
+                    );
+                }
+            }
             let (_, eir_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
-                (speed_index + 1) * 2 + 1,
+                hi_speed * 2 + 1,
                 zone.temperature_c,
                 self.source_temp.compute(env),
                 1.0,
@@ -8170,5 +8217,39 @@ mod ideal_capacity_tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         let env = make_env(19.0, 60);
         eq.init(&cfg, &env).unwrap();
+    }
+
+    #[test]
+    fn four_speed_heat_pump_above_rated_load_has_reasonable_cop() {
+        let cfg = multi_speed_heater_config(
+            4,
+            vec![2_000.0, 4_000.0, 6_000.0, 8_000.0],
+            "[[0.8,0,0,0,0,0],[1.2,0,0,0,0,0],\
+              [0.7,0,0,0,0,0],[1.3,0,0,0,0,0],\
+              [0.6,0,0,0,0,0],[1.4,0,0,0,0,0],\
+              [0.5,0,0,0,0,0],[1.5,0,0,0,0,0]]",
+        );
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = make_env(18.0, 60);
+        eq.init(&cfg, &env).unwrap();
+
+        eq.update_control(&env);
+
+        eq.core.hvac.runtime.last_speed_index = 3;
+        eq.core.hvac.runtime.last_speed_frac = 0.5;
+        eq.core.hvac.runtime.duty_cycle = 1.0;
+        eq.core.operating_mode = OperatingMode::HeatingHP;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(0.0);
+        assert!(
+            cop > 0.1 && cop < 50.0,
+            "COP must be physically reasonable; got {cop} for 4-speed HP at max stage with speed_frac=0.5"
+        );
     }
 }
