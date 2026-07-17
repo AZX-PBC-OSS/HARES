@@ -481,6 +481,26 @@ pub struct DehumidifierConfig {
     /// off-cycle fraction `(1 - RTF)` to avoid double-counting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_cycle_parasitic_load_w: Option<f64>,
+    /// Minimum inlet air dry-bulb temperature for compressor operation [°C].
+    ///
+    /// Below this temperature the unit is locked out to prevent evaporator
+    /// freeze-up. EnergyPlus `ZoneDehumidifier.cc:687–688` gates on
+    /// `MinInletAirTemp` / `MaxInletAirTemp`.
+    ///
+    /// Default (when absent from config): 10.0°C, matching the EnergyPlus
+    /// IDD schema v4.2 default for `ZoneHVAC:Dehumidifier:DX` field N4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_operating_temp_c: Option<f64>,
+    /// Maximum inlet air dry-bulb temperature for compressor operation [°C].
+    ///
+    /// Above this temperature the unit is locked out for compressor thermal
+    /// protection. EnergyPlus `ZoneDehumidifier.cc:687–688` gates on
+    /// `MinInletAirTemp` / `MaxInletAirTemp`.
+    ///
+    /// Default (when absent from config): 35.0°C, matching the EnergyPlus
+    /// IDD schema v4.2 default for `ZoneHVAC:Dehumidifier:DX` field N5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_operating_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for DehumidifierConfig {
@@ -525,6 +545,29 @@ impl DehumidifierConfig {
             if !parasitic.is_finite() || parasitic < 0.0 {
                 return Err(HaresError::Equipment(format!(
                     "DehumidifierConfig: off_cycle_parasitic_load_w must be finite and >= 0, got {parasitic}"
+                )));
+            }
+        }
+        if let Some(min_temp) = self.min_operating_temp_c {
+            if !min_temp.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "DehumidifierConfig: min_operating_temp_c must be finite, got {min_temp}"
+                )));
+            }
+        }
+        if let Some(max_temp) = self.max_operating_temp_c {
+            if !max_temp.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "DehumidifierConfig: max_operating_temp_c must be finite, got {max_temp}"
+                )));
+            }
+        }
+        if let (Some(min_temp), Some(max_temp)) =
+            (self.min_operating_temp_c, self.max_operating_temp_c)
+        {
+            if min_temp >= max_temp {
+                return Err(HaresError::Equipment(format!(
+                    "DehumidifierConfig: min_operating_temp_c ({min_temp}) must be less than max_operating_temp_c ({max_temp})"
                 )));
             }
         }
@@ -1096,6 +1139,8 @@ mod tests {
             part_load_curve_coeffs: None,
             plf_min: None,
             off_cycle_parasitic_load_w: Some(5.0),
+            min_operating_temp_c: None,
+            max_operating_temp_c: None,
         };
         let ec = typed_config(cfg.clone());
         let recovered: DehumidifierConfig = ec.typed().unwrap();
@@ -1125,6 +1170,8 @@ mod tests {
             part_load_curve_coeffs: None,
             plf_min: None,
             off_cycle_parasitic_load_w: None,
+            min_operating_temp_c: None,
+            max_operating_temp_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1142,6 +1189,8 @@ mod tests {
             part_load_curve_coeffs: None,
             plf_min: None,
             off_cycle_parasitic_load_w: None,
+            min_operating_temp_c: None,
+            max_operating_temp_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1178,6 +1227,8 @@ mod tests {
             part_load_curve_coeffs: None,
             plf_min: None,
             off_cycle_parasitic_load_w: Some(-1.0),
+            min_operating_temp_c: None,
+            max_operating_temp_c: None,
         };
         assert!(cfg.validate().is_err());
     }

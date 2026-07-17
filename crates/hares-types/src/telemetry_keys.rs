@@ -705,6 +705,12 @@ pub const MIN_RH: &str = "min_rh";
 pub const MAX_RH: &str = "max_rh";
 
 /// scope: internal
+pub const TEMPERATURE_LOCKOUT: &str = "temperature_lockout";
+
+/// scope: internal
+pub const INLET_AIR_TEMP_C: &str = "inlet_air_temp_c";
+
+/// scope: internal
 pub const MOISTURE_MASS_FLOW_KG_S: &str = "moisture_mass_flow_kg_s";
 
 /// scope: internal
@@ -1209,6 +1215,8 @@ mod tests {
             TARGET_RH,
             MIN_RH,
             MAX_RH,
+            TEMPERATURE_LOCKOUT,
+            INLET_AIR_TEMP_C,
             MOISTURE_MASS_FLOW_KG_S,
             HUMIDITY_SEMI_IMPLICIT_ALPHA,
             HUMIDITY_SOLVER_TELEMETRY_KEY,
@@ -1461,6 +1469,8 @@ mod tests {
             TARGET_RH,
             MIN_RH,
             MAX_RH,
+            TEMPERATURE_LOCKOUT,
+            INLET_AIR_TEMP_C,
             MOISTURE_MASS_FLOW_KG_S,
             HUMIDITY_SEMI_IMPLICIT_ALPHA,
             HUMIDITY_SOLVER_TELEMETRY_KEY,

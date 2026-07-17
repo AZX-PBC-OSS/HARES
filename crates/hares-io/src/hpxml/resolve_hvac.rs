@@ -1314,6 +1314,8 @@ fn try_build_dehumidifier_config(
         part_load_curve_coeffs: None,
         plf_min: None,
         off_cycle_parasitic_load_w: None,
+        min_operating_temp_c: None,
+        max_operating_temp_c: None,
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Dehumidifier".to_string(), cfg)

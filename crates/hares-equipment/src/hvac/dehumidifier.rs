@@ -55,6 +55,18 @@ const RH_MAX_FRACTION: f64 = 1.0;
 //   DH-1-2017 / DH-1-2022 (current, per 10 CFR Part 430 Appendix X1):
 //     18.3°C DB (65°F) / 60% RH for portable; 22.8°C DB (73°F) / 60% RH for whole-home
 const DEFAULT_DB_BOUNDS_C: (f64, f64) = (10.0, 40.0);
+// Default inlet air temperature operating limits for the dehumidifier compressor.
+// EnergyPlus ZoneDehumidifier.cc:687–688 gates the unit when inlet air temperature
+// is outside [MinInletAirTemp, MaxInletAirTemp].
+// EnergyPlus IDD schema v4.2 (`Energy+.idd.in:36987`): fields N4 "Minimum Dry-Bulb
+// Temperature for Dehumidifier Operation" default 10.0°C and N5 "Maximum Dry-Bulb
+// Temperature for Dehumidifier Operation" default 35.0°C. These are the
+// `MinInletAirTemp` / `MaxInletAirTemp` operating-lockout fields on the
+// `ZoneHVAC:Dehumidifier:DX` object, distinct from the `Curve:Biquadratic`
+// calibration domain (21.0°C / 32.22°C, see T-1703).
+// EnergyPlus `vendors/EnergyPlus/idd/Energy+.idd.in` (v4.2).
+const DEFAULT_MIN_OPERATING_TEMP_C: f64 = 10.0;
+const DEFAULT_MAX_OPERATING_TEMP_C: f64 = 35.0;
 const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
 
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
@@ -139,6 +151,16 @@ pub struct Dehumidifier {
     /// includes the parasitic implicitly; the parasitic is only applied to the
     /// off-cycle fraction `(1 - RTF)` to avoid double-counting.
     off_cycle_parasitic_load_w: Option<f64>,
+    /// Minimum inlet air dry-bulb temperature for compressor operation [°C].
+    ///
+    /// Below this temperature the unit is locked out to prevent evaporator
+    /// freeze-up. `None` disables the low-temperature lockout.
+    min_operating_temp_c: Option<f64>,
+    /// Maximum inlet air dry-bulb temperature for compressor operation [°C].
+    ///
+    /// Above this temperature the unit is locked out for compressor thermal
+    /// protection. `None` disables the high-temperature lockout.
+    max_operating_temp_c: Option<f64>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// compressor pf 0.96 on the total electric draw. Real power stays
     /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
@@ -206,6 +228,8 @@ impl Dehumidifier {
             plf_min: DEFAULT_PLF_MIN,
             zone_id_explicit,
             off_cycle_parasitic_load_w: None,
+            min_operating_temp_c: Some(DEFAULT_MIN_OPERATING_TEMP_C),
+            max_operating_temp_c: Some(DEFAULT_MAX_OPERATING_TEMP_C),
             zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
@@ -401,6 +425,13 @@ impl Dehumidifier {
 
         self.off_cycle_parasitic_load_w = cfg.off_cycle_parasitic_load_w;
 
+        if cfg.min_operating_temp_c.is_some() {
+            self.min_operating_temp_c = cfg.min_operating_temp_c;
+        }
+        if cfg.max_operating_temp_c.is_some() {
+            self.max_operating_temp_c = cfg.max_operating_temp_c;
+        }
+
         let target_rh_raw = cfg.target_rh.unwrap_or(DEFAULT_TARGET_RH_FRACTION);
         self.target_rh = parse_rh_fraction(target_rh_raw, "target_rh")?;
         self.min_rh = (self.target_rh - DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
@@ -560,6 +591,43 @@ impl Equipment for Dehumidifier {
         let pressure_pa = env.weather.pressure_pa();
         let zone = env.zones.iter().find(|z| z.id == self.zone_id);
         if let Some(zone_state) = zone {
+            // Inlet air temperature operating limits per EnergyPlus
+            // ZoneDehumidifier.cc:687–688: lock out the compressor when
+            // the inlet air temperature is outside [MinInletAirTemp, MaxInletAirTemp].
+            // Low-temperature lockout prevents evaporator freeze-up;
+            // high-temperature lockout provides compressor thermal protection.
+            let temp_locked_out = match (self.min_operating_temp_c, self.max_operating_temp_c) {
+                (Some(min), _) if zone_state.temperature_c < min => {
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(
+                        equipment = %self.descriptor.name,
+                        inlet_air_temp_c = zone_state.temperature_c,
+                        min_operating_temp_c = min,
+                        "dehumidifier locked out: inlet air temperature {:.1}°C below minimum {:.1}°C",
+                        zone_state.temperature_c,
+                        min,
+                    );
+                    true
+                }
+                (_, Some(max)) if zone_state.temperature_c > max => {
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(
+                        equipment = %self.descriptor.name,
+                        inlet_air_temp_c = zone_state.temperature_c,
+                        max_operating_temp_c = max,
+                        "dehumidifier locked out: inlet air temperature {:.1}°C above maximum {:.1}°C",
+                        zone_state.temperature_c,
+                        max,
+                    );
+                    true
+                }
+                _ => false,
+            };
+            if temp_locked_out {
+                self.is_on = false;
+                self.operating_mode = OperatingMode::Off;
+                return OperatingMode::Off;
+            }
             let rh = hares_physics::psychrometrics::zone_relative_humidity(zone_state, pressure_pa);
             self.update_is_on(rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION));
         } else {
@@ -675,6 +743,16 @@ impl Equipment for Dehumidifier {
         self.write_step_telemetry(snapshot);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+        let temp_locked_out = match (self.min_operating_temp_c, self.max_operating_temp_c) {
+            (Some(min), _) if zone.temperature_c < min => true,
+            (_, Some(max)) if zone.temperature_c > max => true,
+            _ => false,
+        };
+        self.telemetry.set(
+            tk::TEMPERATURE_LOCKOUT,
+            if temp_locked_out { 1.0 } else { 0.0 },
+        );
+        self.telemetry.set(tk::INLET_AIR_TEMP_C, zone.temperature_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw)),
@@ -846,7 +924,7 @@ fn evaluate_normalized_curve(
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(15);
+    let mut telemetry = Telemetry::with_capacity(17);
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
@@ -868,6 +946,8 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::PART_LOAD_FACTOR, 1.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::PARASITIC_ELECTRIC_W, 0.0);
+    telemetry.insert(tk::TEMPERATURE_LOCKOUT, 0.0);
+    telemetry.insert(tk::INLET_AIR_TEMP_C, 0.0);
     telemetry
 }
 
@@ -949,6 +1029,16 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::PARASITIC_ELECTRIC_W.to_string(),
             unit: "W".to_string(),
             description: "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage".to_string(),
+        },
+        TelemetryField {
+            name: tk::TEMPERATURE_LOCKOUT.to_string(),
+            unit: "bool".to_string(),
+            description: "1.0 when the dehumidifier is locked out by inlet air temperature limits; 0.0 otherwise".to_string(),
+        },
+        TelemetryField {
+            name: tk::INLET_AIR_TEMP_C.to_string(),
+            unit: "C".to_string(),
+            description: "Inlet air dry-bulb temperature at the dehumidifier inlet".to_string(),
         },
     ]
 }
@@ -1048,6 +1138,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap()
@@ -1462,8 +1554,12 @@ mod tests {
 
         // Cold condition: 10°C / 60% RH — refrigerant cycle is less effective,
         // so water removal must be strictly less than at rated conditions.
+        // Disable temperature lockout for this test — it validates curve shape
+        // at low temperature, not the operating limit gate.
         let mut eq_cold = Dehumidifier::new(cfg.clone());
         eq_cold.init(&cfg, &env(0.60)).unwrap();
+        eq_cold.min_operating_temp_c = None;
+        eq_cold.max_operating_temp_c = None;
         eq_cold
             .apply_control(&ControlSignal::ModeOverride {
                 mode: OperatingMode::Cooling,
@@ -1718,6 +1814,8 @@ mod tests {
                     part_load_curve_coeffs: coeffs,
                     plf_min: None,
                     off_cycle_parasitic_load_w: None,
+                    min_operating_temp_c: None,
+                    max_operating_temp_c: None,
                 },
             )
             .unwrap()
@@ -1822,6 +1920,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap();
@@ -1972,6 +2072,8 @@ mod tests {
                     part_load_curve_coeffs: coeffs,
                     plf_min,
                     off_cycle_parasitic_load_w: None,
+                    min_operating_temp_c: None,
+                    max_operating_temp_c: None,
                 },
             )
             .unwrap()
@@ -2100,6 +2202,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap();
@@ -2117,6 +2221,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap();
@@ -2164,6 +2270,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap();
@@ -2181,6 +2289,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap();
@@ -2223,6 +2333,8 @@ mod tests {
                 part_load_curve_coeffs: None,
                 plf_min: None,
                 off_cycle_parasitic_load_w: parasitic,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
             },
         )
         .unwrap()
@@ -2314,5 +2426,121 @@ mod tests {
             .unwrap();
 
         assert_eq!(eq.telemetry().get(tk::PARASITIC_ELECTRIC_W), Some(5.0));
+    }
+
+    // ── Temperature lockout tests ──────────────────────────────────────────
+
+    /// Inlet air temperature below the minimum operating temperature forces
+    /// `is_on = false` even when RH is above the deadband upper threshold.
+    /// EnergyPlus ZoneDehumidifier.cc:687–688: `InletAirTemp < MinInletAirTemp`
+    /// disables the unit.
+    #[test]
+    fn temp_below_min_operating_forces_is_on_false() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env_with_temp(5.0, 0.60)).unwrap();
+
+        // 5°C is below the default min_operating_temp_c of 10.0°C.
+        // RH=0.60 is above max_rh=0.5125, so normally the unit would run.
+        let mode = eq.update_control(&env_with_temp(5.0, 0.60));
+        assert_eq!(mode, OperatingMode::Off, "unit must be off below min temp");
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(0.0));
+
+        let mut slots = ports();
+        eq.step(
+            &env_with_temp(5.0, 0.60),
+            Duration::from_secs(60),
+            &mut slots,
+        )
+        .unwrap();
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::TEMPERATURE_LOCKOUT), Some(1.0));
+        assert!(eq.telemetry().get(tk::INLET_AIR_TEMP_C).unwrap() > 0.0);
+    }
+
+    /// Inlet air temperature above the maximum operating temperature forces
+    /// `is_on = false`.
+    #[test]
+    fn temp_above_max_operating_forces_is_on_false() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env_with_temp(40.0, 0.60)).unwrap();
+
+        // 40°C is above the default max_operating_temp_c of 35.0°C.
+        let mode = eq.update_control(&env_with_temp(40.0, 0.60));
+        assert_eq!(mode, OperatingMode::Off, "unit must be off above max temp");
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(0.0));
+
+        let mut slots = ports();
+        eq.step(
+            &env_with_temp(40.0, 0.60),
+            Duration::from_secs(60),
+            &mut slots,
+        )
+        .unwrap();
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::TEMPERATURE_LOCKOUT), Some(1.0));
+    }
+
+    /// Inlet air temperature within the operating range allows normal
+    /// dehumidifier operation when RH is above the deadband.
+    #[test]
+    fn temp_within_operating_range_allows_normal_operation() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env_with_temp(25.0, 0.60)).unwrap();
+
+        // 25°C is within the default [10.0, 35.0]°C range.
+        let mode = eq.update_control(&env_with_temp(25.0, 0.60));
+        assert_eq!(
+            mode,
+            OperatingMode::Cooling,
+            "unit must run within operating temp range"
+        );
+
+        let mut slots = ports();
+        eq.step(
+            &env_with_temp(25.0, 0.60),
+            Duration::from_secs(60),
+            &mut slots,
+        )
+        .unwrap();
+        assert!(eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap() > 0.0);
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(1.0));
+        assert_eq!(eq.telemetry().get(tk::TEMPERATURE_LOCKOUT), Some(0.0));
+    }
+
+    /// When both `min_operating_temp_c` and `max_operating_temp_c` are `None`,
+    /// the temperature lockout is disabled and the unit operates as it did
+    /// before the feature was added (backward compatible).
+    #[test]
+    fn temp_limits_none_disables_lockout_backward_compatible() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+
+        // Override internal limits to None — lockout disabled.
+        eq.min_operating_temp_c = None;
+        eq.max_operating_temp_c = None;
+
+        // At 5°C (well below typical lockout thresholds), the unit must still
+        // run when RH is high because the lockout is disabled.
+        let mode = eq.update_control(&env_with_temp(5.0, 0.60));
+        assert_eq!(
+            mode,
+            OperatingMode::Cooling,
+            "unit must run at 5°C when lockout is disabled"
+        );
+
+        let mut slots = ports();
+        eq.step(
+            &env_with_temp(5.0, 0.60),
+            Duration::from_secs(60),
+            &mut slots,
+        )
+        .unwrap();
+        assert!(eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap() > 0.0);
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(1.0));
+        assert_eq!(eq.telemetry().get(tk::TEMPERATURE_LOCKOUT), Some(0.0));
     }
 }
