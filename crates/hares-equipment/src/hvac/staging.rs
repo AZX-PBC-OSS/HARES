@@ -328,13 +328,44 @@ impl HvacEquipment {
     }
 
     /// Apply the Winkler (2011) exponential startup capacity ramp.
+    ///
+    /// Only heat pump equipment (any mode) applies the ramp, matching OCHRE's
+    /// `"HP" in self.mode` guard (HVAC.py:977). Non-HP equipment (central AC,
+    /// room AC, furnaces, baseboard) returns steady-state capacity unchanged.
     pub fn apply_startup_capacity_degradation(
         &mut self,
         steady_capacity_w: f64,
         dt_min: f64,
     ) -> f64 {
+        if !self.config.equipment_type.is_heat_pump() {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if self.runtime.startup.c_d > 0.0 {
+                    tracing::warn!(
+                        equipment_type = ?self.config.equipment_type,
+                        c_d = self.runtime.startup.c_d,
+                        "startup cap degradation: non-HP equipment with non-zero Cd; \
+                         ramp bypassed (multiplier = 1.0). OCHRE HVAC.py:977 gate."
+                    );
+                }
+            }
+            return steady_capacity_w;
+        }
         let on_now = self.runtime.duty_cycle > 0.0;
         let mult = self.runtime.startup.capacity_multiplier(on_now, dt_min);
+        #[cfg(feature = "observe")]
+        {
+            let ramp_active = mult < 1.0;
+            tracing::debug!(
+                startup_multiplier = mult,
+                ramp_active,
+                equipment_type = ?self.config.equipment_type,
+                c_d = self.runtime.startup.c_d,
+                time_since_start_min = self.runtime.startup.time_since_start_min,
+                steady_capacity_w,
+                "startup capacity degradation observe"
+            );
+        }
         if mult < 1.0 {
             tracing::debug!(
                 startup_multiplier = mult,
@@ -816,10 +847,11 @@ mod tests {
 
     /// apply_startup_capacity_degradation: cold start (duty_cycle > 0, timer=0) must
     /// return capacity below steady-state.  Winkler (2011) c_d=0.25, dt=1 min → t_full=5.4 min,
-    /// first-step mult < 1.0.
+    /// first-step mult < 1.0. Uses a HP heating type so the ramp gate allows the ramp.
     #[test]
     fn startup_capacity_degradation_cold_start() {
         let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
         hvac.runtime.duty_cycle = 1.0; // unit is on
         hvac.runtime.startup.c_d = 0.25;
         hvac.runtime.startup.time_since_start_min = 0.0;
@@ -849,9 +881,11 @@ mod tests {
 
     /// apply_startup_capacity_degradation: when c_d = 0.0 (variable-speed / no ramp),
     /// the multiplier is always 1.0 and capacity equals steady-state on the first step.
+    /// Uses an HP type so the ramp gate allows the ramp path; the Cd=0 bypass is tested.
     #[test]
     fn startup_capacity_degradation_c_d_zero_no_ramp() {
         let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
         hvac.runtime.duty_cycle = 1.0;
         hvac.runtime.startup.c_d = 0.0;
         hvac.runtime.startup.time_since_start_min = 0.0;
@@ -868,6 +902,7 @@ mod tests {
     /// apply_startup_capacity_degradation warm-restart scenario:
     /// with c_d=0.25, once time_since_start_min >= t_full the multiplier is 1.0.
     /// After an off cycle, the first on-step must start below 1.0 again.
+    /// Uses an HP type so the ramp gate allows the ramp path.
     #[test]
     fn startup_capacity_degradation_warm_restart_real() {
         let steady_w = 10_000.0;
@@ -876,6 +911,7 @@ mod tests {
 
         // Run enough on-steps to pass t_full.
         let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
         hvac.runtime.duty_cycle = 1.0;
         hvac.runtime.startup.c_d = c_d;
         hvac.runtime.startup.time_since_start_min = 0.0;
@@ -901,6 +937,58 @@ mod tests {
         assert!(
             w_restart < steady_w,
             "first on-step after off cycle must be below steady-state: got {w_restart} W"
+        );
+    }
+
+    /// apply_startup_capacity_degradation: non-HP AC must return multiplier 1.0
+    /// (stepping-state capacity unchanged) regardless of Cd value.
+    /// OCHRE gates the ramp on `"HP" in self.mode` (HVAC.py:977); no-DX
+    /// equipment does not experience Winkler (2011) compressor startup transients.
+    #[test]
+    fn startup_capacity_degradation_non_hp_bypasses_ramp_regardless_of_cd() {
+        for cd in [0.0, 0.07, 0.20, 0.25] {
+            let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+            hvac.runtime.duty_cycle = 1.0;
+            hvac.runtime.startup.c_d = cd;
+            hvac.runtime.startup.time_since_start_min = 0.0;
+
+            let steady_w = 10_000.0;
+            let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+            assert!(
+                (actual_w - steady_w).abs() < 1e-9,
+                "non-HP AC with Cd={cd} must return steady capacity (multiplier = 1.0): \
+                 expected {steady_w} W, got {actual_w} W"
+            );
+        }
+    }
+
+    /// apply_startup_capacity_degradation: HP in heating mode with Cd > 0 must
+    /// produce a non-unity ramp multiplier on a cold start.
+    /// Winkler (2011) model: c_d=0.25, dt=1 min → t_full=5.4 min,
+    /// first-step mult < 1.0.
+    #[test]
+    fn startup_capacity_degradation_hp_heating_cold_start_produces_ramp() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+
+        assert!(
+            actual_w < steady_w,
+            "HP heating cold start with Cd=0.25 must be below steady-state: \
+             expected < {steady_w} W, got {actual_w} W"
+        );
+
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let expected_mult =
+            (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        assert!(
+            (actual_w - steady_w * expected_mult).abs() < 1.0,
+            "HP heating cold start multiplier mismatch: expected {:.1} W, got {actual_w:.1} W",
+            steady_w * expected_mult
         );
     }
 

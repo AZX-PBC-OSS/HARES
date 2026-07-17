@@ -2022,7 +2022,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, CoolingCore, RoomAC, SpeedControlMode};
+    use super::{AirConditioner, CoolingCore, HvacEquipmentType, RoomAC, SpeedControlMode};
     use crate::hvac::ThermostatMode;
 
     use crate::{
@@ -3005,10 +3005,13 @@ mod tests {
     }
 
     #[test]
-    fn single_speed_ac_startup_ramp_reduces_first_step_capacity() {
+    /// HP cooler startup ramp: SEER 14 → c_d=0.07, step 1 power < step 5 power.
+    /// Winkler (2011) startup capacity ramp applies to HP equipment only,
+    /// matching OCHRE's `"HP" in self.mode` guard (HVAC.py:977).
+    fn hp_cooler_startup_ramp_reduces_first_step_capacity() {
         // SEER 14 → EIR = 3.412141633 / 14 ≈ 0.2437; c_d=0.07 gives t_full=1.8 min.
         // Step 1 fires at time_since_start=0.5 min (< t_full) → capacity multiplier < 1.
-        // By step 3, time_since_start=2.5 min > t_full → multiplier = 1.0.
+        // By step 5, time_since_start=4.5 min > t_full → multiplier = 1.0.
         let seer = 14.0_f64;
         let eir = 3.412_141_633_f64 / seer;
         let cfg = EquipmentConfig::from_typed(
@@ -3056,6 +3059,9 @@ mod tests {
         .unwrap();
         let environment = env(26.0, 0.010, 18.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
+        // Override equipment type to HP cooler so the startup ramp applies,
+        // matching OCHRE's `"HP" in self.mode` gate.
+        eq.core.hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpCooling;
         eq.init(&cfg, &environment).unwrap();
 
         eq.update_control(&environment);
@@ -3082,11 +3088,11 @@ mod tests {
 
         assert!(
             kw_step1 > 0.0,
-            "AC must draw power on step 1; got {kw_step1}"
+            "HP cooler must draw power on step 1; got {kw_step1}"
         );
         assert!(
             kw_step1 < kw_steady,
-            "startup ramp must reduce step-1 kW below steady-state; step1={kw_step1:.4}, steady={kw_steady:.4}"
+            "startup ramp must reduce step-1 kW below steady-state for HP cooler; step1={kw_step1:.4}, steady={kw_steady:.4}"
         );
     }
 

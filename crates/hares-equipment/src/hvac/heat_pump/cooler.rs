@@ -54,6 +54,10 @@ impl HpCooler {
                 MSHP_CRANKCASE_HEATER_KW,
                 MSHP_CRANKCASE_HEATER_THRESHOLD_C,
             );
+        } else {
+            let ashp_cool_type = crate::hvac::hvac_core::HvacEquipmentType::AshpHeatPumpCooling;
+            inner.core.hvac.config.equipment_type = ashp_cool_type;
+            inner.core.hvac.config.airflow_m3_s_per_w = ashp_cool_type.default_airflow_m3_s_per_w();
         }
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {

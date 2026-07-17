@@ -386,6 +386,7 @@ pub(super) fn default_biquadratic_coeffs(
         HvacEquipmentType::GasFurnace
         | HvacEquipmentType::ElectricFurnace
         | HvacEquipmentType::AcCooler
+        | HvacEquipmentType::AshpHeatPumpCooling
         | HvacEquipmentType::MiniSplitCool
         | HvacEquipmentType::Baseboard
         | HvacEquipmentType::Other => None,

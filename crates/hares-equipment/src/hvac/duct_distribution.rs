@@ -721,6 +721,7 @@ mod tests {
         // does not write humidity.
         let humidity_writers: &[HvacEquipmentType] = &[
             HvacEquipmentType::AcCooler,
+            HvacEquipmentType::AshpHeatPumpCooling,
             HvacEquipmentType::MiniSplitCool,
             HvacEquipmentType::GshpHeatPumpCooling,
             HvacEquipmentType::WshpHeatPumpCooling,

@@ -90,6 +90,11 @@ pub enum HvacEquipmentType {
     /// temperature rather than outdoor air. No defrost. Supply air temp follows ASHP HP-only profile
     /// (the coil operates at similar discharge temperatures regardless of source medium).
     GshpHeatPumpHeating,
+    /// Air-source heat pump cooling coil. Uses the central-cooling airflow baseline.
+    /// Distinct from AcCooler (non-HP central AC) so the startup capacity degradation ramp
+    /// (Winkler 2011) can gate on heat pump equipment types, matching OCHRE's
+    /// `"HP" in self.mode` guard (HVAC.py:977).
+    AshpHeatPumpCooling,
     /// Ground-source heat pump cooling coil. Source-side temperature is entering water/ground
     /// temperature. No crankcase heater (compressor is indoors). Uses central-cooling airflow baseline.
     GshpHeatPumpCooling,
@@ -245,7 +250,7 @@ impl HvacEquipmentType {
             Self::AshpHeatPumpOnly => 32.2 + 0.15 * (outdoor_temp_c - 8.3),
             Self::AshpHeatPumpAux => 40.6,
             Self::MiniSplitHeat => 43.3,
-            Self::AcCooler | Self::MiniSplitCool => 40.6,
+            Self::AcCooler | Self::AshpHeatPumpCooling | Self::MiniSplitCool => 40.6,
             // GSHP supply air temp follows ASHP HP-only profile: the water-to-air coil
             // produces similar discharge temperatures to air-source DX regardless of
             // source medium. ASHRAE HoF 2021 Ch. 34 (Geothermal Energy): water-to-air
@@ -261,9 +266,10 @@ impl HvacEquipmentType {
 
     pub fn default_airflow_m3_s_per_w(self) -> f64 {
         match self {
-            Self::AcCooler | Self::GshpHeatPumpCooling | Self::WshpHeatPumpCooling => {
-                AIRFLOW_CENTRAL_AC_M3_S_PER_W
-            }
+            Self::AcCooler
+            | Self::AshpHeatPumpCooling
+            | Self::GshpHeatPumpCooling
+            | Self::WshpHeatPumpCooling => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
             Self::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
             Self::GasFurnace
             | Self::ElectricFurnace
@@ -289,6 +295,27 @@ impl HvacEquipmentType {
                 | Self::GshpHeatPumpHeating
                 | Self::WshpHeatPumpHeating
                 | Self::Baseboard
+        )
+    }
+
+    /// True for heat pump equipment (any mode: heating or cooling).
+    ///
+    /// Used to gate the Winkler (2011) startup capacity degradation ramp
+    /// to HP compressor operation only, matching OCHRE's `"HP" in self.mode`
+    /// guard (HVAC.py:977). Non-HP equipment (central AC, room AC, furnaces,
+    /// baseboard) must not apply the startup ramp.
+    pub fn is_heat_pump(self) -> bool {
+        matches!(
+            self,
+            Self::AshpHeatPumpCooling
+                | Self::AshpHeatPumpOnly
+                | Self::AshpHeatPumpAux
+                | Self::MiniSplitHeat
+                | Self::MiniSplitCool
+                | Self::GshpHeatPumpHeating
+                | Self::GshpHeatPumpCooling
+                | Self::WshpHeatPumpHeating
+                | Self::WshpHeatPumpCooling
         )
     }
 }
@@ -465,6 +492,7 @@ impl HvacEquipment {
                     .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
                 airflow_m3_s_per_w: match equipment_type {
                     HvacEquipmentType::AcCooler
+                    | HvacEquipmentType::AshpHeatPumpCooling
                     | HvacEquipmentType::GshpHeatPumpCooling
                     | HvacEquipmentType::WshpHeatPumpCooling => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
                     HvacEquipmentType::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
@@ -869,6 +897,7 @@ impl HvacEquipment {
         let supports_auto_ideal = matches!(
             self.config.equipment_type,
             HvacEquipmentType::AcCooler
+                | HvacEquipmentType::AshpHeatPumpCooling
                 | HvacEquipmentType::MiniSplitCool
                 | HvacEquipmentType::AshpHeatPumpOnly
                 | HvacEquipmentType::AshpHeatPumpAux
@@ -1648,7 +1677,7 @@ mod tests {
     #[test]
     fn startup_ramp_degrades_first_step_and_recovers_to_full() {
         // c_d=0.25 → t_full=5.4 min; with dt=1 min the ramp takes ~6 steps.
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         hvac.runtime.startup.c_d = 0.25;
         hvac.runtime.duty_cycle = 1.0;
 
