@@ -96,12 +96,45 @@ impl HvacEquipment {
             }
             SpeedControlMode::TwoSpeedAlternating => {
                 let desired_index = self.apply_disabled_speeds_two_speed(1);
-                if desired_index != self.runtime.last_speed_index {
-                    self.runtime.time_at_current_speed_s = 0.0;
+                let time_before = self.runtime.time_at_current_speed_s;
+                let old_speed = self.runtime.last_speed_index;
+                let locked =
+                    time_before < self.config.min_time_per_speed_s && desired_index != old_speed;
+                if locked {
+                    tracing::debug!(
+                        time_at_current_speed_s = time_before,
+                        min_time_per_speed_s = self.config.min_time_per_speed_s,
+                        desired_index,
+                        current_index = old_speed,
+                        "TwoSpeedAlternating: min-time guard blocking speed change"
+                    );
+                }
+                let speed_index = if locked {
+                    old_speed
+                } else {
+                    if desired_index != old_speed {
+                        self.runtime.time_at_current_speed_s = 0.0;
+                    }
+                    desired_index
+                };
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    if speed_index != old_speed
+                        && self.config.min_time_per_speed_s > 0.0
+                        && time_before > 0.0
+                    {
+                        assert!(
+                            time_before >= self.config.min_time_per_speed_s,
+                            "TwoSpeedAlternating: speed changed before min_time period elapsed \
+                             (time_at_current_speed_s={time_before}s, \
+                             min_time_per_speed_s={min_time}s)",
+                            min_time = self.config.min_time_per_speed_s,
+                        );
+                    }
                 }
                 let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
-                let high_cap = 1.0; // high speed = full capacity fraction
-                if desired_index == 1 {
+                let high_cap = 1.0;
+                if speed_index == 1 {
                     SpeedSelection {
                         speed_index: 1,
                         part_load_ratio: (load_fraction / high_cap).clamp(0.0, 1.0),
@@ -632,6 +665,41 @@ mod tests {
         assert_eq!(sel.speed_index, 0);
         assert!((sel.part_load_ratio - 0.6).abs() < 1e-9);
         assert!((sel.speed_frac - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_speed_alternating_min_time_guard() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.72;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0;
+        hvac.set_disabled_speeds(&[true, false]);
+
+        let sel = hvac.select_speed(0.5);
+        assert_eq!(
+            sel.speed_index, 0,
+            "min-time guard must hold speed at 0 when time_at_current_speed_s < min_time"
+        );
+    }
+
+    #[test]
+    fn two_speed_alternating_allows_change_after_min_time() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.72;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0;
+        hvac.set_disabled_speeds(&[true, false]);
+
+        hvac.advance_speed_timer(300.0);
+        let sel = hvac.select_speed(0.5);
+        assert_eq!(
+            sel.speed_index, 1,
+            "speed must change after min_time_per_speed_s has elapsed"
+        );
     }
 
     fn make_two_speed_setpoint() -> HvacEquipment {

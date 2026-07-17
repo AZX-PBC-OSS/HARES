@@ -2524,6 +2524,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
         hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 0.0;
 
         let sel = hvac.select_speed(0.3);
         assert_eq!(
@@ -3051,6 +3052,7 @@ mod tests {
     fn two_speed_alternating_always_high_speed() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.min_time_per_speed_s = 0.0;
 
         assert_eq!(
             hvac.select_speed(0.3).speed_index,
