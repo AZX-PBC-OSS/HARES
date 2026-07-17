@@ -1,6 +1,7 @@
 //! Typed configuration structs for heat pump HVAC equipment.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::core_config::default_one;
 use super::heat_pump::defrost::DefrostConfig;
@@ -538,7 +539,17 @@ impl HeatPumpCoolerConfig {
             1 => SpeedControlMode::SingleSpeed,
             2 => SpeedControlMode::TwoSpeedSetpoint,
             n if n >= 4 => SpeedControlMode::VariableSpeedIdeal,
-            _ => SpeedControlMode::SingleSpeed,
+            _ => {
+                if n == 3 {
+                    warn!(
+                        n,
+                        "3-speed cooling equipment is atypical; verify input data. \
+                         Using MultiSpeedInterpolated control mode (previously mapped \
+                         to SingleSpeed)."
+                    );
+                }
+                SpeedControlMode::MultiSpeedInterpolated
+            }
         }
     }
 
@@ -1118,6 +1129,83 @@ mod tests {
             cfg.common.eir_part_load_benefit.is_none(),
             "default eir_part_load_benefit must be None; got {:?}",
             cfg.common.eir_part_load_benefit,
+        );
+    }
+
+    #[test]
+    fn three_speed_cooler_maps_to_multi_speed_interpolated() {
+        let cfg = HeatPumpCoolerConfig {
+            common: HeatPumpCommonConfig {
+                cooling_capacity_w: Some(12_000.0),
+                cooling_eir: Some(0.25),
+                number_of_speeds: 3,
+                is_mini_split: false,
+                ..HeatPumpCommonConfig::default()
+            },
+            stage_shrs: None,
+            ..HeatPumpCoolerConfig::default()
+        };
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::MultiSpeedInterpolated,
+        );
+    }
+
+    #[test]
+    fn two_speed_cooler_still_maps_to_two_speed_setpoint() {
+        let cfg = HeatPumpCoolerConfig {
+            common: HeatPumpCommonConfig {
+                cooling_capacity_w: Some(12_000.0),
+                cooling_eir: Some(0.25),
+                number_of_speeds: 2,
+                is_mini_split: false,
+                ..HeatPumpCommonConfig::default()
+            },
+            stage_shrs: None,
+            ..HeatPumpCoolerConfig::default()
+        };
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::TwoSpeedSetpoint,
+        );
+    }
+
+    #[test]
+    fn mini_split_cooler_still_maps_to_variable_speed_ideal() {
+        let cfg = HeatPumpCoolerConfig {
+            common: HeatPumpCommonConfig {
+                cooling_capacity_w: Some(12_000.0),
+                cooling_eir: Some(0.25),
+                number_of_speeds: 4,
+                is_mini_split: true,
+                ..HeatPumpCommonConfig::default()
+            },
+            stage_shrs: None,
+            ..HeatPumpCoolerConfig::default()
+        };
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::VariableSpeedIdeal,
+        );
+    }
+
+    #[test]
+    fn three_speed_mini_split_cooler_forces_variable_speed_ideal() {
+        let cfg = HeatPumpCoolerConfig {
+            common: HeatPumpCommonConfig {
+                cooling_capacity_w: Some(12_000.0),
+                cooling_eir: Some(0.25),
+                number_of_speeds: 3,
+                is_mini_split: true,
+                ..HeatPumpCommonConfig::default()
+            },
+            stage_shrs: None,
+            ..HeatPumpCoolerConfig::default()
+        };
+        assert_eq!(cfg.effective_number_of_speeds(), 4);
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::VariableSpeedIdeal,
         );
     }
 }

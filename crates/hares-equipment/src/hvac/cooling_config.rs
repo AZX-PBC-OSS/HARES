@@ -119,7 +119,7 @@ impl CentralAirConditionerConfig {
             1 => SpeedControlMode::SingleSpeed,
             2 => SpeedControlMode::TwoSpeedSetpoint,
             4 => SpeedControlMode::VariableSpeedIdeal,
-            _ => SpeedControlMode::SingleSpeed,
+            _ => SpeedControlMode::MultiSpeedInterpolated,
         }
     }
 
