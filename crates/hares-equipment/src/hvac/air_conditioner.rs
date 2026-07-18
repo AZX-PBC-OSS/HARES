@@ -32,6 +32,7 @@ use super::coil_physics::{
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
+use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
@@ -415,13 +416,6 @@ impl Equipment for RoomAC {
 }
 
 impl CoolingCore {
-    fn apply_cooling_startup_cd(&mut self, cd: Option<f64>) {
-        if let Some(cd) = cd {
-            self.hvac.runtime.plf_cooling_degradation_coeff = cd;
-            self.hvac.runtime.startup.c_d = cd;
-        }
-    }
-
     fn select_variable_speed_cooling(
         &mut self,
         requested_capacity_fraction: f64,
@@ -642,22 +636,32 @@ impl CoolingCore {
                 );
             }
             self.rated_shr = cfg.shr.unwrap_or(default_shr).clamp(0.0, 1.0);
-            // Priority: explicit user Cd → SEER-derived Cd → EnergyPlus SEER2 default 0.20.
+            // PLF cycling degradation coefficient from SEER only.
             // EnergyPlus `StandardRatings.cc:177–180`: SEER2 Cd=0.20.
-            let derived = cfg.derived_cooling_startup_cd();
+            // OCHRE `utils/equipment.py:470–500` `calc_c_d`: same threshold table.
+            // NOT derived from `cfg.startup_cd` — startup ramp is a separate
+            // physical phenomenon (Winkler 2011) with its own opt-in Cd.
+            let plf_cd = cfg.derived_plf_cd().unwrap_or(0.20);
+            self.hvac.runtime.plf_cooling_degradation_coeff = plf_cd;
+            self.hvac.runtime.startup.c_d = cfg.startup_cd.unwrap_or(DEFAULT_STARTUP_CD);
             if cfg.startup_cd.is_none() {
-                if let Some(cd_val) = derived {
-                    tracing::debug!(
-                        equipment_name = %config.name,
-                        startup_cd = cd_val,
-                        seer_bucket = if cd_val < 0.11 { "SEER >= 13" } else { "SEER < 13" },
-                        "Room AC derived cycling degradation coefficient from EIR"
-                    );
-                }
+                tracing::debug!(
+                    equipment_name = %config.name,
+                    plf_cd,
+                    seer_bucket = if plf_cd < 0.11 { "SEER >= 13" } else { "SEER < 13" },
+                    "Room AC derived PLF cycling degradation coefficient from EIR"
+                );
             }
-            let cd = derived.unwrap_or(0.20);
-            self.hvac.runtime.plf_cooling_degradation_coeff = cd;
-            self.hvac.runtime.startup.c_d = cd;
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    equipment_name = %config.name,
+                    plf_cd,
+                    startup_cd = self.hvac.runtime.startup.c_d,
+                    is_room_ac = true,
+                    "Room AC init: PLF degradation Cd (AHRI 210/240) and startup ramp Cd (Winkler 2011)"
+                );
+            }
 
             // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
             // Removal to Begin), suggested value 1000 s (V26-1-0 IDD §Coil:Cooling:DX);
@@ -769,7 +773,24 @@ impl CoolingCore {
                 self.rated_shr = self.stage_shrs[self.stage_shrs.len() - 1].clamp(0.0, 1.0);
             }
 
-            self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
+            // PLF cycling degradation coefficient from speed/SEER only.
+            // NOT derived from `cfg.startup_cd` — startup ramp is a separate
+            // physical phenomenon (Winkler 2011) with its own opt-in Cd.
+            self.hvac.runtime.plf_cooling_degradation_coeff = cfg
+                .derived_plf_cd()
+                .unwrap_or(DEFAULT_PLF_DEGRADATION_COEFF);
+            self.hvac.runtime.startup.c_d = cfg.startup_cd.unwrap_or(DEFAULT_STARTUP_CD);
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    equipment_name = %config.name,
+                    plf_cd = self.hvac.runtime.plf_cooling_degradation_coeff,
+                    startup_cd = self.hvac.runtime.startup.c_d,
+                    is_central_ac = true,
+                    speed_control_mode = ?self.hvac.config.speed_control_mode,
+                    "Central AC init: PLF degradation Cd (AHRI 210/240) and startup ramp Cd (Winkler 2011)"
+                );
+            }
 
             // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
             // Removal to Begin), suggested value 1000 s (V26-1-0 IDD §Coil:Cooling:DX);
@@ -2162,7 +2183,8 @@ mod tests {
 
     #[test]
     fn room_ac_init_uses_explicit_startup_cd() {
-        // Explicit startup_cd takes priority over SEER-derived value.
+        // Explicit startup_cd sets startup.c_d only, NOT plf_cooling_degradation_coeff.
+        // PLF Cd is derived from SEER (0.20 for SEER < 13), decoupled from startup ramp.
         let explicit_cd = 0.15;
         let cfg = EquipmentConfig::from_typed(
             "room_ac_explicit".to_string(),
@@ -2185,13 +2207,15 @@ mod tests {
         .unwrap();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
-        assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - explicit_cd).abs() < 1e-9);
+        // SEER = 10 → SEER < 13 → PLF Cd = 0.20 (from derived_plf_cd, NOT from explicit_cd).
+        assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-9);
         assert!((eq.core.hvac.runtime.startup.c_d - explicit_cd).abs() < 1e-9);
     }
 
     #[test]
     fn room_ac_init_uses_derived_cd_when_no_explicit() {
-        // No explicit startup_cd → derived from SEER. SEER < 13 → Cd = 0.20.
+        // No explicit startup_cd → derived from SEER. SEER < 13 → PLF Cd = 0.20.
+        // startup.c_d remains at DEFAULT_STARTUP_CD (0.0) — startup ramp is opt-in.
         let eir = BTU_PER_HR_PER_W / 10.0;
         let cfg = EquipmentConfig::from_typed(
             "room_ac_derived".to_string(),
@@ -2215,7 +2239,11 @@ mod tests {
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
         assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-9);
-        assert!((eq.core.hvac.runtime.startup.c_d - 0.20).abs() < 1e-9);
+        assert!(
+            eq.core.hvac.runtime.startup.c_d.abs() < 1e-9,
+            "startup.c_d must be 0.0 (DEFAULT_STARTUP_CD) when no explicit startup_cd provided, got {}",
+            eq.core.hvac.runtime.startup.c_d
+        );
     }
 
     #[test]
@@ -2978,7 +3006,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_two_speed_ac_derives_two_speed_startup_cd() {
+    fn typed_two_speed_ac_derives_two_speed_plf_cd_startup_cd_is_zero() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 2;
             typed.startup_cd = None;
@@ -2992,15 +3020,69 @@ mod tests {
             eq.core.hvac.config.speed_control_mode,
             SpeedControlMode::TwoSpeedSetpoint
         );
-        assert!(
-            (eq.core.hvac.runtime.startup.c_d - 0.11).abs() < 1e-9,
-            "two-speed typed cooling must derive startup Cd=0.11, got {}",
-            eq.core.hvac.runtime.startup.c_d
-        );
+        // PLF Cd = 0.11 (two-speed derived), matching AHRI 210/240.
         assert!(
             (eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-9,
             "two-speed typed cooling must derive PLF Cd=0.11, got {}",
             eq.core.hvac.runtime.plf_cooling_degradation_coeff
+        );
+        // startup.c_d = 0.0 (DEFAULT_STARTUP_CD), matching OCHRE HVAC.py:765.
+        assert!(
+            eq.core.hvac.runtime.startup.c_d.abs() < 1e-9,
+            "two-speed typed cooling startup Cd must be 0.0 (DEFAULT_STARTUP_CD), got {}",
+            eq.core.hvac.runtime.startup.c_d
+        );
+    }
+
+    /// A default-constructed single-speed central AC (no explicit startup_cd)
+    /// must have `startup_cd = 0.0`, matching OCHRE's opt-in startup degradation.
+    /// The PLF cycling degradation coefficient is derived from SEER.
+    #[test]
+    fn default_central_ac_startup_cd_is_zero() {
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        let env = env(28.0, 0.010, 18.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            eq.core.hvac.runtime.startup.c_d.abs() < 1e-9,
+            "default-constructed single-speed AC must have startup_cd = 0.0, got {}",
+            eq.core.hvac.runtime.startup.c_d
+        );
+        // PLF Cd must be SEER-derived (not zero): SEER 16 → Cd = 0.07.
+        assert!(
+            eq.core.hvac.runtime.plf_cooling_degradation_coeff > 0.0,
+            "PLF Cd must be non-zero for single-speed AC, got {}",
+            eq.core.hvac.runtime.plf_cooling_degradation_coeff
+        );
+    }
+
+    /// Explicit startup_cd must set startup.c_d only, NOT
+    /// plf_cooling_degradation_coeff. Regression test for the conflation bug
+    /// where derived_cooling_startup_cd() leaked user startup_cd into PLF Cd.
+    #[test]
+    fn central_ac_explicit_startup_cd_does_not_affect_plf_cd() {
+        let explicit_cd = 0.15;
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = Some(explicit_cd);
+        });
+        let env = env(28.0, 0.010, 18.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        // Default EIR=0.33 → SEER≈10.34 < 13 → PLF Cd = 0.20, NOT explicit_cd.
+        assert!(
+            (eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-9,
+            "PLF Cd must be SEER-derived (0.20), not explicit startup_cd, got {}",
+            eq.core.hvac.runtime.plf_cooling_degradation_coeff
+        );
+        // startup.c_d must be the explicit value.
+        assert!(
+            (eq.core.hvac.runtime.startup.c_d - explicit_cd).abs() < 1e-9,
+            "startup.c_d must be explicit value {}, got {}",
+            explicit_cd,
+            eq.core.hvac.runtime.startup.c_d
         );
     }
 

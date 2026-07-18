@@ -182,7 +182,7 @@ impl HpCooler {
                 .common
                 .is_mini_split
                 .then(|| "mini-split".to_string()),
-            startup_cd: hp_cfg.derived_cooling_startup_cd(),
+            startup_cd: None,
             biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
             biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
             biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
@@ -452,7 +452,7 @@ impl GshpCooler {
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
             system_type: None,
-            startup_cd: hp_cfg.derived_cooling_startup_cd(),
+            startup_cd: None,
             biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
             biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
             biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
@@ -858,7 +858,7 @@ impl WshpCooler {
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
             system_type: None,
-            startup_cd: hp_cfg.derived_cooling_startup_cd(),
+            startup_cd: None,
             biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
             biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
             biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
@@ -1192,6 +1192,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -1270,6 +1271,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -1353,6 +1355,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -1389,6 +1392,7 @@ mod tests {
         let env = cooling_env(21.0, 5.0);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -1551,6 +1555,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -1813,6 +1818,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         cooler.update_control(&env_warm);
@@ -1867,6 +1873,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         cooler.update_control(&env_cold);
@@ -1912,6 +1919,7 @@ mod tests {
         eq.update_control(&env);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -2014,6 +2022,7 @@ mod tests {
         eq.update_control(&env);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![hares_types::HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();

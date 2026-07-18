@@ -38,11 +38,15 @@ pub mod equipment_type_name {
     pub const IDEAL_HVAC: &str = "Ideal HVAC";
 }
 
-/// Resolve the Cd (degradation coefficient) from config keys and equipment-type
-/// defaults. Precedence:
-///   1. Explicit key: "startup_cd" > "cooling_cd" > "cd"
+/// Resolve the PLF cycling degradation coefficient (Cd) from config keys and
+/// equipment-type defaults. Precedence:
+///   1. Explicit key: "cooling_cd" > "cd"
 ///   2. Derived from speed_control_mode, SEER, HSPF (equipment-type default)
-///   3. DEFAULT_PLF_DEGRADATION_COEFF (0.25)
+///   3. Parameter `default_cd` (typically `DEFAULT_PLF_DEGRADATION_COEFF`)
+///
+/// The startup capacity ramp Cd is handled separately via the `"startup_cd"` key
+/// and defaults to `DEFAULT_STARTUP_CD` (0.0), matching OCHRE's opt-in startup
+/// degradation behaviour.
 ///
 /// OCHRE utils/equipment.py:470–500 `calc_c_d` uses the identical decision table.
 /// Variable-speed: 0.0; two-speed: 0.11; single-speed: SEER < 13 → 0.20, else 0.07
@@ -54,9 +58,8 @@ pub(super) fn resolve_cd(
     rated_hspf: Option<f64>,
     default_cd: f64,
 ) -> f64 {
-    if let Some(cd) = extract_numeric(config, "startup_cd")
-        .or_else(|| extract_numeric(config, "cooling_cd"))
-        .or_else(|| extract_numeric(config, "cd"))
+    if let Some(cd) =
+        extract_numeric(config, "cooling_cd").or_else(|| extract_numeric(config, "cd"))
     {
         return cd;
     }

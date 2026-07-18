@@ -25,17 +25,22 @@ pub enum SpeedControlMode {
     VariableSpeedIdeal,
 }
 
-/// Startup capacity ramp configuration (Winkler 2009 / OCHRE exponential model).
+/// Startup capacity ramp configuration (Winkler 2011 exponential model).
 ///
 /// The ramp multiplier follows:
 ///   t_full = 20.0 * c_d + 0.4  [minutes]
 ///   mult = clamp(0, 1, -1.025 * exp(-3.79936 * t / t_full) + 1.025)
 ///
-/// When `c_d == 0.0` the ramp is bypassed and the multiplier is always 1.0,
-/// which is the correct behaviour for variable-speed equipment.
+/// When `c_d == 0.0` the ramp is bypassed and the multiplier is always 1.0.
+/// Default `c_d = 0.0` matches OCHRE's `"Startup Capacity Degradation (-)"` default
+/// (HVAC.py:765) — startup ramp is opt-in via an explicit user override.
+///
+/// The PLF cycling degradation coefficient (AHRI 210/240) is held separately in
+/// `HvacRuntimeState::plf_cooling_degradation_coeff` and is not conflated with
+/// the startup ramp Cd.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StartupConfig {
-    /// AHRI degradation coefficient (Cd). 0.0 disables the ramp entirely.
+    /// Winkler (2011) startup capacity degradation coefficient (Cd). 0.0 disables the ramp entirely.
     pub c_d: f64,
     /// Accumulated time [minutes] since the compressor last started.
     /// Reset to `0.5 * dt_min` on the first on-step; incremented by `dt_min`
@@ -46,7 +51,7 @@ pub struct StartupConfig {
 impl Default for StartupConfig {
     fn default() -> Self {
         Self {
-            c_d: 0.25,
+            c_d: 0.0,
             time_since_start_min: 0.0,
         }
     }
@@ -522,6 +527,60 @@ mod tests {
         assert!(
             (sel.part_load_ratio - 1.0).abs() < 1e-12,
             "rated load must have full part-load ratio"
+        );
+    }
+
+    // --- StartupConfig tests ---
+
+    /// StartupConfig::default() Cd = 0.0 → multiplier is always 1.0
+    /// (ramp disabled), matching OCHRE's opt-in startup behaviour.
+    #[test]
+    fn startup_config_default_disables_ramp() {
+        let mut cfg = StartupConfig::default();
+        assert!(
+            cfg.c_d.abs() < 1e-12,
+            "default startup Cd must be 0.0, got {}",
+            cfg.c_d
+        );
+        // At any time step, multiplier must be 1.0.
+        for dt_min in [0.5, 1.0, 5.0, 10.0] {
+            let mult = cfg.capacity_multiplier(true, dt_min);
+            assert!(
+                (mult - 1.0).abs() < 1e-12,
+                "c_d=0 must yield multiplier 1.0 at dt={dt_min} min, got {mult}"
+            );
+        }
+        // Also verify warm-start: after several on-steps, still 1.0.
+        let mut cfg2 = StartupConfig::default();
+        for _ in 0..10 {
+            cfg2.capacity_multiplier(true, 1.0);
+        }
+        assert!(
+            (cfg2.capacity_multiplier(true, 1.0) - 1.0).abs() < 1e-12,
+            "c_d=0 must yield multiplier 1.0 after warm-up"
+        );
+    }
+
+    /// StartupConfig with explicit non-zero Cd produces a ramp multiplier
+    /// < 1.0 at cold start, confirming the ramp is opt-in.
+    /// Winkler (2011): t_full = 20*Cd + 0.4; mult = -1.025*exp(-3.79936*t/t_full) + 1.025.
+    #[test]
+    fn startup_config_explicit_cd_produces_ramp() {
+        let mut cfg = StartupConfig {
+            c_d: 0.25,
+            time_since_start_min: 0.0,
+        };
+        let mult = cfg.capacity_multiplier(true, 1.0);
+        assert!(
+            mult < 1.0,
+            "c_d=0.25 cold start must produce multiplier < 1.0, got {mult}"
+        );
+        // Winkler formula check: t_full = 5.4 min, t = 0.5 min (mid-step).
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let expected = (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        assert!(
+            (mult - expected).abs() < 1e-12,
+            "c_d=0.25 cold start multiplier {mult} != expected {expected}"
         );
     }
 }

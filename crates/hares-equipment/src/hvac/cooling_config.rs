@@ -136,6 +136,19 @@ impl CentralAirConditionerConfig {
         })
     }
 
+    pub fn derived_plf_cd(&self) -> Option<f64> {
+        match self.cooling_speed_control_mode() {
+            SpeedControlMode::VariableSpeedIdeal => Some(0.0),
+            SpeedControlMode::TwoSpeedSetpoint
+            | SpeedControlMode::TwoSpeedTime
+            | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
+            SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => {
+                let seer = BTU_PER_HR_PER_W / self.eir.max(1e-6);
+                Some(if seer < 13.0 { 0.20 } else { 0.07 })
+            }
+        }
+    }
+
     /// Validate that efficiency and capacity fields are finite and positive.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
@@ -425,6 +438,14 @@ impl RoomAcConfig {
             let seer = BTU_PER_HR_PER_W / self.eir;
             Some(if seer < 13.0 { 0.20 } else { 0.07 })
         })
+    }
+
+    pub fn derived_plf_cd(&self) -> Option<f64> {
+        if !self.eir.is_finite() || self.eir <= 0.0 {
+            return None;
+        }
+        let seer = BTU_PER_HR_PER_W / self.eir;
+        Some(if seer < 13.0 { 0.20 } else { 0.07 })
     }
 }
 
@@ -1320,5 +1341,79 @@ mod tests {
             min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn central_ac_derived_plf_cd_ignores_explicit_startup_cd() {
+        let eir = 3.412_141_633 / 10.0;
+        let cfg = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 10_000.0,
+            eir,
+            shr: None,
+            number_of_speeds: 1,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: Some(0.15),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        // derived_plf_cd ignores startup_cd; returns SEER-derived value (SEER=10 → 0.20).
+        assert_eq!(cfg.derived_plf_cd(), Some(0.20));
+        // derived_cooling_startup_cd still returns the explicit override.
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.15));
+    }
+
+    #[test]
+    fn room_ac_derived_plf_cd_ignores_explicit_startup_cd() {
+        let eir = BTU_PER_HR_PER_W / 14.0;
+        let cfg = RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: Some(0.15),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        // derived_plf_cd ignores startup_cd; returns SEER-derived value (SEER=14 → 0.07).
+        assert_eq!(cfg.derived_plf_cd(), Some(0.07));
+        // derived_cooling_startup_cd still returns the explicit override.
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.15));
     }
 }

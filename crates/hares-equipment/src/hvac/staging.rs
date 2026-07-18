@@ -19,6 +19,12 @@ pub(super) const DEFAULT_LOW_SPEED_CAPACITY_FRACTION: f64 = 0.72;
 /// AHRI Standard 210/240-2023, S6.6.3 default when no test data available.
 pub(super) const DEFAULT_PLF_DEGRADATION_COEFF: f64 = 0.25;
 
+/// Default startup capacity ramp degradation coefficient (Cd).
+/// Winkler (2011) exponential startup capacity degradation model.
+/// Default 0.0 matches OCHRE's `"Startup Capacity Degradation (-)"` (HVAC.py:765)
+/// — startup ramp is OFF unless the user explicitly provides a non-zero Cd.
+pub(super) const DEFAULT_STARTUP_CD: f64 = 0.0;
+
 impl HvacEquipment {
     /// Number of discrete speed stages. For single-speed equipment this is 1.
     pub fn n_speed_stages(&self) -> usize {

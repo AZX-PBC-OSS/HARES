@@ -17,7 +17,9 @@ use super::core_config::{
 use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
 use super::helpers::validate_zone_id;
 use super::speed_control::{SpeedControlMode, StartupConfig};
-use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
+use super::staging::{
+    DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD,
+};
 use super::thermostat::{
     ScheduleSetpoints, ThermalSetpoints, ThermostatConfig, ThermostatFsm, ThermostatMode,
     lookup_zone_temp,
@@ -637,11 +639,22 @@ impl HvacEquipment {
             DEFAULT_PLF_DEGRADATION_COEFF,
         );
         self.runtime.plf_cooling_degradation_coeff = cd;
+        let startup_cd = extract_numeric(config, "startup_cd").unwrap_or(DEFAULT_STARTUP_CD);
         self.runtime.startup = StartupConfig {
-            c_d: cd,
+            c_d: startup_cd,
             time_since_start_min: 0.0,
         };
         self.runtime.startup.validate()?;
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                plf_cd = cd,
+                startup_cd,
+                equipment_type = ?self.config.equipment_type,
+                speed_control_mode = ?self.config.speed_control_mode,
+                "equipment init: PLF degradation Cd (AHRI 210/240) and startup ramp Cd (Winkler 2011)"
+            );
+        }
         self.config.biquadratic_coeffs = load_biquadratic_coeffs(config, "biquadratic_coeffs")?;
         // Also honour the split capacity/EIR keys that the HPXML resolver writes
         // (capacity_biquadratic_coeffs / eir_biquadratic_coeffs). These are the
@@ -1884,7 +1897,7 @@ mod tests {
 
     #[test]
     fn low_seer_single_speed_overrides_cd_on_init() {
-        // SEER < 13 → Cd = 0.20 (applies to both PLF coeff and startup ramp).
+        // SEER < 13 → PLF Cd = 0.20. startup.c_d remains at DEFAULT_STARTUP_CD (0.0).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1893,19 +1906,19 @@ mod tests {
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
             (hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-12,
-            "low-SEER Cd must be 0.20, got {}",
+            "low-SEER PLF Cd must be 0.20, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.20).abs() < 1e-12,
-            "startup c_d must also be 0.20 for low-SEER: {}",
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "startup c_d must be 0.0 (DEFAULT_STARTUP_CD), got {}",
             hvac.runtime.startup.c_d
         );
     }
 
     #[test]
     fn high_seer_single_speed_overrides_cd_on_init() {
-        // SEER >= 13 → Cd = 0.07.
+        // SEER >= 13 → PLF Cd = 0.07. startup.c_d remains at DEFAULT_STARTUP_CD (0.0).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1914,12 +1927,12 @@ mod tests {
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
             (hvac.runtime.plf_cooling_degradation_coeff - 0.07).abs() < 1e-12,
-            "high-SEER Cd must be 0.07, got {}",
+            "high-SEER PLF Cd must be 0.07, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.07).abs() < 1e-12,
-            "startup c_d must also be 0.07: {}",
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "startup c_d must be 0.0 (DEFAULT_STARTUP_CD), got {}",
             hvac.runtime.startup.c_d
         );
     }
@@ -1942,7 +1955,7 @@ mod tests {
 
     #[test]
     fn high_hspf_single_speed_overrides_cd_on_init() {
-        // HSPF >= 7 → Cd = 0.11 (applies to both PLF coeff and startup ramp).
+        // HSPF >= 7 → PLF Cd = 0.11. startup.c_d remains at DEFAULT_STARTUP_CD (0.0).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1951,12 +1964,12 @@ mod tests {
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
             (hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
-            "high-HSPF Cd must be 0.11, got {}",
+            "high-HSPF PLF Cd must be 0.11, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.11).abs() < 1e-12,
-            "startup c_d must also be 0.11 for high-HSPF: {}",
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "startup c_d must be 0.0 (DEFAULT_STARTUP_CD), got {}",
             hvac.runtime.startup.c_d
         );
     }
@@ -1971,12 +1984,12 @@ mod tests {
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
             (hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
-            "two-speed must default Cd to 0.11, got {}",
+            "two-speed PLF Cd must be 0.11, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.11).abs() < 1e-12,
-            "two-speed startup c_d must be 0.11: {}",
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "two-speed startup c_d must be 0.0 (DEFAULT_STARTUP_CD), got {}",
             hvac.runtime.startup.c_d
         );
     }
@@ -1997,7 +2010,9 @@ mod tests {
 
     #[test]
     fn explicit_cd_config_overrides_derived_defaults() {
-        // When "cooling_cd" is explicitly set, rating-based overrides must not apply.
+        // When "cooling_cd" is explicitly set, rating-based overrides must not apply
+        // for PLF Cd. startup.c_d remains at DEFAULT_STARTUP_CD (0.0) — only
+        // the "startup_cd" key controls the startup ramp coefficient.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -2012,8 +2027,9 @@ mod tests {
             "explicit cooling_cd must not be overridden by SEER table"
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.15).abs() < 1e-12,
-            "startup c_d must also respect explicit cooling_cd"
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "startup c_d must be 0.0 (DEFAULT_STARTUP_CD) when only cooling_cd is set, got {}",
+            hvac.runtime.startup.c_d
         );
     }
 
@@ -3356,17 +3372,15 @@ mod tests {
 
     // --- Regression tests for Cd cascade ---
     //
-    // The Cd cascade in init() is performed in three separate blocks (lines 396-398,
-    // 399-406, 491-515).  This test pins the observable semantics so that the
-    // refactoring to a single `resolve_cd` helper does not
-    // silently change behaviour.
+    // The Cd cascade in init() resolves PLF degradation Cd and startup ramp Cd
+    // independently.  PLF Cd is derived from "cooling_cd" → "cd" → SEER-derived
+    // → DEFAULT_PLF_DEGRADATION_COEFF.  Startup Cd is read from "startup_cd" only
+    // and defaults to DEFAULT_STARTUP_CD (0.0), matching OCHRE HVAC.py:765.
 
     /// When the user provides only `"cooling_cd"`, it sets `plf_cooling_degradation_coeff`
-    /// but NOT `startup.c_d` (which falls through to `startup_cd` → `cooling_cd` → `cd`).
-    /// In the current code `cooling_cd` DOES set both because the second block also reads it.
-    /// This test documents the actual (current) behaviour: both fields receive the same value.
+    /// but NOT `startup.c_d` (which remains at DEFAULT_STARTUP_CD = 0.0).
     #[test]
-    fn cooling_cd_sets_both_plf_and_startup_cd() {
+    fn cooling_cd_sets_plf_cd_not_startup_cd() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -3380,18 +3394,17 @@ mod tests {
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.runtime.startup.c_d - 0.15).abs() < 1e-12,
-            "cooling_cd must also set startup.c_d to 0.15, got {}",
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "cooling_cd must NOT set startup.c_d; should remain at DEFAULT_STARTUP_CD=0.0, got {}",
             hvac.runtime.startup.c_d
         );
     }
 
-    /// When the user provides `"startup_cd"`, `resolve_cd` applies it to both
-    /// `plf_cooling_degradation_coeff` and `startup.c_d`. The old Cd cascade had an
-    /// asymmetry where `startup_cd` only set `startup.c_d` while `plf_cooling_degradation_coeff`
-    /// fell through to the default — this was a bug, now fixed by the unified `resolve_cd`.
+    /// When the user provides `"startup_cd"`, it sets `startup.c_d` only.
+    /// `plf_cooling_degradation_coeff` falls through to the speed-mode-derived
+    /// or default value — the two coefficients are independent.
     #[test]
-    fn startup_cd_sets_both_plf_and_startup_cd() {
+    fn startup_cd_sets_startup_cd_only() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -3404,15 +3417,17 @@ mod tests {
             "startup_cd must set startup.c_d to 0.05, got {}",
             hvac.runtime.startup.c_d
         );
+        // PLF Cd: single-speed AC with no SEER → falls through to DEFAULT_PLF_DEGRADATION_COEFF (0.25).
+        // startup_cd no longer influences plf_cooling_degradation_coeff.
         assert!(
-            (hvac.runtime.plf_cooling_degradation_coeff - 0.05).abs() < 1e-12,
-            "startup_cd must also set plf_cooling_degradation_coeff to 0.05, got {}",
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12,
+            "startup_cd must NOT set plf_cooling_degradation_coeff; should be default 0.25, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
     }
 
     /// When no Cd key is set and speed_control_mode is VariableSpeedIdeal,
-    /// the derived path must set both plf Cd and startup Cd to 0.0.
+    /// the derived PLF Cd is 0.0 and startup Cd defaults to 0.0.
     #[test]
     fn variable_speed_derived_cd_is_zero() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
@@ -3429,21 +3444,21 @@ mod tests {
         );
         assert!(
             hvac.runtime.plf_cooling_degradation_coeff.abs() < 1e-12,
-            "variable-speed derived plf Cd must be 0.0, got {}",
+            "variable-speed derived PLF Cd must be 0.0, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
             hvac.runtime.startup.c_d.abs() < 1e-12,
-            "variable-speed derived startup Cd must be 0.0, got {}",
+            "variable-speed startup Cd must be 0.0 (DEFAULT_STARTUP_CD), got {}",
             hvac.runtime.startup.c_d
         );
     }
 
-    /// The key chain "startup_cd" → "cooling_cd" → "cd" is evaluated once by
-    /// `resolve_cd`. When both `startup_cd` and `cooling_cd` are present,
-    /// `startup_cd` wins for both `startup.c_d` and `plf_cooling_degradation_coeff`.
+    /// The config keys "startup_cd" and "cooling_cd" control independent coefficients.
+    /// "startup_cd" → `startup.c_d` (Winkler 2011 startup ramp).
+    /// "cooling_cd" → `plf_cooling_degradation_coeff` (AHRI 210/240 cycling degradation).
     #[test]
-    fn cd_key_chain_priority() {
+    fn cd_key_chain_independent_coefficients() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -3454,15 +3469,16 @@ mod tests {
             .insert("cooling_cd".to_string(), 0.30_f64.into());
         hvac.init(&config, &env(24.0, 60, 0))
             .expect("init must succeed");
-        // startup_cd (0.05) takes precedence over cooling_cd (0.30)
+        // startup_cd (0.05) sets startup.c_d
         assert!(
             (hvac.runtime.startup.c_d - 0.05).abs() < 1e-12,
-            "startup_cd must take precedence over cooling_cd for startup.c_d, got {}",
+            "startup_cd must set startup.c_d to 0.05, got {}",
             hvac.runtime.startup.c_d
         );
+        // cooling_cd (0.30) sets plf_cooling_degradation_coeff
         assert!(
-            (hvac.runtime.plf_cooling_degradation_coeff - 0.05).abs() < 1e-12,
-            "startup_cd must also take precedence over cooling_cd for plf_cooling_degradation_coeff, got {}",
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.30).abs() < 1e-12,
+            "cooling_cd must set plf_cooling_degradation_coeff to 0.30, got {}",
             hvac.runtime.plf_cooling_degradation_coeff
         );
     }
