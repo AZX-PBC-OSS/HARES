@@ -54,10 +54,15 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DEFROST_ELAPSED_S, 0.0);
     telemetry.insert(tk::SPEED_FRAC, 0.0);
     telemetry.insert(tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC, 0.0);
+    // Observe-gated diagnostics: Telemetry::set panics on unknown keys under
+    // debug_assertions/check_invariants, so every observe-only set site must
+    // have its key pre-populated here.
+    telemetry.insert(tk::BIQUADRATIC_INDEX_CLAMPED, 0.0);
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
     telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
     telemetry.insert(tk::TIME_SINCE_START_MIN, 0.0);
+    telemetry.insert(tk::STARTUP_TIMER_RESET_COUNT, 0.0);
     telemetry.insert(tk::DUTY_CYCLE, 0.0);
     telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
     telemetry.insert(tk::MODE_DURATION_S, 0.0);
@@ -332,7 +337,12 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::TIME_SINCE_START_MIN.to_string(),
             unit: "min".to_string(),
-            description: "Elapsed time since compressor startup; 0.0 when compressor is off".to_string(),
+            description: "Elapsed time since compressor startup; preserved across off-steps, reset on off→on transition".to_string(),
+        },
+        TelemetryField {
+            name: tk::STARTUP_TIMER_RESET_COUNT.to_string(),
+            unit: "count".to_string(),
+            description: "Cumulative startup-timer resets (off→on transitions) since init; difference consecutive rows for resets per hour".to_string(),
         },
         TelemetryField {
             name: tk::DUTY_CYCLE.to_string(),

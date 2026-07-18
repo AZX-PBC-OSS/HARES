@@ -643,6 +643,8 @@ impl HvacEquipment {
         self.runtime.startup = StartupConfig {
             c_d: startup_cd,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         self.runtime.startup.validate()?;
         #[cfg(feature = "observe")]
@@ -1708,11 +1710,15 @@ mod tests {
             "must reach full after ramp: {last}"
         );
 
-        // Turn off resets the ramp.
+        // Turn off: timer is preserved across off-steps (edge detection).
         hvac.runtime.duty_cycle = 0.0;
         let off = hvac.apply_startup_capacity_degradation(10_000.0, 1.0, false);
         assert!((off - 10_000.0).abs() < 1e-9);
-        assert_eq!(hvac.runtime.startup.time_since_start_min, 0.0);
+        assert!(
+            hvac.runtime.startup.time_since_start_min > 0.0,
+            "timer must be preserved across off-step, got {}",
+            hvac.runtime.startup.time_since_start_min
+        );
 
         // Restart must degrade again.
         hvac.runtime.duty_cycle = 1.0;

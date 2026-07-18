@@ -218,13 +218,26 @@ pub const PART_LOAD_FACTOR: &str = "part_load_factor";
 /// scope: internal
 pub const STARTUP_MULTIPLIER: &str = "startup_multiplier";
 
-/// Elapsed time since compressor startup [minutes]. Resets to 0.0 when the
-/// compressor is off. Used with `STARTUP_MULTIPLIER` in diagnostic CSV output
-/// to detect whether the startup timer erroneously advances while the compressor
-/// is not energised (e.g. during ER-only operation on an ASHP).
+/// Elapsed time since compressor startup [minutes]. Preserved across
+/// off-steps and reset only on a true off→on transition (edge detection,
+/// matching OCHRE's mode-transition reset). Used with `STARTUP_MULTIPLIER`
+/// in diagnostic CSV output to detect whether the startup timer erroneously
+/// advances while the compressor is not energised (e.g. during ER-only
+/// operation on an ASHP).
 ///
 /// scope: internal
 pub const TIME_SINCE_START_MIN: &str = "time_since_start_min";
+
+/// Cumulative count of startup-ramp timer resets (true off→on compressor
+/// transitions) since equipment init. Under the edge-detection contract the
+/// timer resets exactly once per compressor restart, so differencing
+/// consecutive diagnostic-CSV rows yields the resets-per-hour rate — the
+/// former per-off-step reset behaviour produced a dramatically higher rate.
+/// Diagnostic counter only: not persisted across checkpoint restore
+/// (restarts from 0, matching `BIQUADRATIC_INDEX_CLAMPED`).
+///
+/// scope: internal
+pub const STARTUP_TIMER_RESET_COUNT: &str = "startup_timer_reset_count";
 
 /// scope: internal
 pub const DUTY_CYCLE: &str = "duty_cycle";
@@ -366,6 +379,20 @@ pub const BIQUADRATIC_INDEX_CLAMPED: &str = "biquadratic_index_clamped";
 ///
 /// scope: internal
 pub const HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC: &str = "high_side_curve_clamped_speed_frac";
+
+/// 1.0 when the Henderson-Rengarajan latent degradation model is active for
+/// the current cooling step, 0.0 otherwise. Observe-only diagnostic.
+///
+/// scope: internal
+pub const LATENT_DEGRADATION_ACTIVE: &str = "latent_degradation_active";
+
+/// Steady-state SHR from the coil bypass-factor solution before the
+/// Henderson-Rengarajan part-load latent degradation is applied. Paired with
+/// the always-set `SHR` (post-degradation) to quantify the degradation
+/// magnitude offline. Observe-only diagnostic.
+///
+/// scope: internal
+pub const SHR_BEFORE_DEGRADATION: &str = "shr_before_degradation";
 
 // ── Battery / EV / storage ──────────────────────────────────────────────────
 
@@ -1088,6 +1115,7 @@ mod tests {
             PART_LOAD_FACTOR,
             STARTUP_MULTIPLIER,
             TIME_SINCE_START_MIN,
+            STARTUP_TIMER_RESET_COUNT,
             DUTY_CYCLE,
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
@@ -1126,6 +1154,8 @@ mod tests {
             BIQUADRATIC_CURVE_SOURCE,
             BIQUADRATIC_INDEX_CLAMPED,
             HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+            LATENT_DEGRADATION_ACTIVE,
+            SHR_BEFORE_DEGRADATION,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,
@@ -1343,6 +1373,7 @@ mod tests {
             PART_LOAD_FACTOR,
             STARTUP_MULTIPLIER,
             TIME_SINCE_START_MIN,
+            STARTUP_TIMER_RESET_COUNT,
             DUTY_CYCLE,
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
@@ -1381,6 +1412,8 @@ mod tests {
             BIQUADRATIC_CURVE_SOURCE,
             BIQUADRATIC_INDEX_CLAMPED,
             HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+            LATENT_DEGRADATION_ACTIVE,
+            SHR_BEFORE_DEGRADATION,
             // Battery / storage
             SOC,
             OHMIC_LOSS_W,

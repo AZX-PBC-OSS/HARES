@@ -249,6 +249,9 @@ struct HeaterState {
     max_oat_supplemental_c: f64,
     hp_available: bool,
     er_was_on: bool,
+    startup_c_d: f64,
+    startup_time_since_start_min: f64,
+    startup_was_on: bool,
     thermostat_hysteresis_c: f64,
     time_at_current_speed_s: f64,
     // --- Thermostat short-cycle protection (survives warmup restart) ---
@@ -259,7 +262,9 @@ struct HeaterState {
 // Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
-const HEATER_CHECKPOINT_VERSION: u32 = 3;
+// Version 4: added `startup_c_d`, `startup_time_since_start_min`, `startup_was_on`
+// for startup ramp persistence across checkpoint restart.
+const HEATER_CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy)]
 struct HeaterControl {
@@ -1583,6 +1588,10 @@ impl HeatPumpHeaterCore {
                 hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
                 self.hvac.take_biquadratic_clamp_count() as f64,
             );
+            self.telemetry.set(
+                tk::STARTUP_TIMER_RESET_COUNT,
+                self.hvac.runtime.startup.reset_count as f64,
+            );
             tracing::debug!(
                 operating_mode = ?self.operating_mode,
                 startup_multiplier = self.hvac.runtime.startup.current_multiplier(),
@@ -1794,11 +1803,10 @@ impl HeatPumpHeaterCore {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             if self.operating_mode == OperatingMode::HeatingER {
-                debug_assert_eq!(
-                    self.hvac.runtime.startup.time_since_start_min, 0.0,
-                    "startup timer must not advance during ER-only operation: \
-                     time_since_start_min={}",
-                    self.hvac.runtime.startup.time_since_start_min
+                assert!(
+                    !self.hvac.runtime.startup.was_on,
+                    "startup ramp: compressor must be off during ER-only operation, \
+                     but was_on=true"
                 );
             }
         }
@@ -2530,6 +2538,9 @@ impl HeatPumpHeaterCore {
                 max_oat_supplemental_c: self.max_oat_supplemental_c,
                 hp_available: self.hp_available,
                 er_was_on: self.er_was_on,
+                startup_c_d: self.hvac.runtime.startup.c_d,
+                startup_time_since_start_min: self.hvac.runtime.startup.time_since_start_min,
+                startup_was_on: self.hvac.runtime.startup.was_on,
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
                 min_on_time_s: self.hvac.thermostat_fsm.min_on_time_s,
@@ -2566,6 +2577,9 @@ impl HeatPumpHeaterCore {
         self.pan_heater_on = decoded.pan_heater_on;
         self.last_er_off_at = decoded.last_er_off_at;
         self.er_was_on = decoded.er_was_on;
+        self.hvac.runtime.startup.c_d = decoded.startup_c_d;
+        self.hvac.runtime.startup.time_since_start_min = decoded.startup_time_since_start_min;
+        self.hvac.runtime.startup.was_on = decoded.startup_was_on;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
@@ -7032,6 +7046,137 @@ mod tests {
                 .thermostat_fsm
                 .can_transition_mode(ThermostatMode::Heating, t300),
             "min_off_time_s=180 must release at 180s after restore"
+        );
+    }
+
+    /// `startup_was_on`, `startup_c_d`, and `startup_time_since_start_min`
+    /// must survive a checkpoint round-trip. The edge-detection flag `was_on`
+    /// gates whether the next on-step fires a fresh startup ramp; losing it
+    /// at checkpoint would spuriously re-trigger the ramp on restore.
+    #[test]
+    fn startup_config_survives_checkpoint_heater() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.hysteresis_c = Some(0.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+        });
+        let environment = env(16.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // Set startup fields directly — the test targets checkpoint
+        // persistence, not the operating-mode path that sets these fields.
+        eq.core.hvac.runtime.startup.c_d = 0.25;
+        eq.core.hvac.runtime.startup.time_since_start_min = 2.5;
+        eq.core.hvac.runtime.startup.was_on = true;
+
+        let saved_c_d = eq.core.hvac.runtime.startup.c_d;
+        let saved_timer = eq.core.hvac.runtime.startup.time_since_start_min;
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert!(
+            !restored.core.hvac.runtime.startup.was_on,
+            "fresh was_on must be false"
+        );
+        assert_eq!(restored.core.hvac.runtime.startup.time_since_start_min, 0.0);
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            restored.core.hvac.runtime.startup.was_on,
+            "was_on must survive checkpoint round-trip"
+        );
+        assert!(
+            (restored.core.hvac.runtime.startup.c_d - saved_c_d).abs() < 1e-12,
+            "c_d must survive checkpoint round-trip"
+        );
+        assert!(
+            (restored.core.hvac.runtime.startup.time_since_start_min - saved_timer).abs() < 1e-12,
+            "time_since_start_min must survive checkpoint round-trip"
+        );
+    }
+
+    /// Companion to the AC-side step-level regression test: `ASHPHeater::step`
+    /// reaches the startup-ramp bookkeeping unconditionally on every timestep
+    /// (compute_step has no operating-mode gate), so a real off-step records
+    /// `was_on = false` and a genuine restart fires a fresh ramp. Locks the
+    /// unconditional-call contract at the `step()` dispatch level — the seam
+    /// where the AC-side bug lived — rather than at `capacity_multiplier`
+    /// level. OCHRE updates the equivalent previous-mode state unconditionally
+    /// every timestep (HVAC.py:616).
+    #[test]
+    fn heater_step_off_step_clears_was_on_and_restart_fires_fresh_ramp() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.hysteresis_c = Some(0.0);
+        });
+        // Cold zone (16 °C < 21 °C heating setpoint) → HP on. OAT 5 °C is
+        // above DEFAULT_HP_LOCKOUT_TEMP_C (-17.78 °C) and above
+        // DEFAULT_ER_LOCKOUT_TEMP_C (4.44 °C), so the mode is pure HeatingHP.
+        let cold = env(16.0, 5.0, 0.003);
+        // Deadband zone (21 °C < 24 °C < 26 °C cooling setpoint) → Off.
+        let warm = env(24.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &cold).unwrap();
+        // Startup ramp is opt-in (DEFAULT_STARTUP_CD = 0.0); enable it the
+        // same way startup_config_survives_checkpoint_heater does.
+        eq.core.hvac.runtime.startup.c_d = 0.25;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        // dt = 60 s → dt_min = 1.0, so a fresh ramp evaluates at t = 0.5 min.
+        let dt = Duration::from_secs(60);
+
+        // On-step: ramp starts.
+        eq.update_control(&cold);
+        eq.step(&cold, dt, &mut ports).unwrap();
+        assert!(
+            eq.core.hvac.runtime.startup.was_on,
+            "was_on must be true after HP on-step"
+        );
+        assert!(
+            (eq.core.hvac.runtime.startup.time_since_start_min - 0.5).abs() < 1e-12,
+            "first on-step must set timer to 0.5·dt = 0.5 min, got {}",
+            eq.core.hvac.runtime.startup.time_since_start_min
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 1,
+            "cold start must count one timer reset"
+        );
+
+        // Off-step: was_on must flip false, timer preserved.
+        eq.update_control(&warm);
+        eq.step(&warm, dt, &mut ports).unwrap();
+        assert!(
+            !eq.core.hvac.runtime.startup.was_on,
+            "off-step must record was_on = false so the next on-step is a \
+             detectable off→on transition"
+        );
+        assert!(
+            (eq.core.hvac.runtime.startup.time_since_start_min - 0.5).abs() < 1e-12,
+            "off-step must preserve the timer, got {}",
+            eq.core.hvac.runtime.startup.time_since_start_min
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 1,
+            "off-step must not count a timer reset"
+        );
+
+        // Restart step: fresh ramp, not continued decay.
+        eq.update_control(&cold);
+        eq.step(&cold, dt, &mut ports).unwrap();
+        let restart_timer = eq.core.hvac.runtime.startup.time_since_start_min;
+        assert!(
+            (restart_timer - 0.5).abs() < 1e-12,
+            "restart must fire a fresh ramp (timer reset, then advanced to \
+             0.5·dt = 0.5 min), not continue the old ramp to 1.5 min; got {restart_timer}"
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 2,
+            "restart must count a second timer reset"
         );
     }
 

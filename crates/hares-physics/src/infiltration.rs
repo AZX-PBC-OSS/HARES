@@ -28,6 +28,9 @@
 //! - EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 
 use crate::units::*;
+// warn! is only emitted from cfg-gated diagnostic blocks; an unconditional
+// import is an unused-import warning in plain release builds.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use tracing::warn;
 
 /// Opening type for natural ventilation — distinguishes single-sided (one opening)

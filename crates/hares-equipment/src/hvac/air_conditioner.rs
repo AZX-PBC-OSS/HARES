@@ -148,6 +148,7 @@ struct AirConditionerState {
     crankcase_heater_on: bool,
     startup_c_d: f64,
     startup_time_since_start_min: f64,
+    startup_was_on: bool,
     plf_state: f64,
     last_speed_index: usize,
     last_speed_frac: f64,
@@ -178,7 +179,8 @@ struct AirConditionerState {
 // Version 2: dropped the redundant `operating_mode_code` field (telemetry mode
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
-const AC_CHECKPOINT_VERSION: u32 = 3;
+// Version 4: added `startup_was_on` for edge-detection persistence across checkpoint restart.
+const AC_CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy)]
 struct PerformanceResult {
@@ -1158,7 +1160,21 @@ impl CoolingCore {
             self.cycle_off_steps += 1;
             self.hvac.runtime.time_at_current_speed_s = 0.0;
             self.hvac.update_prev_zone_temp(None);
-            // apply_startup_capacity_degradation resets the ramp timer when off.
+            // Off-step bookkeeping for the startup-ramp edge detector: record
+            // `was_on = false` so the next Cooling step is a true off→on
+            // transition and fires a fresh ramp reset (the timer itself is
+            // preserved across off-steps; see StartupConfig::capacity_multiplier).
+            // OCHRE's equivalent state (`mode_prev = self.mode`) is updated
+            // unconditionally every timestep in update_results (HVAC.py:616),
+            // which is what makes its `"HP" not in self.mode_prev` reset check
+            // (HVAC.py:978-979) fire on a genuine restart. Skipping this call
+            // on off-steps freezes `was_on` at its last on-step value and a
+            // cold restart never re-triggers the ramp. Mirrors
+            // ASHPHeater::compute_step, which reaches
+            // apply_startup_capacity_degradation unconditionally every timestep.
+            // The returned capacity is unused — the compressor is off.
+            self.hvac
+                .apply_startup_capacity_degradation(0.0, dt_min, false);
         }
 
         // Crankcase heater: draws power when outdoor temp is below threshold AND
@@ -1322,6 +1338,10 @@ impl CoolingCore {
             tk::STARTUP_MULTIPLIER,
             self.hvac.runtime.startup.current_multiplier(),
         );
+        self.telemetry.set(
+            tk::TIME_SINCE_START_MIN,
+            self.hvac.runtime.startup.time_since_start_min,
+        );
         self.telemetry
             .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
         self.telemetry.set(
@@ -1390,6 +1410,10 @@ impl CoolingCore {
             self.telemetry.set(
                 hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
                 self.hvac.take_biquadratic_clamp_count() as f64,
+            );
+            self.telemetry.set(
+                tk::STARTUP_TIMER_RESET_COUNT,
+                self.hvac.runtime.startup.reset_count as f64,
             );
         }
 
@@ -1724,7 +1748,7 @@ impl CoolingCore {
         #[cfg(feature = "observe")]
         {
             self.telemetry.set(
-                "latent_degradation_active",
+                tk::LATENT_DEGRADATION_ACTIVE,
                 if self.latent_degradation.is_active() {
                     1.0
                 } else {
@@ -1732,7 +1756,7 @@ impl CoolingCore {
                 },
             );
             self.telemetry
-                .set("shr_before_degradation", steady_state_shr);
+                .set(tk::SHR_BEFORE_DEGRADATION, steady_state_shr);
         }
 
         self.hvac.config.shr = shr;
@@ -1788,6 +1812,7 @@ impl CoolingCore {
                 crankcase_heater_on: self.crankcase_heater_on,
                 startup_c_d: self.hvac.runtime.startup.c_d,
                 startup_time_since_start_min: self.hvac.runtime.startup.time_since_start_min,
+                startup_was_on: self.hvac.runtime.startup.was_on,
                 plf_state: self.hvac.runtime.plf_state,
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
@@ -1838,6 +1863,7 @@ impl CoolingCore {
         self.crankcase_heater_on = decoded.crankcase_heater_on;
         self.hvac.runtime.startup.c_d = decoded.startup_c_d;
         self.hvac.runtime.startup.time_since_start_min = decoded.startup_time_since_start_min;
+        self.hvac.runtime.startup.was_on = decoded.startup_was_on;
         self.hvac.runtime.plf_state = decoded.plf_state;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
@@ -3855,6 +3881,179 @@ mod tests {
                 .thermostat_fsm
                 .can_transition_mode(ThermostatMode::Deadband, t120),
             "min_on_time_s=120 must release at 120s after restore"
+        );
+    }
+
+    /// `startup_was_on`, `startup_c_d`, and `startup_time_since_start_min`
+    /// must survive a checkpoint round-trip. The edge-detection flag `was_on`
+    /// gates whether the next on-step fires a fresh startup ramp; losing it
+    /// at checkpoint would spuriously re-trigger the ramp on restore.
+    #[test]
+    fn startup_config_survives_checkpoint_ac() {
+        let cfg = ac_config_with(|typed| {
+            typed.hysteresis_c = Some(0.0);
+            typed.startup_cd = Some(0.25);
+        });
+        let environment = env(28.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.core.hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpCooling;
+        eq.init(&cfg, &environment).unwrap();
+
+        assert!(
+            !eq.core.hvac.runtime.startup.was_on,
+            "fresh was_on must be false"
+        );
+        assert_eq!(eq.core.hvac.runtime.startup.time_since_start_min, 0.0);
+        assert!((eq.core.hvac.runtime.startup.c_d - 0.25).abs() < 1e-12);
+
+        // Step with hot zone (28°C vs 24°C cooling setpoint): compressor
+        // comes on, startup ramp begins.
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        assert!(
+            eq.core.hvac.runtime.startup.was_on,
+            "was_on must be true after compressor step"
+        );
+        let saved_timer = eq.core.hvac.runtime.startup.time_since_start_min;
+        assert!(
+            saved_timer > 0.0,
+            "time_since_start_min must be positive after on-step"
+        );
+
+        let saved_c_d = eq.core.hvac.runtime.startup.c_d;
+
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert!(
+            !restored.core.hvac.runtime.startup.was_on,
+            "fresh was_on must be false"
+        );
+        assert_eq!(restored.core.hvac.runtime.startup.time_since_start_min, 0.0);
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            restored.core.hvac.runtime.startup.was_on,
+            "was_on must survive checkpoint round-trip"
+        );
+        assert!(
+            (restored.core.hvac.runtime.startup.c_d - saved_c_d).abs() < 1e-12,
+            "c_d must survive checkpoint round-trip"
+        );
+        assert!(
+            (restored.core.hvac.runtime.startup.time_since_start_min - saved_timer).abs() < 1e-12,
+            "time_since_start_min must survive checkpoint round-trip"
+        );
+    }
+
+    /// Regression for the step-level edge-detection wiring: `CoolingCore::step`
+    /// must run the startup-ramp bookkeeping on every timestep, including
+    /// off-steps. Drives a real `AirConditioner` through `step()` across
+    /// on → off → on operating-mode transitions (not `capacity_multiplier`
+    /// directly). Before the fix, the off-branch of `step()` never called
+    /// `apply_startup_capacity_degradation`, so `was_on` stayed frozen at
+    /// `true` for the whole off period and the restart step continued the old
+    /// decayed ramp (timer 0.5 → 1.5 min) instead of firing a fresh one
+    /// (timer reset → 0.5 min). OCHRE updates the equivalent previous-mode
+    /// state unconditionally every timestep (HVAC.py:616).
+    #[test]
+    fn ac_step_off_step_clears_was_on_and_restart_fires_fresh_ramp() {
+        let cfg = ac_config_with(|typed| {
+            typed.hysteresis_c = Some(0.0);
+            typed.startup_cd = Some(0.25);
+        });
+        // Hot zone (28 °C > 24 °C cooling setpoint) → compressor on.
+        let hot = env(28.0, 0.010, 19.0, 35.0);
+        // Cool zone (19 °C < 24 °C cooling setpoint) → compressor off.
+        let cool = env(19.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.core.hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpCooling;
+        eq.init(&cfg, &hot).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        // dt = 60 s → dt_min = 1.0, so a fresh ramp evaluates at t = 0.5 min.
+        let dt = Duration::from_secs(60);
+
+        // On-step: ramp starts.
+        eq.update_control(&hot);
+        eq.step(&hot, dt, &mut ports).unwrap();
+        assert!(
+            eq.core.hvac.runtime.startup.was_on,
+            "was_on must be true after on-step"
+        );
+        assert!(
+            (eq.core.hvac.runtime.startup.time_since_start_min - 0.5).abs() < 1e-12,
+            "first on-step must set timer to 0.5·dt = 0.5 min, got {}",
+            eq.core.hvac.runtime.startup.time_since_start_min
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 1,
+            "cold start must count one timer reset"
+        );
+
+        // Off-step: step() must record was_on = false while preserving the timer.
+        eq.update_control(&cool);
+        eq.step(&cool, dt, &mut ports).unwrap();
+        assert!(
+            !eq.core.hvac.runtime.startup.was_on,
+            "off-step must record was_on = false so the next on-step is a \
+             detectable off→on transition"
+        );
+        assert!(
+            (eq.core.hvac.runtime.startup.time_since_start_min - 0.5).abs() < 1e-12,
+            "off-step must preserve the timer, got {}",
+            eq.core.hvac.runtime.startup.time_since_start_min
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 1,
+            "off-step must not count a timer reset"
+        );
+
+        // Restart step: true off→on transition → fresh ramp, not continued decay.
+        eq.update_control(&hot);
+        eq.step(&hot, dt, &mut ports).unwrap();
+        let restart_timer = eq.core.hvac.runtime.startup.time_since_start_min;
+        assert!(
+            (restart_timer - 0.5).abs() < 1e-12,
+            "restart must fire a fresh ramp (timer reset, then advanced to \
+             0.5·dt = 0.5 min), not continue the old ramp to 1.5 min; got {restart_timer}"
+        );
+        assert!(
+            eq.core.hvac.runtime.startup.was_on,
+            "was_on must be true after restart step"
+        );
+        assert_eq!(
+            eq.core.hvac.runtime.startup.reset_count, 2,
+            "restart must count a second timer reset"
+        );
+
+        // The reported multiplier must be the fresh cold-start Winkler (2011)
+        // value at t = 0.5 min (t_full = 20·0.25 + 0.4 = 5.4 min), not the
+        // further-decayed continued-ramp value at t = 1.5 min.
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let fresh = (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        let reported = eq.telemetry().get(tk::STARTUP_MULTIPLIER).unwrap();
+        assert!(
+            (reported - fresh).abs() < 1e-9,
+            "restart STARTUP_MULTIPLIER must equal fresh cold-start value \
+             {fresh}, got {reported}"
+        );
+        let reported_timer = eq.telemetry().get(tk::TIME_SINCE_START_MIN).unwrap();
+        assert!(
+            (reported_timer - 0.5).abs() < 1e-12,
+            "TIME_SINCE_START_MIN telemetry must report the fresh timer, got {reported_timer}"
         );
     }
 

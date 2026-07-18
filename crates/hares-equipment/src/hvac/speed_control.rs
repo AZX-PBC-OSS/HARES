@@ -43,9 +43,23 @@ pub struct StartupConfig {
     /// Winkler (2011) startup capacity degradation coefficient (Cd). 0.0 disables the ramp entirely.
     pub c_d: f64,
     /// Accumulated time [minutes] since the compressor last started.
-    /// Reset to `0.5 * dt_min` on the first on-step; incremented by `dt_min`
-    /// on subsequent on-steps. Zeroed on any off-step.
+    /// Reset to `0.0` on the first on-step after an off-step; set to
+    /// `0.5 * dt_min` immediately after the reset, then incremented by
+    /// `dt_min` on subsequent on-steps. Preserved across off-steps.
     pub time_since_start_min: f64,
+    /// Whether the compressor was running on the previous call. Used for
+    /// edge-detection: the timer only resets on a true off→on transition,
+    /// matching OCHRE's mode-transition-based reset (HVAC.py:978–979).
+    pub was_on: bool,
+    /// Cumulative count of startup-timer resets (true off→on transitions)
+    /// since init. Diagnostic counter surfaced as the
+    /// `STARTUP_TIMER_RESET_COUNT` telemetry column: under edge detection it
+    /// increments exactly once per compressor restart, so differencing
+    /// consecutive diagnostic-CSV rows yields the resets-per-hour rate.
+    /// Like the biquadratic clamp counter, it is diagnostic-only and is not
+    /// persisted across checkpoint restore (restarts from 0).
+    #[serde(default)]
+    pub reset_count: u64,
 }
 
 impl Default for StartupConfig {
@@ -53,6 +67,8 @@ impl Default for StartupConfig {
         Self {
             c_d: 0.0,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         }
     }
 }
@@ -75,10 +91,54 @@ impl StartupConfig {
     /// `dt_min`  -- timestep duration in minutes.
     ///
     /// Returns a value in `[0.0, 1.0]`.
+    ///
+    /// Edge detection (off→on transition) guards the timer reset, matching
+    /// OCHRE's mode-transition-based pattern (HVAC.py:978–979). The timer is
+    /// preserved across off-steps so repeated on/off cycling from PLR < 1.0
+    /// duty-cycle modulation cannot trigger multiple ramp resets per cycle.
+    ///
+    /// Call contract: must be invoked exactly once per simulation timestep,
+    /// including steps where the compressor is off. OCHRE's equivalent
+    /// previous-mode state is updated unconditionally every timestep
+    /// (`mode_prev = self.mode`, HVAC.py:616); the edge detector only works
+    /// if `was_on` receives the same unconditional per-step bookkeeping.
+    /// A caller that skips off-steps freezes `was_on` at `true` and the
+    /// reset never fires on a genuine cold restart.
+    ///
+    /// Relationship to EnergyPlus: E+ DX coils fold compressor startup
+    /// thermal lag into the PLF curve as an energy penalty (AHRI 210/240 Cd;
+    /// DXCoils.cc "Part load factor, accounts for thermal lag at compressor
+    /// startup") and time-resolve only the *latent* startup transient
+    /// (Henderson-Rengarajan, DXCoils.cc `Tcl`). The time-resolved *sensible*
+    /// ramp modelled here is the OCHRE/Winkler (2011) residential extension;
+    /// HARES keeps the PLF cycling penalty separate in
+    /// `HvacRuntimeState::plf_cooling_degradation_coeff`.
     pub fn capacity_multiplier(&mut self, on_now: bool, dt_min: f64) -> f64 {
+        let transitioning_on = !self.was_on && on_now;
+        self.was_on = on_now;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let prev_time = self.time_since_start_min;
+
         if !on_now {
-            self.time_since_start_min = 0.0;
+            #[cfg(feature = "observe")]
+            tracing::debug!(
+                time_since_start_min = self.time_since_start_min,
+                "startup ramp: compressor off, timer preserved"
+            );
             return 1.0;
+        }
+
+        // Off→on transition: reset timer to model cold-start transient.
+        // Consecutive on-steps accumulate without reset.
+        if transitioning_on {
+            self.time_since_start_min = 0.0;
+            self.reset_count += 1;
+            #[cfg(feature = "observe")]
+            tracing::debug!(
+                reset_count = self.reset_count,
+                "startup ramp: off→on transition detected, timer reset"
+            );
         }
 
         // c_d == 0 ⇒ variable-speed or no startup ramp configured.
@@ -93,6 +153,18 @@ impl StartupConfig {
             self.time_since_start_min = 0.5 * dt_min;
         } else {
             self.time_since_start_min += dt_min;
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.time_since_start_min < prev_time {
+                assert!(
+                    transitioning_on,
+                    "time_since_start_min decreased from {prev_time} to {} \
+                     without an off→on transition",
+                    self.time_since_start_min
+                );
+            }
         }
 
         if self.time_since_start_min >= t_full {
@@ -230,6 +302,8 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d: 0.0,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         // First on-step.
         assert_eq!(cfg.capacity_multiplier(true, 1.0), 1.0);
@@ -238,14 +312,21 @@ mod tests {
     }
 
     #[test]
-    fn off_step_resets_timer_and_returns_one() {
+    fn off_step_preserves_timer_and_returns_one() {
         let mut cfg = StartupConfig {
             c_d: 0.25,
             time_since_start_min: 5.0,
+            was_on: true,
+            reset_count: 0,
         };
         let mult = cfg.capacity_multiplier(false, 1.0);
         assert_eq!(mult, 1.0);
-        assert_eq!(cfg.time_since_start_min, 0.0);
+        assert!(!cfg.was_on, "was_on must be false after off-step");
+        assert!(
+            (cfg.time_since_start_min - 5.0).abs() < 1e-12,
+            "timer must be preserved across off-step, got {}",
+            cfg.time_since_start_min
+        );
     }
 
     #[test]
@@ -253,6 +334,8 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d: 0.25,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         let mult = cfg.capacity_multiplier(true, 2.0);
         // time should be set to 0.5 * 2.0 = 1.0 minute
@@ -268,6 +351,8 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d: 0.25,
             time_since_start_min: 5.4,
+            was_on: true,
+            reset_count: 0,
         };
         // Advance one step with dt=1 min (time_since_start_min was already 5.4,
         // so after += dt_min it becomes 6.4 >= t_full).
@@ -280,16 +365,22 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d: 0.25,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         // Run past t_full.
         for _ in 0..10 {
             cfg.capacity_multiplier(true, 1.0);
         }
         assert_eq!(cfg.capacity_multiplier(true, 1.0), 1.0);
-        // Turn off.
+        // Turn off: timer is preserved across off-steps (edge detection).
         cfg.capacity_multiplier(false, 1.0);
-        assert_eq!(cfg.time_since_start_min, 0.0);
-        // First step after restart should degrade.
+        assert!(
+            cfg.time_since_start_min > 0.0,
+            "timer must be preserved across off-step, got {}",
+            cfg.time_since_start_min
+        );
+        // First step after restart should degrade (off→on transition resets timer).
         let restart_mult = cfg.capacity_multiplier(true, 2.0);
         assert!(
             restart_mult < 1.0,
@@ -308,11 +399,120 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         let mult = cfg.capacity_multiplier(true, 1.0); // dt=1 min → time=0.5 min
         assert!(
             (mult - expected).abs() < 1e-9,
             "expected {expected}, got {mult}"
+        );
+    }
+
+    /// Edge detection: alternating on/off steps. The first on-step produces
+    /// a ramp (cold start). The first off-step returns 1.0 and records off
+    /// state without resetting the timer. The second on-step produces a fresh
+    /// ramp (off→on transition reset), but back-to-back on-steps do NOT reset.
+    #[test]
+    fn edge_detection_alternating_on_off_and_consecutive_on_no_reset() {
+        // c_d=0.25 → t_full = 5.4 min
+        let mut cfg = StartupConfig {
+            c_d: 0.25,
+            time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
+        };
+
+        // Step 1: first on-step — ramp starts (transition detected).
+        let m1 = cfg.capacity_multiplier(true, 1.0);
+        assert!(m1 < 1.0, "first on-step must ramp: {m1}");
+        assert!(
+            (cfg.time_since_start_min - 0.5).abs() < 1e-12,
+            "first on-step: timer must be 0.5 min, got {}",
+            cfg.time_since_start_min
+        );
+        assert!(cfg.was_on, "was_on must be true after first on-step");
+
+        // Step 2: off-step — returns 1.0, timer preserved, was_on → false.
+        let m2 = cfg.capacity_multiplier(false, 1.0);
+        assert!((m2 - 1.0).abs() < 1e-12, "off-step must return 1.0: {m2}");
+        assert!(
+            (cfg.time_since_start_min - 0.5).abs() < 1e-12,
+            "off-step: timer must be preserved at 0.5 min, got {}",
+            cfg.time_since_start_min
+        );
+        assert!(!cfg.was_on, "was_on must be false after off-step");
+
+        // Step 3: second on-step — off→on transition resets timer,
+        // fresh ramp starts.
+        let m3 = cfg.capacity_multiplier(true, 1.0);
+        assert!(m3 < 1.0, "second on-step must ramp (edge transition): {m3}");
+        assert!(
+            (cfg.time_since_start_min - 0.5).abs() < 1e-12,
+            "second on-step: timer must be 0.5 min after reset+advance, got {}",
+            cfg.time_since_start_min
+        );
+        assert!(cfg.was_on, "was_on must be true after second on-step");
+
+        // Step 4: consecutive on-step — NO reset, timer advances.
+        let prev_timer = cfg.time_since_start_min;
+        let m4 = cfg.capacity_multiplier(true, 1.0);
+        assert!(m4 < 1.0, "consecutive on-step must still be in ramp: {m4}");
+        assert!(
+            (cfg.time_since_start_min - (prev_timer + 1.0)).abs() < 1e-12,
+            "consecutive on-step: timer must advance from {prev_timer} to {:.1}, got {}",
+            prev_timer + 1.0,
+            cfg.time_since_start_min
+        );
+        assert!(cfg.was_on, "was_on must stay true on consecutive on-step");
+
+        // Step 5: another off-step confirms timer preserved.
+        let timer_before_off = cfg.time_since_start_min;
+        let m5 = cfg.capacity_multiplier(false, 1.0);
+        assert!((m5 - 1.0).abs() < 1e-12);
+        assert!(
+            (cfg.time_since_start_min - timer_before_off).abs() < 1e-12,
+            "off-step must preserve timer at {}, got {}",
+            timer_before_off,
+            cfg.time_since_start_min
+        );
+        assert!(!cfg.was_on);
+    }
+
+    /// `reset_count` (the `STARTUP_TIMER_RESET_COUNT` diagnostic source)
+    /// increments exactly once per true off→on transition: cold start and
+    /// restart each count one; consecutive on-steps and off-steps do not.
+    /// The count reflects timer resets, so it advances even when `c_d == 0`
+    /// (ramp disabled) — the off→on timer reset still occurs.
+    #[test]
+    fn reset_count_increments_only_on_off_to_on_transitions() {
+        let mut cfg = StartupConfig {
+            c_d: 0.25,
+            time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
+        };
+
+        cfg.capacity_multiplier(true, 1.0); // cold start: off→on
+        assert_eq!(cfg.reset_count, 1, "cold start must count one reset");
+        cfg.capacity_multiplier(true, 1.0); // consecutive on: no transition
+        assert_eq!(cfg.reset_count, 1, "consecutive on-step must not count");
+        cfg.capacity_multiplier(false, 1.0); // off: no transition
+        assert_eq!(cfg.reset_count, 1, "off-step must not count");
+        cfg.capacity_multiplier(false, 1.0); // still off: no transition
+        assert_eq!(cfg.reset_count, 1, "sustained off must not count");
+        cfg.capacity_multiplier(true, 1.0); // restart: off→on
+        assert_eq!(cfg.reset_count, 2, "restart must count a second reset");
+
+        // c_d == 0 disables the ramp multiplier but the off→on timer reset
+        // still fires, so the diagnostic count still advances.
+        let mut disabled = StartupConfig::default();
+        disabled.capacity_multiplier(true, 1.0);
+        disabled.capacity_multiplier(false, 1.0);
+        disabled.capacity_multiplier(true, 1.0);
+        assert_eq!(
+            disabled.reset_count, 2,
+            "c_d=0 must still count off→on timer resets"
         );
     }
 
@@ -569,6 +769,8 @@ mod tests {
         let mut cfg = StartupConfig {
             c_d: 0.25,
             time_since_start_min: 0.0,
+            was_on: false,
+            reset_count: 0,
         };
         let mult = cfg.capacity_multiplier(true, 1.0);
         assert!(

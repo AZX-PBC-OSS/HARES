@@ -942,7 +942,7 @@ mod tests {
             "past t_full the multiplier must be 1.0, got {mult_at_full}"
         );
 
-        // Off cycle resets the timer.
+        // Off cycle: timer is preserved (edge detection — no per-step reset).
         hvac.runtime.duty_cycle = 0.0;
         let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
 
@@ -1139,6 +1139,112 @@ mod tests {
             "after 30 min HP, timer {} must be >= t_full={}",
             hvac.runtime.startup.time_since_start_min,
             t_full
+        );
+    }
+
+    /// Two sequential timesteps demonstrating that edge detection correctly
+    /// preserves the startup ramp timer across an off-step and fires a fresh
+    /// ramp on the next off→on transition.
+    ///
+    /// Scenario:
+    ///   1. Cold-start on-step (5 min): ramp degrades capacity. Capacity at
+    ///      t = 0.5·dt = 2.5 min follows the Winkler (2011) exponential ramp:
+    ///      multiplier = −1.025·exp(−3.79936·t/t_full) + 1.025, where
+    ///      t_full = 20·c_d + 0.4 = 5.4 min for c_d = 0.25.
+    ///   2. Off-step (5 min): timer preserved, multiplier returns 1.0.
+    ///   3. Subsequent on-step: off→on transition resets timer, fresh ramp begins.
+    ///   4. Continuous on-steps after ramp start converge to multiplier 1.0.
+    ///
+    /// This test exercises the edge-detection path end-to-end — timer
+    /// preservation, `was_on` state tracking, transition reset, and ramp
+    /// convergence — without relying on a PLR-cycling sub-timestep model
+    /// that does not exist in this crate.
+    #[test]
+    fn startup_edge_detection_preserves_timer_across_off_fires_fresh_ramp_on_next_on() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+        hvac.runtime.startup.was_on = false;
+
+        // First timestep (5 min): cold start, compressor on. Ramp degrades
+        // capacity; timer advances to 0.5·dt = 2.5 min (OCHRE convention
+        // sets timer to mid-step on the first on-step after a transition).
+        let w_on = hvac.apply_startup_capacity_degradation(steady_w, 5.0, true);
+        assert!(
+            w_on < steady_w,
+            "cold-start capacity must show ramp: {w_on} W"
+        );
+        // Numeric assertion — Winkler formula at t = 2.5 min, t_full = 5.4.
+        let expected_multiplier = {
+            let ratio = -3.799_36_f64 * 2.5 / t_full;
+            (-1.025_f64 * ratio.exp() + 1.025).clamp(0.0, 1.0)
+        };
+        assert!(
+            (w_on - expected_multiplier * steady_w).abs() < 1e-9 * steady_w,
+            "w_on must match Winkler multiplier at t=2.5: expected {} W, got {w_on} W",
+            expected_multiplier * steady_w
+        );
+        let timer_after_on = hvac.runtime.startup.time_since_start_min;
+
+        // Second timestep (5 min): compressor off. Timer must be preserved,
+        // multiplier must be 1.0, and was_on must flip to false.
+        let w_off = hvac.apply_startup_capacity_degradation(steady_w, 5.0, false);
+        assert!(
+            (w_off - steady_w).abs() < 1e-9,
+            "off-step must return steady capacity (multiplier 1.0): {w_off} W"
+        );
+        assert!(
+            (hvac.runtime.startup.time_since_start_min - timer_after_on).abs() < 1e-12,
+            "off-step: timer must be preserved at {}, got {}",
+            timer_after_on,
+            hvac.runtime.startup.time_since_start_min
+        );
+        assert!(
+            !hvac.runtime.startup.was_on,
+            "was_on must be false after off-step"
+        );
+
+        // With c_d=0.25, dt=5.0 min: first on-step sets timer to 0.5·5.0 = 2.5 min.
+        // Since only one step, timer = 2.5 < t_full = 5.4, so ramp was active.
+        let expected_first_step_timer = 0.5 * 5.0;
+        assert!(
+            (timer_after_on - expected_first_step_timer).abs() < 1e-12,
+            "on-step timer must be {}, got {}",
+            expected_first_step_timer,
+            timer_after_on
+        );
+
+        // Third timestep: off→on transition correctly resets timer,
+        // fresh ramp begins for the next on-cycle.
+        hvac.runtime.duty_cycle = 1.0;
+        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            w_restart < steady_w,
+            "off→on transition must trigger fresh ramp: {w_restart} W"
+        );
+        // Timer was reset on transition and then set to 0.5·1.0 = 0.5 min.
+        assert!(
+            hvac.runtime.startup.time_since_start_min < timer_after_on,
+            "off→on transition must reset timer: {} >= {}",
+            hvac.runtime.startup.time_since_start_min,
+            timer_after_on
+        );
+        assert!(hvac.runtime.startup.was_on);
+
+        // Ramp converges within t_full on the next cycle.
+        for _ in 0..((t_full as usize) + 2) {
+            hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+        let converged_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            (converged_w - steady_w).abs() < 1e-9,
+            "ramp must converge to 1.0 within t_full+2 on the restart cycle: \
+             expected {steady_w} W, got {converged_w} W"
         );
     }
 
