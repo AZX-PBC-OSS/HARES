@@ -722,6 +722,12 @@ pub const VENT_SUPPLY_FAN_POWER_W: &str = "vent_supply_fan_power_w";
 /// scope: internal
 pub const VENT_EXHAUST_FAN_POWER_W: &str = "vent_exhaust_fan_power_w";
 
+/// Continuous defrost fraction [0–1] for HRV/ERV recovery derating
+/// at low outdoor temperatures.
+///
+/// scope: internal
+pub const VENT_DEFROST_FRACTION: &str = "vent_defrost_fraction";
+
 // ── Dehumidifier ────────────────────────────────────────────────────────────
 
 /// scope: internal
@@ -1248,6 +1254,7 @@ mod tests {
             LATENT_RECOVERY_W,
             VENT_SUPPLY_FAN_POWER_W,
             VENT_EXHAUST_FAN_POWER_W,
+            VENT_DEFROST_FRACTION,
             // Dehumidifier
             WATER_REMOVAL_L_DAY,
             LATENT_REMOVAL_W,
@@ -1506,6 +1513,7 @@ mod tests {
             LATENT_RECOVERY_W,
             VENT_SUPPLY_FAN_POWER_W,
             VENT_EXHAUST_FAN_POWER_W,
+            VENT_DEFROST_FRACTION,
             // Dehumidifier
             WATER_REMOVAL_L_DAY,
             LATENT_REMOVAL_W,

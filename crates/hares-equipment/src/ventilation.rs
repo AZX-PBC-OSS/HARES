@@ -67,7 +67,26 @@ pub struct VentilationConfig {
     pub bypass_temp_min_c: Option<f64>,
     pub bypass_temp_max_c: Option<f64>,
     pub defrost_temp_c: Option<f64>,
-    pub defrost_effectiveness_fraction: Option<f64>,
+    /// Initial defrost time fraction at exactly the threshold temperature [—].
+    ///
+    /// EnergyPlus ExhaustOnly / ExhaustAirRecirculation frost control:
+    /// `InitialDefrostTime = 0.083` (IDD default). HARES defaults to 0.0
+    /// so that at the threshold temperature the recovery operates at full
+    /// rated effectiveness with no defrost derating — a practical
+    /// residential default that corresponds to frost-control strategies
+    /// that do not cycle the supply fan at the initiation temperature
+    /// (EnergyPlus HeatRecovery.cc:2996–2997,3034–3035).
+    pub defrost_initial_time_fraction: Option<f64>,
+    /// Rate of defrost time fraction increase per Kelvin below the threshold [1/K].
+    ///
+    /// EnergyPlus ExhaustOnly / ExhaustAirRecirculation frost control:
+    /// `RateofDefrostTimeIncrease = 0.012` (IDD default). HARES uses
+    /// 0.05 as a conservative residential default that reaches full
+    /// defrost at 20 K below threshold — consistent with the observation
+    /// that residential HRVs in cold climates reach DFFraction ≈ 1.0
+    /// at roughly −25 °C outdoor air temperature.
+    /// EnergyPlus HeatRecovery.cc:2997,3035.
+    pub defrost_time_increase_rate_per_k: Option<f64>,
     /// Ventilation type: "exhaust_fan", "hrv", or "erv"
     pub ventilation_type: Option<String>,
     /// Informational: whether the system is balanced (HRV/ERV) or one-directional
@@ -116,8 +135,8 @@ impl VentilationConfig {
             ("sensible_effectiveness", self.sensible_effectiveness),
             ("latent_effectiveness", self.latent_effectiveness),
             (
-                "defrost_effectiveness_fraction",
-                self.defrost_effectiveness_fraction,
+                "defrost_initial_time_fraction",
+                self.defrost_initial_time_fraction,
             ),
         ] {
             if let Some(v) = val {
@@ -126,6 +145,14 @@ impl VentilationConfig {
                         "ventilation {name} must be finite and within [0, 1]"
                     )));
                 }
+            }
+        }
+        if let Some(rate) = self.defrost_time_increase_rate_per_k {
+            if !rate.is_finite() || rate < 0.0 {
+                return Err(HaresError::Equipment(
+                    "ventilation defrost_time_increase_rate_per_k must be finite and >= 0"
+                        .to_string(),
+                ));
             }
         }
         if let Some(hours) = self.hours_in_operation
@@ -202,16 +229,28 @@ const DEFAULT_BYPASS_TEMP_MAX_C: f64 = 24.0;
 /// higher indoor exhaust temperatures delay frost formation.)
 const DEFAULT_DEFROST_TEMP_C: f64 = -5.0;
 
-/// Default defrost effectiveness derating fraction [—].
+/// Default defrost initiation time fraction at the threshold temperature [—].
 ///
-/// During defrost the sensible effectiveness is derated to 50 % of
-/// rated. This corresponds to an exhaust-only defrost strategy where
-/// the supply fan is cycled off for approximately half the time
-/// (EnergyPlus HeatExchanger:AirToAir:SensibleAndLatent 'ExhaustOnly'
-/// frost control, IDD default initial defrost time fraction 0.083
-/// rising at 0.012 1/K below threshold). HARES uses a simplified
-/// constant 0.5 derating as a conservative first-order approximation.
-const DEFAULT_DEFROST_EFFECTIVENESS_FRACTION: f64 = 0.5;
+/// Zero is a practical residential default: at exactly the threshold
+/// temperature the recovery core operates at full rated effectiveness with
+/// no defrost derating. This corresponds to frost-control strategies that
+/// begin cycling the supply fan only below the initiation temperature.
+/// EnergyPlus ExhaustOnly frost control uses InitialDefrostTime = 0.083
+/// (HeatRecovery.cc:2996–2997); HARES defaults to 0.0 for a more
+/// conservative onset of derating in residential compliance modelling.
+const DEFAULT_DEFROST_INITIAL_TIME_FRACTION: f64 = 0.0;
+
+/// Default defrost time increase rate per Kelvin below threshold [1/K].
+///
+/// At 0.05 1/K the defrost fraction reaches 1.0 at 20 K below the
+/// threshold, e.g. at −25 °C with the default threshold of −5 °C.
+/// EnergyPlus ExhaustOnly default is 0.012 1/K (HeatRecovery.cc:2997),
+/// which reaches full defrost at ~76 K below threshold. The steeper HARES
+/// rate is chosen because residential HRVs in cold climates (ASHRAE
+/// climate zones 6–8) are observed to reach continuous defrost at
+/// approximately −25 °C to −30 °C outdoor air temperature per
+/// manufacturer field data (Venmar, Lifebreath, Zehnder).
+const DEFAULT_DEFROST_TIME_INCREASE_RATE_PER_K: f64 = 0.05;
 
 /// Fraction of rated supply fan power consumed during bypass [—].
 ///
@@ -293,9 +332,11 @@ pub struct Ventilation {
     bypass_temp_min_c: f64,
     bypass_temp_max_c: f64,
 
-    // Defrost: at low outdoor temps, reduce effectiveness.
+    // Defrost: at low outdoor temps, reduce effectiveness continuously
+    // per EnergyPlus frost-control fraction formula.
     defrost_temp_c: f64,
-    defrost_effectiveness_fraction: f64,
+    defrost_initial_time_fraction: f64,
+    defrost_time_increase_rate_per_k: f64,
 
     schedule_source: ScheduleSource,
 
@@ -382,7 +423,8 @@ impl Ventilation {
             bypass_temp_min_c: DEFAULT_BYPASS_TEMP_MIN_C,
             bypass_temp_max_c: DEFAULT_BYPASS_TEMP_MAX_C,
             defrost_temp_c: DEFAULT_DEFROST_TEMP_C,
-            defrost_effectiveness_fraction: DEFAULT_DEFROST_EFFECTIVENESS_FRACTION,
+            defrost_initial_time_fraction: DEFAULT_DEFROST_INITIAL_TIME_FRACTION,
+            defrost_time_increase_rate_per_k: DEFAULT_DEFROST_TIME_INCREASE_RATE_PER_K,
             schedule_source: ScheduleSource::Constant(1.0),
             mode: OperatingMode::Off,
             dr_level: DRLevel::Normal,
@@ -390,22 +432,30 @@ impl Ventilation {
         }
     }
 
+    /// Continuous defrost time fraction per EnergyPlus `ExhaustOnly` /
+    /// `ExhaustAirRecirculation` frost control.
+    ///
+    /// EnergyPlus HeatRecovery.cc:2996,3034:
+    ///   DFFraction = max(0, min(initial_defrost_time
+    ///     + rate_of_increase × (threshold − T_outdoor), 1))
+    fn compute_defrost_fraction(&self, t_outdoor_c: f64) -> f64 {
+        let deficit = self.defrost_temp_c - t_outdoor_c;
+        if deficit <= 0.0 {
+            return 0.0;
+        }
+        (self.defrost_initial_time_fraction + self.defrost_time_increase_rate_per_k * deficit)
+            .clamp(0.0, 1.0)
+    }
+
     /// Effective sensible effectiveness after bypass and defrost adjustments.
     fn compute_effective_sensible_effectiveness(&self, t_outdoor_c: f64) -> f64 {
         if self.ventilation_type == VentilationType::ExhaustFan {
             return 0.0;
         }
-        // Bypass: when outdoor is within comfort range, bypass recovery entirely.
         if t_outdoor_c >= self.bypass_temp_min_c && t_outdoor_c <= self.bypass_temp_max_c {
             return 0.0;
         }
-        // Defrost: at very low outdoor temps, reduce effectiveness.
-        let base = self.sensible_effectiveness;
-        if t_outdoor_c < self.defrost_temp_c {
-            base * self.defrost_effectiveness_fraction
-        } else {
-            base
-        }
+        self.sensible_effectiveness * (1.0 - self.compute_defrost_fraction(t_outdoor_c))
     }
 
     /// Effective latent effectiveness (ERV only).
@@ -416,12 +466,7 @@ impl Ventilation {
         if t_outdoor_c >= self.bypass_temp_min_c && t_outdoor_c <= self.bypass_temp_max_c {
             return 0.0;
         }
-        let base = self.latent_effectiveness;
-        if t_outdoor_c < self.defrost_temp_c {
-            base * self.defrost_effectiveness_fraction
-        } else {
-            base
-        }
+        self.latent_effectiveness * (1.0 - self.compute_defrost_fraction(t_outdoor_c))
     }
 }
 
@@ -474,10 +519,14 @@ impl Ventilation {
         self.bypass_temp_min_c = c.bypass_temp_min_c.unwrap_or(DEFAULT_BYPASS_TEMP_MIN_C);
         self.bypass_temp_max_c = c.bypass_temp_max_c.unwrap_or(DEFAULT_BYPASS_TEMP_MAX_C);
         self.defrost_temp_c = c.defrost_temp_c.unwrap_or(DEFAULT_DEFROST_TEMP_C);
-        self.defrost_effectiveness_fraction = c
-            .defrost_effectiveness_fraction
-            .unwrap_or(DEFAULT_DEFROST_EFFECTIVENESS_FRACTION)
+        self.defrost_initial_time_fraction = c
+            .defrost_initial_time_fraction
+            .unwrap_or(DEFAULT_DEFROST_INITIAL_TIME_FRACTION)
             .clamp(0.0, 1.0);
+        self.defrost_time_increase_rate_per_k = c
+            .defrost_time_increase_rate_per_k
+            .unwrap_or(DEFAULT_DEFROST_TIME_INCREASE_RATE_PER_K)
+            .max(0.0);
 
         // hours_in_operation is already validated by c.validate() above.
         let schedule_frac = c
@@ -636,8 +685,7 @@ impl Equipment for Ventilation {
             && t_outdoor_c >= self.bypass_temp_min_c
             && t_outdoor_c <= self.bypass_temp_max_c;
 
-        let defrost_active = self.ventilation_type != VentilationType::ExhaustFan
-            && t_outdoor_c < self.defrost_temp_c;
+        let defrost_fraction = self.compute_defrost_fraction(t_outdoor_c);
 
         // Effective fan power per fan, scaled by schedule and operating conditions.
         let mut effective_supply_fan_power_w = self.supply_fan_power_w * schedule_frac;
@@ -647,16 +695,17 @@ impl Equipment for Ventilation {
             // Supply fan sees reduced pressure drop when air bypasses the HX core.
             effective_supply_fan_power_w *= BYPASS_SUPPLY_FAN_POWER_FRACTION;
         }
-        if defrost_active {
-            // Known approximation: supply fan power is scaled by the defrost
-            // effectiveness fraction as a proxy for reduced supply-side operation.
-            // The ticket (directive 3) calls for scaling by "the actual mass flow
-            // fraction through each fan"; HARES does not yet model per-fan defrost
-            // flow fractions. A proper defrost flow fraction requires the T-0590
-            // defrost model (time-fraction-based frost control with supply/exhaust
-            // modulation). Until that lands, the effectiveness fraction is used as
-            // a conservative first-order proxy.
-            effective_supply_fan_power_w *= self.defrost_effectiveness_fraction;
+        if defrost_fraction > 0.0 {
+            // Known approximation: supply fan power is scaled by (1 −
+            // defrost_fraction) as a proxy for reduced supply-side operation
+            // duration. The ticket (directive 3) calls for scaling by "the
+            // actual mass flow fraction through each fan"; HARES does not yet
+            // model per-fan defrost flow fractions. A proper defrost flow
+            // fraction requires the T-0590 defrost model (time-fraction-based
+            // frost control with supply/exhaust modulation). Until that lands,
+            // the continuous defrost fraction is used as a conservative
+            // first-order proxy.
+            effective_supply_fan_power_w *= 1.0 - defrost_fraction;
         }
 
         let effective_fan_power_w = effective_supply_fan_power_w + effective_exhaust_fan_power_w;
@@ -726,6 +775,45 @@ impl Equipment for Ventilation {
         self.telemetry.set(tk::SUPPLY_TEMP_C, t_supply_c);
         self.telemetry
             .set(tk::BYPASS_ACTIVE, if bypass_active { 1.0 } else { 0.0 });
+
+        self.telemetry
+            .set(tk::VENT_DEFROST_FRACTION, defrost_fraction);
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                t_outdoor_c,
+                t_indoor_c,
+                defrost_fraction,
+                eff_s,
+                eff_l,
+                bypass_active,
+                "Ventilation defrost derating: temperature-dependent continuous fraction"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if !(0.0..=1.0).contains(&defrost_fraction) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "ventilation_defrost_fraction_range".to_string(),
+                    value: defrost_fraction,
+                    tolerance: 1e-12,
+                });
+            }
+            if self.ventilation_type != VentilationType::ExhaustFan {
+                let rated = self.sensible_effectiveness;
+                if !(0.0..=rated).contains(&self.effective_sensible_effectiveness) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "ventilation_effective_sensible_effectiveness_range"
+                            .to_string(),
+                        value: self.effective_sensible_effectiveness,
+                        tolerance: 1e-12,
+                    });
+                }
+            }
+        }
+
         self.mode = self.mode.resolve_idle(true, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
@@ -853,7 +941,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(9);
+    let mut t = Telemetry::with_capacity(10);
     t.insert(tk::ELECTRIC_KW, 0.0);
     t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     t.insert(tk::FAN_POWER_W, 0.0);
@@ -863,6 +951,7 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::LATENT_RECOVERY_W, 0.0);
     t.insert(tk::SUPPLY_TEMP_C, 20.0);
     t.insert(tk::BYPASS_ACTIVE, 0.0);
+    t.insert(tk::VENT_DEFROST_FRACTION, 0.0);
     t
 }
 
@@ -912,6 +1001,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::BYPASS_ACTIVE.to_string(),
             unit: "-".to_string(),
             description: "Bypass mode active (1 = bypassing recovery)".to_string(),
+        },
+        TelemetryField {
+            name: tk::VENT_DEFROST_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Continuous defrost fraction for HRV/ERV recovery derating".to_string(),
         },
     ]
 }
@@ -974,7 +1068,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -999,7 +1094,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("erv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1135,10 +1231,11 @@ mod tests {
 
     #[test]
     fn hrv_supply_temp_at_minus_20c_with_defrost_derating() {
-        // At -20°C (below defrost threshold -5°C), effectiveness is halved to 35%.
+        // At -25°C (20 K below threshold), defrost_fraction = 0.0 + 0.05 × 20 = 1.0.
+        // Effectiveness = 0.70 × (1 − 1.0) = 0.0 → no recovery, T_supply = T_outdoor.
         let cfg = hrv_config();
         let mut hrv = Ventilation::new(cfg.clone());
-        let e = env(-20.0, 20.0);
+        let e = env(-25.0, 20.0);
         hrv.init(&cfg, &e).expect("init");
 
         let mut ports = PortSlots {
@@ -1148,14 +1245,22 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        // T_supply = -20 + 0.35 * (20 - (-20)) = -20 + 14 = -6°C
         let t_supply = hrv
             .telemetry()
             .get(tk::SUPPLY_TEMP_C)
             .expect("supply_temp_c");
         assert!(
-            (t_supply - (-6.0)).abs() < 0.5,
-            "HRV at -20°C with defrost (35% eff) should give ~-6°C supply, got {t_supply}"
+            (t_supply - (-25.0)).abs() < 0.5,
+            "at -25°C with full defrost, T_supply should be ~-25°C (no recovery), got {t_supply}"
+        );
+        assert!(
+            (hrv.telemetry()
+                .get(tk::VENT_DEFROST_FRACTION)
+                .unwrap_or(0.0)
+                - 1.0)
+                .abs()
+                < 0.01,
+            "defrost fraction should be 1.0 at 20 K below threshold"
         );
     }
 
@@ -1324,7 +1429,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("exhaust_fan".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1454,7 +1560,8 @@ mod tests {
             bypass_temp_min_c: None,
             bypass_temp_max_c: None,
             defrost_temp_c: None,
-            defrost_effectiveness_fraction: None,
+            defrost_initial_time_fraction: None,
+            defrost_time_increase_rate_per_k: None,
             ventilation_type: None,
             balanced: None,
             hours_in_operation: None,
@@ -1516,6 +1623,28 @@ mod tests {
     }
 
     #[test]
+    fn ventilation_config_validate_allows_defrost_rate_above_one() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.defrost_time_increase_rate_per_k = Some(2.0);
+        assert!(
+            cfg.validate().is_ok(),
+            "defrost_time_increase_rate_per_k is a rate (1/K), not a fraction; \
+             values > 1.0 must be accepted"
+        );
+    }
+
+    #[test]
+    fn ventilation_config_validate_rejects_negative_defrost_rate() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.defrost_time_increase_rate_per_k = Some(-0.1);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("defrost_time_increase_rate_per_k"),
+            "negative defrost_time_increase_rate_per_k must fail validation; got: {err}"
+        );
+    }
+
+    #[test]
     fn typed_init_uses_hours_in_operation_and_ventilation_type() {
         let cfg = VentilationConfig {
             hours_in_operation: Some(8.0),
@@ -1566,7 +1695,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("exhaust_fan".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1639,16 +1769,17 @@ mod tests {
             "bypass: latent eff should be 0.0, got {eff_l}"
         );
 
-        // Defrost range: effectiveness must be derated (35% = 0.50 × 0.70 = 0.35).
-        let e_cold = env(-20.0, 20.0);
+        // Defrost range: at -25°C (20 K below threshold) defrost_fraction = 1.0,
+        // so effectiveness = 0.70 × (1.0 − 1.0) = 0.0.
+        let e_cold = env(-25.0, 20.0);
         hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
             .expect("step defrost");
         let (eff_s, _eff_l) = hrv
             .effective_ventilation_effectiveness()
             .expect("HRV provides effectiveness");
         assert!(
-            (eff_s - 0.35).abs() < 0.01,
-            "defrost: sensible eff should be ~0.35 (50% derating), got {eff_s}"
+            (eff_s - 0.0).abs() < 0.01,
+            "deep defrost: sensible eff should be ~0.0 (full defrost), got {eff_s}"
         );
     }
 
@@ -1708,7 +1839,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1798,7 +1930,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("exhaust_fan".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1849,7 +1982,8 @@ mod tests {
                 bypass_temp_min_c: Some(18.0),
                 bypass_temp_max_c: Some(24.0),
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1915,7 +2049,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -1937,7 +2072,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: None,
@@ -2218,7 +2354,8 @@ mod tests {
                 bypass_temp_min_c: None,
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
-                defrost_effectiveness_fraction: None,
+                defrost_initial_time_fraction: None,
+                defrost_time_increase_rate_per_k: None,
                 ventilation_type: Some("hrv".to_string()),
                 balanced: None,
                 hours_in_operation: Some(0.0),
@@ -2250,5 +2387,144 @@ mod tests {
         );
         hares_types::validate_core_contract(v.descriptor(), v.core_output())
             .expect("validate_core_contract");
+    }
+
+    // ── Continuous defrost fraction tests ───────────────────────────────────
+
+    /// At the threshold temperature (−5°C default), defrost_fraction = 0.0,
+    /// so effectiveness equals rated (0.70). Contrasts with the old binary
+    /// model which would have applied 0.5× at any temperature below threshold.
+    #[test]
+    fn defrost_returns_rated_effectiveness_at_threshold() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(-5.0, 20.0); // exactly at default threshold
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, _) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        assert!(
+            (eff_s - 0.70).abs() < 0.01,
+            "at threshold temperature, effectiveness should be rated 0.70, got {eff_s}"
+        );
+        let defrost_frac = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost_fraction");
+        assert!(
+            defrost_frac.abs() < 0.01,
+            "defrost_fraction should be 0.0 at threshold, got {defrost_frac}"
+        );
+    }
+
+    /// At 20 K below threshold (−25°C), defrost_fraction = 0.0 + 0.05 × 20 = 1.0.
+    /// Effectiveness should be zero (no recovery at all during continuous defrost).
+    #[test]
+    fn defrost_returns_zero_effectiveness_when_fraction_reaches_one() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(-25.0, 20.0); // 20 K below -5°C default threshold
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, _) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        assert!(
+            eff_s.abs() < 0.01,
+            "at -25°C, defrost_fraction should be 1.0, effectiveness should be 0.0, got {eff_s}"
+        );
+        let defrost_frac = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost_fraction");
+        assert!(
+            (defrost_frac - 1.0).abs() < 0.01,
+            "defrost_fraction should be 1.0 at -25°C, got {defrost_frac}"
+        );
+    }
+
+    /// Intermediate temperatures between threshold and full defrost produce
+    /// intermediate effectiveness values in (0, rated).
+    #[test]
+    fn defrost_produces_intermediate_effectiveness() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(-12.5, 20.0); // 7.5 K below threshold, frac = 0.05 × 7.5 = 0.375
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, _) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        // defrost_fraction = 0.0 + 0.05 × 7.5 = 0.375
+        // eff = 0.70 × (1 − 0.375) = 0.70 × 0.625 = 0.4375
+        let expected = 0.70 * (1.0 - 0.375);
+        assert!(
+            (eff_s - expected).abs() < 0.01,
+            "at -12.5°C, effectiveness should be ~{expected}, got {eff_s}"
+        );
+        assert!(
+            eff_s > 0.0 && eff_s < 0.70,
+            "effectiveness should be strictly between 0 and rated, got {eff_s}"
+        );
+    }
+
+    /// Regression: at −6°C (1 K below −5°C threshold), the continuous model
+    /// gives effectiveness = 0.70 × 0.95 = 0.665, not the old binary model's
+    /// 0.70 × 0.50 = 0.35.
+    #[test]
+    fn defrost_not_binary_regression_minus_6c() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(-6.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, _) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        // defrost_fraction = 0.0 + 0.05 × 1 = 0.05
+        // eff = 0.70 × 0.95 = 0.665
+        let expected = 0.70 * 0.95;
+        assert!(
+            (eff_s - expected).abs() < 0.01,
+            "at -6°C, effectiveness should be ~{expected}, got {eff_s} (not 0.35 — old binary)"
+        );
+
+        let defrost_frac = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost_fraction");
+        assert!(
+            (defrost_frac - 0.05).abs() < 0.01,
+            "defrost_fraction should be 0.05 at -6°C, got {defrost_frac}"
+        );
     }
 }
