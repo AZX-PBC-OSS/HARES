@@ -1500,6 +1500,10 @@ impl HeatPumpHeaterCore {
             tk::STARTUP_MULTIPLIER,
             self.hvac.runtime.startup.current_multiplier(),
         );
+        self.telemetry.set(
+            tk::TIME_SINCE_START_MIN,
+            self.hvac.runtime.startup.time_since_start_min,
+        );
         self.telemetry
             .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
         self.telemetry.set(
@@ -1578,6 +1582,14 @@ impl HeatPumpHeaterCore {
             self.telemetry.set(
                 hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
                 self.hvac.take_biquadratic_clamp_count() as f64,
+            );
+            tracing::debug!(
+                operating_mode = ?self.operating_mode,
+                startup_multiplier = self.hvac.runtime.startup.current_multiplier(),
+                time_since_start_min = self.hvac.runtime.startup.time_since_start_min,
+                c_d = self.hvac.runtime.startup.c_d,
+                duty_cycle = self.hvac.runtime.duty_cycle,
+                "ASHP heater startup ramp observe: mode vs timer state"
             );
         }
 
@@ -1776,9 +1788,20 @@ impl HeatPumpHeaterCore {
 
         let hp_on = hp_on_control;
 
-        let staged_capacity_w = self
-            .hvac
-            .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
+        let staged_capacity_w =
+            self.hvac
+                .apply_startup_capacity_degradation(steady_capacity_w, dt_min, hp_on_control);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.operating_mode == OperatingMode::HeatingER {
+                debug_assert_eq!(
+                    self.hvac.runtime.startup.time_since_start_min, 0.0,
+                    "startup timer must not advance during ER-only operation: \
+                     time_since_start_min={}",
+                    self.hvac.runtime.startup.time_since_start_min
+                );
+            }
+        }
         // OCHRE HVAC.py:1156 -- clip to capacity_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.control.max_capacity_fraction;
         let mut hp_capacity_w = if hp_on {

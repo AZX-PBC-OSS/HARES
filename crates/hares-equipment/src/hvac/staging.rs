@@ -338,10 +338,18 @@ impl HvacEquipment {
     /// Only heat pump equipment (any mode) applies the ramp, matching OCHRE's
     /// `"HP" in self.mode` guard (HVAC.py:977). Non-HP equipment (central AC,
     /// room AC, furnaces, baseboard) returns steady-state capacity unchanged.
+    ///
+    /// `compressor_on` gates the ramp timer advance for HP equipment. When the
+    /// HP compressor is not energised (e.g. ASHP in ER-only backup mode), the
+    /// timer must not advance even though `duty_cycle > 0.0` — the startup ramp
+    /// models a compressor transient that only applies when the compressor is
+    /// actually running. OCHRE guards the timer advance on `"HP" in self.mode`
+    /// (HVAC.py:977,985); this parameter is the HARES equivalent.
     pub fn apply_startup_capacity_degradation(
         &mut self,
         steady_capacity_w: f64,
         dt_min: f64,
+        compressor_on: bool,
     ) -> f64 {
         if !self.config.equipment_type.is_heat_pump() {
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -357,7 +365,7 @@ impl HvacEquipment {
             }
             return steady_capacity_w;
         }
-        let on_now = self.runtime.duty_cycle > 0.0;
+        let on_now = compressor_on;
         let mult = self.runtime.startup.capacity_multiplier(on_now, dt_min);
         #[cfg(feature = "observe")]
         {
@@ -369,6 +377,7 @@ impl HvacEquipment {
                 c_d = self.runtime.startup.c_d,
                 time_since_start_min = self.runtime.startup.time_since_start_min,
                 steady_capacity_w,
+                compressor_on,
                 "startup capacity degradation observe"
             );
         }
@@ -863,7 +872,7 @@ mod tests {
         hvac.runtime.startup.time_since_start_min = 0.0;
 
         let steady_w = 10_000.0;
-        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
 
         assert!(
             actual_w < steady_w,
@@ -897,7 +906,7 @@ mod tests {
         hvac.runtime.startup.time_since_start_min = 0.0;
 
         let steady_w = 10_000.0;
-        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
 
         assert!(
             (actual_w - steady_w).abs() < 1e-9,
@@ -925,7 +934,7 @@ mod tests {
         // Advance beyond t_full with 1-min steps.
         let mut mult_at_full = 0.0_f64;
         for _ in 0..=((t_full as usize) + 1) {
-            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
             mult_at_full = w / steady_w;
         }
         assert!(
@@ -935,11 +944,11 @@ mod tests {
 
         // Off cycle resets the timer.
         hvac.runtime.duty_cycle = 0.0;
-        let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
 
         // First on-step after off must ramp again (mult < 1.0).
         hvac.runtime.duty_cycle = 1.0;
-        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
         assert!(
             w_restart < steady_w,
             "first on-step after off cycle must be below steady-state: got {w_restart} W"
@@ -959,7 +968,7 @@ mod tests {
             hvac.runtime.startup.time_since_start_min = 0.0;
 
             let steady_w = 10_000.0;
-            let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+            let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
             assert!(
                 (actual_w - steady_w).abs() < 1e-9,
                 "non-HP AC with Cd={cd} must return steady capacity (multiplier = 1.0): \
@@ -980,7 +989,7 @@ mod tests {
         hvac.runtime.startup.time_since_start_min = 0.0;
 
         let steady_w = 10_000.0;
-        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
 
         assert!(
             actual_w < steady_w,
@@ -995,6 +1004,141 @@ mod tests {
             (actual_w - steady_w * expected_mult).abs() < 1.0,
             "HP heating cold start multiplier mismatch: expected {:.1} W, got {actual_w:.1} W",
             steady_w * expected_mult
+        );
+    }
+
+    /// apply_startup_capacity_degradation: when compressor_on = false but
+    /// duty_cycle > 0.0 (ER-only operation), the startup timer must NOT advance.
+    /// OCHRE HVAC.py:977,985 guards timer advance on `"HP" in self.mode`.
+    #[test]
+    fn startup_capacity_degradation_compressor_off_does_not_advance_timer() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0; // ER is drawing power
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        // compressor_on = false: the HP compressor is not energised.
+        // Timer should NOT advance, multiplier = 1.0, time_since_start_min = 0.0.
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+
+        assert!(
+            (actual_w - steady_w).abs() < 1e-9,
+            "compressor_off with duty_cycle>0 must yield full capacity: \
+             expected {steady_w} W, got {actual_w} W"
+        );
+        assert_eq!(
+            hvac.runtime.startup.time_since_start_min, 0.0,
+            "compressor_off must not advance startup timer"
+        );
+
+        // Multiple ER-only steps: timer stays at 0, capacity stays at full.
+        for _ in 0..5 {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+            assert!(
+                (w - steady_w).abs() < 1e-9,
+                "repeated ER-only steps must keep full capacity"
+            );
+            assert_eq!(
+                hvac.runtime.startup.time_since_start_min, 0.0,
+                "repeated ER-only steps must not advance timer"
+            );
+        }
+    }
+
+    /// ASHP running ER-only (compressor_off) for 30 min, then switching to HP
+    /// mode (compressor_on): the first HP step must produce a startup ramp
+    /// (multiplier < 1.0), proving the timer was NOT advanced during ER operation.
+    /// OCHRE's `"HP" in self.mode` guard (HVAC.py:977) only advances the timer
+    /// when the HP compressor is actually energised.
+    #[test]
+    fn startup_capacity_degradation_er_then_hp_ramps_on_mode_switch() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        // 30 minutes of ER-only operation (compressor_off).
+        for _ in 0..30 {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+            assert!(
+                (w - steady_w).abs() < 1e-9,
+                "ER-only steps must not degrade capacity"
+            );
+        }
+        assert_eq!(
+            hvac.runtime.startup.time_since_start_min, 0.0,
+            "after 30 min ER-only, startup timer must be zero"
+        );
+
+        // Switch to HP mode: compressor_on = true.
+        let first_hp_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            first_hp_w < steady_w,
+            "first HP step after ER-only must have startup ramp: \
+             {first_hp_w} W >= {steady_w} W"
+        );
+        assert!(
+            hvac.runtime.startup.time_since_start_min > 0.0,
+            "first HP step must advance timer from zero"
+        );
+
+        // After t_full + 1 minutes of continuous HP, ramp should converge to 1.0.
+        for _ in 0..((t_full as usize) + 2) {
+            hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+        let converged_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            (converged_w - steady_w).abs() < 1e-9,
+            "after t_full+2 minutes of HP, ramp must converge to 1.0: \
+             expected {steady_w} W, got {converged_w} W"
+        );
+    }
+
+    /// ASHP in HP mode for 30 continuous minutes: ramp must converge to
+    /// multiplier = 1.0 within t_full = 20*Cd + 0.4 minutes.
+    /// Winkler (2011): c_d=0.25 → t_full=5.4 min.
+    #[test]
+    fn startup_capacity_degradation_hp_ramp_converges_to_full_within_t_full() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        // First step must be degraded.
+        let first_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            first_w < steady_w,
+            "cold-start HP step must be degraded: {first_w} W >= {steady_w} W"
+        );
+
+        // Run 30 minutes of continuous HP.
+        let mut last_w = first_w;
+        for _ in 1..30 {
+            last_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+
+        // After 30 min the ramp must have converged to 1.0.
+        assert!(
+            (last_w - steady_w).abs() < 1e-9,
+            "after 30 min HP, ramp must converge to 1.0: \
+             expected {steady_w} W, got {last_w} W"
+        );
+
+        // The timer must be well past t_full.
+        assert!(
+            hvac.runtime.startup.time_since_start_min >= t_full,
+            "after 30 min HP, timer {} must be >= t_full={}",
+            hvac.runtime.startup.time_since_start_min,
+            t_full
         );
     }
 

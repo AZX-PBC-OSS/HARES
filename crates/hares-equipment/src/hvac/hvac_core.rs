@@ -1695,13 +1695,13 @@ mod tests {
         hvac.runtime.duty_cycle = 1.0;
 
         // First on-step must be degraded (t = 0.5 min < t_full = 5.4 min).
-        let step1 = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
+        let step1 = hvac.apply_startup_capacity_degradation(10_000.0, 1.0, true);
         assert!(step1 < 10_000.0, "first startup step must degrade: {step1}");
 
         // After enough on-steps the ramp reaches full capacity.
         let mut last = step1;
         for _ in 0..10 {
-            last = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
+            last = hvac.apply_startup_capacity_degradation(10_000.0, 1.0, true);
         }
         assert!(
             (last - 10_000.0).abs() < 1e-9,
@@ -1710,13 +1710,13 @@ mod tests {
 
         // Turn off resets the ramp.
         hvac.runtime.duty_cycle = 0.0;
-        let off = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
+        let off = hvac.apply_startup_capacity_degradation(10_000.0, 1.0, false);
         assert!((off - 10_000.0).abs() < 1e-9);
         assert_eq!(hvac.runtime.startup.time_since_start_min, 0.0);
 
         // Restart must degrade again.
         hvac.runtime.duty_cycle = 1.0;
-        let restart = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
+        let restart = hvac.apply_startup_capacity_degradation(10_000.0, 1.0, true);
         assert!(restart < 10_000.0, "restart must degrade again: {restart}");
     }
 

@@ -218,6 +218,14 @@ pub const PART_LOAD_FACTOR: &str = "part_load_factor";
 /// scope: internal
 pub const STARTUP_MULTIPLIER: &str = "startup_multiplier";
 
+/// Elapsed time since compressor startup [minutes]. Resets to 0.0 when the
+/// compressor is off. Used with `STARTUP_MULTIPLIER` in diagnostic CSV output
+/// to detect whether the startup timer erroneously advances while the compressor
+/// is not energised (e.g. during ER-only operation on an ASHP).
+///
+/// scope: internal
+pub const TIME_SINCE_START_MIN: &str = "time_since_start_min";
+
 /// scope: internal
 pub const DUTY_CYCLE: &str = "duty_cycle";
 
@@ -1079,6 +1087,7 @@ mod tests {
             PART_LOAD_RATIO,
             PART_LOAD_FACTOR,
             STARTUP_MULTIPLIER,
+            TIME_SINCE_START_MIN,
             DUTY_CYCLE,
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
@@ -1333,6 +1342,7 @@ mod tests {
             PART_LOAD_RATIO,
             PART_LOAD_FACTOR,
             STARTUP_MULTIPLIER,
+            TIME_SINCE_START_MIN,
             DUTY_CYCLE,
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,

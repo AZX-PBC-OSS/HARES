@@ -57,6 +57,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
     telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
+    telemetry.insert(tk::TIME_SINCE_START_MIN, 0.0);
     telemetry.insert(tk::DUTY_CYCLE, 0.0);
     telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
     telemetry.insert(tk::MODE_DURATION_S, 0.0);
@@ -327,6 +328,11 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::STARTUP_MULTIPLIER.to_string(),
             unit: "-".to_string(),
             description: "Capacity ramp multiplier on compressor restart (Winkler 2009)".to_string(),
+        },
+        TelemetryField {
+            name: tk::TIME_SINCE_START_MIN.to_string(),
+            unit: "min".to_string(),
+            description: "Elapsed time since compressor startup; 0.0 when compressor is off".to_string(),
         },
         TelemetryField {
             name: tk::DUTY_CYCLE.to_string(),

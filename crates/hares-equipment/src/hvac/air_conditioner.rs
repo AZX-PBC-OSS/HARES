@@ -1651,9 +1651,11 @@ impl CoolingCore {
             eir_ratio_base
         };
 
-        let staged_capacity_w = self
-            .hvac
-            .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
+        let staged_capacity_w = self.hvac.apply_startup_capacity_degradation(
+            steady_capacity_w,
+            dt_min,
+            self.hvac.runtime.duty_cycle > 0.0,
+        );
         // OCHRE HVAC.py:445-448 -- clip to rated_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.control.max_capacity_fraction;
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
