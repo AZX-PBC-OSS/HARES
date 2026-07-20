@@ -90,6 +90,11 @@ const PHASE_POWER_SUFFIX_B: &str = "_power_kw";
 const PHASE_DURATION_PREFIX_B: &str = "cycle_phase_";
 const PHASE_DURATION_SUFFIX_B: &str = "_duration_s";
 
+const PHASE_WATER_DRAW_PREFIX_A: &str = "phase_";
+const PHASE_WATER_DRAW_SUFFIX_A: &str = "_has_water_draw";
+const PHASE_WATER_DRAW_PREFIX_B: &str = "cycle_phase_";
+const PHASE_WATER_DRAW_SUFFIX_B: &str = "_has_water_draw";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ForcedMode {
     Idle,
@@ -139,6 +144,7 @@ struct WetApplianceState {
 struct CyclePhase {
     power_kw: f64,
     duration_s: f64,
+    has_water_draw: bool,
 }
 
 /// Event-based stochastic load with an Idle -> Active -> Cooldown cycle.
@@ -867,6 +873,7 @@ impl WetAppliance {
             phases: vec![CyclePhase {
                 power_kw: 1.0,
                 duration_s: 900.0,
+                has_water_draw: false,
             }],
             n_units: 1.0,
             sensible_gain_fraction: 0.0,
@@ -1036,10 +1043,27 @@ impl WetAppliance {
             })?;
         }
 
-        if bus_energized && self.active && self.hot_water_draw_rate_kg_s > 0.0 {
+        let current_phase_has_water = self
+            .phases
+            .get(self.phase_index)
+            .is_some_and(|p| p.has_water_draw);
+
+        if bus_energized
+            && self.active
+            && current_phase_has_water
+            && self.hot_water_draw_rate_kg_s > 0.0
+        {
+            let flow_rate_kg_s = self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0);
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                water_draw_flow_kg_s = flow_rate_kg_s,
+                phase_has_water_draw = true,
+                equipment = %self.descriptor.name,
+                "wet appliance water draw active"
+            );
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: crate::water_heater::DHW_DEMAND_LOOP,
-                flow_rate_kg_s: self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0),
+                flow_rate_kg_s,
                 supply_temp_c: 0.0,
                 return_temp_c: 0.0,
                 fluid_type: FluidType::Water,
@@ -1047,6 +1071,19 @@ impl WetAppliance {
                 node_id: FluidNodeId(0),
                 direction: HeatTransferDirection::Source,
             })?;
+        }
+
+        // Report zero flow when phase lacks water draw or appliance is inactive.
+        #[cfg(feature = "observe")]
+        {
+            if !current_phase_has_water || !self.active {
+                tracing::info!(
+                    water_draw_flow_kg_s = 0.0,
+                    phase_has_water_draw = current_phase_has_water,
+                    equipment = %self.descriptor.name,
+                    "wet appliance water draw idle"
+                );
+            }
         }
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
@@ -1204,13 +1241,18 @@ impl Equipment for WetAppliance {
                 CoreCapabilities::empty()
             };
 
-        let total_cycle_duration_s: f64 = self.phases.iter().map(|p| p.duration_s).sum();
-        self.hot_water_draw_rate_kg_s = if total_cycle_duration_s > 0.0 {
+        let water_draw_phases_duration_s: f64 = self
+            .phases
+            .iter()
+            .filter(|p| p.has_water_draw)
+            .map(|p| p.duration_s)
+            .sum();
+        self.hot_water_draw_rate_kg_s = if water_draw_phases_duration_s > 0.0 {
             config
                 .get_f64(KEY_HOT_WATER_DRAW_VOLUME_L)
                 .unwrap_or(0.0)
                 .max(0.0)
-                / total_cycle_duration_s
+                / water_draw_phases_duration_s
         } else {
             0.0
         };
@@ -1613,6 +1655,7 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
         return Ok(vec![CyclePhase {
             power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),
             duration_s: parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0),
+            has_water_draw: false,
         }]);
     }
 
@@ -1622,6 +1665,8 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
         let d_a = format!("{PHASE_DURATION_PREFIX_A}{idx}{PHASE_DURATION_SUFFIX_A}");
         let p_b = format!("{PHASE_POWER_PREFIX_B}{idx}{PHASE_POWER_SUFFIX_B}");
         let d_b = format!("{PHASE_DURATION_PREFIX_B}{idx}{PHASE_DURATION_SUFFIX_B}");
+        let w_a = format!("{PHASE_WATER_DRAW_PREFIX_A}{idx}{PHASE_WATER_DRAW_SUFFIX_A}");
+        let w_b = format!("{PHASE_WATER_DRAW_PREFIX_B}{idx}{PHASE_WATER_DRAW_SUFFIX_B}");
 
         let power_kw = config
             .get_f64(&p_a)
@@ -1651,9 +1696,15 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
             )));
         }
 
+        let has_water_draw = config
+            .get_bool(&w_a)
+            .or_else(|| config.get_bool(&w_b))
+            .unwrap_or(false);
+
         phases.push(CyclePhase {
             power_kw,
             duration_s,
+            has_water_draw,
         });
     }
 
@@ -3873,6 +3924,165 @@ mod tests {
         assert!(
             thermal_sag < thermal_nominal,
             "thermal gain at sag ({thermal_sag}) must be less than nominal ({thermal_nominal})"
+        );
+    }
+
+    /// Configure a 3-phase cycle where only phase 0 has water draw.
+    fn wet_config_with_water_draw(only_phase_0_draws: bool) -> (EquipmentConfig, f64) {
+        let volume = 12.0;
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 3.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.4.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("phase_0_has_water_draw".to_string(), true.into());
+        raw.insert("phase_1_power_kw".to_string(), 0.8.into());
+        raw.insert("phase_1_duration_s".to_string(), 60.0.into());
+        raw.insert(
+            "phase_1_has_water_draw".to_string(),
+            (!only_phase_0_draws).into(),
+        );
+        raw.insert("phase_2_power_kw".to_string(), 1.0.into());
+        raw.insert("phase_2_duration_s".to_string(), 60.0.into());
+        raw.insert(
+            "phase_2_has_water_draw".to_string(),
+            (!only_phase_0_draws).into(),
+        );
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.05.into());
+        raw.insert("hot_water_draw_volume_l".to_string(), volume.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        (
+            EquipmentConfig::raw(
+                "test_water_draw".to_string(),
+                "Clothes Washer".to_string(),
+                raw,
+            ),
+            volume,
+        )
+    }
+
+    #[test]
+    fn wet_appliance_hot_water_only_during_fill_phases() {
+        let mut env = base_env();
+        let (config, _volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.iter().any(|f| f.total_flow_kg_s > 0.0),
+            "Phase 0 (fill with water draw) should emit fluid flow"
+        );
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
+            "Phase 1 (no water draw) should emit zero fluid flow"
+        );
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
+            "Phase 2 (no water draw) should emit zero fluid flow"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_no_phantom_draw_during_spin() {
+        let mut env = base_env();
+        let (config, _volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_phase_0: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        assert!(flow_phase_0 > 0.0, "Fill/wash phase should draw hot water");
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_phase_2: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        assert_eq!(
+            flow_phase_2, 0.0,
+            "Spin/drain phase must not draw hot water"
+        );
+    }
+
+    #[test]
+    fn parse_cycle_phases_respects_water_draw_flag() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("phase_len".to_string(), 2.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("phase_0_has_water_draw".to_string(), true.into());
+        raw.insert("phase_1_power_kw".to_string(), 1.0.into());
+        raw.insert("phase_1_duration_s".to_string(), 120.0.into());
+        // phase_1_has_water_draw intentionally absent
+
+        let config = EquipmentConfig::raw(
+            "test_parse_water_draw".to_string(),
+            "Clothes Washer".to_string(),
+            raw,
+        );
+        let phases = super::parse_cycle_phases(&config).unwrap();
+        assert_eq!(phases.len(), 2);
+        assert!(phases[0].has_water_draw);
+        assert!(!phases[1].has_water_draw);
+    }
+
+    #[test]
+    fn parse_cycle_phases_alternate_key_format() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("cycle_phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("cycle_phase_0_has_water_draw".to_string(), true.into());
+
+        let config =
+            EquipmentConfig::raw("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
+        let phases = super::parse_cycle_phases(&config).unwrap();
+        assert_eq!(phases.len(), 1);
+        assert!(phases[0].has_water_draw);
+    }
+
+    #[test]
+    fn hot_water_draw_rate_uses_water_phase_duration_only() {
+        let mut env = base_env();
+        let (config, volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_kg_s: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        let expected_rate = volume / 60.0;
+        assert!(
+            (flow_kg_s - expected_rate).abs() < 1e-9,
+            "Draw rate should be volume/water_phase_duration = {volume}/60 = {expected_rate}, got {flow_kg_s}"
         );
     }
 

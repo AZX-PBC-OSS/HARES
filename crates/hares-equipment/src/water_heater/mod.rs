@@ -706,6 +706,7 @@ mod dhw_integration_tests {
         raw.insert("phase_len".to_string(), 1.0.into());
         raw.insert("phase_0_power_kw".to_string(), 0.5.into());
         raw.insert("phase_0_duration_s".to_string(), 1800.0.into()); // 30 min
+        raw.insert("phase_0_has_water_draw".to_string(), true.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 11.0.into());
@@ -817,7 +818,7 @@ mod dhw_integration_tests {
     }
 
     #[test]
-    fn draw_rate_equals_volume_over_total_cycle_duration() {
+    fn draw_rate_equals_volume_over_water_phase_duration() {
         let env = base_env();
         let draw_volume_l = 15.0;
         let phase_duration_s = 1800.0; // single phase, 30 min
@@ -838,7 +839,7 @@ mod dhw_integration_tests {
         let expected_kg_s = draw_volume_l / phase_duration_s;
         assert!(
             (dhw.total_flow_kg_s - expected_kg_s).abs() < 1e-9,
-            "draw rate must be volume/duration = {expected_kg_s}, got {}",
+            "draw rate must be volume/water phase duration = {expected_kg_s}, got {}",
             dhw.total_flow_kg_s,
         );
     }

@@ -295,6 +295,22 @@ pub(super) fn resolve_scheduled_loads(
                             let actual_kwh = cw_appl / lcy * acy * multiplier;
                             params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
                         }
+
+                        // Multi-phase cycle: fill, wash, rinse, spin.
+                        // Fill and wash/rinse phases draw hot water; spin does not.
+                        params.insert("phase_len".to_string(), json!(4));
+                        params.insert("phase_0_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_0_duration_s".to_string(), json!(300.0));
+                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
+                        params.insert("phase_1_power_kw".to_string(), json!(0.4));
+                        params.insert("phase_1_duration_s".to_string(), json!(900.0));
+                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
+                        params.insert("phase_2_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_2_duration_s".to_string(), json!(300.0));
+                        params.insert("phase_2_has_water_draw".to_string(), json!(true));
+                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_duration_s".to_string(), json!(600.0));
+                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
                     "ClothesDryer" => {
                         if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
@@ -416,6 +432,22 @@ pub(super) fn resolve_scheduled_loads(
                             let actual_kwh = kwh_per_cyc * dwcpy * multiplier;
                             params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
                         }
+
+                        // Multi-phase cycle: fill, wash, drain, dry.
+                        // Fill and wash phases draw hot water; drain and dry do not.
+                        params.insert("phase_len".to_string(), json!(4));
+                        params.insert("phase_0_power_kw".to_string(), json!(0.05));
+                        params.insert("phase_0_duration_s".to_string(), json!(120.0));
+                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
+                        params.insert("phase_1_power_kw".to_string(), json!(0.6));
+                        params.insert("phase_1_duration_s".to_string(), json!(1200.0));
+                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
+                        params.insert("phase_2_power_kw".to_string(), json!(0.3));
+                        params.insert("phase_2_duration_s".to_string(), json!(60.0));
+                        params.insert("phase_2_has_water_draw".to_string(), json!(false));
+                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_duration_s".to_string(), json!(900.0));
+                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
                     "CookingRange"
                         if !params.contains_key("annual_electric_kwh")
