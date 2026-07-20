@@ -5115,6 +5115,14 @@ impl Dwelling {
                 let vent = &mut self.thermal_solver.config_mut().ventilation;
                 vent.sensible_recovery_efficiency = eff_s;
                 vent.latent_recovery_efficiency = eff_l;
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    equipment = %eq.descriptor().name,
+                    mode = ?eq.core_output().state.operating_mode,
+                    eff_s,
+                    eff_l,
+                    "ventilation effectiveness propagated to thermal solver config"
+                );
             }
         }
 

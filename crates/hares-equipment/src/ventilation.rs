@@ -607,6 +607,16 @@ impl Equipment for Ventilation {
             && env.grid.bus_energized();
 
         if !is_running {
+            // Clear stored effective effectiveness so that the thermal solver
+            // computes the full unconditioned ventilation load when the equipment
+            // is off or in GridEmergency. Without this reset, stale values from
+            // the most recent running timestep persist and are returned by
+            // effective_ventilation_effectiveness(), causing the solver to
+            // under-estimate the ventilation load by deducting recovery that
+            // is not occurring.
+            self.effective_sensible_effectiveness = 0.0;
+            self.effective_latent_effectiveness = 0.0;
+
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
@@ -635,6 +645,36 @@ impl Equipment for Ventilation {
                 },
                 performance: CorePerformance::default(),
             };
+
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if self.effective_sensible_effectiveness != 0.0 {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "ventilation_effectiveness_zero_when_off".to_string(),
+                        value: self.effective_sensible_effectiveness,
+                        tolerance: 0.0,
+                    });
+                }
+                if self.effective_latent_effectiveness != 0.0 {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "ventilation_effectiveness_zero_when_off".to_string(),
+                        value: self.effective_latent_effectiveness,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    mode = ?self.mode,
+                    dr_level = ?self.dr_level,
+                    effective_sensible_effectiveness = self.effective_sensible_effectiveness,
+                    effective_latent_effectiveness = self.effective_latent_effectiveness,
+                    "Ventilation not running: effectiveness cleared"
+                );
+            }
+
             return Ok(());
         }
 
@@ -652,6 +692,8 @@ impl Equipment for Ventilation {
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
+            self.effective_sensible_effectiveness = 0.0;
+            self.effective_latent_effectiveness = 0.0;
             self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
@@ -782,13 +824,15 @@ impl Equipment for Ventilation {
         #[cfg(feature = "observe")]
         {
             tracing::debug!(
+                mode = ?self.mode,
+                dr_level = ?self.dr_level,
                 t_outdoor_c,
                 t_indoor_c,
                 defrost_fraction,
                 eff_s,
                 eff_l,
                 bypass_active,
-                "Ventilation defrost derating: temperature-dependent continuous fraction"
+                "Ventilation running: effective effectiveness and mode"
             );
         }
 
@@ -2525,6 +2569,257 @@ mod tests {
         assert!(
             (defrost_frac - 0.05).abs() < 0.01,
             "defrost_fraction should be 0.05 at -6°C, got {defrost_frac}"
+        );
+    }
+
+    /// After calling step() with mode = Off, effective_ventilation_effectiveness()
+    /// returns (0.0, 0.0) — the solver must compute the full unconditioned load.
+    #[test]
+    fn effectiveness_is_zero_when_mode_is_off() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("Ventilation provides effectiveness");
+        assert!(
+            eff_s.abs() < 1e-12,
+            "sensible effectiveness should be 0.0 when mode is Off, got {eff_s}"
+        );
+        assert!(
+            eff_l.abs() < 1e-12,
+            "latent effectiveness should be 0.0 when mode is Off, got {eff_l}"
+        );
+    }
+
+    /// After running with mode = On (producing non-zero effectiveness), then
+    /// switching to mode = Off, the second step returns (0.0, 0.0) — stale
+    /// recovery efficiency from the previous running timestep must not persist.
+    #[test]
+    fn effectiveness_is_zero_after_running_then_turning_off() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step running");
+
+        // Verify running step produced non-zero effectiveness
+        let (eff_s_before, _) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after running");
+        assert!(
+            eff_s_before > 0.0,
+            "effectiveness should be non-zero while running, got {eff_s_before}"
+        );
+
+        // Now turn off and step again
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step off");
+
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after off");
+        assert!(
+            eff_s.abs() < 1e-12,
+            "sensible effectiveness should be 0.0 after turning off, got {eff_s}"
+        );
+        assert!(
+            eff_l.abs() < 1e-12,
+            "latent effectiveness should be 0.0 after turning off, got {eff_l}"
+        );
+    }
+
+    /// After setting dr_level to GridEmergency, effectiveness is (0.0, 0.0).
+    #[test]
+    fn effectiveness_is_zero_during_grid_emergency() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        hrv.apply_control_unchecked(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("Ventilation provides effectiveness");
+        assert!(
+            eff_s.abs() < 1e-12,
+            "sensible effectiveness should be 0.0 during GridEmergency, got {eff_s}"
+        );
+        assert!(
+            eff_l.abs() < 1e-12,
+            "latent effectiveness should be 0.0 during GridEmergency, got {eff_l}"
+        );
+    }
+
+    /// Regression: ventilation toggled Off after running for several timesteps
+    /// must not propagate stale recovery efficiency to ports or telemetry.
+    /// The stale-state bug caused the thermal solver to deduct recovery when
+    /// no recovery was occurring, under-estimating the ventilation load.
+    #[test]
+    fn off_after_running_does_not_propagate_stale_effectiveness() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // Run several timesteps to establish non-zero effectiveness
+        for _ in 0..3 {
+            hrv.step(&e, Duration::from_secs(300), &mut ports)
+                .expect("step running");
+            assert!(
+                hrv.effective_ventilation_effectiveness().unwrap().0 > 0.0,
+                "running step should produce non-zero effectiveness"
+            );
+            assert!(
+                hrv.telemetry().get(tk::SENSIBLE_RECOVERY_W).unwrap() > 0.0,
+                "running step should report non-zero recovery in telemetry"
+            );
+        }
+
+        // Toggle off
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        ports.zero();
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step off");
+
+        // Effectiveness must be zero after turning off
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after off");
+        assert_eq!(
+            eff_s, 0.0,
+            "sensible effectiveness should be 0.0 after turning off, got {eff_s}"
+        );
+        assert_eq!(
+            eff_l, 0.0,
+            "latent effectiveness should be 0.0 after turning off, got {eff_l}"
+        );
+
+        // Telemetry must not report stale recovery values
+        assert_eq!(
+            hrv.telemetry().get(tk::SENSIBLE_RECOVERY_W),
+            Some(0.0),
+            "sensible recovery telemetry should be 0.0 when off"
+        );
+        assert_eq!(
+            hrv.telemetry().get(tk::LATENT_RECOVERY_W),
+            Some(0.0),
+            "latent recovery telemetry should be 0.0 when off"
+        );
+
+        // Electrical port must draw zero power
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "electrical port should draw 0 W when off"
+        );
+
+        // Core output must report off
+        let co = hrv.core_output();
+        assert_eq!(
+            co.flows.electric_kw,
+            Some(ElectricPower::Consumption(0.0)),
+            "core output must report zero consumption when off"
+        );
+    }
+
+    /// Mode On with a zero-valued schedule (e.g. `hours_in_operation = 0`)
+    /// must clear effective effectiveness, matching the same reset that the
+    /// `Off`/`GridEmergency` early-return path applies.  Without this fix the
+    /// `effective_flow_rate_m3_s <= 0.0` branch leaves stale non-zero
+    /// effectiveness from a prior running step while zeroing telemetry,
+    /// producing a silent mismatch between reported recovery and the values
+    /// driving the thermal solver.
+    #[test]
+    fn on_with_zero_schedule_clears_effectiveness() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // Run several steps to establish non-zero effectiveness
+        for _ in 0..3 {
+            hrv.step(&e, Duration::from_secs(300), &mut ports)
+                .expect("step running");
+            assert!(
+                hrv.effective_ventilation_effectiveness().unwrap().0 > 0.0,
+                "running step should produce non-zero effectiveness"
+            );
+        }
+
+        // Force the schedule to zero while mode stays On — this reaches the
+        // `effective_flow_rate_m3_s <= 0.0` early-return path that the fix
+        // targets.  schedule_source is `Constant` in the current Ventilation
+        // implementation; the test uses direct mutation because the public
+        // API provides no per-timestep schedule variation.
+        hrv.schedule_source = ScheduleSource::Constant(0.0);
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step with zero schedule");
+
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after zero-schedule step");
+        assert_eq!(
+            eff_s, 0.0,
+            "sensible effectiveness should be 0.0 with zero schedule, got {eff_s}"
+        );
+        assert_eq!(
+            eff_l, 0.0,
+            "latent effectiveness should be 0.0 with zero schedule, got {eff_l}"
         );
     }
 }
