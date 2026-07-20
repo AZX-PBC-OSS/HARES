@@ -343,6 +343,38 @@ pub(super) fn resolve_scheduled_loads(
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
                         params.insert("latent_gain_fraction".to_string(), json!(frac_lat));
 
+                        // Set DryerType for runtime physics routing. HPXML 4.2 §3.8.2:
+                        // ClothesDryer/Vented determines exhaust vs condenser behaviour.
+                        // Unvented condenser dryers reject all energy as sensible heat
+                        // in the zone; vented dryers exhaust ~85% outdoors.
+                        //
+                        // Unvented condenser dryers are exclusively electric — the
+                        // compressor driving the condenser coil requires electric power.
+                        // HPXML permits Vented=false + FuelType=gas (the fields are
+                        // independent), but this combination is physically inconsistent:
+                        // no consumer gas dryer burns fuel internally with no exhaust
+                        // path and no condenser coil recovering combustion moisture.
+                        // When this combination appears, classify as vented-gas as a
+                        // conservative fallback (exhausts most energy, makes fewer
+                        // assumptions about zone-conditioning effects).
+                        let dryer_type = if vented {
+                            if fuel == FuelType::Gas {
+                                "vented_gas"
+                            } else {
+                                "vented_electric"
+                            }
+                        } else if fuel == FuelType::Electric {
+                            "unvented_condenser"
+                        } else {
+                            tracing::warn!(
+                                "ClothesDryer: Vented=false with FuelType=gas is physically \
+                                 inconsistent — no consumer gas dryer has a condenser coil. \
+                                 Classifying as vented-gas (conservative fallback)."
+                            );
+                            "vented_gas"
+                        };
+                        params.insert("dryer_type".to_string(), json!(dryer_type));
+
                         // Default annual energy when HPXML doesn't provide it
                         // (OCHRE hpxml.py parse_clothes_dryer). Uses default washer values
                         // (RatedAnnualkWh=400, IMEF=1.0, Capacity=3.0 ft³) since washer params

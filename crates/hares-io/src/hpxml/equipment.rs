@@ -1275,6 +1275,10 @@ mod tests {
             "sensible={sens}, expected 0.135"
         );
         assert!((lat - 0.015).abs() < 1e-9, "latent={lat}, expected 0.015");
+        assert_eq!(
+            dryer.parameters["dryer_type"].as_str().unwrap(),
+            "vented_electric"
+        );
     }
 
     #[test]
@@ -1291,6 +1295,10 @@ mod tests {
         // frac_lost=0.0, gain_factor=0.90 → sens=0.90, lat=0.10
         assert!((sens - 0.90).abs() < 1e-9, "sensible={sens}, expected 0.90");
         assert!((lat - 0.10).abs() < 1e-9, "latent={lat}, expected 0.10");
+        assert_eq!(
+            dryer.parameters["dryer_type"].as_str().unwrap(),
+            "unvented_condenser"
+        );
     }
 
     #[test]
@@ -1310,6 +1318,10 @@ mod tests {
             "sensible={sens}, expected 0.1335"
         );
         assert!((lat - 0.0165).abs() < 1e-9, "latent={lat}, expected 0.0165");
+        assert_eq!(
+            dryer.parameters["dryer_type"].as_str().unwrap(),
+            "vented_gas"
+        );
     }
 
     #[test]
@@ -1326,6 +1338,10 @@ mod tests {
         // frac_lost=0.0, gain_factor=0.89 → sens=0.89, lat=0.11
         assert!((sens - 0.89).abs() < 1e-9, "sensible={sens}, expected 0.89");
         assert!((lat - 0.11).abs() < 1e-9, "latent={lat}, expected 0.11");
+        assert_eq!(
+            dryer.parameters["dryer_type"].as_str().unwrap(),
+            "vented_gas"
+        );
     }
 
     #[test]
@@ -1341,6 +1357,10 @@ mod tests {
         assert!(
             (sens - 0.135).abs() < 1e-9,
             "should default to vented: sensible={sens}"
+        );
+        assert_eq!(
+            dryer.parameters["dryer_type"].as_str().unwrap(),
+            "vented_electric"
         );
     }
 
