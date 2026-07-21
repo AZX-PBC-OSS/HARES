@@ -45,17 +45,33 @@ impl ColumnAggregation {
         let normalized = name.trim();
 
         if normalized.ends_with("(kWh)") {
+            // Energy accumulates over time — summed, not averaged.
             return Self::Sum;
         }
 
+        // All other quantities are resampled by averaging within each time bucket:
+        // (kW) power, (therms/hour) fuel-power rate, (kVAR) reactive power,
+        // (W) rate-like, (C)/(°C) temperature, (-) dimensionless ratios,
+        // (W/m2) irradiance intensity per area, (s) static configuration,
+        // (deg) directional angle
         if normalized.ends_with("(kW)")
             || normalized.ends_with("(C)")
             || normalized.ends_with("(\u{b0}C)")
             || normalized.ends_with("(-)")
+            || normalized.ends_with("(therms/hour)")
+            || normalized.ends_with("(kVAR)")
+            || normalized.ends_with("(W)")
+            || normalized.ends_with("(W/m2)")
+            || normalized.ends_with("(s)")
+            || normalized.ends_with("(deg)")
         {
             return Self::Mean;
         }
 
+        tracing::warn!(
+            column = name,
+            "unrecognized column unit suffix; falling back to ColumnAggregation::Mean",
+        );
         Self::Mean
     }
 }
@@ -75,13 +91,36 @@ impl FleetAggregation {
     fn for_column(name: &str) -> Self {
         let normalized = name.trim();
 
+        // Additive across dwellings — summed with sample weight:
+        // (kW) power, (kWh) energy, (therms/hour) fuel-power rate,
+        // (kVAR) reactive power, (W) rate-like quantity
+        if normalized.ends_with("(kW)")
+            || normalized.ends_with("(kWh)")
+            || normalized.ends_with("(therms/hour)")
+            || normalized.ends_with("(kVAR)")
+            || normalized.ends_with("(W)")
+        {
+            return Self::WeightedSum;
+        }
+
+        // NOT additive across dwellings — weighted mean:
+        // (C)/(°C) temperature (intensive property), (-) dimensionless
+        // ratios/coefficients, (W/m2) irradiance intensity per area,
+        // (s) static configuration constants, (deg) directional angle
         if normalized.ends_with("(C)")
             || normalized.ends_with("(\u{b0}C)")
             || normalized.ends_with("(-)")
+            || normalized.ends_with("(W/m2)")
+            || normalized.ends_with("(s)")
+            || normalized.ends_with("(deg)")
         {
             return Self::WeightedMean;
         }
 
+        tracing::warn!(
+            column = name,
+            "unrecognized column unit suffix; falling back to FleetAggregation::WeightedSum",
+        );
         Self::WeightedSum
     }
 }
@@ -1299,5 +1338,159 @@ mod tests {
 
         let result = extract_rows(&outcome, 0);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn column_aggregation_recognizes_therms_per_hour_kvar_and_watt_suffixes() {
+        assert_eq!(
+            ColumnAggregation::for_column("Total Gas Power (therms/hour)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            ColumnAggregation::for_column("Total Reactive Power (kVAR)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            ColumnAggregation::for_column("Net Sensible Heat Gain - Indoor (W)"),
+            ColumnAggregation::Mean
+        );
+    }
+
+    #[test]
+    fn fleet_aggregation_recognizes_therms_per_hour_kvar_and_watt_suffixes() {
+        assert_eq!(
+            FleetAggregation::for_column("Total Gas Power (therms/hour)"),
+            FleetAggregation::WeightedSum
+        );
+        assert_eq!(
+            FleetAggregation::for_column("Total Reactive Power (kVAR)"),
+            FleetAggregation::WeightedSum
+        );
+        assert_eq!(
+            FleetAggregation::for_column("Net Sensible Heat Gain - Indoor (W)"),
+            FleetAggregation::WeightedSum
+        );
+    }
+
+    #[test]
+    fn unrecognized_column_suffix_returns_documented_defaults() {
+        // ColumnAggregation default is Mean for unrecognized suffixes.
+        assert_eq!(
+            ColumnAggregation::for_column("Mystery Metric (foo)"),
+            ColumnAggregation::Mean
+        );
+        // FleetAggregation default is WeightedSum for unrecognized suffixes.
+        assert_eq!(
+            FleetAggregation::for_column("Mystery Metric (foo)"),
+            FleetAggregation::WeightedSum
+        );
+    }
+
+    #[test]
+    fn column_aggregation_recognizes_irradiance_time_and_angle_suffixes() {
+        assert_eq!(
+            ColumnAggregation::for_column("PV Irradiance (W/m2)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            ColumnAggregation::for_column("ASHP Min On Time (s)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            ColumnAggregation::for_column("ASHP Min Off Time (s)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            ColumnAggregation::for_column("Natural Ventilation Wind Angle (deg)"),
+            ColumnAggregation::Mean
+        );
+    }
+
+    #[test]
+    fn fleet_aggregation_recognizes_irradiance_time_and_angle_suffixes() {
+        assert_eq!(
+            FleetAggregation::for_column("PV Irradiance (W/m2)"),
+            FleetAggregation::WeightedMean
+        );
+        assert_eq!(
+            FleetAggregation::for_column("ASHP Min On Time (s)"),
+            FleetAggregation::WeightedMean
+        );
+        assert_eq!(
+            FleetAggregation::for_column("ASHP Min Off Time (s)"),
+            FleetAggregation::WeightedMean
+        );
+        assert_eq!(
+            FleetAggregation::for_column("Natural Ventilation Wind Angle (deg)"),
+            FleetAggregation::WeightedMean
+        );
+    }
+
+    #[test]
+    fn aggregation_recognizes_natural_ventilation_cw_column() {
+        // "Natural Ventilation Cw" is a dimensionless opening-effectiveness
+        // coefficient (bounded [0.0, 0.55]), renamed with (-) suffix for
+        // consistency with every other dimensionless column in the output schema.
+        assert_eq!(
+            ColumnAggregation::for_column("Natural Ventilation Cw (-)"),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            FleetAggregation::for_column("Natural Ventilation Cw (-)"),
+            FleetAggregation::WeightedMean
+        );
+    }
+
+    #[test]
+    fn all_known_suffixes_are_explicitly_handled() {
+        let mean_suffixes: &[&str] = &[
+            "(kW)",
+            "(therms/hour)",
+            "(kVAR)",
+            "(W)",
+            "(W/m2)",
+            "(s)",
+            "(deg)",
+            "(C)",
+            "(\u{b0}C)",
+            "(-)",
+        ];
+
+        for suffix in mean_suffixes {
+            let name = format!("Test Column {suffix}");
+            assert_eq!(
+                ColumnAggregation::for_column(&name),
+                ColumnAggregation::Mean,
+                "known suffix '{suffix}' should return Mean in ColumnAggregation"
+            );
+        }
+
+        assert_eq!(
+            ColumnAggregation::for_column("Energy (kWh)"),
+            ColumnAggregation::Sum
+        );
+
+        let weighted_sum_suffixes: &[&str] = &["(kW)", "(kWh)", "(therms/hour)", "(kVAR)", "(W)"];
+
+        for suffix in weighted_sum_suffixes {
+            let name = format!("Test Column {suffix}");
+            assert_eq!(
+                FleetAggregation::for_column(&name),
+                FleetAggregation::WeightedSum,
+                "known suffix '{suffix}' should return WeightedSum in FleetAggregation"
+            );
+        }
+
+        let weighted_mean_suffixes: &[&str] =
+            &["(C)", "(\u{b0}C)", "(-)", "(W/m2)", "(s)", "(deg)"];
+
+        for suffix in weighted_mean_suffixes {
+            let name = format!("Test Column {suffix}");
+            assert_eq!(
+                FleetAggregation::for_column(&name),
+                FleetAggregation::WeightedMean,
+                "known suffix '{suffix}' should return WeightedMean in FleetAggregation"
+            );
+        }
     }
 }

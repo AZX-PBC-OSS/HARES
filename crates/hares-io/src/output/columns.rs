@@ -558,7 +558,7 @@ pub fn build_schema(
         }
         #[cfg(feature = "observe")]
         for label in &[
-            "Natural Ventilation Cw",
+            "Natural Ventilation Cw (-)",
             "Natural Ventilation Wind Angle (deg)",
         ] {
             fields.push(Field::new(*label, DataType::Float64, true));

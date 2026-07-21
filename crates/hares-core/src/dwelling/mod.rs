@@ -5968,7 +5968,7 @@ impl Dwelling {
                 gains.natural_ventilation_w,
             ),
             #[cfg(feature = "observe")]
-            ("Natural Ventilation Cw", gains.natural_ventilation_cw),
+            ("Natural Ventilation Cw (-)", gains.natural_ventilation_cw),
             #[cfg(feature = "observe")]
             (
                 "Natural Ventilation Wind Angle (deg)",
