@@ -841,6 +841,12 @@ pub fn build_schema(
     metadata.insert("hares_verbosity".to_string(), verbosity.to_string());
     metadata.insert("hares_mode_map".to_string(), mode_ordinal_json());
 
+    let basement_lighting_created = equipment_list.iter().any(|s| s.name == "Basement Lighting");
+    metadata.insert(
+        "basement_lighting_created".to_string(),
+        basement_lighting_created.to_string(),
+    );
+
     Schema::new_with_metadata(fields, metadata)
 }
 
@@ -1210,6 +1216,27 @@ mod tests {
             serde_json::from_str(meta.get("hares_mode_map").unwrap()).unwrap();
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), OperatingMode::iter().count());
+    }
+
+    #[test]
+    fn schema_metadata_includes_basement_lighting_created() {
+        let specs = vec![
+            make_spec("Indoor Lighting", FuelType::Electric),
+            make_spec("Basement Lighting", FuelType::Electric),
+        ];
+        let schema = build_schema(&specs, 1, &[]);
+        let meta = schema.metadata();
+        assert_eq!(
+            meta.get("basement_lighting_created").map(|s| s.as_str()),
+            Some("true"),
+        );
+
+        let schema_no_basement = build_schema(&[], 0, &[]);
+        let meta_no = schema_no_basement.metadata();
+        assert_eq!(
+            meta_no.get("basement_lighting_created").map(|s| s.as_str()),
+            Some("false"),
+        );
     }
 
     #[test]

@@ -675,6 +675,33 @@ pub(super) fn resolve_scheduled_loads(
             }
             .to_string();
 
+            // OCHRE hpxml.py:1695-1698: Basement Lighting is only created when
+            // Foundation Type == "Finished Basement". Unconditioned foundations
+            // (unfinished basements, crawlspaces, vented basements, slab-on-grade)
+            // have no thermally-modeled basement zone, so routing lighting heat
+            // gains to them incorrectly distributes zone-level HVAC loads.
+            if location == "basement"
+                && building.foundation_name.as_deref() != Some("Finished Basement")
+            {
+                #[cfg(feature = "observe")]
+                tracing::info!(
+                    target: "observe",
+                    foundation_name = building.foundation_name,
+                    basement_lighting_created = false,
+                    "basement lighting skipped — foundation is not Finished Basement"
+                );
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            if location == "basement" {
+                tracing::info!(
+                    target: "observe",
+                    foundation_name = building.foundation_name,
+                    basement_lighting_created = true,
+                    "basement lighting created — foundation is Finished Basement"
+                );
+            }
+
             let area_ft2 = match location.as_str() {
                 "garage" => garage_area_ft2,
                 "basement" => foundation_area_ft2,
@@ -1440,7 +1467,14 @@ mod tests {
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
                     </BuildingConstruction>
                   </BuildingSummary>
-                  <Enclosure><Walls /></Enclosure>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><Basement><Conditioned>true</Conditioned></Basement></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
                   <Lighting>
                     <LightingGroup>
                       <Location>garage</Location>
@@ -1493,5 +1527,132 @@ mod tests {
         );
         // Re-resolving must yield the identical order (run-to-run determinism).
         assert_eq!(first, resolve_names());
+    }
+
+    /// Basement lighting must NOT be created when foundation is unconditioned.
+    #[test]
+    fn basement_lighting_skipped_for_unfinished_basement() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>basement</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be created for Unfinished Basement"
+        );
+    }
+
+    /// Basement lighting must be created when foundation is conditioned
+    /// (Finished Basement).
+    #[test]
+    fn basement_lighting_created_for_finished_basement() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><Basement><Conditioned>true</Conditioned></Basement></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>basement</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+        assert!(
+            specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must be created for Finished Basement"
+        );
+    }
+
+    /// Basement lighting must NOT be created when no foundation type
+    /// is specified (slab-on-grade default: foundation_name = None).
+    #[test]
+    fn basement_lighting_skipped_when_no_foundation() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>basement</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be created when no foundation type is specified"
+        );
     }
 }

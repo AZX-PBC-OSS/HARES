@@ -757,6 +757,35 @@ impl InvariantChecker {
     }
 }
 
+/// Verifies that Basement Lighting is only created when the foundation is
+/// conditioned (i.e. "Finished Basement").
+///
+/// OCHRE hpxml.py:1695-1698: Basement Lighting equipment is gated on
+/// Foundation Type == "Finished Basement". Routing lighting heat gains to
+/// an unconditioned foundation zone incorrectly distributes zone-level
+/// HVAC loads — the total energy balance is preserved but zone-level loads
+/// are wrong.
+///
+/// This invariant catches regressions where unconditioned-basement lighting
+/// is inadvertently created through an alternative code path that bypasses
+/// the HPXML resolution gate.
+#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
+pub fn check_basement_lighting_foundation(
+    equipment_names: &[String],
+    foundation_name: Option<&str>,
+) -> Result<(), HaresError> {
+    for name in equipment_names {
+        if name == "Basement Lighting" && foundation_name != Some("Finished Basement") {
+            return Err(HaresError::InvariantViolation {
+                check_name: "basement_lighting_foundation".to_string(),
+                value: 0.0,
+                tolerance: 0.0,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1864,6 +1893,49 @@ mod tests {
         assert!(
             result.is_err(),
             "cumulative exceeding drift tolerance must fail"
+        );
+    }
+
+    // ── basement_lighting_foundation ────────────────────────────────────────
+
+    #[test]
+    fn basement_lighting_passes_with_finished_basement() {
+        let result = check_basement_lighting_foundation(
+            &["Basement Lighting".to_string()],
+            Some("Finished Basement"),
+        );
+        assert!(result.is_ok(), "Finished Basement should pass");
+    }
+
+    #[test]
+    fn basement_lighting_fails_with_unfinished_basement() {
+        let result = check_basement_lighting_foundation(
+            &["Basement Lighting".to_string()],
+            Some("Unfinished Basement"),
+        );
+        assert!(result.is_err(), "Unfinished Basement must fail");
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "basement_lighting_foundation"
+        ));
+    }
+
+    #[test]
+    fn basement_lighting_fails_with_no_foundation() {
+        let result = check_basement_lighting_foundation(&["Basement Lighting".to_string()], None);
+        assert!(result.is_err(), "no foundation must fail");
+    }
+
+    #[test]
+    fn basement_lighting_passes_when_no_basement_equipment() {
+        let result = check_basement_lighting_foundation(
+            &["Indoor Lighting".to_string(), "Clothes Dryer".to_string()],
+            Some("Unfinished Basement"),
+        );
+        assert!(
+            result.is_ok(),
+            "no Basement Lighting equipment should pass regardless of foundation"
         );
     }
 }

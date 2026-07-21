@@ -83,6 +83,8 @@ use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::invariants::InvariantChecker;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use crate::invariants::check_basement_lighting_foundation;
 use crate::rng::{
     RNG_STREAM_EV_DRIVER_BASE, RNG_STREAM_EVENT_LOAD_BASE, advance_dwelling_rng, derive_sub_rng,
 };
@@ -1938,6 +1940,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 .unwrap_or_else(|| PathBuf::from("defaults")),
         ),
         &defaults,
+        bp.building.foundation_name.as_deref(),
     )?;
 
     // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
@@ -1951,6 +1954,11 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         hares_io::check_hvac_setpoint_invariants(&equipment_specs);
         hares_io::check_foundation_zone_invariant(&bp.building);
         hares_io::check_mode_ordinals_invariant();
+        let equipment_names: Vec<String> = equipment_specs.iter().map(|s| s.name.clone()).collect();
+        check_basement_lighting_foundation(
+            &equipment_names,
+            bp.building.foundation_name.as_deref(),
+        )?;
     }
     let override_root = config
         .overrides

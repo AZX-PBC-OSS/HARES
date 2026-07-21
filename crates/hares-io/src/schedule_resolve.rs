@@ -414,6 +414,7 @@ pub fn inject_schedule_into_specs(
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
     defaults: &DefaultsStore,
+    foundation_name: Option<&str>,
 ) -> Result<(), HaresError> {
     let csv_col_map: HashMap<String, usize> = schedule
         .column_names
@@ -437,7 +438,7 @@ pub fn inject_schedule_into_specs(
 
     // Ensure specs exist for CSV columns that have column mappings but
     // no corresponding spec from HPXML parsing (e.g. microwave).
-    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults);
+    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, foundation_name);
 
     let profiles = defaults_path.map(load_default_profiles).unwrap_or_default();
 
@@ -1327,6 +1328,13 @@ fn normalize_schedule_col_name(name: &str) -> String {
 /// but no corresponding spec from HPXML parsing (e.g. microwave, which is a
 /// separate schedule CSV column not produced by the HPXML appliance parser).
 ///
+/// Basement Lighting is gated on `foundation_name == "Finished Basement"` to
+/// match the HPXML-resolution gate in `resolve_loads.rs` and OCHRE's behaviour
+/// (hpxml.py:1695-1698). Without this check, a schedule CSV with a
+/// `lighting_basement` column would silently create basement lighting equipment
+/// for unconditioned foundations, reintroducing the exact regression class the
+/// `check_basement_lighting_foundation` invariant was written to catch.
+///
 /// Specs are constructed through `build_spec` — the same path every HPXML-derived
 /// spec takes — so default gain fractions, fuel-type labels, and ZIP parameters
 /// are injected consistently.  This prevents the class of bug where an
@@ -1336,12 +1344,18 @@ fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
     defaults: &DefaultsStore,
+    foundation_name: Option<&str>,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
             mapping.category,
             ScheduleCategory::Ignore | ScheduleCategory::Occupancy | ScheduleCategory::Setpoint
         ) {
+            continue;
+        }
+        if mapping.equipment_name == "Basement Lighting"
+            && foundation_name != Some("Finished Basement")
+        {
             continue;
         }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -1680,6 +1694,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1703,6 +1718,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1730,6 +1746,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1750,8 +1767,14 @@ mod tests {
     fn max_electric_power_w_without_annual_kwh_sets_csv_peak() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", None, Some(500.0))];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1786,8 +1809,14 @@ mod tests {
             Some(1200.0),
             Some(500.0),
         )];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1798,8 +1827,14 @@ mod tests {
     fn annual_kwh_only_behavior_unchanged_csv_branch() {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut specs = vec![make_spec_with_power("Indoor Lighting", Some(1200.0), None)];
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
 
         let mean_fraction = (0.2 + 1.0 + 0.4) / 3.0;
@@ -1823,6 +1858,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1867,6 +1903,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1890,8 +1927,14 @@ mod tests {
         let mut schedule = make_schedule_with_event_column(&[0.0, 1.0, 0.0]);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -1908,8 +1951,14 @@ mod tests {
         let mut schedule = make_schedule(4);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs[0]
@@ -2016,8 +2065,14 @@ mod tests {
             ),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let heater_typed = specs[0]
             .typed_config
@@ -2254,8 +2309,14 @@ mod tests {
             make_typed_tankless_spec(Some(200.0)),
         ];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         for spec in specs.iter().take(3) {
             let typed = spec
@@ -2338,8 +2399,14 @@ mod tests {
             avg_daily_l,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let draw_col_idx = specs[0]
             .typed_config
@@ -2381,8 +2448,13 @@ mod tests {
         );
         let mut specs = vec![make_typed_tankless_spec(None)];
 
-        let result =
-            inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty());
+        let result = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
         let err_msg = err.to_string();
@@ -2454,8 +2526,13 @@ mod tests {
         );
         let mut specs = vec![spec];
 
-        let result =
-            inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty());
+        let result = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
         let err_msg = err.to_string();
@@ -2504,8 +2581,14 @@ mod tests {
             200.0,
         )];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         let typed = specs[0]
             .typed_config
@@ -2712,6 +2795,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2874,6 +2958,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3096,6 +3181,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3157,6 +3243,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3215,6 +3302,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3258,6 +3346,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3291,6 +3380,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3350,6 +3440,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
+            None,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3411,8 +3502,14 @@ mod tests {
         let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed with valid config");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed with valid config");
 
         assert_eq!(
             specs.len(),
@@ -3498,8 +3595,14 @@ mod tests {
         let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject should succeed");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject should succeed");
 
         let spec = &specs[0];
         assert_eq!(spec.name, "Microwave");
@@ -3630,8 +3733,14 @@ mod tests {
             primary_role: None,
         }];
 
-        inject_schedule_into_specs(&mut specs, &mut schedule, None, &DefaultsStore::empty())
-            .expect("inject_schedule_into_specs should succeed");
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed");
 
         // Cooking Range must have its own schedule column
         let cooking = specs
@@ -3667,6 +3776,108 @@ mod tests {
         assert!(
             cooking_col != microwave_col,
             "Cooking Range and Microwave must have different schedule column indices"
+        );
+    }
+
+    fn make_schedule_with_basement_lighting_column(values: &[f64]) -> ScheduleTimeSeries {
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..values.len())
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("lighting_basement".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec!["lighting_basement".to_string()],
+            columns: vec![values.to_vec()],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![crate::ColumnAggregation::Mean],
+        }
+    }
+
+    #[test]
+    fn basement_lighting_not_auto_created_from_csv_for_unfinished_foundation() {
+        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be auto-created from CSV column when foundation is not Finished Basement"
+        );
+    }
+
+    #[test]
+    fn basement_lighting_not_auto_created_from_csv_for_unfinished_basement() {
+        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Unfinished Basement"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be auto-created from CSV column when foundation is Unfinished Basement"
+        );
+    }
+
+    #[test]
+    fn basement_lighting_auto_created_from_csv_for_finished_basement() {
+        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Finished Basement"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        let basement = specs.iter().find(|s| s.name == "Basement Lighting");
+        assert!(
+            basement.is_some(),
+            "Basement Lighting must be auto-created from CSV column when foundation is Finished Basement"
+        );
+        let spec = basement.unwrap();
+        assert_eq!(spec.fuel_type, FuelType::Electric);
+    }
+
+    #[test]
+    fn basement_lighting_not_auto_created_from_csv_for_crawlspace() {
+        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Crawlspace"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be auto-created from CSV column when foundation is Crawlspace"
         );
     }
 }
