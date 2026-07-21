@@ -479,6 +479,7 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,

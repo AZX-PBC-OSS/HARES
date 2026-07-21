@@ -395,6 +395,17 @@ pub trait Equipment: Send + Sync {
     fn ocv_source(&self) -> Option<&str> {
         None
     }
+
+    /// Additional init-time provenance lines for the diagnostic CSV.
+    ///
+    /// Each string is written as a `# eq ...` comment line by
+    /// `diagnostics::write_equipment_init`. Equipment types that expose
+    /// model-parameter provenance beyond the standard zone-id / OCV-source
+    /// comments override this to surface scaling choices, coefficient
+    /// conventions, or other init-time metadata.
+    fn provenance_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Re-export postcard CRC32 serialisation helpers from the serial module.

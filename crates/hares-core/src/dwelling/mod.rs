@@ -2559,7 +2559,17 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                     .map(|s| (eq.descriptor().name.clone(), s.to_string()))
             })
             .collect();
-        diagnostics::write_equipment_init(&mut writer, &equipment_zones, &ocv_sources);
+        let provenance_lines: Vec<String> = dwelling
+            .equipment
+            .iter()
+            .flat_map(|eq| eq.provenance_lines())
+            .collect();
+        diagnostics::write_equipment_init(
+            &mut writer,
+            &equipment_zones,
+            &ocv_sources,
+            &provenance_lines,
+        );
         Some(writer)
     } else {
         None

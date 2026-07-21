@@ -662,6 +662,21 @@ pub struct HeatPumpWaterHeaterConfig {
     pub wall_heat_fraction: Option<f64>,
     pub capacity_biquadratic_coeffs: Option<[f64; 6]>,
     pub cop_biquadratic_coeffs: Option<[f64; 6]>,
+    /// Controls whether the COP biquadratic curve coefficients are already
+    /// normalized for the OCHRE `cop_nominal * curve()` convention.
+    ///
+    /// - `true` (or `None`, the default): HARES computes a `cop_scale` that anchors
+    ///   the curve output to `cop` (typically a UEF-derived rated COP) at the domain
+    ///   midpoint — the existing behaviour.  COP = cop_curve(T_wb, T_tank) * cop_scale.
+    /// - `false`: the curve is treated as a direct multiplier on `cop` with no
+    ///   re-normalisation — matching OCHRE's `cop_nominal * cop_curve()` convention.
+    ///   COP = cop_curve(T_wb, T_tank) * cop.  Set this when providing custom
+    ///   coefficients from EnergyPlus, BEopt, or other tools that follow the OCHRE
+    ///   convention.
+    ///
+    /// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py:637-640.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cop_curve_is_normalized: Option<bool>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -1036,6 +1051,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -1227,6 +1243,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1405,6 +1422,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1607,6 +1625,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1816,6 +1835,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,

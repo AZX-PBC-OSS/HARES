@@ -289,6 +289,7 @@ pub fn write_equipment_init(
     w: &mut impl Write,
     equipment: &[(String, u16, Option<String>)],
     ocv_sources: &[(String, String)],
+    provenance_lines: &[String],
 ) {
     for (name, zone_id, zone_type) in equipment {
         match zone_type {
@@ -305,6 +306,9 @@ pub fn write_equipment_init(
     }
     for (name, source) in ocv_sources {
         let _ = writeln!(w, "# eq ocv_source: {name} -> {source}");
+    }
+    for line in provenance_lines {
+        let _ = writeln!(w, "{line}");
     }
 }
 

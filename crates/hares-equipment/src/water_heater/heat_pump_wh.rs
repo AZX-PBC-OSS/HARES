@@ -122,6 +122,12 @@ pub struct HeatPumpWH {
     /// by computing scale = cop_rated / cop_curve(rated_conditions).
     /// Defaults to 1.0 (no scaling; pure curve output).
     cop_scale: f64,
+    /// When `true` (default), `cop_scale` is computed to anchor the curve output
+    /// to `cop_rated` at the domain midpoint. When `false`, the curve coefficients
+    /// are treated as an OCHRE-format direct multiplier on `cop_rated` with no
+    /// re-normalisation — `cop_scale` is set to `cop_rated` directly.
+    /// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py:637-640.
+    cop_curve_is_normalized: bool,
     /// Tempering valve delivery temperature (°C) for hot draws (e.g. dishwasher).
     /// Maps to `hot_draw_temp_c` in the TMV logic. Typically 51.67°C (125°F);
     /// `None` means no valve present (defaults to tank setpoint).
@@ -278,6 +284,7 @@ impl HeatPumpWH {
                 output_max: None,
             },
             cop_scale: 1.0,
+            cop_curve_is_normalized: true,
             tempering_valve_setpoint_c: None,
             fixture_delivery_temp_c: 40.6,
             capacity_curve: BiquadraticCurve {
@@ -457,6 +464,8 @@ impl HeatPumpWH {
         let cop_rated =
             c.cop.unwrap_or(DEFAULT_RATED_COP) * c.performance_adjustment.unwrap_or(1.0);
 
+        self.cop_curve_is_normalized = c.cop_curve_is_normalized.unwrap_or(true);
+
         self.cop_curve = BiquadraticCurve {
             coeffs: c.cop_biquadratic_coeffs.unwrap_or(DEFAULT_COP_CURVE),
             x1_bounds: (DEFAULT_ZONE_TEMP_BOUNDS_C.0, DEFAULT_ZONE_TEMP_BOUNDS_C.1),
@@ -467,11 +476,26 @@ impl HeatPumpWH {
         };
         let ref_zone_temp = (self.cop_curve.x1_bounds.0 + self.cop_curve.x1_bounds.1) * 0.5;
         let ref_tank_temp = (self.cop_curve.x2_bounds.0 + self.cop_curve.x2_bounds.1) * 0.5;
-        let cop_at_ref = self
-            .cop_curve
-            .evaluate(ref_zone_temp, ref_tank_temp)
-            .max(1e-6);
-        self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
+        if self.cop_curve_is_normalized {
+            let cop_at_ref = self
+                .cop_curve
+                .evaluate(ref_zone_temp, ref_tank_temp)
+                .max(1e-6);
+            self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
+        } else {
+            self.cop_scale = cop_rated;
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if !self.cop_curve_is_normalized {
+                debug_assert!(
+                    (self.cop_scale - cop_rated).abs() < 1e-12,
+                    "cop_scale ({}) must equal cop_rated ({cop_rated}) when cop_curve_is_normalized is false",
+                    self.cop_scale
+                );
+            }
+        }
 
         self.tempering_valve_setpoint_c = c.tempering_valve_setpoint_c.filter(|&t| t > 0.0);
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
@@ -559,11 +583,15 @@ impl HeatPumpWH {
             if (blend_factor - 1.0).abs() < 1e-9 {
                 self.cop_curve = lp_cop_curve;
                 self.capacity_curve = lp_capacity_curve;
-                let cop_at_ref = self
-                    .cop_curve
-                    .evaluate(ref_zone_temp, ref_tank_temp)
-                    .max(1e-6);
-                self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
+                if self.cop_curve_is_normalized {
+                    let cop_at_ref = self
+                        .cop_curve
+                        .evaluate(ref_zone_temp, ref_tank_temp)
+                        .max(1e-6);
+                    self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
+                } else {
+                    self.cop_scale = cop_rated;
+                }
                 self.low_power_blend_factor = 0.0;
             } else if blend_factor > 0.0 {
                 self.low_power_cop_curve = Some(lp_cop_curve);
@@ -674,6 +702,8 @@ impl HeatPumpWH {
                 curve_set = curve_id,
                 min_ambient_c = self.min_ambient_temp_c,
                 max_ambient_c = self.max_ambient_temp_c,
+                cop_curve_is_normalized = self.cop_curve_is_normalized,
+                cop_scale = self.cop_scale,
                 "HPWH curve selection"
             );
         }
@@ -1345,6 +1375,19 @@ impl Equipment for HeatPumpWH {
         }
         Ok(())
     }
+
+    fn provenance_lines(&self) -> Vec<String> {
+        vec![
+            format!(
+                "# eq cop_curve_is_normalized: {} -> {}",
+                self.descriptor.name, self.cop_curve_is_normalized
+            ),
+            format!(
+                "# eq cop_scale: {} -> {:.4}",
+                self.descriptor.name, self.cop_scale
+            ),
+        ]
+    }
 }
 
 impl HeatPumpWH {
@@ -1518,8 +1561,9 @@ mod tests {
 
     use super::hpwh_compressor::{
         DEFAULT_CAPACITY_CURVE, DEFAULT_COP_CURVE, DEFAULT_LOW_POWER_CAPACITY_CURVE,
-        DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C, DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C,
-        DEFAULT_MIN_AMBIENT_TEMP_C,
+        DEFAULT_LOW_POWER_COP_CURVE, DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C,
+        DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_RATED_COP,
+        DEFAULT_TANK_TEMP_BOUNDS_C, DEFAULT_ZONE_TEMP_BOUNDS_C,
     };
     use super::{HeatPumpWH, weighted_average_tank_temp};
     use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
@@ -1599,6 +1643,7 @@ mod tests {
             wall_heat_fraction: Some(0.0),
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: Some(1.0),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,
@@ -1657,6 +1702,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1745,6 +1791,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1799,6 +1846,7 @@ mod tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -3022,6 +3070,238 @@ mod tests {
             "electrical consumption should be the same: {elec_100:.4} vs {elec_80:.4}"
         );
     }
+
+    // --- cop_curve_is_normalized tests ---
+
+    /// When `cop_curve_is_normalized = false`, the COP should equal
+    /// `cop_rated * cop_curve_eval` — i.e. `cop_scale == cop_rated` and no
+    /// re-normalisation to the domain midpoint occurs. This matches OCHRE's
+    /// `cop_nominal * cop_curve()` convention.
+    /// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py:637-640.
+    #[test]
+    fn cop_curve_not_normalized_uses_direct_cop_rated_multiplier() {
+        let mut typed = base_typed_config();
+        typed.cop = Some(DEFAULT_RATED_COP);
+        typed.cop_curve_is_normalized = Some(false);
+        typed.initial_tank_temp_c = Some(45.0);
+        typed.setpoint_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = equipment_config(typed);
+
+        let ref_wb = (DEFAULT_ZONE_TEMP_BOUNDS_C.0 + DEFAULT_ZONE_TEMP_BOUNDS_C.1) * 0.5;
+        let ref_tank = (DEFAULT_TANK_TEMP_BOUNDS_C.0 + DEFAULT_TANK_TEMP_BOUNDS_C.1) * 0.5;
+        let e = env_with_wet_bulb(30.0, ref_wb);
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+
+        let cop_curve_eval = eq.cop_curve.evaluate(ref_wb, ref_tank);
+        let expected_cop = DEFAULT_RATED_COP * cop_curve_eval;
+        let expected_scale = DEFAULT_RATED_COP;
+
+        assert!(
+            (eq.cop_scale - expected_scale).abs() < 1e-9,
+            "non-normalized cop_scale must equal cop_rated ({}), got {}",
+            expected_scale,
+            eq.cop_scale
+        );
+
+        let mut ports = ports();
+        eq.step(&e, Duration::from_secs(60), &mut ports)
+            .expect("step");
+
+        let cop = eq.telemetry().get(tk::COP).expect("COP telemetry");
+        assert!(
+            (cop - expected_cop).abs() < 1e-3,
+            "non-normalized COP ({cop:.4}) should match cop_rated * cop_curve_eval ({expected_cop:.4})"
+        );
+    }
+
+    /// When `cop_curve_is_normalized = false` with a low-power HPWH, the COP
+    /// should use the low-power curve after full replacement (blend_factor == 1.0)
+    /// multiplied directly by `cop_rated` — no re-normalisation. This exercises
+    /// the duplicated `cop_scale` recomputation in the low-power recalibration path.
+    #[test]
+    fn cop_curve_not_normalized_low_power_uses_direct_cop_rated_multiplier() {
+        let mut typed = base_typed_config();
+        typed.cop = Some(DEFAULT_RATED_COP);
+        typed.cop_curve_is_normalized = Some(false);
+        typed.low_power_hpwh = Some(true);
+        typed.uniform_energy_factor = Some(5.0);
+        typed.initial_tank_temp_c = Some(45.0);
+        typed.setpoint_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = equipment_config(typed);
+
+        let ref_wb = (DEFAULT_ZONE_TEMP_BOUNDS_C.0 + DEFAULT_ZONE_TEMP_BOUNDS_C.1) * 0.5;
+        let ref_tank = (DEFAULT_TANK_TEMP_BOUNDS_C.0 + DEFAULT_TANK_TEMP_BOUNDS_C.1) * 0.5;
+        let e = env_with_wet_bulb(30.0, ref_wb);
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+
+        // blend_factor == 1.0 fully replaces standard curve with low-power curve.
+        assert!(
+            (eq.low_power_blend_factor - 0.0).abs() < 1e-12,
+            "blend_factor should be 0 after full replacement"
+        );
+        assert!(
+            eq.cop_curve.coeffs == DEFAULT_LOW_POWER_COP_CURVE,
+            "low-power COP curve should replace standard after full replacement"
+        );
+
+        let c = &DEFAULT_LOW_POWER_COP_CURVE;
+        let lp_cop = c[0]
+            + c[1] * ref_wb
+            + c[2] * ref_wb * ref_wb
+            + c[3] * ref_tank
+            + c[4] * ref_tank * ref_tank
+            + c[5] * ref_tank * ref_wb;
+        let expected_cop = DEFAULT_RATED_COP * lp_cop;
+        let expected_scale = DEFAULT_RATED_COP;
+
+        assert!(
+            (eq.cop_scale - expected_scale).abs() < 1e-9,
+            "non-normalized low-power cop_scale must equal cop_rated ({}), got {}",
+            expected_scale,
+            eq.cop_scale
+        );
+
+        let mut ports = ports();
+        eq.step(&e, Duration::from_secs(60), &mut ports)
+            .expect("step");
+
+        let cop = eq.telemetry().get(tk::COP).expect("COP telemetry");
+        assert!(
+            (cop - expected_cop).abs() < 1e-3,
+            "non-normalized low-power COP ({cop:.4}) should match \
+             cop_rated * low_power_cop_curve_eval ({expected_cop:.4})"
+        );
+    }
+
+    /// When `cop_curve_is_normalized = true` (the default), the existing
+    /// anchoring behaviour is preserved: COP at the domain midpoint equals
+    /// `cop_rated`. The curve output is re-normalised via `cop_scale`.
+    #[test]
+    fn cop_curve_normalized_anchors_cop_to_rated_at_midpoint() {
+        let mut typed = base_typed_config();
+        typed.cop = Some(DEFAULT_RATED_COP);
+        typed.cop_curve_is_normalized = Some(true);
+        typed.initial_tank_temp_c = Some(45.0);
+        typed.setpoint_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = equipment_config(typed);
+
+        let ref_wb = (DEFAULT_ZONE_TEMP_BOUNDS_C.0 + DEFAULT_ZONE_TEMP_BOUNDS_C.1) * 0.5;
+        let e = env_with_wet_bulb(30.0, ref_wb);
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+
+        let mut ports = ports();
+        eq.step(&e, Duration::from_secs(60), &mut ports)
+            .expect("step");
+
+        let cop = eq.telemetry().get(tk::COP).expect("COP telemetry");
+        assert!(
+            (cop - DEFAULT_RATED_COP).abs() < 1e-2,
+            "normalized COP ({cop:.4}) should equal cop_rated ({}) at domain midpoint",
+            DEFAULT_RATED_COP
+        );
+    }
+
+    /// Regression test: with default curve coefficients and non-normalized path,
+    /// COP at ref (25 °C wet-bulb, 45 °C tank) ≈ 3.88 matching OCHRE's
+    /// `cop_nominal * curve()` convention, while the normalized path produces
+    /// COP = cop_rated = 3.45.
+    /// With DEFAULT_COP_CURVE: cop_curve(25, 45) ≈ 1.124.
+    /// - OCHRE convention: COP = 3.45 * 1.124 ≈ 3.88
+    /// - HARES anchoring:   COP = 3.45 (anchored to rated at midpoint)
+    #[test]
+    fn non_normalized_cop_matches_ochre_convention_at_reference_conditions() {
+        let ref_wb = (DEFAULT_ZONE_TEMP_BOUNDS_C.0 + DEFAULT_ZONE_TEMP_BOUNDS_C.1) * 0.5;
+        let ref_tank = (DEFAULT_TANK_TEMP_BOUNDS_C.0 + DEFAULT_TANK_TEMP_BOUNDS_C.1) * 0.5;
+        let cop_at_ref = DEFAULT_COP_CURVE[0]
+            + DEFAULT_COP_CURVE[1] * ref_wb
+            + DEFAULT_COP_CURVE[2] * ref_wb * ref_wb
+            + DEFAULT_COP_CURVE[3] * ref_tank
+            + DEFAULT_COP_CURVE[4] * ref_tank * ref_tank
+            + DEFAULT_COP_CURVE[5] * ref_tank * ref_wb;
+
+        let expected_ochre_cop = DEFAULT_RATED_COP * cop_at_ref;
+        let expected_anchored_cop = DEFAULT_RATED_COP;
+
+        let e = env_with_wet_bulb(30.0, ref_wb);
+
+        // --- Non-normalized (OCHRE convention) ---
+        let mut typed_ochre = base_typed_config();
+        typed_ochre.cop = Some(DEFAULT_RATED_COP);
+        typed_ochre.cop_curve_is_normalized = Some(false);
+        typed_ochre.initial_tank_temp_c = Some(45.0);
+        typed_ochre.setpoint_c = Some(55.0);
+        typed_ochre.draw_flow_rate_kg_s = Some(0.0);
+        let cfg_ochre = equipment_config(typed_ochre);
+        let mut eq_ochre = HeatPumpWH::new(cfg_ochre.clone());
+        eq_ochre.init(&cfg_ochre, &e).expect("init");
+        let mut ports_ochre = ports();
+        eq_ochre
+            .step(&e, Duration::from_secs(60), &mut ports_ochre)
+            .expect("step");
+        let cop_ochre = eq_ochre.telemetry().get(tk::COP).expect("COP");
+
+        // --- Normalized (HARES anchoring) ---
+        let mut typed_anchored = base_typed_config();
+        typed_anchored.cop = Some(DEFAULT_RATED_COP);
+        typed_anchored.cop_curve_is_normalized = Some(true);
+        typed_anchored.initial_tank_temp_c = Some(45.0);
+        typed_anchored.setpoint_c = Some(55.0);
+        typed_anchored.draw_flow_rate_kg_s = Some(0.0);
+        let cfg_anchored = equipment_config(typed_anchored);
+        let mut eq_anchored = HeatPumpWH::new(cfg_anchored.clone());
+        eq_anchored.init(&cfg_anchored, &e).expect("init");
+        let mut ports_anchored = ports();
+        eq_anchored
+            .step(&e, Duration::from_secs(60), &mut ports_anchored)
+            .expect("step");
+        let cop_anchored = eq_anchored.telemetry().get(tk::COP).expect("COP");
+
+        assert!(
+            (cop_ochre - expected_ochre_cop).abs() < 1e-3,
+            "non-normalized COP ({cop_ochre:.4}) should match OCHRE convention \
+             cop_rated * cop_curve(ref) = {expected_ochre_cop:.4}"
+        );
+        assert!(
+            (cop_anchored - expected_anchored_cop).abs() < 1e-2,
+            "normalized COP ({cop_anchored:.4}) should equal cop_rated ({expected_anchored_cop}) \
+             at domain midpoint"
+        );
+    }
+
+    /// `provenance_lines()` must emit the two `# eq` comment lines that
+    /// `write_equipment_init` writes into the diagnostic CSV.  This test
+    /// guards against format-string typos, field-order swaps, and
+    /// precision regressions in the trait override.
+    #[test]
+    fn provenance_lines_reports_cop_curve_is_normalized_and_cop_scale() {
+        let mut typed = base_typed_config();
+        typed.cop = Some(DEFAULT_RATED_COP);
+        typed.cop_curve_is_normalized = Some(false);
+        let cfg = equipment_config(typed);
+
+        let e = env(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+
+        let lines = eq.provenance_lines();
+        assert_eq!(
+            lines.len(),
+            2,
+            "provenance_lines must return exactly 2 lines"
+        );
+
+        assert_eq!(lines[0], "# eq cop_curve_is_normalized: HPWH -> false");
+        assert_eq!(lines[1], "# eq cop_scale: HPWH -> 3.4500");
+    }
 }
 
 #[cfg(test)]
@@ -3790,6 +4070,7 @@ mod new_feature_tests {
             wall_heat_fraction: None,
             capacity_biquadratic_coeffs: None,
             cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
             performance_adjustment: Some(1.0),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,

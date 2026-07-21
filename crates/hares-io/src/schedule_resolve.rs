@@ -2229,6 +2229,7 @@ mod tests {
                     wall_heat_fraction: None,
                     capacity_biquadratic_coeffs: None,
                     cop_biquadratic_coeffs: None,
+                    cop_curve_is_normalized: None,
                     performance_adjustment: Some(0.92),
                     zone_type: Some("conditioned".to_string()),
                     first_hour_rating_m3: Some(0.20),
