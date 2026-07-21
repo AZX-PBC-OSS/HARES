@@ -134,6 +134,7 @@ jobs:
       - uses: taiki-e/install-action@cargo-nextest
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F observe
       - run: cargo nextest run --workspace --release -F check_invariants --no-fail-fast --profile ci
+      - run: cargo nextest run --release --no-fail-fast --profile ci -p hares-equipment
       - uses: actions/upload-artifact@v4
         if: success() || failure()
         with:

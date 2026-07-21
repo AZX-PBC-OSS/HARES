@@ -966,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
     fn deadband_offset_below_zero_panics() {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, -0.1);
@@ -973,6 +974,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
     fn deadband_offset_above_one_panics() {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 1.1);

@@ -3669,6 +3669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_detects_unknown_column() {
         let mut column_index = HashMap::new();
         column_index.insert("unknown_column".to_string(), 0);
@@ -3686,6 +3687,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_returns_empty_when_all_mapped() {
         let mut column_index = HashMap::new();
         column_index.insert("cooking_range".to_string(), 0);

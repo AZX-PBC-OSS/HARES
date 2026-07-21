@@ -270,8 +270,16 @@ impl RegularGridInterpolator {
     ///
     /// # Panics
     /// Panics if `point.len() != self.ndim()`.
+    /// In debug/check_invariants builds, panics if any coordinate is non-finite
+    /// (NaN or ±Inf).
     /// In debug/check_invariants builds, panics if strategy is `NaN` and any
     /// coordinate is out of bounds.
+    ///
+    /// # Returns
+    /// In release builds without `check_invariants`, returns `f32::NAN` as a
+    /// sentinel when any coordinate is non-finite, or when strategy is `NaN`
+    /// and any coordinate is out of bounds. Callers should treat NaN results
+    /// as an error signal.
     pub fn interpolate(&mut self, point: &[f64]) -> f32 {
         assert_eq!(
             point.len(),
@@ -280,6 +288,21 @@ impl RegularGridInterpolator {
             self.axes.len(),
             point.len()
         );
+
+        // Guard against non-finite query coordinates. In debug/invariant builds
+        // the assertion fires first with a descriptive message; in optimized
+        // release builds the early return produces a detectable NaN poison value.
+        let all_finite = point.iter().all(|v| v.is_finite());
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        assert!(
+            all_finite,
+            "RegularGridInterpolator::interpolate: non-finite coordinate in query point {:?}",
+            point
+        );
+
+        if !all_finite {
+            return f32::NAN;
+        }
 
         let ndim = self.axes.len();
 
@@ -1066,6 +1089,79 @@ mod tests {
                 "dim {dim}: cached bracket {} out of range [0, {max_lo}]",
                 interp.cached_bracket[dim]
             );
+        }
+    }
+
+    // ── Non-finite query coordinate tests ───────────────────────────────
+    //
+    // These tests use catch_unwind so the sentinel-return path (f32::NAN)
+    // is verified in every build configuration, not just the bare --release
+    // profile that has neither debug_assertions nor check_invariants active.
+
+    #[test]
+    fn interpolate_returns_nan_for_nan_input() {
+        let mut interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0]],
+            vec![0.0, 10.0],
+            ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interp.interpolate(&[f64::NAN])
+        }));
+        match result {
+            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
+            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
+        }
+    }
+
+    #[test]
+    fn interpolate_returns_nan_for_inf_input() {
+        let mut interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0]],
+            vec![0.0, 10.0],
+            ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interp.interpolate(&[f64::INFINITY])
+        }));
+        match result {
+            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
+            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
+        }
+    }
+
+    #[test]
+    fn interpolate_returns_nan_for_neg_inf_input() {
+        let mut interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0]],
+            vec![0.0, 10.0],
+            ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interp.interpolate(&[f64::NEG_INFINITY])
+        }));
+        match result {
+            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
+            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
+        }
+    }
+
+    #[test]
+    fn interpolate_returns_nan_for_mixed_finite_nan_input() {
+        let axes = vec![vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0, 1.0]];
+        let total: usize = axes.iter().map(|a| a.len()).product();
+        let values = vec![0.5f32; total];
+        let mut interp =
+            RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interp.interpolate(&[0.5, f64::NAN, 0.5])
+        }));
+        match result {
+            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
+            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
         }
     }
 }
