@@ -9,6 +9,7 @@
 
 use serde_json::json;
 
+use hares_equipment::HeatPumpWaterHeaterConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::HpxmlError;
 use hares_io::hpxml::building::parse_building;
@@ -511,7 +512,7 @@ fn electric_boiler_omitting_flow_rate_and_return_temp_silently_applies_defaults(
 // --- Heat Pump Water Heater: HotWaterTemperature ---------------------------
 
 #[test]
-fn hpwh_missing_hot_water_temperature_errors() {
+fn hpwh_missing_hot_water_temperature_passes_none_not_silent_default() {
     let xml = wrap_systems(
         r#"<WaterHeating>
           <WaterHeatingSystem>
@@ -523,10 +524,23 @@ fn hpwh_missing_hot_water_temperature_errors() {
           </WaterHeatingSystem>
         </WaterHeating>"#,
     );
-    expect_missing(
-        resolve(&xml),
-        "WaterHeatingSystem/HotWaterTemperature",
-        "Heat Pump Water Heater",
+    let specs = resolve(&xml)
+        .expect("HPWH should resolve even without HotWaterTemperature; setpoint_c is optional with DEFAULT_SETPOINT_C fallback in init_typed");
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("should emit HPWH");
+    let typed_cfg: HeatPumpWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed hpwh config")
+        .typed()
+        .expect("hpwh typed config");
+    // setpoint_c is optional — init_typed applies DEFAULT_SETPOINT_C (51.67 °C).
+    // Parser must not silently substitute a value; None is explicit absence.
+    assert!(
+        typed_cfg.setpoint_c.is_none(),
+        "parser must NOT silently substitute a setpoint_c when HotWaterTemperature is absent"
     );
 }
 

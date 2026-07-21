@@ -25,6 +25,8 @@ use super::hpwh_compressor::{
     self, DEFAULT_BACKUP_EFFICIENCY, DEFAULT_BACKUP_ELEMENT_POWER_W,
     DEFAULT_BACKUP_ENABLE_OFFSET_C, DEFAULT_CAPACITY_CURVE, DEFAULT_COMPRESSOR_POWER_W,
     DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C, DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION,
+    DEFAULT_LOW_POWER_CAPACITY_CURVE, DEFAULT_LOW_POWER_COP_CURVE,
+    DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C, DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C,
     DEFAULT_MAX_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S,
     DEFAULT_PARASITIC_POWER_W, DEFAULT_RATED_COP, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C,
     DEFAULT_ZONE_TEMP_BOUNDS_C,
@@ -127,6 +129,16 @@ pub struct HeatPumpWH {
     /// Fixture delivery temperature for TMV blending (°C). Default 40.6°C.
     fixture_delivery_temp_c: f64,
     capacity_curve: BiquadraticCurve,
+    /// Low-power HPWH COP biquadratic curve (UEF >= 4.9). `None` for standard HPWH.
+    /// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 470.
+    low_power_cop_curve: Option<BiquadraticCurve>,
+    /// Low-power HPWH capacity biquadratic curve (UEF >= 4.9). `None` for standard HPWH.
+    /// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 469.
+    low_power_capacity_curve: Option<BiquadraticCurve>,
+    /// Blend factor for cross-fading standard → low-power curve outputs.
+    /// 0.0 = pure standard; 1.0 = pure low-power. Intermediate values
+    /// linear-interpolate between the two curve evaluations per timestep.
+    low_power_blend_factor: f64,
     min_ambient_temp_c: f64,
     max_ambient_temp_c: f64,
     max_tank_temp_c: f64,
@@ -276,6 +288,9 @@ impl HeatPumpWH {
                 output_min: Some(0.0),
                 output_max: None,
             },
+            low_power_cop_curve: None,
+            low_power_capacity_curve: None,
+            low_power_blend_factor: 0.0,
             min_ambient_temp_c: DEFAULT_MIN_AMBIENT_TEMP_C,
             max_ambient_temp_c: DEFAULT_MAX_AMBIENT_TEMP_C,
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
@@ -471,9 +486,141 @@ impl HeatPumpWH {
             output_max: None,
         };
 
-        self.min_ambient_temp_c = c.min_ambient_temp_c.unwrap_or(DEFAULT_MIN_AMBIENT_TEMP_C);
-        self.max_ambient_temp_c = c.max_ambient_temp_c.unwrap_or(DEFAULT_MAX_AMBIENT_TEMP_C);
+        // Low-power HPWH detection and coefficient branching.
+        //
+        // HARES divergence from OCHRE: OCHRE's HPXML import layer
+        // (ochre/utils/hpxml.py:1174-1181) triggers low-power mode via an
+        // exact-equality UEF == 4.9 sentinel — a "temporary flag for
+        // designating 120V HPWHs in [the] panels branch of ResStock."
+        // HARES generalizes to a continuous UEF-based compressor-class
+        // transition: UEF >= 4.8 activates blending, UEF >= 4.9 identifies
+        // the low-power compressor class, with a linear cross-fade of curve
+        // outputs over [4.8, 5.0] to avoid a hard step discontinuity.
+        // The low-power biquadratic coefficients themselves are verified
+        // against OCHRE WaterHeater.py:469-470 and are a physically-distinct
+        // compressor family independent of the triggering mechanism.
+        // Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py:444, 462-474, 611-616.
+        let effective_low_power = c
+            .low_power_hpwh
+            .unwrap_or_else(|| c.uniform_energy_factor.is_some_and(|uef| uef >= 4.9));
+
+        // UEF cross-fade blend factor: linear interpolation in [4.8, 5.0].
+        // Below 4.8 → standard curve; above 5.0 → pure low-power.
+        // When low_power_hpwh is explicitly true without UEF, use pure low-power.
+        // When UEF is in [4.8, 5.0) but below 4.9, effective_low_power is false
+        // but blending still occurs for smooth COP/capacity continuity.
+        // Source: docs/reviews/equipment-wh/equip-wh-03-hpwh-compressor-curves.md Finding 5.
+        let blend_factor = if c.cop_biquadratic_coeffs.is_none() {
+            // Honour explicit low_power_hpwh override: when explicitly Some(false),
+            // do not blend even if UEF would suggest it.
+            // When low_power_hpwh is None, check UEF for auto-detection.
+            let want_low_power = c
+                .low_power_hpwh
+                .unwrap_or_else(|| c.uniform_energy_factor.is_some_and(|uef| uef >= 4.8));
+            if !want_low_power {
+                0.0
+            } else {
+                c.uniform_energy_factor.map_or(1.0, |uef| {
+                    if uef < 4.8 {
+                        0.0
+                    } else if uef < 5.0 {
+                        (uef - 4.8) / 0.2
+                    } else {
+                        1.0
+                    }
+                })
+            }
+        } else {
+            0.0
+        };
+
+        if blend_factor > 0.0 {
+            // When blend < 1.0, the standard curve stays unmodified and the
+            // low-power curve provides the alternate endpoint for cross-fade.
+            // When blend == 1.0, the standard curve is replaced by the
+            // low-power curve and cop_scale recalibrated.
+            let lp_cop_curve = BiquadraticCurve {
+                coeffs: DEFAULT_LOW_POWER_COP_CURVE,
+                x1_bounds: self.cop_curve.x1_bounds,
+                x2_bounds: self.cop_curve.x2_bounds,
+                warn_on_clamp: false,
+                output_min: None,
+                output_max: None,
+            };
+            let lp_capacity_curve = BiquadraticCurve {
+                coeffs: DEFAULT_LOW_POWER_CAPACITY_CURVE,
+                x1_bounds: self.capacity_curve.x1_bounds,
+                x2_bounds: self.capacity_curve.x2_bounds,
+                warn_on_clamp: false,
+                output_min: Some(0.0),
+                output_max: None,
+            };
+
+            if (blend_factor - 1.0).abs() < 1e-9 {
+                self.cop_curve = lp_cop_curve;
+                self.capacity_curve = lp_capacity_curve;
+                let cop_at_ref = self
+                    .cop_curve
+                    .evaluate(ref_zone_temp, ref_tank_temp)
+                    .max(1e-6);
+                self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
+                self.low_power_blend_factor = 0.0;
+            } else if blend_factor > 0.0 {
+                self.low_power_cop_curve = Some(lp_cop_curve);
+                self.low_power_capacity_curve = Some(lp_capacity_curve);
+                self.low_power_blend_factor = blend_factor;
+            }
+        }
+
+        let use_widened_bounds = effective_low_power || blend_factor > 0.0;
+
+        self.min_ambient_temp_c = if use_widened_bounds {
+            c.min_ambient_temp_c
+                .unwrap_or(DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C)
+        } else {
+            c.min_ambient_temp_c.unwrap_or(DEFAULT_MIN_AMBIENT_TEMP_C)
+        };
+        self.max_ambient_temp_c = if use_widened_bounds {
+            c.max_ambient_temp_c
+                .unwrap_or(DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C)
+        } else {
+            c.max_ambient_temp_c.unwrap_or(DEFAULT_MAX_AMBIENT_TEMP_C)
+        };
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if use_widened_bounds {
+                debug_assert!(
+                    (self.min_ambient_temp_c - DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C).abs() < 2e-3,
+                    "low-power HPWH min_ambient_temp_c {} differs from expected {}",
+                    self.min_ambient_temp_c,
+                    DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C
+                );
+                debug_assert!(
+                    (self.max_ambient_temp_c - DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C).abs() < 2e-3,
+                    "low-power HPWH max_ambient_temp_c {} differs from expected {}",
+                    self.max_ambient_temp_c,
+                    DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C
+                );
+                if self.low_power_blend_factor > 0.0 {
+                    debug_assert!(
+                        self.low_power_cop_curve.is_some(),
+                        "low_power_cop_curve must be set when blend_factor > 0"
+                    );
+                    debug_assert!(
+                        self.low_power_capacity_curve.is_some(),
+                        "low_power_capacity_curve must be set when blend_factor > 0"
+                    );
+                }
+                if (self.low_power_blend_factor - 1.0).abs() < 1e-9 {
+                    debug_assert!(
+                        self.cop_curve.coeffs != DEFAULT_COP_CURVE,
+                        "COP curve must differ from standard when low-power is active"
+                    );
+                }
+            }
+        }
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
         self.lost_heat_fraction = c.lost_heat_fraction.unwrap_or(DEFAULT_LOST_HEAT_FRACTION);
@@ -510,6 +657,27 @@ impl HeatPumpWH {
         self.tank.register_node_telemetry(&mut self.telemetry);
         self.core_output = CoreOutput::default();
         self.draw_tracker = super::DrawVolumeTracker::new();
+
+        #[cfg(feature = "observe")]
+        {
+            let curve_id = if (self.low_power_blend_factor - 1.0).abs() < 1e-9 {
+                "low_power"
+            } else if self.low_power_blend_factor > 0.0 {
+                "blended"
+            } else {
+                "standard"
+            };
+            tracing::info!(
+                equipment = %config.name,
+                low_power_hpwh = effective_low_power,
+                blend_factor = self.low_power_blend_factor,
+                curve_set = curve_id,
+                min_ambient_c = self.min_ambient_temp_c,
+                max_ambient_c = self.max_ambient_temp_c,
+                "HPWH curve selection"
+            );
+        }
+
         Ok(())
     }
 }
@@ -708,7 +876,17 @@ impl Equipment for HeatPumpWH {
         // Use wet-bulb temperature for COP/capacity curves: HPWH performance depends
         // on available enthalpy in the ambient air, not dry-bulb temperature alone.
         let wet_bulb_c = self.zone_wet_bulb_c(env);
-        let cop_raw = self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c) * self.cop_scale;
+        let cop_raw = if self.low_power_blend_factor > 0.0 {
+            let std_cop = self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c);
+            let lp_cop = self
+                .low_power_cop_curve
+                .expect("low_power_cop_curve set when blend_factor > 0")
+                .evaluate(wet_bulb_c, tank_avg_temp_c);
+            ((1.0 - self.low_power_blend_factor) * std_cop + self.low_power_blend_factor * lp_cop)
+                * self.cop_scale
+        } else {
+            self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c) * self.cop_scale
+        };
         // Divisor floor: when the biquadratic COP curve evaluates to ≤ 0
         // within valid input bounds, the raw COP would be zero or negative,
         // producing divide-by-zero (Inf) in the compressor power calculation
@@ -720,10 +898,19 @@ impl Equipment for HeatPumpWH {
         let cop = cop_raw.clamp(0.0, 8.0);
         // Capacity multiplier modulates the rated delivered heat based on ambient
         // wet-bulb and tank temperature, matching EnergyPlus/OCHRE HPWH model.
-        let cap_mult = self
-            .capacity_curve
-            .evaluate(wet_bulb_c, tank_avg_temp_c)
-            .max(0.0);
+        let cap_mult = if self.low_power_blend_factor > 0.0 {
+            let std_cap = self.capacity_curve.evaluate(wet_bulb_c, tank_avg_temp_c);
+            let lp_cap = self
+                .low_power_capacity_curve
+                .expect("low_power_capacity_curve set when blend_factor > 0")
+                .evaluate(wet_bulb_c, tank_avg_temp_c);
+            ((1.0 - self.low_power_blend_factor) * std_cap + self.low_power_blend_factor * lp_cap)
+                .max(0.0)
+        } else {
+            self.capacity_curve
+                .evaluate(wet_bulb_c, tank_avg_temp_c)
+                .max(0.0)
+        };
         // capacity_actual_w = rated compressor input * cap_mult (rated capacity delivered).
         // power_input_w = capacity_actual_w / cop_actual (electrical input required).
         let capacity_actual_w = self.compressor_power_w * cap_mult;
@@ -1329,6 +1516,11 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
+    use super::hpwh_compressor::{
+        DEFAULT_CAPACITY_CURVE, DEFAULT_COP_CURVE, DEFAULT_LOW_POWER_CAPACITY_CURVE,
+        DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C, DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C,
+        DEFAULT_MIN_AMBIENT_TEMP_C,
+    };
     use super::{HeatPumpWH, weighted_average_tank_temp};
     use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
 
@@ -1412,6 +1604,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 
@@ -1468,6 +1662,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         };
         let config = equipment_config(typed);
         let env = env(20.0);
@@ -1554,6 +1750,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         };
         let config = equipment_config(typed);
         let e = env(20.0);
@@ -1606,6 +1804,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: Some(true),
+            uniform_energy_factor: Some(5.0),
         };
         let config = equipment_config(typed);
         let e = env(20.0);
@@ -1615,6 +1815,182 @@ mod tests {
             (eq.compressor_power_w - 1_499.4).abs() < 1e-9,
             "low-power HPWH thermal capacity must be 1499.4 W; got {}",
             eq.compressor_power_w
+        );
+        // UEF = 5.0 → blend_factor = 1.0 → capacity curve replaced with low-power set.
+        assert!(
+            eq.capacity_curve.coeffs == DEFAULT_LOW_POWER_CAPACITY_CURVE,
+            "low-power HPWH must use low-power capacity curve; got {:?}",
+            eq.capacity_curve.coeffs
+        );
+        assert!(
+            eq.cop_curve.coeffs != DEFAULT_COP_CURVE,
+            "low-power HPWH COP curve must differ from standard"
+        );
+        // Ambient bounds must be the widened low-power range.
+        assert!(
+            (eq.min_ambient_temp_c - DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C).abs() < 1e-3,
+            "low-power HPWH must use widened min ambient {}; got {}",
+            DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C,
+            eq.min_ambient_temp_c
+        );
+        assert!(
+            (eq.max_ambient_temp_c - DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C).abs() < 1e-3,
+            "low-power HPWH must use widened max ambient {}; got {}",
+            DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C,
+            eq.max_ambient_temp_c
+        );
+    }
+
+    #[test]
+    fn low_power_hpwh_uef_blend_produces_intermediate_curves() {
+        let mut typed = base_typed_config();
+        typed.low_power_hpwh = None;
+        typed.uniform_energy_factor = Some(4.85);
+        typed.compressor_power_w = Some(1_499.4);
+        let cfg = equipment_config(typed);
+        let e = env(20.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+        // UEF = 4.85 → blend_factor = (4.85 - 4.8) / 0.2 = 0.25
+        assert!(
+            (eq.low_power_blend_factor - 0.25).abs() < 1e-6,
+            "UEF=4.85 should give blend factor 0.25, got {}",
+            eq.low_power_blend_factor
+        );
+        assert!(
+            eq.low_power_cop_curve.is_some(),
+            "blending must set low_power_cop_curve"
+        );
+        assert!(
+            eq.low_power_capacity_curve.is_some(),
+            "blending must set low_power_capacity_curve"
+        );
+        // Standard curve should still be the standard coefficients (not replaced).
+        assert_eq!(
+            eq.capacity_curve.coeffs, DEFAULT_CAPACITY_CURVE,
+            "standard capacity curve must remain when blending"
+        );
+        // Ambient bounds should be widened even during blending.
+        assert!(
+            (eq.min_ambient_temp_c - DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C).abs() < 1e-3,
+            "low-power HPWH must use widened min ambient; got {}",
+            eq.min_ambient_temp_c
+        );
+    }
+
+    #[test]
+    fn low_power_hpwh_uef_below_threshold_uses_standard_curves() {
+        let mut typed = base_typed_config();
+        typed.low_power_hpwh = None;
+        typed.uniform_energy_factor = Some(4.0);
+        let cfg = equipment_config(typed);
+        let e = env(20.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+        assert!(
+            eq.low_power_blend_factor.abs() < 1e-12,
+            "UEF=4.0 must not activate blending"
+        );
+        assert!(eq.low_power_cop_curve.is_none());
+        assert!(eq.low_power_capacity_curve.is_none());
+        assert_eq!(eq.capacity_curve.coeffs, DEFAULT_CAPACITY_CURVE);
+        assert!(
+            (eq.min_ambient_temp_c - DEFAULT_MIN_AMBIENT_TEMP_C).abs() < 1e-3,
+            "standard HPWH must use standard min ambient"
+        );
+    }
+
+    #[test]
+    fn low_power_hpwh_explicit_overrides_uef() {
+        let mut typed = base_typed_config();
+        typed.low_power_hpwh = Some(false);
+        typed.uniform_energy_factor = Some(5.0);
+        let cfg = equipment_config(typed);
+        let e = env(20.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).expect("init should succeed");
+        // Explicit false must override auto-detection.
+        assert!(eq.low_power_blend_factor.abs() < 1e-12);
+        assert!(eq.low_power_cop_curve.is_none());
+        assert!((eq.min_ambient_temp_c - DEFAULT_MIN_AMBIENT_TEMP_C).abs() < 1e-3);
+    }
+
+    #[test]
+    fn low_power_hpwh_lockout_bounds_respect_widened_range() {
+        let mut typed = base_typed_config();
+        typed.low_power_hpwh = Some(true);
+        typed.uniform_energy_factor = Some(5.0);
+        typed.setpoint_c = Some(52.0);
+        typed.initial_tank_temp_c = Some(48.0);
+        typed.tempering_valve_setpoint_c = None;
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env(2.8)).expect("init should succeed");
+        // At 2.8°C (within low-power bounds but below standard min), compressor
+        // must be allowed to run — standard HPWH would be locked out at this temp.
+        let mut ports = ports();
+        eq.step(&env(2.8), Duration::from_secs(60), &mut ports)
+            .expect("step should succeed");
+        assert!(
+            eq.compressor_on,
+            "low-power HPWH compressor must run at 2.8°C ambient (within widened bounds)"
+        );
+    }
+
+    #[test]
+    fn high_uef_hpwh_produces_lower_compressor_power_than_standard_uef() {
+        // Standard HPWH (no low-power)
+        let mut standard = base_typed_config();
+        standard.low_power_hpwh = None;
+        standard.uniform_energy_factor = None;
+        standard.cop = Some(3.45);
+        standard.compressor_power_w = Some(1_725.0);
+        standard.setpoint_c = Some(52.0);
+        standard.initial_tank_temp_c = Some(48.0);
+        standard.tempering_valve_setpoint_c = None;
+        standard.draw_flow_rate_kg_s = Some(0.0);
+        standard.backup_enable_offset_c = Some(8.0);
+        let cfg_std = equipment_config(standard.clone());
+        let mut eq_std = HeatPumpWH::new(cfg_std.clone());
+        eq_std
+            .init(&cfg_std, &env(19.44))
+            .expect("init should succeed");
+
+        // Low-power HPWH (UEF = 5.0)
+        let mut lp = standard.clone();
+        lp.low_power_hpwh = Some(true);
+        lp.uniform_energy_factor = Some(5.0);
+        lp.compressor_power_w = Some(1_499.4);
+        let cfg_lp = equipment_config(lp);
+        let mut eq_lp = HeatPumpWH::new(cfg_lp.clone());
+        eq_lp
+            .init(&cfg_lp, &env(19.44))
+            .expect("init should succeed");
+
+        // Step both at 19.44°C with identical tank temps.
+        // Both should be calling for heat with compressor on.
+        let mut ports_std = ports();
+        let mut ports_lp = ports();
+        eq_std
+            .step(&env(19.44), Duration::from_secs(60), &mut ports_std)
+            .expect("step");
+        eq_lp
+            .step(&env(19.44), Duration::from_secs(60), &mut ports_lp)
+            .expect("step");
+
+        let std_comp_power = eq_std
+            .telemetry
+            .get(tk::COMPRESSOR_POWER_W)
+            .expect("compressor power telemetry");
+        let lp_comp_power = eq_lp
+            .telemetry
+            .get(tk::COMPRESSOR_POWER_W)
+            .expect("compressor power telemetry");
+
+        assert!(
+            lp_comp_power < std_comp_power,
+            "low-power HPWH compressor power ({lp_comp_power} W) must be lower than standard ({std_comp_power} W)"
         );
     }
 
@@ -3419,6 +3795,8 @@ mod new_feature_tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         };
         let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());

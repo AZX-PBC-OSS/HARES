@@ -265,28 +265,19 @@ pub(super) fn resolve_water_heaters(
                 let uef = uniform_energy_factor.or_else(|| {
                     energy_factor.map(|ef| (HPWH_UEF_TO_EF_SLOPE + ef) / HPWH_UEF_TO_EF_DENOM)
                 });
-                let low_power = uef.is_some_and(|u| (u - 4.9).abs() < 1e-9);
-                let (cop, setpoint_c, tempering_valve_setpoint_c) = if low_power {
-                    // Low-power OCHRE preset (UEF ≈ 4.9): fixed 60 °C storage,
-                    // 51.67 °C (125 °F) tempering valve per manufacturer spec.
-                    (Some(4.2), Some(60.0), Some(51.67))
-                } else {
-                    let cop = uef.map(|uef_val| HPWH_UEF_TO_COP * uef_val);
-                    // Tempering valve setpoint mirrors the HPXML-declared
-                    // storage setpoint. If HPXML omits HotWaterTemperature we
-                    // cannot guess safely -- error loudly.
-                    let storage_setpoint_c = setpoint_c.ok_or_else(|| {
-                        super::HpxmlError::MissingField {
-                            path: "WaterHeatingSystem/HotWaterTemperature",
-                            system_kind: "Heat Pump Water Heater",
-                            system_id: super::xml_helpers::element_id(wh)
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            reason:
-                                "hot water setpoint (°C) is required to size the tempering valve; no silent default permitted",
-                        }
-                    })?;
-                    (cop, setpoint_c, Some(storage_setpoint_c))
-                };
+                let low_power = uef.is_some_and(|u| u >= 4.9);
+                // HARES divergence from OCHRE: OCHRE's HPXML import layer
+                // (ochre/utils/hpxml.py:1174-1181) uses exact-equality
+                // UEF == 4.9 as a sentinel for one specific 120V ResStock
+                // product ("temporary flag for designating 120V HPWHs in
+                // [the] panels branch of ResStock"). HARES generalizes to
+                // a physically-motivated continuous UEF threshold: cop is
+                // always derived from UEF via HPWH_UEF_TO_COP, and the
+                // low-power coefficient set and ambient bounds are handled
+                // via blending in HeatPumpWH::init_typed — the parser does
+                // not substitute manufacturer-specific preset values.
+                let cop = uef.map(|uef_val| HPWH_UEF_TO_COP * uef_val);
+                let tempering_valve_setpoint_c = setpoint_c;
                 let cfg = HeatPumpWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -304,13 +295,13 @@ pub(super) fn resolve_water_heaters(
                     tempering_valve_setpoint_c,
                     avg_water_draw_l_per_day,
                     draw_flow_rate_kg_s: None,
-                    compressor_power_w: if low_power { Some(1_499.4) } else { None },
+                    compressor_power_w: None,
                     backup_enable_offset_c: None,
                     min_ambient_temp_c: None,
                     max_ambient_temp_c: None,
                     min_on_time_s: None,
                     min_off_time_s: None,
-                    hp_only_mode: Some(low_power),
+                    hp_only_mode: None,
                     element_hp_control_mode: None,
                     fan_power_w: None,
                     parasitic_power_w: None,
@@ -325,6 +316,8 @@ pub(super) fn resolve_water_heaters(
                     first_hour_rating_m3,
                     jacket_r_value_m2_k_w,
                     fixture_delivery_temp_c: None,
+                    low_power_hpwh: Some(low_power),
+                    uniform_energy_factor: uef,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)?
             }
@@ -954,6 +947,8 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
         first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
         jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
+        low_power_hpwh: params.get("low_power_hpwh").and_then(Value::as_bool),
+        uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
     };
     EquipmentConfig::from_typed(name.to_string(), "Heat Pump Water Heater".to_string(), cfg).ok()
 }

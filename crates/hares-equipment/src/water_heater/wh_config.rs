@@ -670,6 +670,32 @@ pub struct HeatPumpWaterHeaterConfig {
     /// TMV fixture delivery temperature (°C). Default: 40.6°C (≈ 105°F) per OCHRE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixture_delivery_temp_c: Option<f64>,
+    /// Set to true for low-power HPWH. Uses distinct COP/capacity biquadratic
+    /// coefficients and widened ambient lockout bounds (2.778–62.778°C instead
+    /// of 7.222–43.333°C). When `None`, HARES auto-detects from
+    /// `uniform_energy_factor` if provided (UEF >= 4.8 triggers blending,
+    /// UEF >= 4.9 identifies the unit as the low-power compressor class).
+    ///
+    /// **HARES divergence from OCHRE:** OCHRE's HPXML import layer
+    /// (`ochre/utils/hpxml.py:1174-1181`) uses exact-equality `UEF == 4.9` as
+    /// a sentinel for one specific 120V ResStock product and documents the flag
+    /// as a "temporary flag." HARES generalizes this to a continuous
+    /// UEF-based compressor-class transition with smooth blending over
+    /// [4.8, 5.0] rather than a hard switch at a single sentinel value.
+    /// The low-power coefficient set (COP and capacity curves) is verified
+    /// against `WaterHeater.py:469-470` and is a physically-distinct compressor
+    /// family independent of the triggering mechanism.
+    /// Source for coefficients: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 444, 462-474, 611-616.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_power_hpwh: Option<bool>,
+    /// Uniform Energy Factor (post-2015 test procedure). When >= 4.8 and
+    /// `low_power_hpwh` is not explicitly set, HARES activates low-power
+    /// curve blending with a linear cross-fade over [4.8, 5.0]. Units with
+    /// UEF >= 4.9 are treated as the low-power compressor class with widened
+    /// ambient lockout bounds.
+    /// Source: HPXML 4.2 §3.8.2; ResStock waterheater.rb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uniform_energy_factor: Option<f64>,
 }
 
 impl EquipmentTypedConfig for HeatPumpWaterHeaterConfig {
@@ -781,6 +807,20 @@ impl HeatPumpWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "hpwh: uniform_energy_factor",
+            self.uniform_energy_factor,
+            0.0,
+            true,
+        )?;
+        if let Some(min) = self.min_ambient_temp_c
+            && let Some(max) = self.max_ambient_temp_c
+            && min >= max
+        {
+            return Err(HaresError::Equipment(format!(
+                "hpwh: min_ambient_temp_c ({min}) must be < max_ambient_temp_c ({max})"
+            )));
+        }
         check_setpoint_vs_max_temp(
             "hpwh",
             self.setpoint_c,
@@ -1001,6 +1041,8 @@ mod tests {
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         };
         let ec = EquipmentConfig::from_typed(
             "hpwh".to_string(),
@@ -1190,6 +1232,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 
@@ -1366,6 +1410,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 
@@ -1566,6 +1612,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 
@@ -1773,6 +1821,8 @@ mod tests {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 

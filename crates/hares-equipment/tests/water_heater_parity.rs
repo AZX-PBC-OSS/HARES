@@ -204,6 +204,8 @@ fn hpwh_cfg_with(
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         },
     )
     .unwrap()
@@ -645,6 +647,8 @@ fn hpwh_cop_at_multiple_ambient_temps() {
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
                 fixture_delivery_temp_c: None,
+                low_power_hpwh: None,
+                uniform_energy_factor: None,
             },
         )
         .unwrap();
@@ -1025,6 +1029,8 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
         first_hour_rating_m3: None,
         jacket_r_value_m2_k_w: None,
         fixture_delivery_temp_c: None,
+        low_power_hpwh: None,
+        uniform_energy_factor: None,
     };
     let cfg0 = EquipmentConfig::from_typed(
         "HPWH0".to_string(),
@@ -1150,6 +1156,8 @@ fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         },
     )
     .unwrap();

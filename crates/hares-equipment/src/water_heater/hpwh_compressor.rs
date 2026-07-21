@@ -25,24 +25,51 @@ pub(super) const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
 pub(super) const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
 /// Standard EnergyPlus/OCHRE HPWH COP biquadratic curve (GE GeoSpring class).
 /// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
-/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 446-448.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 474.
 pub(super) const DEFAULT_COP_CURVE: [f64; 6] =
     [1.0132, 0.0436, 0.0000117, -0.01113, 0.00003688, -0.000498];
 /// Standard EnergyPlus/OCHRE HPWH capacity curve (GE GeoSpring / A.O. Smith class).
 /// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 473.
 pub(super) const DEFAULT_CAPACITY_CURVE: [f64; 6] =
     [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145];
+/// Low-power HPWH COP biquadratic curve (distinct compressor family).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+///
+/// **HARES divergence from OCHRE:** OCHRE's HPXML import uses an exact-equality
+/// `UEF == 4.9` sentinel tied to one specific 120V ResStock product and applies
+/// these coefficients as a hard switch. HARES generalizes to a continuous
+/// UEF-based compressor-class transition with smooth blending — this coefficient
+/// set represents a physically-distinct low-power compressor family, not a single
+/// product SKU.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 470 (low-power COP).
+pub(super) const DEFAULT_LOW_POWER_COP_CURVE: [f64; 6] =
+    [1.1332, 0.063, -0.0000979, -0.00972, -0.0000214, -0.000686];
+/// Low-power HPWH capacity biquadratic curve (distinct compressor family).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 469 (low-power capacity).
+pub(super) const DEFAULT_LOW_POWER_CAPACITY_CURVE: [f64; 6] =
+    [0.813, 0.0160, 0.000537, 0.0020319, -0.0000860, -0.0000686];
 pub(super) const DEFAULT_ZONE_TEMP_BOUNDS_C: (f64, f64) = (5.0, 45.0);
 pub(super) const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
 /// OCHRE-compatible ambient temperature lockout range (°C) -- standard HPWH.
 ///
 /// Source values in Fahrenheit: lower = 45°F, upper = 110°F.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 614-616.
 /// Conversion formula: (°F − 32) × 5/9. These are const expressions, not
 /// function calls, so they evaluate at compile time.
 // 45°F → (45 - 32) × 5/9 = 7.222...°C
 pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = (45.0 - 32.0) * 5.0 / 9.0;
 // 110°F → (110 - 32) × 5/9 = 43.333...°C
 pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = (110.0 - 32.0) * 5.0 / 9.0;
+/// Widened ambient temperature lockout range (°C) for low-power HPWH.
+///
+/// Source values in Fahrenheit: lower = 37°F, upper = 145°F.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 612-613.
+// 37°F → (37 - 32) × 5/9 = 2.777...°C
+pub(super) const DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C: f64 = (37.0 - 32.0) * 5.0 / 9.0;
+// 145°F → (145 - 32) × 5/9 = 62.777...°C
+pub(super) const DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C: f64 = (145.0 - 32.0) * 5.0 / 9.0;
 /// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
 pub(super) const DEFAULT_SHR: f64 = 0.88;
 /// Fraction of compressor waste heat that exits the building envelope.

@@ -484,6 +484,8 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         };
         Some(
             EquipmentConfig::from_typed(wh.name.clone(), "Heat Pump Water Heater".to_string(), cfg)

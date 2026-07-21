@@ -1130,7 +1130,7 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
 }
 
 #[test]
-fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
+fn low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets() {
     let xml = minimal_xml(
         r#"<Systems><WaterHeating>
             <WaterHeatingSystem>
@@ -1157,26 +1157,102 @@ fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
         .typed()
         .expect("hpwh typed config");
 
+    // Auto-detection: UEF >= 4.9 sets low_power_hpwh and passes UEF through.
     assert_eq!(
-        typed_cfg.hp_only_mode,
+        typed_cfg.low_power_hpwh,
         Some(true),
-        "OCHRE low-power HPWH branch must disable backup resistance"
+        "UEF 4.9 must auto-detect low_power_hpwh"
     );
+    assert!(
+        (typed_cfg.uniform_energy_factor.unwrap() - 4.9).abs() < 1e-9,
+        "UEF must be passed through to config"
+    );
+
+    // Parser must NOT hardcode manufacturer-specific preset values (cop=4.2,
+    // setpoint=60°C, hp_only_mode=true, TV=51.67°C). Those are OCHRE's
+    // ResStock-specific sentinel values for one 120V SKU; HARES derives cop
+    // from UEF and lets init_typed blending handle the low-power transition.
+    assert!(
+        typed_cfg.hp_only_mode.is_none(),
+        "hp_only_mode must not be auto-set by parser"
+    );
+    // UEF=4.9 → cop = HPWH_UEF_TO_COP * 4.9 ≈ 5.755
+    let cop = typed_cfg.cop.expect("cop must be set from UEF");
+    assert!(
+        (cop - 5.755).abs() < 0.01,
+        "cop must be derived from UEF (HPWH_UEF_TO_COP * 4.9 ≈ 5.755), got {cop}"
+    );
+    // setpoint_c is absent from the XML and must not be silently substituted.
+    assert!(
+        typed_cfg.setpoint_c.is_none(),
+        "setpoint_c must not be silently substituted when absent from HPXML"
+    );
+    assert!(
+        typed_cfg.compressor_power_w.is_none(),
+        "compressor_power_w must not be hardcoded by parser"
+    );
+}
+
+/// Regression: high-UEF HPWH (5.5, a realistic non-boundary value) must NOT
+/// exhibit the hardcoded-preset discontinuity (cop=4.2, setpoint=60°C, etc.)
+/// that affected the `>= 4.9` parser branch before the fix. cop must be
+/// derived from UEF continuously, and transition blending is handled by
+/// init_typed — the parser only extracts data from HPXML.
+#[test]
+fn high_uef_hpwh_cop_derived_from_uef_not_hardcoded() {
+    let xml = minimal_xml(
+        r#"<Systems><WaterHeating>
+            <WaterHeatingSystem>
+                <FuelType>electricity</FuelType>
+                <WaterHeaterType>heat pump water heater</WaterHeaterType>
+                <UniformEnergyFactor>5.5</UniformEnergyFactor>
+                <TankVolume>66</TankVolume>
+                <HotWaterTemperature units="C">50.0</HotWaterTemperature>
+            </WaterHeatingSystem>
+        </WaterHeating></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        .expect("resolve_equipment");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("should emit Heat Pump Water Heater");
+
+    let typed_cfg: HeatPumpWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed hpwh config")
+        .typed()
+        .expect("hpwh typed config");
+
     assert_eq!(
-        typed_cfg.cop,
-        Some(4.2),
-        "OCHRE low-power HPWH branch fixes COP at 4.2"
+        typed_cfg.low_power_hpwh,
+        Some(true),
+        "UEF 5.5 must auto-detect"
     );
-    assert_eq!(
-        typed_cfg.setpoint_c,
-        Some(60.0),
-        "OCHRE low-power HPWH branch fixes storage setpoint at 60 C"
+    assert!(
+        (typed_cfg.uniform_energy_factor.unwrap() - 5.5).abs() < 1e-9,
+        "UEF must be passed through"
     );
-    assert_eq!(
-        typed_cfg.tempering_valve_setpoint_c,
-        Some(51.67),
-        "OCHRE low-power HPWH branch fixes tempering valve setpoint at 51.67 C"
+
+    // UEF=5.5 → cop = HPWH_UEF_TO_COP * 5.5 ≈ 6.460
+    let cop = typed_cfg.cop.expect("cop must be set from UEF");
+    assert!(
+        (cop - 6.460).abs() < 0.01,
+        "cop must be derived from UEF ({cop}), NOT hardcoded to 4.2"
     );
+
+    // setpoint_c from HPXML HotWaterTemperature (50.0°C) must be preserved.
+    assert!(
+        (typed_cfg.setpoint_c.unwrap() - 50.0).abs() < 1e-3,
+        "HPXML HotWaterTemperature must be preserved"
+    );
+
+    // No hardcoded presets.
+    assert!(typed_cfg.hp_only_mode.is_none());
+    assert!(typed_cfg.compressor_power_w.is_none());
 }
 
 // ===========================================================================

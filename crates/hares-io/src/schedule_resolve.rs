@@ -2234,6 +2234,8 @@ mod tests {
                     first_hour_rating_m3: Some(0.20),
                     jacket_r_value_m2_k_w: None,
                     fixture_delivery_temp_c: None,
+                    low_power_hpwh: None,
+                    uniform_energy_factor: None,
                 },
             ),
             other => panic!("unsupported water heater type for schedule test: {other}"),
