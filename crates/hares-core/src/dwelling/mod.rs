@@ -2910,7 +2910,7 @@ impl Dwelling {
 
 /// Typed payload for `set_battery_lut` -- ensures the data matches the LUT type at compile time.
 pub enum BatteryLutData {
-    ChargingCurve(RegularGridInterpolator),
+    ChargingCurve(Box<RegularGridInterpolator>),
     Ocv(OcvTable),
     UNeg(UNegTable),
 }
@@ -2949,7 +2949,7 @@ impl Dwelling {
 
         match (lut_type, lut) {
             (BatteryLutType::ChargingCurve, BatteryLutData::ChargingCurve(interp)) => {
-                eq.set_charging_curve_lut(Some(interp))
+                eq.set_charging_curve_lut(Some(*interp))
             }
             (BatteryLutType::Ocv, BatteryLutData::Ocv(table)) => eq.set_ocv_table(table),
             (BatteryLutType::UNeg, BatteryLutData::UNeg(table)) => eq.set_u_neg_table(table),

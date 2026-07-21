@@ -1220,7 +1220,7 @@ impl PyDwelling {
                 .set_battery_lut(
                     &name,
                     BatteryLutType::ChargingCurve,
-                    BatteryLutData::ChargingCurve(lut.clone()),
+                    BatteryLutData::ChargingCurve(Box::new(lut.clone())),
                 )
                 .or_else(|_| dwelling.set_ev_charging_curve_lut(&name, lut))
                 .map_err(to_py_err)?;
@@ -1263,7 +1263,7 @@ impl PyDwelling {
                     .set_battery_lut(
                         &name,
                         BatteryLutType::ChargingCurve,
-                        BatteryLutData::ChargingCurve(lut.clone()),
+                        BatteryLutData::ChargingCurve(Box::new(lut.clone())),
                     )
                     .or_else(|_| dwelling.set_ev_charging_curve_lut(&name, lut))
                     .map_err(to_py_err)?;

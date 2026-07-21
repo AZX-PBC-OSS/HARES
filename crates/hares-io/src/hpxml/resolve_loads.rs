@@ -547,12 +547,65 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("target_rh".to_string(), json!(target_rh));
                         }
                     }
+                    "Refrigerator" => {
+                        let multiplier = node
+                            .child("extension")
+                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .unwrap_or(1.0);
+                        if let Some(kwh) =
+                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        {
+                            params
+                                .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
+                        }
+                    }
+                    "Freezer" => {
+                        let multiplier = node
+                            .child("extension")
+                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .unwrap_or(1.0);
+                        if let Some(kwh) =
+                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        {
+                            params
+                                .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
+                        }
+                    }
                     other => {
                         tracing::warn!(
                             appliance_tag = other,
                             "No appliance-specific parameter extraction for this tag; \
                              only generic fields will be parsed"
                         );
+                    }
+                }
+
+                #[cfg(debug_assertions)]
+                {
+                    let multiplier = node
+                        .child("extension")
+                        .and_then(|e| child_f64(e, "UsageMultiplier"))
+                        .unwrap_or(1.0);
+                    if (multiplier - 1.0).abs() > f64::EPSILON {
+                        if let Some(kwh) =
+                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        {
+                            let unscaled_default = match tag {
+                                "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
+                                "Freezer" => Some(319.8),
+                                _ => None,
+                            };
+                            if let Some(default) = unscaled_default {
+                                if (kwh - default).abs() < 1e-6 {
+                                    tracing::warn!(
+                                        appliance = tag,
+                                        multiplier = %multiplier,
+                                        unscaled_default_kwh = default,
+                                        "appliance default energy was not scaled by UsageMultiplier"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1616,6 +1669,209 @@ mod tests {
             specs.iter().any(|s| s.name == "Basement Lighting"),
             "Basement Lighting must be created for Finished Basement"
         );
+    }
+
+    #[test]
+    fn refrigerator_default_scaled_by_usage_multiplier() {
+        // Refrigerator missing RatedAnnualkWh and AdjustedAnnualkWh,
+        // with UsageMultiplier=2.0. Default = 637.0 + 18.0 * n_bedrooms.
+        // With 3 bedrooms: default = 691.0, scaled = 1382.0.
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                  <Appliances>
+                    <Refrigerator>
+                      <extension>
+                        <UsageMultiplier>2.0</UsageMultiplier>
+                      </extension>
+                    </Refrigerator>
+                  </Appliances>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+
+        let fridge = specs
+            .iter()
+            .find(|s| s.name == "Refrigerator")
+            .expect("Refrigerator spec should exist");
+        let kwh = fridge
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64())
+            .expect("annual_electric_kwh should be present");
+        // Default for 3 bedrooms: 637.0 + 18.0 * 3.0 = 691.0. Scaled by 2.0 = 1382.0.
+        assert!((kwh - 1382.0).abs() < 0.01, "expected ~1382.0, got {kwh}");
+    }
+
+    #[test]
+    fn freezer_default_scaled_by_usage_multiplier() {
+        // Freezer missing RatedAnnualkWh and AdjustedAnnualkWh,
+        // with UsageMultiplier=1.5. Default = 319.8, scaled = 479.7.
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                  <Appliances>
+                    <Freezer>
+                      <extension>
+                        <UsageMultiplier>1.5</UsageMultiplier>
+                      </extension>
+                    </Freezer>
+                  </Appliances>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+
+        let freezer = specs
+            .iter()
+            .find(|s| s.name == "Freezer")
+            .expect("Freezer spec should exist");
+        let kwh = freezer
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64())
+            .expect("annual_electric_kwh should be present");
+        // Default = 319.8, scaled by 1.5 = 479.7.
+        assert!((kwh - 479.7).abs() < 0.01, "expected ~479.7, got {kwh}");
+    }
+
+    #[test]
+    fn all_appliance_energies_doubled_by_usage_multiplier() {
+        // Run two identical HPXML buildings, one with UsageMultiplier=2.0
+        // and one with UsageMultiplier=1.0 (baseline), and verify that
+        // all six appliance annual_electric_kwh values are doubled.
+        let building_xml = |multiplier: f64| -> String {
+            format!(
+                r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                  <Appliances>
+                    <ClothesWasher>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </ClothesWasher>
+                    <ClothesDryer>
+                      <FuelType>electricity</FuelType>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </ClothesDryer>
+                    <Dishwasher>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </Dishwasher>
+                    <Refrigerator>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </Refrigerator>
+                    <Freezer>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </Freezer>
+                    <CookingRange>
+                      <FuelType>electricity</FuelType>
+                      <extension>
+                        <UsageMultiplier>{multiplier}</UsageMultiplier>
+                      </extension>
+                    </CookingRange>
+                  </Appliances>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+            "#
+            )
+        };
+
+        let resolve = |xml: &str| -> BTreeMap<String, f64> {
+            let building = parse_building(xml).expect("building should parse");
+            let mut specs = Vec::new();
+            resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+                .expect("resolve_scheduled_loads");
+            specs
+                .into_iter()
+                .filter_map(|s| {
+                    s.parameters
+                        .get("annual_electric_kwh")
+                        .and_then(|v| v.as_f64())
+                        .map(|kwh| (s.name, kwh))
+                })
+                .collect()
+        };
+
+        let baseline_xml = building_xml(1.0);
+        let doubled_xml = building_xml(2.0);
+
+        let baseline = resolve(&baseline_xml);
+        let doubled = resolve(&doubled_xml);
+
+        let target_appliances = [
+            "Clothes Washer",
+            "Clothes Dryer",
+            "Dishwasher",
+            "Refrigerator",
+            "Freezer",
+            "Cooking Range",
+        ];
+
+        for name in target_appliances {
+            let base_kwh = baseline
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from baseline"));
+            let dbl_kwh = doubled
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from doubled run"));
+            let expected = base_kwh * 2.0;
+            assert!(
+                (dbl_kwh - expected).abs() < 0.1,
+                "{name}: baseline={base_kwh}, doubled={dbl_kwh}, expected 2x={expected}"
+            );
+        }
     }
 
     /// Basement lighting must NOT be created when no foundation type

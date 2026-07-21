@@ -555,7 +555,7 @@ impl Ev {
             ChargingLevel::L1 => self.l1_power_kw().min(max_power_kw),
             ChargingLevel::L2 => self.rated_power_kw.min(max_power_kw),
         };
-        let curve_limited_rated = if let Some(lut) = &self.charging_curve_lut {
+        let curve_limited_rated = if let Some(lut) = self.charging_curve_lut.as_mut() {
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             let effective_kwh = self.battery_capacity_kwh * soh;
             let c_rate = if effective_kwh > 0.0 {

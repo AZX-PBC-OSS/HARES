@@ -603,7 +603,7 @@ impl Battery {
 
     /// Determine the target charge/discharge power based on control state and
     /// Stage 1 accumulated electrical power.
-    fn determine_target_power(&self, net_load_kw: f64, dt_hours: f64) -> f64 {
+    fn determine_target_power(&mut self, net_load_kw: f64, dt_hours: f64) -> f64 {
         // Priority 1: explicit power setpoint from external control
         if let Some(setpoint) = self.power_setpoint_kw {
             return self.clamp_power(setpoint);
@@ -660,7 +660,7 @@ impl Battery {
     ///
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
-    fn clamp_power(&self, power_kw: f64) -> f64 {
+    fn clamp_power(&mut self, power_kw: f64) -> f64 {
         let temp_derate = self
             .capacity_derate_model
             .evaluate(self.cell_temp_c)
@@ -668,7 +668,7 @@ impl Battery {
         let dr_fraction = self.dr_power_fraction();
         if power_kw > 0.0 {
             let mut hw_max = self.max_charge_kw * temp_derate * dr_fraction;
-            if let Some(ref lut) = self.charging_curve_lut {
+            if let Some(ref mut lut) = self.charging_curve_lut {
                 let soh = 1.0 - self.degradation.capacity_fade_fraction();
                 let pack_kwh = self.capacity_kwh_nominal;
                 let c_rate = if pack_kwh > 0.0 {

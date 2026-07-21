@@ -55,6 +55,10 @@ pub struct RegularGridInterpolator {
     /// Throttle linear-extrapolation warnings to once per interpolator lifetime.
     #[serde(skip)]
     linear_extrap_warned: AtomicBool,
+    /// Last-known lower bracket index per axis, used to accelerate consecutive
+    /// queries via linear hunting instead of binary search.
+    #[serde(skip)]
+    cached_bracket: Vec<usize>,
     /// Count of out-of-bounds coordinate occurrences (only when feature "observe" is active).
     #[cfg(feature = "observe")]
     #[serde(skip)]
@@ -63,6 +67,14 @@ pub struct RegularGridInterpolator {
     #[cfg(feature = "observe")]
     #[serde(skip)]
     pub linear_extrap_count: [AtomicU64; 8],
+    /// Per-dimension cumulative count of linear hunt steps taken (only when feature "observe" is active).
+    #[cfg(feature = "observe")]
+    #[serde(skip)]
+    pub hunt_steps: [AtomicU64; 8],
+    /// Per-dimension count of binary-search fallback events (only when feature "observe" is active).
+    #[cfg(feature = "observe")]
+    #[serde(skip)]
+    pub binary_fallback_count: [AtomicU64; 8],
 }
 
 impl Clone for RegularGridInterpolator {
@@ -75,6 +87,8 @@ impl Clone for RegularGridInterpolator {
             linear_extrap_warned: AtomicBool::new(
                 self.linear_extrap_warned.load(Ordering::Relaxed),
             ),
+            // Reset cache on clone: clones from serde start cold.
+            cached_bracket: vec![0usize; self.axes.len()],
             #[cfg(feature = "observe")]
             oob_count: AtomicU64::new(self.oob_count.load(Ordering::Relaxed)),
             #[cfg(feature = "observe")]
@@ -87,6 +101,28 @@ impl Clone for RegularGridInterpolator {
                 AtomicU64::new(self.linear_extrap_count[5].load(Ordering::Relaxed)),
                 AtomicU64::new(self.linear_extrap_count[6].load(Ordering::Relaxed)),
                 AtomicU64::new(self.linear_extrap_count[7].load(Ordering::Relaxed)),
+            ],
+            #[cfg(feature = "observe")]
+            hunt_steps: [
+                AtomicU64::new(self.hunt_steps[0].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[1].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[2].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[3].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[4].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[5].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[6].load(Ordering::Relaxed)),
+                AtomicU64::new(self.hunt_steps[7].load(Ordering::Relaxed)),
+            ],
+            #[cfg(feature = "observe")]
+            binary_fallback_count: [
+                AtomicU64::new(self.binary_fallback_count[0].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[1].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[2].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[3].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[4].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[5].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[6].load(Ordering::Relaxed)),
+                AtomicU64::new(self.binary_fallback_count[7].load(Ordering::Relaxed)),
             ],
         }
     }
@@ -170,16 +206,41 @@ impl RegularGridInterpolator {
             strides[i] = strides[i + 1] * axes[i + 1].len();
         }
 
+        let cached_bracket = vec![0usize; ndim];
+
         Ok(Self {
             axes,
             values,
             strides,
             strategy,
             linear_extrap_warned: AtomicBool::new(false),
+            cached_bracket,
             #[cfg(feature = "observe")]
             oob_count: AtomicU64::new(0),
             #[cfg(feature = "observe")]
             linear_extrap_count: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            #[cfg(feature = "observe")]
+            hunt_steps: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            #[cfg(feature = "observe")]
+            binary_fallback_count: [
                 AtomicU64::new(0),
                 AtomicU64::new(0),
                 AtomicU64::new(0),
@@ -203,11 +264,15 @@ impl RegularGridInterpolator {
     /// `point` must have exactly `ndim()` elements.  Out-of-bounds coordinates
     /// are handled according to `self.strategy`.
     ///
+    /// Uses a hunting strategy starting from the last-known bracket position
+    /// to accelerate temporally-coherent queries, falling back to binary
+    /// search when the target has moved more than `HUNT_THRESHOLD` steps.
+    ///
     /// # Panics
     /// Panics if `point.len() != self.ndim()`.
     /// In debug/check_invariants builds, panics if strategy is `NaN` and any
     /// coordinate is out of bounds.
-    pub fn interpolate(&self, point: &[f64]) -> f32 {
+    pub fn interpolate(&mut self, point: &[f64]) -> f32 {
         assert_eq!(
             point.len(),
             self.axes.len(),
@@ -222,6 +287,13 @@ impl RegularGridInterpolator {
             ndim <= 8,
             "RegularGridInterpolator supports at most 8 dimensions, got {ndim}"
         );
+
+        // Deserialised instances bypass new() and start with an empty cache
+        // (serde skips cached_bracket, defaulting Vec to len=0).  Self-heal on
+        // first interpolate call so deserialise-then-interpolate never panics.
+        if self.cached_bracket.len() != ndim {
+            self.cached_bracket.resize(ndim, 0);
+        }
 
         // NaN strategy: check OOB first so we can return early.
         if self.strategy == ExtrapolationStrategy::NaN {
@@ -261,9 +333,26 @@ impl RegularGridInterpolator {
             } else {
                 x
             };
-            let (lo, frac) = bracket(axis, x_proc, needs_clamp);
+            let (lo, frac, steps, fallback) = hunt_bracket(
+                axis,
+                x_proc,
+                &mut self.cached_bracket[dim],
+                needs_clamp,
+                HUNT_THRESHOLD,
+            );
             lo_indices[dim] = lo;
             fracs[dim] = frac;
+            #[cfg(not(feature = "observe"))]
+            {
+                let _ = (steps, fallback);
+            }
+            #[cfg(feature = "observe")]
+            {
+                self.hunt_steps[dim].fetch_add(steps, Ordering::Relaxed);
+                if fallback {
+                    self.binary_fallback_count[dim].fetch_add(1, Ordering::Relaxed);
+                }
+            }
 
             #[cfg(feature = "observe")]
             if !needs_clamp && (x < axis[0] || x > axis[axis.len() - 1]) {
@@ -312,32 +401,76 @@ impl RegularGridInterpolator {
     }
 }
 
-/// Find the lower bracket index and fractional position of `x` in a sorted axis.
+/// Maximum number of linear hunt steps before falling back to binary search.
+/// Beyond this distance, an O(log n) binary search is faster than O(n) linear
+/// scanning. Chosen as a conservative threshold: hunting 20 elements is ~40 ns
+/// on modern CPUs, well within the cost of one binary search step.
+const HUNT_THRESHOLD: usize = 20;
+
+/// Find the lower bracket index and fractional position of `x` in a sorted axis
+/// using a hunting strategy starting from `guess`.
 ///
-/// Returns `(lo, frac)` where `axis[lo] <= x <= axis[lo+1]` and
-/// `frac = (x - axis[lo]) / (axis[lo+1] - axis[lo])`.
-///
-/// If `x` is at or beyond the last point, returns `(len-2, 1.0)` so that
-/// interpolation yields the last value.  For single-element axes, returns `(0, 0.0)`.
+/// Returns `(lo, frac, linear_steps, binary_fallback)` where `lo` is the lower
+/// bracket index (clamped to `[0, n-2]`), `frac` is the fractional position
+/// within the bracket, `linear_steps` is the number of elements scanned, and
+/// `binary_fallback` is true if a binary search was used because the target
+/// moved beyond `hunt_threshold` steps.
 ///
 /// When `clamp_frac` is false, the fractional position is not clamped to [0,1],
 /// allowing negative or >1 values for linear extrapolation.
 #[inline]
-fn bracket(axis: &[f64], x: f64, clamp_frac: bool) -> (usize, f64) {
+fn hunt_bracket(
+    axis: &[f64],
+    x: f64,
+    guess: &mut usize,
+    clamp_frac: bool,
+    hunt_threshold: usize,
+) -> (usize, f64, u64, bool) {
     let n = axis.len();
     if n == 1 {
-        return (0, 0.0);
+        *guess = 0;
+        return (0, 0.0, 0, false);
     }
-    // Binary search for the interval containing x.
-    // `partition_point` gives us the first index where axis[i] > x.
-    let pos = axis.partition_point(|&v| v <= x);
-    let lo = if pos == 0 {
-        0
-    } else if pos >= n {
-        n - 2
+
+    // Clamp guess to valid bracket index range [0, n-2].
+    *guess = (*guess).min(n - 2);
+
+    let mut lo = *guess;
+    let mut steps: u64 = 0;
+
+    if x >= axis[lo] {
+        // Hunt upward: walk forward while x is at or past axis[hi].
+        let mut hi = lo + 1;
+        while hi < n && x >= axis[hi] {
+            steps += 1;
+            lo = hi;
+            hi += 1;
+        }
     } else {
-        pos - 1
-    };
+        // Hunt downward: walk backward while x is before axis[lo].
+        while lo > 0 && x < axis[lo] {
+            steps += 1;
+            lo -= 1;
+        }
+    }
+
+    // Clamp lo after the hunt: an upward walk can overshoot to n-1 when
+    // x >= axis[n-1]; a downward walk never undershoots below 0.
+    lo = lo.min(n - 2);
+
+    let binary_fallback = steps as usize > hunt_threshold;
+    if binary_fallback {
+        let pos = axis.partition_point(|&v| v <= x);
+        lo = if pos == 0 {
+            0
+        } else if pos >= n {
+            n - 2
+        } else {
+            pos - 1
+        };
+    }
+
+    *guess = lo;
     let span = axis[lo + 1] - axis[lo];
     let frac = if span.abs() < f64::EPSILON {
         0.0
@@ -345,7 +478,7 @@ fn bracket(axis: &[f64], x: f64, clamp_frac: bool) -> (usize, f64) {
         let raw = (x - axis[lo]) / span;
         if clamp_frac { raw.clamp(0.0, 1.0) } else { raw }
     };
-    (lo, frac)
+    (lo, frac, steps, binary_fallback)
 }
 
 #[cfg(test)]
@@ -354,7 +487,7 @@ mod tests {
 
     #[test]
     fn interp_1d_linear() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0]],
             vec![0.0, 10.0],
             ExtrapolationStrategy::Clamp,
@@ -367,7 +500,7 @@ mod tests {
 
     #[test]
     fn interp_1d_clamp() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0]],
             vec![2.0, 8.0],
             ExtrapolationStrategy::Clamp,
@@ -382,7 +515,7 @@ mod tests {
     #[test]
     fn interp_2d_bilinear() {
         // f(x, y) = x + y on [0,1] × [0,1]
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0], vec![0.0, 1.0]],
             // Row-major: (0,0)=0, (0,1)=1, (1,0)=1, (1,1)=2
             vec![0.0, 1.0, 1.0, 2.0],
@@ -406,7 +539,7 @@ mod tests {
         ];
         let total: usize = axes.iter().map(|a| a.len()).product();
         let values = vec![0.5f32; total];
-        let interp =
+        let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
         assert!((interp.interpolate(&[0.3, 15.0, 0.5, 0.85]) - 0.5).abs() < 1e-5);
     }
@@ -431,7 +564,7 @@ mod tests {
                 }
             }
         }
-        let interp =
+        let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
         assert!((interp.interpolate(&[0.0, 0.5, 0.5, 0.5]) - 0.0).abs() < 1e-5);
         assert!((interp.interpolate(&[1.0, 0.5, 0.5, 0.5]) - 1.0).abs() < 1e-5);
@@ -442,7 +575,7 @@ mod tests {
     #[test]
     fn interp_3_point_axis() {
         // 1D with 3 points: [0, 0.5, 1.0] → [0, 1, 0]
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 0.5, 1.0]],
             vec![0.0, 1.0, 0.0],
             ExtrapolationStrategy::Clamp,
@@ -507,7 +640,7 @@ mod tests {
     #[test]
     fn single_point_axis() {
         // Single-point axis: always returns that value.
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.5]],
             vec![3.125],
             ExtrapolationStrategy::Clamp,
@@ -570,7 +703,7 @@ mod tests {
     #[test]
     fn interp_2d_clamp_both_axes() {
         // f(x,y) = x*10 + y on [0,1]×[0,1]
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0], vec![0.0, 1.0]],
             vec![0.0, 1.0, 10.0, 11.0],
             ExtrapolationStrategy::Clamp,
@@ -601,7 +734,7 @@ mod tests {
                 }
             }
         }
-        let interp =
+        let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
         assert!((interp.interpolate(&[0.5, 0.0, 0.5, 0.5]) - 0.0).abs() < 1e-5);
         assert!((interp.interpolate(&[0.5, 1.0, 0.5, 0.5]) - 1.0).abs() < 1e-5);
@@ -622,7 +755,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "expected 2 coordinates")]
     fn interpolate_panics_on_wrong_point_len() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0], vec![0.0, 1.0]],
             vec![0.0; 4],
             ExtrapolationStrategy::Clamp,
@@ -644,14 +777,14 @@ mod tests {
 
     #[test]
     fn strategy_clamp_fully_oob_returns_corner_value() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
         // Both coords OOB — clamp both to 1.0, bilinear at (1.0,1.0) → f(1,1)=11.0
         assert!((interp.interpolate(&[2.0, 2.0]) - 11.0).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_clamp_mixed_oob() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
         // y OOB (2.0), x in-bounds (0.5) — clamp y to 1.0, interp x → f(0.5,1.0)=6.0
         assert!((interp.interpolate(&[0.5, 2.0]) - 6.0).abs() < 1e-5);
     }
@@ -664,7 +797,7 @@ mod tests {
         should_panic(expected = "NaN strategy")
     )]
     fn strategy_nan_fully_oob_returns_nan() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
         let result = interp.interpolate(&[2.0, 2.0]);
         #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
         assert!(result.is_nan());
@@ -680,7 +813,7 @@ mod tests {
         should_panic(expected = "NaN strategy")
     )]
     fn strategy_nan_mixed_oob_returns_nan() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
         let result = interp.interpolate(&[0.5, 2.0]);
         #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
         assert!(result.is_nan());
@@ -690,8 +823,8 @@ mod tests {
 
     #[test]
     fn strategy_nan_inbounds_returns_same_as_clamp() {
-        let clamp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
-        let nan_interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
+        let mut clamp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
+        let mut nan_interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
         let point = [0.25, 0.75];
         let v_clamp = clamp.interpolate(&point);
         let v_nan = nan_interp.interpolate(&point);
@@ -701,14 +834,14 @@ mod tests {
 
     #[test]
     fn strategy_linear_fully_oob_extrapolates() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
         // f(x,y) = x*10 + y. At (2.0, 2.0): f = 20 + 2 = 22.0
         assert!((interp.interpolate(&[2.0, 2.0]) - 22.0).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_linear_mixed_oob() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
         // y=2.0 means y_frac = (2-0)/1 = 2.0 (extrapolates up)
         // x=0.5 means x_frac = 0.5 (interpolates)
         // Weights: (1-0.5)*(1-2.0)=0.5*(-1)=-0.5 for (0,0), (1-0.5)*2.0=1.0 for (0,1),
@@ -719,7 +852,7 @@ mod tests {
 
     #[test]
     fn strategy_linear_below_bounds() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
         // x=-1.0→frac=-1, y=0.5→frac=0.5
         // Weights: (1-(-1))*(1-0.5)=2*0.5=1 for (0,0), 2*0.5=1 for (0,1),
         //          (-1)*(1-0.5)=-0.5 for (1,0), -1*0.5=-0.5 for (1,1)
@@ -729,14 +862,14 @@ mod tests {
 
     #[test]
     fn strategy_nearest_neighbor_fully_oob_snaps_to_corner() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
         // behaves identically to Clamp for 2-point axes
         assert!((interp.interpolate(&[2.0, 2.0]) - 11.0).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_nearest_neighbor_mixed_oob() {
-        let interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
+        let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
         // behaves identically to Clamp for 2-point axes
         assert!((interp.interpolate(&[0.5, 2.0]) - 6.0).abs() < 1e-5);
     }
@@ -749,7 +882,7 @@ mod tests {
             ExtrapolationStrategy::Linear,
             ExtrapolationStrategy::NearestNeighbor,
         ] {
-            let interp = make_2d_grid_with_strategy(strategy);
+            let mut interp = make_2d_grid_with_strategy(strategy);
             let result = interp.interpolate(&[0.5, 0.5]); // in-bounds, should not panic
             assert!(!result.is_nan() || strategy == ExtrapolationStrategy::NaN);
             // in-bounds should never be NaN even with NaN strategy
@@ -764,7 +897,7 @@ mod tests {
 
     #[test]
     fn strategy_linear_1d_extrapolation_above() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0, 2.0]],
             vec![0.0, 1.0, 2.0],
             ExtrapolationStrategy::Linear,
@@ -776,7 +909,7 @@ mod tests {
 
     #[test]
     fn strategy_linear_1d_extrapolation_below() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0, 2.0]],
             vec![0.0, 1.0, 2.0],
             ExtrapolationStrategy::Linear,
@@ -814,9 +947,9 @@ mod tests {
             )
             .unwrap(),
         ];
-        for interp in grids {
+        for mut interp in grids {
             // Query at various in-bounds points; should match Clamp.
-            let clamp = RegularGridInterpolator::new(
+            let mut clamp = RegularGridInterpolator::new(
                 interp.axes.clone(),
                 interp.values.clone(),
                 ExtrapolationStrategy::Clamp,
@@ -849,7 +982,7 @@ mod tests {
 
     #[test]
     fn strategy_linear_single_element_axis_does_not_panic() {
-        let interp = RegularGridInterpolator::new(
+        let mut interp = RegularGridInterpolator::new(
             vec![vec![0.5]],
             vec![3.125],
             ExtrapolationStrategy::Linear,
@@ -860,5 +993,79 @@ mod tests {
         assert!((result - 3.125).abs() < 1e-5);
         let result = interp.interpolate(&[1.0]);
         assert!((result - 3.125).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cache_tracks_bracket_across_temporally_coherent_queries() {
+        // 4D grid: 3 SOC points × 3 temp points × 2 c-rate points × 2 SOH points.
+        let axes = vec![
+            vec![0.0, 0.5, 1.0],
+            vec![-10.0, 25.0, 45.0],
+            vec![0.1, 1.0, 2.0],
+            vec![0.7, 0.85, 1.0],
+        ];
+        let total: usize = axes.iter().map(|a| a.len()).product();
+        let values = vec![0.5f32; total];
+        let mut interp =
+            RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
+
+        // All cached brackets should start at 0.
+        for dim in 0..interp.ndim() {
+            assert_eq!(interp.cached_bracket[dim], 0);
+        }
+
+        // First query at mid-range positions: should update the cache from 0.
+        let _result = interp.interpolate(&[0.51, 25.0, 1.0, 0.85]);
+        // After first query, cached brackets should reflect actual positions.
+        assert!(
+            interp.cached_bracket[0] > 0,
+            "SOC bracket should have moved from 0"
+        );
+        assert!(
+            interp.cached_bracket[1] > 0,
+            "temp bracket should have moved from 0"
+        );
+        assert!(
+            interp.cached_bracket[2] > 0,
+            "c-rate bracket should have moved from 0"
+        );
+        assert!(
+            interp.cached_bracket[3] > 0,
+            "SOH bracket should have moved from 0"
+        );
+
+        // Record cache positions after first query.
+        let first_cache: Vec<usize> = interp.cached_bracket.clone();
+
+        // Second query: small movement — should use linear hunting, not binary search.
+        let _result = interp.interpolate(&[0.50, 25.0, 1.0, 0.85]);
+        // Most dimensions unchanged; SOC moved slightly from 0.51 to 0.50.
+        // Cache should still be near the first positions.
+        for (dim, &prev) in first_cache.iter().enumerate() {
+            let delta = interp.cached_bracket[dim].abs_diff(prev);
+            assert!(
+                delta <= 1,
+                "dim {dim}: cache moved {delta} steps, expected <=1 for coherent query"
+            );
+        }
+
+        // Third query: large jump in one dimension — falls back to binary search.
+        let _result = interp.interpolate(&[0.9, -5.0, 0.05, 0.95]);
+        // Temp went from 25.0 to -5.0 — a big jump that should trigger binary fallback.
+        // The result should still be correct (0.5 constant grid).
+        assert!(
+            (_result - 0.5).abs() < 1e-5,
+            "numerical result should be unchanged"
+        );
+
+        // Cache should be valid (each entry in [0, axis.len()-2] range).
+        for dim in 0..interp.ndim() {
+            let max_lo = interp.axes[dim].len().saturating_sub(2);
+            assert!(
+                interp.cached_bracket[dim] <= max_lo,
+                "dim {dim}: cached bracket {} out of range [0, {max_lo}]",
+                interp.cached_bracket[dim]
+            );
+        }
     }
 }
