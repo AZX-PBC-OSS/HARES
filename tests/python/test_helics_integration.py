@@ -186,11 +186,16 @@ class _FederateProbe:
     Both the blocking and async request/disconnect entry points are recorded:
     production code drives real federates through the async API (with a
     wall-clock deadline) and falls back to the blocking API for test doubles.
+
+    ``granted_times`` is populated from both ``request_time()`` (blocking) and
+    ``request_time_complete()`` (async) so that callers see the grant
+    regardless of which path ``request_time_with_timeout`` chose.
     """
 
     def __init__(self, fed: Any) -> None:
         self._fed = fed
         self.requested_times: list[float] = []
+        self.granted_times: list[float] = []
         self.disconnect_called = False
 
     def enter_executing_mode(self) -> Any:
@@ -198,11 +203,18 @@ class _FederateProbe:
 
     def request_time(self, requested: float) -> float:
         self.requested_times.append(float(requested))
-        return float(self._fed.request_time(requested))
+        granted = float(self._fed.request_time(requested))
+        self.granted_times.append(granted)
+        return granted
 
     def request_time_async(self, requested: float) -> Any:
         self.requested_times.append(float(requested))
         return self._fed.request_time_async(requested)
+
+    def request_time_complete(self) -> float:
+        granted = float(self._fed.request_time_complete())
+        self.granted_times.append(granted)
+        return granted
 
     def disconnect(self) -> None:
         self.disconnect_called = True
@@ -1202,5 +1214,284 @@ def test_mismatched_subscription_topic_logs_stale_warning() -> None:
             "No subscription should have received data; got update_mask=%d"
             % row["helics_update_mask"]
         )
+    finally:
+        _disconnect_broker(broker)
+
+
+# ---------------------------------------------------------------------------
+# Year-scale co-simulation tests (8760 hourly steps)
+# ---------------------------------------------------------------------------
+
+_YEAR_TIME_RES_S = 3600.0
+_YEAR_TOTAL_STEPS = 8760
+_YEAR_DURATION_S = _YEAR_TOTAL_STEPS * int(_YEAR_TIME_RES_S)
+_YEAR_DRIFT_TOLERANCE_S = 8.76e-3  # 1e-6 per step × 8760 steps
+
+
+def _new_year_dwelling(bldg_id: int = 42) -> Dwelling:
+    dwelling = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        start_time="2019-01-01T00:00:00",
+        duration_s=_YEAR_DURATION_S,
+        time_res_s=int(_YEAR_TIME_RES_S),
+        defaults_path=str(HARES_DEFAULTS),
+        bldg_id=bldg_id,
+        master_seed=0,
+        output_verbosity=0,
+    )
+    dwelling.initialize()
+    return dwelling
+
+
+def _new_year_helics_dwelling(
+    dwelling: Any,
+    fed_name: str,
+    broker_port: int,
+    *,
+    max_time_drift_tolerance_s: float | None = _YEAR_DRIFT_TOLERANCE_S,
+) -> HELICSDwelling:
+    return HELICSDwelling(
+        dwelling=dwelling,
+        fed_name=fed_name,
+        broker_address=f"localhost:{broker_port}",
+        connect_timeout_s=_CONNECT_TIMEOUT_S,
+        grant_timeout_s=_GRANT_TIMEOUT_S,
+        max_time_drift_tolerance_s=max_time_drift_tolerance_s,
+    )
+
+
+@pytest.mark.timeout(600, method="thread")
+def test_year_scale_time_drift() -> None:
+    """A single dwelling federate running 8760 hourly steps accumulates negligible time drift.
+
+    The broker has no peer federates, so every ``request_time()`` is granted
+    immediately.  Cumulative drift across the year must stay below
+    ``1e-6 * step_count ≈ 8.76e-3`` seconds.
+    """
+    broker = create_broker(n_federates=1, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_year_dwelling()
+        helics_dwelling = _new_year_helics_dwelling(dwelling, "year_house_1", broker_port)
+        helics_dwelling.register_publications()
+
+        probe = _FederateProbe(helics_dwelling._fed)
+        helics_dwelling._fed = probe
+        helics_dwelling.run()
+
+        step_grants = [t for t in probe.granted_times if t < helics.HELICS_TIME_MAXTIME]
+        assert len(step_grants) == _YEAR_TOTAL_STEPS, (
+            f"Expected {_YEAR_TOTAL_STEPS} step grants, got {len(step_grants)} "
+            f"(total grants: {len(probe.granted_times)})"
+        )
+
+        expected = [(step + 1) * _YEAR_TIME_RES_S for step in range(_YEAR_TOTAL_STEPS)]
+        total_drift = 0.0
+        for step, (granted, exp) in enumerate(zip(step_grants, expected)):
+            drift = abs(granted - exp)
+            total_drift += drift
+            assert drift <= 1e-6 * (step + 1), (
+                f"Per-step drift {drift:.12f}s at step {step} exceeds bound {1e-6 * (step + 1):.12f}s"
+            )
+
+        assert total_drift < _YEAR_DRIFT_TOLERANCE_S, (
+            f"Cumulative drift {total_drift:.12f}s exceeds tolerance {_YEAR_DRIFT_TOLERANCE_S}s"
+        )
+
+        internal_drift = helics_dwelling.time_drift_cumulative_s
+        assert internal_drift >= 0.0, f"Internal drift {internal_drift} is negative"
+        assert internal_drift < _YEAR_DRIFT_TOLERANCE_S, (
+            f"Internal drift {internal_drift:.12f}s exceeds tolerance {_YEAR_DRIFT_TOLERANCE_S}s"
+        )
+        drift_delta = abs(internal_drift - total_drift)
+        assert drift_delta <= 1e-9, (
+            f"Internal drift {internal_drift:.12f}s disagrees with "
+            f"external drift {total_drift:.12f}s by {drift_delta:.12f}s"
+        )
+
+        assert helics_dwelling._step_index == _YEAR_TOTAL_STEPS, (
+            f"Internal step index {helics_dwelling._step_index} != {_YEAR_TOTAL_STEPS}"
+        )
+    finally:
+        _disconnect_broker(broker)
+
+
+@pytest.mark.timeout(600, method="thread")
+def test_year_scale_time_drift_multi_federate() -> None:
+    """Two federates (dwelling + aggregator) run 8760 hourly steps with cross-federate time alignment.
+
+    The dwelling federate uses a ``_FederateProbe`` to record granted times.
+    The aggregator federate steps in lockstep, publishing a voltage signal.
+    Cumulative drift across the year must stay below
+    ``1e-6 * step_count ≈ 8.76e-3`` seconds.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_year_dwelling()
+        federate_ready = threading.Event()
+        shared_probe: list[_FederateProbe] = []
+        shared_dwelling: list[HELICSDwelling] = []
+
+        def _run_federate() -> None:
+            helics_dwelling = _new_year_helics_dwelling(dwelling, "year_house_2", broker_port)
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+
+            probe = _FederateProbe(helics_dwelling._fed)
+            helics_dwelling._fed = probe
+            shared_probe.append(probe)
+            shared_dwelling.append(helics_dwelling)
+
+            federate_ready.set()
+            helics_dwelling.run()
+
+        thread, thread_result = _start_thread(_run_federate, name="year-dwelling")
+        federate_ready.wait()
+
+        fedinfo = _new_federate_info(broker_port, time_res_s=_YEAR_TIME_RES_S)
+        aggregator = helics.helicsCreateValueFederate("year_agg", fedinfo)
+        sub_power = aggregator.register_subscription("year_house_2/total_power_kw", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        agg_granted_times: list[float] = []
+        try:
+            _enter_exec(aggregator)
+            for step_idx in range(_YEAR_TOTAL_STEPS):
+                pub_voltage.publish(1.0)
+                exit_time_s = (step_idx + 1) * _YEAR_TIME_RES_S
+                granted = _request(aggregator, exit_time_s)
+                agg_granted_times.append(float(granted))
+                if sub_power.is_updated():
+                    _ = float(sub_power.double)
+        finally:
+            aggregator.disconnect()
+
+        thread.join(timeout=60.0)
+        assert thread.is_alive() is False, "dwelling federate thread did not exit"
+        if thread_result.exception is not None:
+            raise thread_result.exception
+        assert thread_result.completed is True
+
+        assert len(shared_probe) == 1
+        probe = shared_probe[0]
+        step_grants_raw = [t for t in probe.granted_times if t < helics.HELICS_TIME_MAXTIME]
+
+        # In multi-federate mode each step may produce multiple grants
+        # (intermediate retry + final accepted). Map each grant to the
+        # nearest expected step index, keeping only the closest match.
+        expected = [(step + 1) * _YEAR_TIME_RES_S for step in range(_YEAR_TOTAL_STEPS)]
+        per_step: dict[int, float] = {}
+        for g in step_grants_raw:
+            step_idx = int(round(g / _YEAR_TIME_RES_S)) - 1
+            if 0 <= step_idx < _YEAR_TOTAL_STEPS:
+                prev = per_step.get(step_idx)
+                if prev is None or abs(g - expected[step_idx]) < abs(prev - expected[step_idx]):
+                    per_step[step_idx] = g
+
+        assert len(per_step) == _YEAR_TOTAL_STEPS, (
+            f"Expected {_YEAR_TOTAL_STEPS} step-matched grants, got {len(per_step)} "
+            f"(raw grants: {len(step_grants_raw)})"
+        )
+        assert len(agg_granted_times) == _YEAR_TOTAL_STEPS, (
+            f"Expected {_YEAR_TOTAL_STEPS} aggregator grants, got {len(agg_granted_times)}"
+        )
+
+        # Dwelling drift
+        dwelling_drift = 0.0
+        for step_idx, granted in sorted(per_step.items()):
+            exp = expected[step_idx]
+            drift = abs(granted - exp)
+            dwelling_drift += drift
+
+        assert dwelling_drift < _YEAR_DRIFT_TOLERANCE_S, (
+            f"Dwelling cumulative drift {dwelling_drift:.12f}s exceeds tolerance {_YEAR_DRIFT_TOLERANCE_S}s"
+        )
+
+        # Cross-federate time alignment
+        for step_idx, dwell_t in sorted(per_step.items()):
+            agg_t = agg_granted_times[step_idx]
+            delta = abs(agg_t - dwell_t)
+            assert delta <= 1e-6, (
+                f"Cross-federate time misalignment {delta:.12f}s at step {step_idx}"
+            )
+
+        agg_drift = 0.0
+        for granted, exp in zip(agg_granted_times, expected):
+            agg_drift += abs(float(granted) - exp)
+        assert agg_drift < _YEAR_DRIFT_TOLERANCE_S, (
+            f"Aggregator cumulative drift {agg_drift:.12f}s exceeds tolerance {_YEAR_DRIFT_TOLERANCE_S}s"
+        )
+
+        assert len(shared_dwelling) == 1
+        helics_dwelling = shared_dwelling[0]
+        internal_drift = helics_dwelling.time_drift_cumulative_s
+        assert internal_drift >= 0.0, f"Internal drift {internal_drift} is negative"
+        assert internal_drift < _YEAR_DRIFT_TOLERANCE_S, (
+            f"Internal drift {internal_drift:.12f}s exceeds tolerance {_YEAR_DRIFT_TOLERANCE_S}s"
+        )
+        drift_delta = abs(internal_drift - dwelling_drift)
+        assert drift_delta <= 1e-9, (
+            f"Internal drift {internal_drift:.12f}s disagrees with "
+            f"external drift {dwelling_drift:.12f}s by {drift_delta:.12f}s"
+        )
+
+        assert helics_dwelling._step_index == _YEAR_TOTAL_STEPS, (
+            f"Internal step index {helics_dwelling._step_index} != {_YEAR_TOTAL_STEPS}"
+        )
+    finally:
+        _disconnect_broker(broker)
+
+
+@pytest.mark.timeout(120, method="thread")
+def test_drift_guard_raises_when_cumulative_drift_exceeds_tolerance() -> None:
+    """A dwelling federate with a negative drift tolerance raises ``RuntimeError``.
+
+    The internal drift accumulator is initialised to 0.0 and grows upward with
+    each non-negative per-step drift. Passing ``max_time_drift_tolerance_s=-1.0``
+    — a tolerance no reachable cumulative drift satisfies — forces the guard to
+    fire on the first step, proving the ``RuntimeError`` path is reachable and
+    that the exception message names ``drift``.
+
+    A modest step count (10) keeps the test fast; only the first step is needed.
+    """
+    _STEPS = 10
+    _TIME_RES = 3600.0
+    _DURATION = _STEPS * int(_TIME_RES)
+
+    broker = create_broker(n_federates=1, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=_DURATION,
+            time_res_s=int(_TIME_RES),
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=99,
+            master_seed=0,
+            output_verbosity=0,
+        )
+        dwelling.initialize()
+
+        helics_dwelling = HELICSDwelling(
+            dwelling=dwelling,
+            fed_name="drift_guard",
+            broker_address=f"localhost:{broker_port}",
+            connect_timeout_s=_CONNECT_TIMEOUT_S,
+            grant_timeout_s=_GRANT_TIMEOUT_S,
+            max_time_drift_tolerance_s=-1.0,
+        )
+        helics_dwelling.register_publications()
+
+        with pytest.raises(RuntimeError, match="drift"):
+            helics_dwelling.run()
     finally:
         _disconnect_broker(broker)

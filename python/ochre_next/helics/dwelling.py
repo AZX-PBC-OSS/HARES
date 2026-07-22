@@ -311,6 +311,7 @@ class HELICSDwelling:
         time_offset_s: float = 0.0,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         grant_timeout_s: float = DEFAULT_GRANT_TIMEOUT_S,
+        max_time_drift_tolerance_s: float | None = None,
     ) -> None:
         self._dwelling = dwelling
         self._fed_name = fed_name
@@ -354,6 +355,10 @@ class HELICSDwelling:
         self._stale_subscription_count: int = 0
         self._required_publication_keys: set[str] = set()
         self._required_subscription_keys: set[str] = set()
+
+        self._max_time_drift_tolerance_s = max_time_drift_tolerance_s
+        self._step_index = 0
+        self._time_drift_cumulative_s = 0.0
 
     def register_publications(
         self,
@@ -506,6 +511,8 @@ class HELICSDwelling:
             self._enter_executing_mode()
             self._verify_registration_completeness()
             self._verify_helics_counts()
+            self._step_index = 0
+            self._time_drift_cumulative_s = 0.0
             for timestamp in self._timesteps:
                 exit_time_s = (timestamp - self._start_time).total_seconds() + self._period_s
                 granted = self._request_time(exit_time_s)
@@ -515,6 +522,21 @@ class HELICSDwelling:
                 if granted >= helics.HELICS_TIME_MAXTIME:
                     self._federation_terminated = True
                     break
+                step_drift = abs(granted - exit_time_s)
+                self._time_drift_cumulative_s += step_drift
+                self._step_index += 1
+                if self._step_index % 1000 == 0:
+                    _LOG.info(
+                        "Time drift at step %d: %.9f seconds",
+                        self._step_index,
+                        self._time_drift_cumulative_s,
+                    )
+                if self._max_time_drift_tolerance_s is not None and self._time_drift_cumulative_s > self._max_time_drift_tolerance_s:
+                    raise RuntimeError(
+                        f"Time drift {self._time_drift_cumulative_s:.9f}s "
+                        f"exceeds tolerance {self._max_time_drift_tolerance_s:.9f}s "
+                        f"at step {self._step_index}"
+                    )
                 self._read_subscriptions()
                 self._dwelling.step()
                 self._publish_results()
@@ -842,6 +864,11 @@ class HELICSDwelling:
     def helics_range_violations_total(self) -> int:
         """Cumulative count of all range violations (voltage, price, control) across the run."""
         return self._range_violations_total
+
+    @property
+    def time_drift_cumulative_s(self) -> float:
+        """Cumulative absolute time drift in seconds accumulated across the run."""
+        return self._time_drift_cumulative_s
 
     def get_diagnostic_row(self) -> dict[str, object]:
         """Return a dict of HELICS diagnostic fields for this timestep.

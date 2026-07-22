@@ -6575,6 +6575,7 @@ impl Dwelling {
                 expected_balance_kg,
                 solver_total_kg,
                 gross_moisture_kg,
+                dt_s,
             )?;
 
             #[cfg(all(

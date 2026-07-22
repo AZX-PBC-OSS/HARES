@@ -215,18 +215,21 @@ impl InvariantChecker {
     /// Catches missing source contributions, extra sources, or incorrect buffering
     /// multiplier when the independently-tracked accounting disagrees with the solver.
     ///
-    /// **Sorption bound**: `|independent_physical_kg − actual_delta_kg| < max(1.0, 5.0 · gross_kg)`
+    /// **Sorption bound**: `|independent_physical_kg − actual_delta_kg| < max(1.0, 5.0 · gross_kg) · (dt_s / 60s)`
     /// Catches absurdly large buffering multipliers by bounding the material sorption
-    /// residual to multiple times the zone moisture inventory. Fires when sorption
-    /// exceeds either 1 kg absolute or 5× the zone air moisture content — conditions
-    /// that indicate a runaway multiplier, a simulation input error, or a solver
-    /// logic bug.
+    /// residual to multiple times the zone moisture inventory, scaled to the timestep.
+    /// The absolute floor of 1.0 kg and the relative bound 5·gross are both multiplied
+    /// by `dt_s / 60s` so the rate guard (kg/s) is uniform regardless of step size.
+    /// Fires when the per-step sorption rate exceeds ~5× the zone moisture inventory
+    /// per minute — conditions that indicate a runaway multiplier, a simulation input
+    /// error, or a solver logic bug.
     pub fn check_moisture(
         &self,
         independent_physical_kg: f64,
         expected_balance_kg: f64,
         actual_delta_kg: f64,
         gross_moisture_mass_kg: f64,
+        dt_s: f64,
     ) -> Result<(), HaresError> {
         // Guard against NaN/Inf propagating through the comparison below:
         // `NaN >= tolerance` evaluates to `false`, silently passing the check.
@@ -275,8 +278,23 @@ impl InvariantChecker {
         }
 
         // Check 2: sorption bound — physical net vs apparent air moisture change.
+        //
+        // The independent physical moisture source mass (kg) and the sorption
+        // residual both scale linearly with `dt_s`, but the zone moisture
+        // inventory `gross_moisture_mass_kg` is instantaneous and does not.
+        // Without a dt_s factor the bound becomes 60× tighter at 3600 s than at
+        // 60 s, generating false-positive violations for legitimate hourly
+        // co-simulation runs.
+        //
+        // The absolute floor of 1.0 kg is appropriate only for the default 60 s
+        // step; at larger dt_s it is relaxed to maintain the same per-second
+        // sorption-rate guard. The relative bound 5·gross is also scaled:
+        // `5 · gross · (dt_s / 60s)` is equivalent to “sorption rate ≤ 5·gross/60s kg/s”.
         let sorption_residual = (independent_physical_kg - actual_delta_kg).abs();
-        let sorption_tolerance = f64::max(1e0, 5.0 * gross_moisture_mass_kg);
+        let sorption_tolerance = f64::max(
+            1e0 * (dt_s / 60.0),
+            5.0 * gross_moisture_mass_kg * (dt_s / 60.0),
+        );
         if sorption_residual >= sorption_tolerance {
             return Err(HaresError::InvariantViolation {
                 check_name: "moisture_sorption".to_string(),
@@ -692,7 +710,7 @@ impl InvariantChecker {
         Ok(())
     }
 
-    pub fn check_moisture(&self, _: f64, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
+    pub fn check_moisture(&self, _: f64, _: f64, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
         Ok(())
     }
 
@@ -1049,8 +1067,13 @@ mod tests {
         let physical_source = q_latent * dt_s / h_fg; // ~0.024 kg
         let expected_balance = physical_source / moisture_mult; // ~0.0016 kg
         let actual_delta = physical_source / moisture_mult; // same formula, all sources tracked
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(result.is_ok(), "balanced independent check should pass");
     }
 
@@ -1075,6 +1098,7 @@ mod tests {
             expected_balance,
             actual_delta,
             gross_kg,
+            dt_s,
         );
         assert!(
             result.is_err(),
@@ -1102,8 +1126,13 @@ mod tests {
         let expected_balance = physical_source / expected_mult; // 0.0016 kg
         let actual_delta = physical_source / actual_mult; // 0.0008 kg
         // Residual = |0.0016 − 0.0008| = 0.0008 kg > max(5e-4, 1e-4*2.33=2.33e-4) = 5e-4
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(
             result.is_err(),
             "manipulated multiplier must fail balance check"
@@ -1129,12 +1158,17 @@ mod tests {
         let actual_delta = physical_source / moisture_mult; // ~0.0096 kg
         // Sorption (material buffering) = physical − actual:
         let expected_sorption = physical_source - actual_delta; // ~0.1343 kg
-        // The sorption check bounds the residual: |physical − actual| < max(1e-3, 0.1*gross)
-        // |0.1439 − 0.0096| = 0.1343 < max(1e-3, 0.1*2.33=0.233) → passes
+        // The sorption check bounds the residual: |physical − actual| < max(1.0, 5.0·gross)·(dt_s/60)
+        // |0.1439 − 0.0096| = 0.1343 < max(1e0·60, 5·2.33·60) = max(60, 699) = 699 → passes
         // The balance check: |physical/M − actual| = 0 → passes (same M)
         let expected_balance = physical_source / moisture_mult;
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(
             result.is_ok(),
             "regression step should pass; expected sorption {expected_sorption:.4} < tolerance"
@@ -1157,8 +1191,13 @@ mod tests {
         // Sorption = |0.024 − 0.00024| = 0.0238 kg > max(1.0, 5*0.01=0.05) = 1.0
         // → sorption check would also fail, but balance fires first:
         // |0.0016 − 0.00024| = 0.00136 > max(5e-4, 1e-4*0.01=1e-6) = 5e-4
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(result.is_err(), "100× multiplier must fail invariant check");
         let err = result.unwrap_err();
         assert!(
@@ -1166,29 +1205,35 @@ mod tests {
         );
     }
 
-    /// The sorption check guards against sorption exceeding the absolute floor
-    /// of 1 kg or 5× the zone moisture inventory. When the buffering produces a
-    /// sorption residual that exceeds the sorption bound (but NOT the balance
-    /// bound because M matches), the sorption check catches it.
+    /// The sorption check guards against sorption exceeding the timestep-scaled
+    /// absolute floor of 1 kg·(dt/60s) or the relative bound 5·gross·(dt/60s).
+    /// When the buffering produces a sorption residual that exceeds the sorption
+    /// bound (but NOT the balance bound because M matches), the sorption check
+    /// catches it.
     ///
-    /// Scenario: an absurdly large moisture source (~10 kW latent) in a very dry
-    /// zone — the per-step sorption exceeds 1 kg while the zone barely holds any
+    /// Scenario: a 50 kW latent source in a very dry zone — the per-step sorption
+    /// exceeds the dt-scaled absolute floor while the zone barely holds any
     /// moisture, indicating either a runaway multiplier or a simulation input error.
     #[test]
     fn sorption_bound_catches_excessive_buffering() {
         let h_fg = 2_501_000.0;
         let dt_s = 600.0;
-        let q_latent = 10_000.0; // absurdly large latent
+        let q_latent = 50_000.0; // absurdly large latent source
         let moisture_mult: f64 = 15.0;
         let gross_kg = 0.01; // very small zone moisture inventory
-        let physical_source = q_latent * dt_s / h_fg; // ~2.398 kg
-        let expected_balance = physical_source / moisture_mult; // ~0.160 kg
+        let physical_source = q_latent * dt_s / h_fg; // ~11.99 kg
+        let expected_balance = physical_source / moisture_mult; // ~0.799 kg
         let actual_delta = physical_source / moisture_mult; // same (balance passes)
-        // Balance: |0.160 − 0.160| = 0 < 5e-4 → passes
-        // Sorption: |2.398 − 0.160| = 2.238 kg > max(1.0, 5*0.01=0.05) = 1.0
+        // Balance: |0.799 − 0.799| = 0 < 5e-4 → passes
+        // Sorption: |11.99 − 0.799| = 11.19 kg > max(1*10, 5*0.01*10) = max(10, 0.5) = 10.0
         // → sorption bound fires
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(
             result.is_err(),
             "excessive sorption must fail sorption bound"
@@ -1232,12 +1277,13 @@ mod tests {
 
         // Balance check: residual = 0 → passes.
         // Sorption check: |physical - actual| = |(-0.036) - (-0.0024)| ≈ 0.0336 kg
-        //   < max(1.0, 5*2.33=11.65) = 1.0 → passes.
+        //   < max(1.0, 5·2.33)·(3600/60) = max(60, 699) = 699 → passes.
         let result = checker().check_moisture(
             independent_physical_kg,
             expected_balance_kg,
             actual_delta_kg,
             gross_kg,
+            dt_s,
         );
         assert!(
             result.is_ok(),
@@ -1252,8 +1298,13 @@ mod tests {
         let old_expected = old_independent / moisture_mult; // ≈ 0.0072 kg
         // actual_delta_kg is still the correct solver output (-0.0024 kg)
         // Residual = |0.0072 - (-0.0024)| = 0.0096 kg > max(5e-4, 1e-4*2.33) = 5e-4
-        let old_result =
-            checker().check_moisture(old_independent, old_expected, actual_delta_kg, gross_kg);
+        let old_result = checker().check_moisture(
+            old_independent,
+            old_expected,
+            actual_delta_kg,
+            gross_kg,
+            dt_s,
+        );
         assert!(
             old_result.is_err(),
             "old cancelled independent mass must produce false-positive invariant failure; got {old_result:?}"
@@ -1284,8 +1335,13 @@ mod tests {
         let condensation_kg = 0.002;
         let actual_delta = expected_balance - condensation_kg; // 0.0028 kg
         let adjusted_actual = actual_delta + condensation_kg; // 0.0048 kg = expected
-        let result =
-            checker().check_moisture(physical_source, expected_balance, adjusted_actual, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            adjusted_actual,
+            gross_kg,
+            dt_s,
+        );
         assert!(
             result.is_ok(),
             "balance with condensation sink must pass; got {result:?}"
@@ -1308,8 +1364,13 @@ mod tests {
         // Passing actual_delta without adding condensation back — the old (buggy) call.
         // Residual = |expected − actual| = |0.0048 − 0.0028| = 0.002 kg
         // > max(5e-4, 1e-4*2.33=2.33e-4) = 5e-4 → must fail.
-        let result =
-            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        let result = checker().check_moisture(
+            physical_source,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+            dt_s,
+        );
         assert!(result.is_err(), "condensation-unaware check must fail");
     }
 
@@ -1610,7 +1671,7 @@ mod tests {
 
     #[test]
     fn moisture_balance_fails_on_nan_physical() {
-        let result = checker().check_moisture(f64::NAN, 0.001, 0.001, 2.0);
+        let result = checker().check_moisture(f64::NAN, 0.001, 0.001, 2.0, 60.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -1621,19 +1682,19 @@ mod tests {
 
     #[test]
     fn moisture_balance_fails_on_nan_expected() {
-        let result = checker().check_moisture(0.024, f64::NAN, 0.001, 2.0);
+        let result = checker().check_moisture(0.024, f64::NAN, 0.001, 2.0, 60.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn moisture_balance_fails_on_nan_actual() {
-        let result = checker().check_moisture(0.024, 0.001, f64::NAN, 2.0);
+        let result = checker().check_moisture(0.024, 0.001, f64::NAN, 2.0, 60.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn moisture_balance_fails_on_nan_gross() {
-        let result = checker().check_moisture(0.024, 0.001, 0.001, f64::NAN);
+        let result = checker().check_moisture(0.024, 0.001, 0.001, f64::NAN, 60.0);
         assert!(result.is_err());
     }
 
@@ -1692,7 +1753,7 @@ mod tests {
 
     #[test]
     fn existing_moisture_balance_tests_still_pass() {
-        let result = checker().check_moisture(0.024, 0.0016, 0.0016, 2.33);
+        let result = checker().check_moisture(0.024, 0.0016, 0.0016, 2.33, 60.0);
         assert!(result.is_ok());
     }
 
