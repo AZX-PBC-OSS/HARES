@@ -641,6 +641,15 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         let mut has_null = vec![false; column_count];
 
         for (sample_weight, _cols, buckets) in &successful {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                debug_assert!(
+                    sample_weight.is_finite() && *sample_weight >= 0.0,
+                    "sample_weight {} must be finite and >= 0.0",
+                    sample_weight
+                );
+            }
+
             let Some(values) = buckets.get(&bucket) else {
                 has_null.fill(true);
                 continue;
@@ -1512,6 +1521,17 @@ mod tests {
             )),
             FleetAggregation::WeightedSum
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "sample_weight")]
+    fn build_aggregate_batch_debug_assert_catches_invalid_weight() {
+        let columns = vec![temp_field_with_unit("Total Electric Power (kW)")];
+        let mut buckets: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        buckets.insert(0, vec![Some(1.0)]);
+        // Direct call bypasses aggregate()'s guard — only the invariant check
+        // in build_aggregate_batch can catch this. Must panic in debug mode.
+        let _ = build_aggregate_batch(vec![(f64::NAN, columns, buckets)]);
     }
 
     #[test]

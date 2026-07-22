@@ -1190,6 +1190,13 @@ mod tests {
     }
 
     #[test]
+    fn from_buildings_defaults_to_valid_weight() {
+        let fleet = Fleet::from_buildings(build_missing_configs(3));
+        let weights: Vec<f64> = fleet.entries.iter().map(|e| e.sample_weight).collect();
+        assert_eq!(weights, vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
     fn with_sample_weights_accepts_zero_and_positive() {
         let fleet = Fleet::from_buildings(build_missing_configs(3))
             .with_sample_weights(vec![1.0, 0.0, 2.5])
