@@ -22,6 +22,7 @@ use std::time::Duration as StdDuration;
 #[cfg(any(feature = "profiling", feature = "actor_profiling"))]
 use std::time::Instant;
 
+use arrow::datatypes::{Field, Schema};
 use chrono::{DateTime, Duration, FixedOffset, Timelike};
 use chrono_tz::Tz;
 use hares_control::{
@@ -49,8 +50,9 @@ use hares_io::{
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
     SimulationConfig, StreamingRecorder, WeatherTimeSeries, build_schema,
-    end_use_electric_power_column, equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev,
-    is_heat_pump_heater, is_hvac_or_wh, is_pv, parse_hpxml, parse_schedule_csv, parse_weather,
+    end_use_electric_power_column, equipment_name_to_end_use, extract_unit_from_name, has_soc,
+    is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv, parse_hpxml,
+    parse_schedule_csv, parse_weather,
 };
 
 use hares_physics::constants::{
@@ -234,6 +236,84 @@ struct EquipmentColumns {
     /// V8 per-equipment telemetry diagnostic columns. Each entry is
     /// (telemetry_key, column_index). Populated from telemetry in record_step.
     v8_columns: Vec<(&'static str, usize)>,
+}
+
+/// Enriches the output schema's Arrow field metadata with unit declarations
+/// from equipment `TelemetryField` descriptors, closing the round-trip gap
+/// between equipment-declared units and the column-suffix-derived units used
+/// by the aggregation pipeline.
+///
+/// For every schema column whose name starts with an equipment instance name,
+/// the column's unit (extracted from the name suffix) is verified against the
+/// corresponding equipment's `telemetry_fields`. When the unit is found in the
+/// equipment's declared fields, the field's metadata is enriched with a
+/// `"unit_source"` key set to `"telemetry_field"` to indicate the unit has been
+/// validated against the authoritative equipment telemetry declaration.
+///
+/// Columns whose unit is not recognized by the owning equipment's telemetry
+/// fields keep their suffix-derived metadata and emit a `tracing::warn!`.
+fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[Box<dyn Equipment>]) -> Schema {
+    // Compute instance-qualified names matching build_schema's convention.
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for eq in equipment {
+        *counts.entry(eq.descriptor().name.as_str()).or_default() += 1;
+    }
+    let mut indices: HashMap<&str, usize> = HashMap::new();
+    let instance_units: Vec<(String, HashSet<String>)> = equipment
+        .iter()
+        .map(|eq| {
+            let desc = eq.descriptor();
+            let base = desc.name.as_str();
+            let name = if counts[base] > 1 {
+                let idx = indices.entry(base).or_insert(0);
+                *idx += 1;
+                format!("{base} #{idx}")
+            } else {
+                base.to_string()
+            };
+            let units: HashSet<String> = desc
+                .telemetry_fields
+                .iter()
+                .map(|tf| tf.unit.clone())
+                .collect();
+            (name, units)
+        })
+        .collect();
+
+    // For each schema field that belongs to a known equipment instance,
+    // verify the column's unit against the equipment's declared telemetry
+    // field units and enrich metadata.
+    let fields: Vec<std::sync::Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let col_name = field.name();
+            let mut metadata = field.metadata().clone();
+
+            // Check if this column name starts with a known instance name
+            // followed by a space (to avoid false prefix matches).
+            if let Some((_name, units)) = instance_units.iter().find(|(name, _)| {
+                col_name.as_bytes().starts_with(name.as_bytes())
+                    && (col_name.len() == name.len() || col_name.as_bytes()[name.len()] == b' ')
+            }) {
+                if let Some(col_unit) = extract_unit_from_name(col_name) {
+                    if units.contains(col_unit) {
+                        metadata.insert("unit_source".to_string(), "telemetry_field".to_string());
+                    } else {
+                        tracing::warn!(
+                            column = col_name,
+                            unit = col_unit,
+                            "column unit not found in equipment telemetry fields"
+                        );
+                    }
+                }
+            }
+
+            std::sync::Arc::new(field.as_ref().clone().with_metadata(metadata))
+        })
+        .collect();
+
+    Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -2254,6 +2334,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             config.sim_config.output_verbosity,
             &zone_names,
         );
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
         let output_value_count = schema.fields().len() - 1; // exclude timestamp
         let output_column_index = build_output_column_index(&schema);
         let recorder = StreamingRecorder::new(
@@ -13822,6 +13903,78 @@ master_seed = 42
             tk::OUTPUT_SCOPE_KEYS.len(),
             27,
             "OUTPUT_SCOPE_KEYS length changed; ensure all are tested above"
+        );
+    }
+
+    #[test]
+    fn enrich_schema_telemetry_units_tags_matching_column_with_unit_source() {
+        let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
+        eq.descriptor.telemetry_fields.push(TelemetryField {
+            name: "test_reactive".to_string(),
+            unit: "kVAR".to_string(),
+            description: "test reactive power".to_string(),
+        });
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        let specs = vec![hares_io::EquipmentSpec {
+            instance_name: Some("TestEq".to_string()),
+            name: "TestEq".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let schema = hares_io::build_schema(&specs, 5, &[]);
+        let enriched = enrich_schema_with_telemetry_units(schema, &equipment);
+        let reactive_col = enriched
+            .fields()
+            .iter()
+            .find(|f| f.name() == "TestEq Reactive Power (kVAR)")
+            .expect("schema v5 must include per-equipment reactive power column");
+        assert_eq!(
+            reactive_col
+                .metadata()
+                .get("unit_source")
+                .map(|s| s.as_str()),
+            Some("telemetry_field"),
+            "reactive power column with matching declared telemetry field unit should carry unit_source"
+        );
+    }
+
+    #[test]
+    fn enrich_schema_telemetry_units_sets_no_unit_source_when_unit_absent_from_descriptor() {
+        let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
+        eq.descriptor.telemetry_fields.push(TelemetryField {
+            name: "test_kw".to_string(),
+            unit: "kW".to_string(),
+            description: "test active power".to_string(),
+        });
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        let specs = vec![hares_io::EquipmentSpec {
+            instance_name: Some("TestEq".to_string()),
+            name: "TestEq".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let schema = hares_io::build_schema(&specs, 5, &[]);
+        let enriched = enrich_schema_with_telemetry_units(schema, &equipment);
+        let reactive_col = enriched
+            .fields()
+            .iter()
+            .find(|f| f.name() == "TestEq Reactive Power (kVAR)")
+            .expect("schema v5 must include per-equipment reactive power column");
+        assert!(
+            reactive_col.metadata().get("unit_source").is_none(),
+            "reactive power column should not get unit_source when equipment declares no kVAR field"
         );
     }
 }

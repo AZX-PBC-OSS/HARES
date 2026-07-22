@@ -34,6 +34,21 @@ pub struct FleetResults {
     pub aggregate_timeseries: RecordBatch,
 }
 
+/// Phase 1 (temporal resampling) aggregation rule: maps a unit string to its
+/// column-level aggregation strategy. Returns `None` for unrecognized units.
+///
+/// # Mapping
+/// - `kWh` → Sum (energy accumulates over time)
+/// - All others → Mean (instantaneous rate, temperature, dimensionless, etc.)
+fn column_aggregation_for_unit(unit: &str) -> Option<ColumnAggregation> {
+    match unit {
+        "kWh" => Some(ColumnAggregation::Sum),
+        "kW" | "C" | "\u{b0}C" | "-" | "W" | "therms/hour" | "kVAR" | "kWh/mi" | "s" | "enum"
+        | "W/m2" | "deg" => Some(ColumnAggregation::Mean),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColumnAggregation {
     Mean,
@@ -41,7 +56,27 @@ enum ColumnAggregation {
 }
 
 impl ColumnAggregation {
-    fn for_column(name: &str) -> Self {
+    /// Returns the aggregation rule for a column by reading the unit from
+    /// Arrow field metadata. Falls back to suffix-based column name parsing
+    /// when no unit metadata is present (e.g. for schemas built without
+    /// `hares-io` column construction).
+    fn for_column(field: &arrow::datatypes::Field) -> Self {
+        if let Some(unit) = field.metadata().get("unit") {
+            return column_aggregation_for_unit(unit).unwrap_or_else(|| {
+                tracing::warn!(
+                    column = field.name().as_str(),
+                    unit = unit.as_str(),
+                    "unrecognized unit in column metadata; \
+                     falling back to ColumnAggregation::Mean",
+                );
+                Self::Mean
+            });
+        }
+
+        Self::for_column_by_suffix(field.name())
+    }
+
+    fn for_column_by_suffix(name: &str) -> Self {
         let normalized = name.trim();
 
         if normalized.ends_with("(kWh)") {
@@ -49,11 +84,6 @@ impl ColumnAggregation {
             return Self::Sum;
         }
 
-        // All other quantities are resampled by averaging within each time bucket:
-        // (kW) power, (therms/hour) fuel-power rate, (kVAR) reactive power,
-        // (W) rate-like, (C)/(°C) temperature, (-) dimensionless ratios,
-        // (W/m2) irradiance intensity per area, (s) static configuration,
-        // (deg) directional angle
         if normalized.ends_with("(kW)")
             || normalized.ends_with("(C)")
             || normalized.ends_with("(\u{b0}C)")
@@ -76,6 +106,26 @@ impl ColumnAggregation {
     }
 }
 
+/// Phase 2 (cross-dwelling fleet) aggregation rule: maps a unit string to its
+/// fleet-level aggregation strategy. Returns `None` for unrecognized units.
+///
+/// Distinct from [`column_aggregation_for_unit`] which governs Phase 1
+/// (temporal resampling). Matches OCHRE `agg_by="House"` semantics: temperature
+/// and dimensionless ratios use weighted mean; everything else uses weighted sum.
+///
+/// # Mapping
+/// - `kWh`, `kW`, `therms/hour`, `kVAR`, `W` → WeightedSum (additive across dwellings)
+/// - `C`, `°C`, `-`, `W/m2`, `s`, `deg`, `kWh/mi`, `enum` → WeightedMean (intensive properties)
+fn fleet_aggregation_for_unit(unit: &str) -> Option<FleetAggregation> {
+    match unit {
+        "kWh" | "kW" | "therms/hour" | "kVAR" | "W" => Some(FleetAggregation::WeightedSum),
+        "C" | "\u{b0}C" | "-" | "W/m2" | "s" | "deg" | "kWh/mi" | "enum" => {
+            Some(FleetAggregation::WeightedMean)
+        }
+        _ => None,
+    }
+}
+
 /// Phase 2 (cross-dwelling fleet) aggregation rule.
 ///
 /// Distinct from `ColumnAggregation` which governs Phase 1 (temporal resampling).
@@ -88,12 +138,25 @@ enum FleetAggregation {
 }
 
 impl FleetAggregation {
-    fn for_column(name: &str) -> Self {
+    fn for_column(field: &arrow::datatypes::Field) -> Self {
+        if let Some(unit) = field.metadata().get("unit") {
+            return fleet_aggregation_for_unit(unit).unwrap_or_else(|| {
+                tracing::warn!(
+                    column = field.name().as_str(),
+                    unit = unit.as_str(),
+                    "unrecognized unit in column metadata; \
+                     falling back to FleetAggregation::WeightedSum",
+                );
+                Self::WeightedSum
+            });
+        }
+
+        Self::for_column_by_suffix(field.name())
+    }
+
+    fn for_column_by_suffix(name: &str) -> Self {
         let normalized = name.trim();
 
-        // Additive across dwellings — summed with sample weight:
-        // (kW) power, (kWh) energy, (therms/hour) fuel-power rate,
-        // (kVAR) reactive power, (W) rate-like quantity
         if normalized.ends_with("(kW)")
             || normalized.ends_with("(kWh)")
             || normalized.ends_with("(therms/hour)")
@@ -103,10 +166,6 @@ impl FleetAggregation {
             return Self::WeightedSum;
         }
 
-        // NOT additive across dwellings — weighted mean:
-        // (C)/(°C) temperature (intensive property), (-) dimensionless
-        // ratios/coefficients, (W/m2) irradiance intensity per area,
-        // (s) static configuration constants, (deg) directional angle
         if normalized.ends_with("(C)")
             || normalized.ends_with("(\u{b0}C)")
             || normalized.ends_with("(-)")
@@ -123,6 +182,26 @@ impl FleetAggregation {
         );
         Self::WeightedSum
     }
+}
+
+/// Builds a temporary Arrow `Field` from a column name, extracting the unit
+/// from the parenthesized suffix and attaching it as metadata. Used when only
+/// column name strings are available rather than full schema fields (e.g. in
+/// `build_aggregate_batch`).
+#[cfg(test)]
+fn temp_field_with_unit(name: &str) -> arrow::datatypes::Field {
+    let field = arrow::datatypes::Field::new(name, DataType::Float64, true);
+    if let Some(start) = name.rfind('(') {
+        if let Some(end) = name[start..].find(')') {
+            if end > 1 {
+                let unit = &name[start + 1..start + end];
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("unit".to_string(), unit.to_string());
+                return field.with_metadata(metadata);
+            }
+        }
+    }
+    field
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +249,11 @@ pub fn aggregate(
     results: &[DwellingOutcome],
     resolution: AggregationResolution,
 ) -> Result<FleetResults, FleetError> {
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        check_unit_aggregation_mapping_invariant();
+    }
+
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
@@ -219,17 +303,17 @@ pub fn aggregate(
             continue;
         }
 
-        let column_names: Vec<String> = numeric_columns
+        let column_fields: Vec<Field> = numeric_columns
             .iter()
-            .map(|idx| schema.field(*idx).name().clone())
+            .map(|idx| schema.field(*idx).clone())
             .collect();
-        let aggregators: Vec<ColumnAggregation> = column_names
+        let aggregators: Vec<ColumnAggregation> = numeric_columns
             .iter()
-            .map(|name| ColumnAggregation::for_column(name))
+            .map(|idx| ColumnAggregation::for_column(schema.field(*idx)))
             .collect();
 
         let buckets = resample_rows(&rows, &numeric_columns, &aggregators, resolution);
-        successful.push((outcome.sample_weight, column_names, buckets));
+        successful.push((outcome.sample_weight, column_fields, buckets));
     }
 
     // Every weight in `successful` is now finite and non-negative, so the only
@@ -446,7 +530,7 @@ fn resample_rows(
     out
 }
 
-type AggregateEntry = (f64, Vec<String>, BTreeMap<i64, Vec<Option<f64>>>);
+type AggregateEntry = (f64, Vec<Field>, BTreeMap<i64, Vec<Option<f64>>>);
 
 fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
     let Some((_, first_columns, first_buckets)) = successful.first() else {
@@ -456,7 +540,7 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
     let column_count = first_columns.len();
     let fleet_aggs: Vec<FleetAggregation> = first_columns
         .iter()
-        .map(|name| FleetAggregation::for_column(name))
+        .map(FleetAggregation::for_column)
         .collect();
 
     #[cfg(feature = "observe")]
@@ -609,7 +693,7 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
     let mut fields = Vec::with_capacity(column_count + 1);
     fields.push(Field::new("Time", DataType::Utf8, false));
     for col in first_columns {
-        fields.push(Field::new(col, DataType::Float64, true));
+        fields.push(col.clone());
     }
 
     let schema = Arc::new(Schema::new(fields));
@@ -632,6 +716,44 @@ fn empty_batch() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![Field::new("Time", DataType::Utf8, false)]));
     let arrays: Vec<Arc<dyn Array>> = vec![Arc::new(StringArray::from(Vec::<&str>::new()))];
     RecordBatch::try_new(schema, arrays).expect("empty aggregate record batch")
+}
+
+/// Invariant check: verifies that every recognized unit in the aggregation
+/// mapping tables maps to a valid aggregation strategy.
+///
+/// This runs at startup in debug builds or when
+/// `feature = "check_invariants"` is enabled.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub fn check_unit_aggregation_mapping_invariant() {
+    let all_units: &[&str] = &[
+        "kWh",
+        "kW",
+        "C",
+        "\u{b0}C",
+        "-",
+        "W",
+        "therms/hour",
+        "kVAR",
+        "kWh/mi",
+        "s",
+        "enum",
+        "W/m2",
+        "deg",
+    ];
+    for unit in all_units {
+        if column_aggregation_for_unit(unit).is_none() {
+            tracing::error!(
+                unit = unit,
+                "unit missing from ColumnAggregation mapping table"
+            );
+        }
+        if fleet_aggregation_for_unit(unit).is_none() {
+            tracing::error!(
+                unit = unit,
+                "unit missing from FleetAggregation mapping table"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1267,7 +1389,7 @@ mod tests {
             buckets_b.insert(t1_jul + h * 3600, vec![Some(100.0 + h as f64)]);
         }
 
-        let columns = vec!["Total Electric Power (kW)".to_string()];
+        let columns = vec![temp_field_with_unit("Total Electric Power (kW)")];
 
         let batch = build_aggregate_batch(vec![
             (1.0, columns.clone(), buckets_a.clone()),
@@ -1297,7 +1419,7 @@ mod tests {
             buckets_b.insert(i, vec![Some(i as f64 * 10.0)]);
         }
 
-        let columns = vec!["Total Electric Power (kW)".to_string()];
+        let columns = vec![temp_field_with_unit("Total Electric Power (kW)")];
 
         let batch = build_aggregate_batch(vec![
             (1.0, columns.clone(), buckets_a.clone()),
@@ -1310,6 +1432,22 @@ mod tests {
             5,
             "partial overlap should return only the intersecting buckets"
         );
+    }
+
+    #[test]
+    fn build_aggregate_batch_unrecognized_unit_does_not_panic() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), "zorgs".to_string());
+        let field = arrow::datatypes::Field::new("Mystery Metric (zorgs)", DataType::Float64, true)
+            .with_metadata(metadata);
+        let columns = vec![field];
+
+        let mut buckets: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
+        buckets.insert(0, vec![Some(42.0)]);
+
+        let batch = build_aggregate_batch(vec![(1.0, columns, buckets)]);
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 2);
     }
 
     #[test]
@@ -1343,15 +1481,17 @@ mod tests {
     #[test]
     fn column_aggregation_recognizes_therms_per_hour_kvar_and_watt_suffixes() {
         assert_eq!(
-            ColumnAggregation::for_column("Total Gas Power (therms/hour)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("Total Gas Power (therms/hour)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            ColumnAggregation::for_column("Total Reactive Power (kVAR)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("Total Reactive Power (kVAR)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            ColumnAggregation::for_column("Net Sensible Heat Gain - Indoor (W)"),
+            ColumnAggregation::for_column(&temp_field_with_unit(
+                "Net Sensible Heat Gain - Indoor (W)"
+            )),
             ColumnAggregation::Mean
         );
     }
@@ -1359,15 +1499,17 @@ mod tests {
     #[test]
     fn fleet_aggregation_recognizes_therms_per_hour_kvar_and_watt_suffixes() {
         assert_eq!(
-            FleetAggregation::for_column("Total Gas Power (therms/hour)"),
+            FleetAggregation::for_column(&temp_field_with_unit("Total Gas Power (therms/hour)")),
             FleetAggregation::WeightedSum
         );
         assert_eq!(
-            FleetAggregation::for_column("Total Reactive Power (kVAR)"),
+            FleetAggregation::for_column(&temp_field_with_unit("Total Reactive Power (kVAR)")),
             FleetAggregation::WeightedSum
         );
         assert_eq!(
-            FleetAggregation::for_column("Net Sensible Heat Gain - Indoor (W)"),
+            FleetAggregation::for_column(&temp_field_with_unit(
+                "Net Sensible Heat Gain - Indoor (W)"
+            )),
             FleetAggregation::WeightedSum
         );
     }
@@ -1376,12 +1518,12 @@ mod tests {
     fn unrecognized_column_suffix_returns_documented_defaults() {
         // ColumnAggregation default is Mean for unrecognized suffixes.
         assert_eq!(
-            ColumnAggregation::for_column("Mystery Metric (foo)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("Mystery Metric (foo)")),
             ColumnAggregation::Mean
         );
         // FleetAggregation default is WeightedSum for unrecognized suffixes.
         assert_eq!(
-            FleetAggregation::for_column("Mystery Metric (foo)"),
+            FleetAggregation::for_column(&temp_field_with_unit("Mystery Metric (foo)")),
             FleetAggregation::WeightedSum
         );
     }
@@ -1389,19 +1531,21 @@ mod tests {
     #[test]
     fn column_aggregation_recognizes_irradiance_time_and_angle_suffixes() {
         assert_eq!(
-            ColumnAggregation::for_column("PV Irradiance (W/m2)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("PV Irradiance (W/m2)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            ColumnAggregation::for_column("ASHP Min On Time (s)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("ASHP Min On Time (s)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            ColumnAggregation::for_column("ASHP Min Off Time (s)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("ASHP Min Off Time (s)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            ColumnAggregation::for_column("Natural Ventilation Wind Angle (deg)"),
+            ColumnAggregation::for_column(&temp_field_with_unit(
+                "Natural Ventilation Wind Angle (deg)"
+            )),
             ColumnAggregation::Mean
         );
     }
@@ -1409,19 +1553,21 @@ mod tests {
     #[test]
     fn fleet_aggregation_recognizes_irradiance_time_and_angle_suffixes() {
         assert_eq!(
-            FleetAggregation::for_column("PV Irradiance (W/m2)"),
+            FleetAggregation::for_column(&temp_field_with_unit("PV Irradiance (W/m2)")),
             FleetAggregation::WeightedMean
         );
         assert_eq!(
-            FleetAggregation::for_column("ASHP Min On Time (s)"),
+            FleetAggregation::for_column(&temp_field_with_unit("ASHP Min On Time (s)")),
             FleetAggregation::WeightedMean
         );
         assert_eq!(
-            FleetAggregation::for_column("ASHP Min Off Time (s)"),
+            FleetAggregation::for_column(&temp_field_with_unit("ASHP Min Off Time (s)")),
             FleetAggregation::WeightedMean
         );
         assert_eq!(
-            FleetAggregation::for_column("Natural Ventilation Wind Angle (deg)"),
+            FleetAggregation::for_column(&temp_field_with_unit(
+                "Natural Ventilation Wind Angle (deg)"
+            )),
             FleetAggregation::WeightedMean
         );
     }
@@ -1432,11 +1578,11 @@ mod tests {
         // coefficient (bounded [0.0, 0.55]), renamed with (-) suffix for
         // consistency with every other dimensionless column in the output schema.
         assert_eq!(
-            ColumnAggregation::for_column("Natural Ventilation Cw (-)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("Natural Ventilation Cw (-)")),
             ColumnAggregation::Mean
         );
         assert_eq!(
-            FleetAggregation::for_column("Natural Ventilation Cw (-)"),
+            FleetAggregation::for_column(&temp_field_with_unit("Natural Ventilation Cw (-)")),
             FleetAggregation::WeightedMean
         );
     }
@@ -1459,14 +1605,14 @@ mod tests {
         for suffix in mean_suffixes {
             let name = format!("Test Column {suffix}");
             assert_eq!(
-                ColumnAggregation::for_column(&name),
+                ColumnAggregation::for_column(&temp_field_with_unit(&name)),
                 ColumnAggregation::Mean,
                 "known suffix '{suffix}' should return Mean in ColumnAggregation"
             );
         }
 
         assert_eq!(
-            ColumnAggregation::for_column("Energy (kWh)"),
+            ColumnAggregation::for_column(&temp_field_with_unit("Energy (kWh)")),
             ColumnAggregation::Sum
         );
 
@@ -1475,7 +1621,7 @@ mod tests {
         for suffix in weighted_sum_suffixes {
             let name = format!("Test Column {suffix}");
             assert_eq!(
-                FleetAggregation::for_column(&name),
+                FleetAggregation::for_column(&temp_field_with_unit(&name)),
                 FleetAggregation::WeightedSum,
                 "known suffix '{suffix}' should return WeightedSum in FleetAggregation"
             );
@@ -1487,10 +1633,171 @@ mod tests {
         for suffix in weighted_mean_suffixes {
             let name = format!("Test Column {suffix}");
             assert_eq!(
-                FleetAggregation::for_column(&name),
+                FleetAggregation::for_column(&temp_field_with_unit(&name)),
                 FleetAggregation::WeightedMean,
                 "known suffix '{suffix}' should return WeightedMean in FleetAggregation"
             );
+        }
+    }
+
+    // ── Unit metadata-driven aggregation tests ────────────────────────────
+
+    /// Custom `TelemetryField` unit `"kWh/mi"` maps to the correct aggregation
+    /// variants: `Mean` for Phase 1 (temporal), `WeightedMean` for Phase 2
+    /// (cross-dwelling). The column name suffix is irrelevant — the unit in
+    /// field metadata drives the aggregation decision.
+    #[test]
+    fn kwh_per_mi_unit_maps_to_correct_aggregation() {
+        let field = temp_field_with_unit("EV Efficiency (kWh/mi)");
+        assert_eq!(
+            ColumnAggregation::for_column(&field),
+            ColumnAggregation::Mean,
+            "Phase 1: kWh/mi should use Mean"
+        );
+        assert_eq!(
+            FleetAggregation::for_column(&field),
+            FleetAggregation::WeightedMean,
+            "Phase 2: kWh/mi should use WeightedMean"
+        );
+    }
+
+    /// Aggregation is driven by unit metadata from the field, NOT by the
+    /// column name suffix. Changing the suffix string does not change the
+    /// aggregation behaviour.
+    #[test]
+    fn aggregation_driven_by_metadata_not_column_name_suffix() {
+        // Construct a field where the unit metadata is "kW" but the column
+        // name ends with a different parenthesized suffix.
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), "kW".to_string());
+        let field = arrow::datatypes::Field::new(
+            "ASHP Heater Electric Power (kw)",
+            DataType::Float64,
+            true,
+        )
+        .with_metadata(metadata);
+
+        // Phase 1: "kW" unit -> Mean
+        assert_eq!(
+            ColumnAggregation::for_column(&field),
+            ColumnAggregation::Mean,
+            "aggregation should use 'kW' unit from metadata, not '(kw)' suffix"
+        );
+
+        // Phase 2: "kW" unit -> WeightedSum
+        assert_eq!(
+            FleetAggregation::for_column(&field),
+            FleetAggregation::WeightedSum,
+            "aggregation should use 'kW' unit from metadata, not '(kw)' suffix"
+        );
+
+        // Same test with a deliberately misleading column name.
+        let mut metadata2 = std::collections::HashMap::new();
+        metadata2.insert("unit".to_string(), "C".to_string());
+        let field2 = arrow::datatypes::Field::new("Some Column (kW)", DataType::Float64, true)
+            .with_metadata(metadata2);
+
+        assert_eq!(
+            ColumnAggregation::for_column(&field2),
+            ColumnAggregation::Mean,
+            "aggregation should use 'C' unit from metadata, not '(kW)' suffix"
+        );
+        assert_eq!(
+            FleetAggregation::for_column(&field2),
+            FleetAggregation::WeightedMean,
+            "aggregation should use 'C' unit from metadata, not '(kW)' suffix"
+        );
+    }
+
+    /// An unrecognized unit in field metadata triggers a `tracing::warn!` but
+    /// falls back to a safe default rather than panicking.
+    #[test]
+    fn unrecognized_unit_triggers_warning_not_panic() {
+        let field = temp_field_with_unit("Mystery Metric (zorgs)");
+        // ColumnAggregation default is Mean.
+        assert_eq!(
+            ColumnAggregation::for_column(&field),
+            ColumnAggregation::Mean
+        );
+        // FleetAggregation default is WeightedSum.
+        assert_eq!(
+            FleetAggregation::for_column(&field),
+            FleetAggregation::WeightedSum
+        );
+    }
+
+    /// `enum` unit maps to Mean / WeightedMean in the aggregation mapping.
+    #[test]
+    fn enum_unit_maps_correctly() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), "enum".to_string());
+        let field =
+            arrow::datatypes::Field::new("Equipment Operating Mode (-)", DataType::Float64, true)
+                .with_metadata(metadata);
+
+        assert_eq!(
+            ColumnAggregation::for_column(&field),
+            ColumnAggregation::Mean
+        );
+        assert_eq!(
+            FleetAggregation::for_column(&field),
+            FleetAggregation::WeightedMean
+        );
+    }
+
+    /// All units in the aggregation mapping table are recognized by both
+    /// Phase 1 and Phase 2 unit mapping functions.
+    #[test]
+    fn all_known_units_recognized_by_both_mapping_tables() {
+        let all_units: &[&str] = &[
+            "kWh",
+            "kW",
+            "C",
+            "\u{b0}C",
+            "-",
+            "W",
+            "therms/hour",
+            "kVAR",
+            "kWh/mi",
+            "s",
+            "enum",
+            "W/m2",
+            "deg",
+        ];
+        for unit in all_units {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("unit".to_string(), unit.to_string());
+            let field =
+                arrow::datatypes::Field::new(format!("Test ({unit})"), DataType::Float64, true)
+                    .with_metadata(metadata);
+
+            assert!(
+                column_aggregation_for_unit(unit).is_some(),
+                "Phase 1: unit '{unit}' must be recognized"
+            );
+            assert!(
+                fleet_aggregation_for_unit(unit).is_some(),
+                "Phase 2: unit '{unit}' must be recognized"
+            );
+
+            // Verify that for_column does not fall through to the suffix parser.
+            let col_agg = ColumnAggregation::for_column(&field);
+            let fleet_agg = FleetAggregation::for_column(&field);
+            match unit {
+                &"kWh" => {
+                    assert_eq!(col_agg, ColumnAggregation::Sum);
+                    assert_eq!(fleet_agg, FleetAggregation::WeightedSum);
+                }
+                &"kW" | &"therms/hour" | &"kVAR" | &"W" => {
+                    assert_eq!(col_agg, ColumnAggregation::Mean);
+                    assert_eq!(fleet_agg, FleetAggregation::WeightedSum);
+                }
+                &"C" | &"\u{b0}C" | &"-" | &"W/m2" | &"s" | &"deg" | &"kWh/mi" | &"enum" => {
+                    assert_eq!(col_agg, ColumnAggregation::Mean);
+                    assert_eq!(fleet_agg, FleetAggregation::WeightedMean);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

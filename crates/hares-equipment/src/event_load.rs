@@ -1886,7 +1886,7 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
         },
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kvar".to_string(),
+            unit: "kVAR".to_string(),
             description: "Reactive power draw".to_string(),
         },
         TelemetryField {
@@ -1906,7 +1906,7 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
         },
         TelemetryField {
             name: tk::STATE.to_string(),
-            unit: "ordinal".to_string(),
+            unit: "-".to_string(),
             description: "State machine phase (0=Idle,1=Active,2=Cooldown)".to_string(),
         },
     ]
@@ -1921,7 +1921,7 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
         },
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kvar".to_string(),
+            unit: "kVAR".to_string(),
             description: "Reactive power draw".to_string(),
         },
         TelemetryField {
@@ -1941,12 +1941,12 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
         },
         TelemetryField {
             name: tk::CYCLE_PHASE.to_string(),
-            unit: "ordinal".to_string(),
+            unit: "-".to_string(),
             description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
         },
         TelemetryField {
             name: tk::DRYER_TYPE.to_string(),
-            unit: "enum ordinal".to_string(),
+            unit: "-".to_string(),
             description: "Dryer type: -1=none,0=VentedElectric,1=VentedGas,2=UnventedCondenser"
                 .to_string(),
         },

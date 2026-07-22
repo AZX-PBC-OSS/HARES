@@ -13,6 +13,45 @@ use hares_types::{EndUse, FuelType, ZoneId};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use strum::IntoEnumIterator;
 
+/// Extracts the unit string from a column name's parenthesized suffix.
+///
+/// Column names follow the OCHRE convention `"{Name} {Metric} ({Unit})"`.
+/// Returns the content between the last `(` and `)`, or `None` if the name
+/// has no parenthesized suffix.
+///
+/// # Examples
+/// - `"Total Electric Power (kW)"` → `Some("kW")`
+/// - `"Temperature - Indoor (C)"` → `Some("C")`
+/// - `"Battery SOC (-)"` → `Some("-")`
+/// - `"Time"` → `None`
+pub fn extract_unit_from_name(name: &str) -> Option<&str> {
+    let start = name.rfind('(')?;
+    let end = name.get(start..)?.find(')')?;
+    if end > 1 {
+        Some(&name[start + 1..start + end])
+    } else {
+        None
+    }
+}
+
+/// Creates an Arrow `Field` with unit metadata attached.
+///
+/// Extracts the unit from the column name's parenthesized suffix via
+/// [`extract_unit_from_name`] and stores it in the field's metadata map
+/// under the `"unit"` key. Fields without a parenthesized suffix (e.g.
+/// `"Time"`) are created with empty metadata.
+fn field_with_unit(name: impl AsRef<str>, data_type: DataType, nullable: bool) -> Field {
+    let name = name.as_ref();
+    let field = Field::new(name, data_type, nullable);
+    if let Some(unit) = extract_unit_from_name(name) {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), unit.to_string());
+        field.with_metadata(metadata)
+    } else {
+        field
+    }
+}
+
 /// Timestamp column included at every verbosity level.
 const TIMESTAMP_COL: &str = "Time";
 
@@ -383,18 +422,18 @@ pub fn build_schema(
     verbosity: u8,
     zone_names: &[(ZoneId, String)],
 ) -> Schema {
-    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    let mut fields = vec![field_with_unit(TIMESTAMP_COL, DataType::Utf8, false)];
 
     // Level 0: total power
     for &col in LEVEL_0_COLUMNS {
-        fields.push(Field::new(col, DataType::Float64, true));
+        fields.push(field_with_unit(col, DataType::Float64, true));
     }
 
     // Always-present context columns: outdoor temp and primary indoor zone temp.
     // These appear at every verbosity level so any output file is self-contained
     // enough to correlate equipment behavior with conditions.
-    fields.push(Field::new(OUTDOOR_TEMP_COL, DataType::Float64, true));
-    fields.push(Field::new(
+    fields.push(field_with_unit(OUTDOOR_TEMP_COL, DataType::Float64, true));
+    fields.push(field_with_unit(
         format!("{ZONE_TEMP_PREFIX} Indoor {ZONE_TEMP_UNIT}"),
         DataType::Float64,
         true,
@@ -409,13 +448,13 @@ pub fn build_schema(
 
     if verbosity >= 1 {
         for (name, fuel) in &names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {ELECTRIC_POWER_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
             if fuel_reports_gas_power_column(*fuel) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {GAS_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
@@ -437,7 +476,7 @@ pub fn build_schema(
         for spec in equipment_list {
             let end_use = equipment_name_to_end_use(&spec.name);
             if seen_end_uses.insert(end_use_display_name(&end_use).to_string()) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     end_use_electric_power_column(&end_use),
                     DataType::Float64,
                     true,
@@ -454,37 +493,41 @@ pub fn build_schema(
         // all-null columns for simulations without those zones.
         for (_zone_id, zone_name) in zone_names {
             if zone_name != "Indoor" {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{ZONE_TEMP_PREFIX} {zone_name} {ZONE_TEMP_UNIT}"),
                     DataType::Float64,
                     true,
                 ));
             }
         }
-        fields.push(Field::new(ZONE_UNMET_LOAD_COL, DataType::Float64, true));
+        fields.push(field_with_unit(
+            ZONE_UNMET_LOAD_COL,
+            DataType::Float64,
+            true,
+        ));
         // Temperature - Ground (C) is always emitted (not zone-conditional):
         // it is populated from weather.ground_temp_c which is valid for
         // every simulation, regardless of zone configuration. OCHRE convention
         // includes it unconditionally alongside Outdoor Dry Bulb.
-        fields.push(Field::new(GROUND_TEMP_COL, DataType::Float64, true));
+        fields.push(field_with_unit(GROUND_TEMP_COL, DataType::Float64, true));
     }
 
     if verbosity >= 3 {
         for (name, _fuel) in &names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {MODE_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
             if is_hvac_or_wh(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {SETPOINT_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
             }
             if has_soc(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {SOC_SUFFIX}"),
                     DataType::Float64,
                     true,
@@ -495,19 +538,19 @@ pub fn build_schema(
 
     if verbosity >= 4 {
         for (name, _fuel) in &names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {ENERGY_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
         }
         // HVAC thermal delivery columns (OCHRE convention, verbosity 4).
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             "HVAC Heating Delivered (W)",
             DataType::Float64,
             true,
         ));
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             "HVAC Cooling Delivered (W)",
             DataType::Float64,
             true,
@@ -523,25 +566,29 @@ pub fn build_schema(
         // Equipment that reports `CoreFlows::reactive_power_kvar = None`
         // fills the column with 0.0 and power factor 1.0.
         for (name, _fuel) in &names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {REACTIVE_POWER_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {POWER_FACTOR_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
         }
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             NET_SENSIBLE_HEAT_GAIN_COL,
             DataType::Float64,
             true,
         ));
         // OCHRE HVAC.py:588: duct losses at verbosity 5.
         // Computed as gross_capacity_w * (1 - dse) per ASHRAE 152.
-        fields.push(Field::new(HVAC_DUCT_LOSSES_COL, DataType::Float64, true));
+        fields.push(field_with_unit(
+            HVAC_DUCT_LOSSES_COL,
+            DataType::Float64,
+            true,
+        ));
     }
 
     if verbosity >= 6 {
@@ -554,14 +601,14 @@ pub fn build_schema(
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Natural Ventilation Heat Gain - Indoor (W)",
         ] {
-            fields.push(Field::new(*label, DataType::Float64, true));
+            fields.push(field_with_unit(*label, DataType::Float64, true));
         }
         #[cfg(feature = "observe")]
         for label in &[
             "Natural Ventilation Cw (-)",
             "Natural Ventilation Wind Angle (deg)",
         ] {
-            fields.push(Field::new(*label, DataType::Float64, true));
+            fields.push(field_with_unit(*label, DataType::Float64, true));
         }
         for label in &[
             "Internal Heat Gain - Indoor (W)",
@@ -574,19 +621,19 @@ pub fn build_schema(
             "Window Heat Gain - Indoor (W)",
             "Internal Mass Heat Gain - Indoor (W)",
         ] {
-            fields.push(Field::new(*label, DataType::Float64, true));
+            fields.push(field_with_unit(*label, DataType::Float64, true));
         }
         // Non-Indoor zone envelope breakdown — conditional on zone presence.
         // Eliminates all-null columns (see review Finding 3) for simulations
         // without attic or other structural zones.
         for (_zone_id, zone_name) in zone_names {
             if zone_name != "Indoor" {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("Infiltration Heat Gain - {zone_name} (W)"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("Interior LWR Exchange - {zone_name} (W)"),
                     DataType::Float64,
                     true,
@@ -597,12 +644,12 @@ pub fn build_schema(
         // Enables diagnosing how much heating/cooling went to each zone
         // (conditioned, basement, duct) in multi-zone buildings.
         for (_zone_id, zone_name) in zone_names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("HVAC Heating Delivered - {zone_name} (W)"),
                 DataType::Float64,
                 true,
             ));
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("HVAC Cooling Delivered - {zone_name} (W)"),
                 DataType::Float64,
                 true,
@@ -613,20 +660,20 @@ pub fn build_schema(
     if verbosity >= 7 {
         // Level 7: schedule inputs and detailed equipment modes.
         for (name, _fuel) in &names {
-            fields.push(Field::new(
+            fields.push(field_with_unit(
                 format!("{name} {SCHEDULE_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
             if is_heat_pump_heater(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {DEFROST_STATE_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 // OCHRE HVAC.py:1464-1467: ER Power column for ASHP heaters at v7.
                 // Reports backup electric resistance power during ER-only or HP+ER modes.
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {ER_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
@@ -636,52 +683,52 @@ pub fn build_schema(
             if is_hvac_or_wh(name) {
                 // SHR and Latent Gains are cooling-only (OCHRE HVAC.py:595-596).
                 if is_cooling_equipment(name) {
-                    fields.push(Field::new(
+                    fields.push(field_with_unit(
                         format!("{name} {SHR_SUFFIX}"),
                         DataType::Float64,
                         true,
                     ));
-                    fields.push(Field::new(
+                    fields.push(field_with_unit(
                         format!("{name} {LATENT_GAINS_SUFFIX}"),
                         DataType::Float64,
                         true,
                     ));
                 }
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {SPEED_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 // OCHRE HVAC.py:575: main_power = total_input - fan.
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {MAIN_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {FAN_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {RUNTIME_FRACTION_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 // Promoted from v8: OCHRE emits Capacity and COP at v7 (HVAC.py:584,598).
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {CAPACITY_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {COP_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
             }
         }
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             HOT_WATER_MAINS_TEMP_COL,
             DataType::Float64,
             true,
@@ -690,22 +737,22 @@ pub fn build_schema(
         // Each column reflects a stage in the setpoint resolution pipeline
         // (schedule → runtime override), enabling diagnosis of DR/override
         // behaviour without tracing per-equipment telemetry.
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             SCHEDULED_HEATING_SETPOINT_COL,
             DataType::Float64,
             true,
         ));
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             SCHEDULED_COOLING_SETPOINT_COL,
             DataType::Float64,
             true,
         ));
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             RUNTIME_HEATING_SETPOINT_COL,
             DataType::Float64,
             true,
         ));
-        fields.push(Field::new(
+        fields.push(field_with_unit(
             RUNTIME_COOLING_SETPOINT_COL,
             DataType::Float64,
             true,
@@ -718,88 +765,88 @@ pub fn build_schema(
         // keys are not in CoreOutput and remain telemetry-only below v8.
         for (name, _fuel) in &names {
             if is_hvac_or_wh(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {SUPPLY_TEMP_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {RETURN_TEMP_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {COMPRESSOR_POWER_W_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {COMPRESSOR_POWER_KW_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {FAN_ELECTRIC_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {FAN_POWER_W_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {MIN_ON_TIME_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {MIN_OFF_TIME_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
             }
             if is_heat_pump_heater(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {SUPPLY_AIR_TEMP_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {PAN_HEATER_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {HP_CAPACITY_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {ER_CAPACITY_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
             }
             if is_pv(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {PV_DC_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {PV_IRRADIANCE_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
             }
             if is_ev(name) {
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {EV_CONNECTION_STATE_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
-                fields.push(Field::new(
+                fields.push(field_with_unit(
                     format!("{name} {EV_CHARGING_LEVEL_SUFFIX}"),
                     DataType::Float64,
                     true,
@@ -2031,5 +2078,63 @@ mod tests {
         assert!(is_compressor_equipment("MSHP Cooler"));
         assert!(!is_compressor_equipment("Gas Furnace"));
         assert!(!is_compressor_equipment("Battery"));
+    }
+
+    /// `extract_unit_from_name` extracts the unit string from a column name's
+    /// parenthesized suffix.
+    #[test]
+    fn extract_unit_from_column_name() {
+        assert_eq!(
+            extract_unit_from_name("Total Electric Power (kW)"),
+            Some("kW")
+        );
+        assert_eq!(
+            extract_unit_from_name("Temperature - Indoor (C)"),
+            Some("C")
+        );
+        assert_eq!(extract_unit_from_name("Battery SOC (-)"), Some("-"));
+        assert_eq!(
+            extract_unit_from_name("Total Gas Power (therms/hour)"),
+            Some("therms/hour")
+        );
+        assert_eq!(extract_unit_from_name("PV Irradiance (W/m2)"), Some("W/m2"));
+        assert_eq!(extract_unit_from_name("Time"), None);
+        assert_eq!(extract_unit_from_name("NoUnit"), None);
+    }
+
+    /// Output schema columns carry unit metadata on their Arrow fields, verified
+    /// against independent hand-written expected units rather than recomputing
+    /// the expected value from the same extraction function.
+    #[test]
+    fn output_schema_columns_carry_unit_metadata() {
+        let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
+        let schema = build_schema(&specs, 3, &[]);
+        let expected_units: &[(&str, &str)] = &[
+            ("Total Electric Power (kW)", "kW"),
+            ("Total Gas Power (therms/hour)", "therms/hour"),
+            ("Total Reactive Power (kVAR)", "kVAR"),
+            ("Outdoor Dry Bulb (C)", "C"),
+            ("Temperature - Indoor (C)", "C"),
+            ("ASHP Heater Electric Power (kW)", "kW"),
+            ("ASHP Heater Mode (-)", "-"),
+            ("ASHP Heater Setpoint (C)", "C"),
+        ];
+        for (col_name, expected_unit) in expected_units {
+            let field = schema
+                .fields()
+                .iter()
+                .find(|f| f.name() == *col_name)
+                .unwrap_or_else(|| panic!("column '{col_name}' not found in schema"));
+            assert_eq!(
+                field.metadata().get("unit").map(|s| s.as_str()),
+                Some(*expected_unit),
+                "column '{col_name}' should have unit='{expected_unit}' in metadata"
+            );
+        }
+        let time_field = schema.fields().iter().find(|f| f.name() == "Time").unwrap();
+        assert!(
+            time_field.metadata().get("unit").is_none(),
+            "Time column should not have unit metadata"
+        );
     }
 }
