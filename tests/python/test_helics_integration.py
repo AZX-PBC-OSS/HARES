@@ -294,6 +294,69 @@ class _FaultyDwelling:
         self._dwelling.apply_control(name, signal)
 
 
+class _FaultyAggregator:
+    """Mock aggregator federate that triggers a HELICS-level error at a configurable step.
+
+    The aggregator sets ``HELICS_FLAG_TERMINATE_ON_ERROR`` and signals its
+    fault via ``helicsFederateLocalError`` — exercising the same
+    broker-termination path that the production ``HELICSDwelling`` and
+    ``HELICSFleet`` guard against.  When the aggregator fails, the surviving
+    federate must receive ``HELICS_TIME_MAXTIME`` on its next
+    ``request_time()`` call rather than hanging indefinitely.
+    """
+
+    def __init__(
+        self,
+        broker_port: int,
+        fed_name: str,
+        fail_step: int = 5,
+        total_steps: int = _TOTAL_STEPS,
+    ) -> None:
+        self._broker_port = broker_port
+        self._fed_name = fed_name
+        self._fail_step = fail_step
+        self._total_steps = total_steps
+        self._step_count = 0
+        self._fed: Any = None
+        self.granted_times: list[float] = []
+
+    def run(self) -> None:
+        fedinfo = _new_federate_info(self._broker_port, core_name=self._fed_name)
+        self._fed = helics.helicsCreateValueFederate(self._fed_name, fedinfo)
+        helics.helicsFederateSetFlagOption(
+            self._fed, helics.HELICS_FLAG_TERMINATE_ON_ERROR, 1
+        )
+        _pub_voltage = self._fed.register_global_publication("grid/voltage", "double")
+        _sub_power = self._fed.register_subscription("house_1/total_power_kw", "double")
+
+        try:
+            _enter_exec(self._fed)
+            for step_idx in range(self._total_steps):
+                _pub_voltage.publish(1.0)
+                granted = _request(self._fed, (step_idx + 1) * _TIME_RES_S)
+                self.granted_times.append(float(granted))
+                self._step_count += 1
+                if self._step_count >= self._fail_step:
+                    raise RuntimeError(
+                        "synthetic aggregator failure at step {}".format(
+                            self._fail_step
+                        )
+                    )
+        except RuntimeError:
+            helics.helicsFederateLocalError(
+                self._fed,
+                -1,
+                "synthetic aggregator failure at step {}".format(self._fail_step),
+            )
+            raise
+        finally:
+            if self._fed is not None:
+                try:
+                    self._fed.disconnect()
+                except Exception:
+                    pass
+
+
 def _new_dwelling(*, bldg_id: int = 42) -> Dwelling:
     dwelling = Dwelling.from_hpxml(
         HPXML,
@@ -1495,3 +1558,154 @@ def test_drift_guard_raises_when_cumulative_drift_exceeds_tolerance() -> None:
             helics_dwelling.run()
     finally:
         _disconnect_broker(broker)
+
+
+def test_multi_federate_fault_propagation() -> None:
+    """Surviving federate exits promptly when a peer signals a HELICS-level error.
+
+    A 2-federate federation runs a dwelling and a faulty aggregator in
+    separate threads.  The aggregator sets ``HELICS_FLAG_TERMINATE_ON_ERROR``
+    and signals its fault via ``helicsFederateLocalError`` at step 5,
+    exercising the broker-termination path.  The dwelling's next
+    ``request_time()`` must resolve — via HELICS_TIME_MAXTIME
+    (broker-detected termination) or a HELICS exception — rather than
+    hanging indefinitely.
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling()
+        federate_ready = threading.Event()
+        probe_ref: list[_FederateProbe] = []
+
+        def _run_dwelling() -> None:
+            helics_dwelling = _new_helics_dwelling(dwelling, "house_1", broker_port)
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+
+            probe = _FederateProbe(helics_dwelling._fed)
+            helics_dwelling._fed = probe
+            probe_ref.append(probe)
+
+            federate_ready.set()
+            helics_dwelling.run()
+
+        dwelling_thread, dwelling_result = _start_thread(
+            _run_dwelling, name="dwelling-federate"
+        )
+        federate_ready.wait()
+
+        def _run_aggregator() -> None:
+            aggregator = _FaultyAggregator(broker_port, "aggregator_1", fail_step=5)
+            aggregator.run()
+
+        agg_thread, agg_result = _start_thread(
+            _run_aggregator, name="aggregator-federate"
+        )
+
+        # The dwelling thread must exit within a short hard deadline.
+        # A hang means request_time() never received the broker's termination
+        # grant — the exact bug this test guards against.
+        dwelling_thread.join(timeout=5.0)
+        agg_thread.join(timeout=5.0)
+
+        assert dwelling_thread.is_alive() is False, (
+            "dwelling thread hung after peer fault"
+        )
+        assert agg_result.exception is not None, (
+            "aggregator should have raised a controlled fault"
+        )
+        assert "synthetic aggregator failure" in str(agg_result.exception)
+
+        assert len(probe_ref) == 1
+        probe = probe_ref[0]
+        assert probe.disconnect_called, (
+            "dwelling should have called disconnect after fault"
+        )
+
+        # When the broker terminates the federation, the surviving federate
+        # receives HELICS_TIME_MAXTIME (< actual request for the next step)
+        # or the call raises.  Either path proves the federate did not hang.
+        if dwelling_result.completed:
+            assert len(probe.granted_times) > 0, (
+                "dwelling should have received time grants before termination"
+            )
+            last_grant = probe.granted_times[-1]
+            last_request = probe.requested_times[-1]
+            terminated = (
+                last_grant >= helics.HELICS_TIME_MAXTIME
+                or last_grant < last_request
+            )
+            assert terminated, (
+                "surviving federate's last request_time() should indicate "
+                "termination; last_request=%.1f last_grant=%.1f"
+                % (last_request, last_grant)
+            )
+    finally:
+        _disconnect_broker(broker)
+
+
+def test_multi_federate_fault_propagation_broker_cleanup() -> None:
+    """After a HELICS-level fault, the broker port is reusable — resources are fully released.
+
+    Runs a fault scenario (aggregator signals ``helicsFederateLocalError``
+    at step 5), tears down the broker, then creates a second broker on the
+    same port and runs a simple dwelling through it.  A port conflict on
+    the second create indicates leaked HELICS resources (sockets, broker
+    state).
+    """
+    broker = create_broker(n_federates=2, port=None)
+    broker_port = get_broker_port(broker)
+
+    try:
+        dwelling = _new_dwelling()
+        federate_ready = threading.Event()
+
+        def _run_dwelling() -> None:
+            helics_dwelling = _new_helics_dwelling(dwelling, "house_1", broker_port)
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            federate_ready.set()
+            try:
+                helics_dwelling.run()
+            except Exception:
+                pass
+
+        dwelling_thread, _dw_result = _start_thread(
+            _run_dwelling, name="dwelling-federate"
+        )
+        federate_ready.wait()
+
+        def _run_aggregator() -> None:
+            aggregator = _FaultyAggregator(broker_port, "aggregator_1", fail_step=5)
+            aggregator.run()
+
+        agg_thread, agg_result = _start_thread(
+            _run_aggregator, name="aggregator-federate"
+        )
+
+        dwelling_thread.join(timeout=30.0)
+        agg_thread.join(timeout=30.0)
+
+        assert dwelling_thread.is_alive() is False
+        assert agg_result.exception is not None
+        assert "synthetic aggregator failure" in str(agg_result.exception)
+    finally:
+        _disconnect_broker(broker)
+
+    # Second broker on the same port must succeed — a port conflict
+    # indicates that the first broker's resources were not fully released.
+    broker2 = create_broker(n_federates=1, port=broker_port)
+    try:
+        broker_port2 = get_broker_port(broker2)
+        assert broker_port2 == broker_port, (
+            "second broker should bind to the same port"
+        )
+
+        dwelling2 = _new_dwelling(bldg_id=99)
+        helics_dwelling2 = _new_helics_dwelling(dwelling2, "house_2", broker_port2)
+        helics_dwelling2.register_publications()
+        helics_dwelling2.run()
+    finally:
+        _disconnect_broker(broker2)
