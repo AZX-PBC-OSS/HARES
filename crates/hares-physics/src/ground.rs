@@ -26,11 +26,22 @@ use crate::borehole::BoreholeGFunctionModel;
 
 /// Default soil thermal diffusivity [m²/day].
 ///
-/// Typical range for moist soil: 0.04–0.07 m²/day.
-/// HARES uses 0.05 m²/day for moist mixed clay/sand soils (representative of
-/// typical residential sites). EnergyPlus CalcSoilSurfTemp defaults to
-/// 0.0208 m²/day (2.4e-7 m²/s) for generic dry soil -- our higher value
-/// reflects the wetter conditions typical of foundation-adjacent soil.
+/// HARES uses 0.05 m²/day for moist mixed clay/sand soils representative of
+/// typical residential sites. This value is consistent with multiple
+/// independent EnergyPlus defaults for damp/moist soil:
+///
+/// - EnergyPlus IDD V26.1.0 `Site:GroundDomain:Slab` defaults to
+///   k=1.5 W/m·K, ρ=2800 kg/m³, cp=850 J/kg·K, yielding
+///   α = k/(ρ·cp) ≈ 0.0545 m²/day.
+/// - EnergyPlus `EarthTube.cc:413-414` "Heavy and Damp" soil type uses
+///   α = 0.05573 m²/day.
+/// - OCHRE `ochre/utils/schedule.py:245-249` (DOE-2 GTEMP correlation,
+///   α = 0.025 ft²/hr) converts to α ≈ 0.0557 m²/day.
+///
+/// Foundation-adjacent soil is typically disturbed, backfilled, and subject
+/// to drainage — conditions where a damp/moist soil is the representative
+/// default. Drier soils (e.g. EnergyPlus "Light and Dry" at
+/// 0.02419 m²/day) are appropriate only for arid, unvegetated sites.
 pub const DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY: f64 = 0.05;
 
 /// Default phase shift: day of minimum surface temperature.
