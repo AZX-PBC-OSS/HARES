@@ -106,6 +106,26 @@ class TestSimulationConfig:
         with pytest.raises(ValueError, match="setpoint_deadband_c must be finite"):
             cfg.setpoint_deadband_c = -1.0
 
+    def test_duration_s_above_chrono_bound_raises_value_error(self):
+        """Verify duration_s above chrono Duration limit raises ValueError."""
+        # i64::MAX / 1_000 ≈ 9.22e15; 10**18 ≈ 1e18 exceeds it.
+        too_large = 10**18
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            SimulationConfig(duration_s=too_large, time_res_s=60)
+
+    def test_time_res_s_above_chrono_bound_raises_value_error(self):
+        """Verify time_res_s above chrono Duration limit raises ValueError."""
+        too_large = 10**18
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            SimulationConfig(duration_s=3600, time_res_s=too_large)
+
+    def test_duration_s_at_chrono_bound_succeeds(self):
+        """Verify duration_s near the chrono Duration limit succeeds."""
+        # MAX_CHRONO_SECONDS - (MAX_CHRONO_SECONDS % 60), still at chrono scale
+        near_max = 9_223_372_036_854_720
+        cfg = SimulationConfig(duration_s=near_max, time_res_s=60)
+        assert cfg.duration_s == near_max
+
 
 class TestDwellingConfig:
     """Test DwellingConfig Python type."""

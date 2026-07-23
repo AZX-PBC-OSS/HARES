@@ -2088,23 +2088,41 @@ pub(crate) fn build_config(
             .transpose()?
             .unwrap_or_else(default_start);
 
-        let time_res = Duration::seconds(
-            kwargs
-                .as_ref()
-                .and_then(|k| k.get_item("time_res_s").ok().flatten())
-                .map(|obj| extract_seconds(&obj))
-                .transpose()?
-                .unwrap_or(DEFAULT_STEP_S),
-        );
+        let time_res_s = match kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("time_res_s").ok().flatten())
+            .map(|obj| extract_seconds(&obj))
+            .transpose()?
+        {
+            Some(v) if v > 0 => v,
+            Some(_) => {
+                return Err(PyValueError::new_err("time_res_s must be positive"));
+            }
+            None => DEFAULT_STEP_S,
+        };
+        let time_res = Duration::try_seconds(time_res_s).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "time_res_s too large for chrono Duration: {time_res_s}"
+            ))
+        })?;
 
-        let duration = Duration::seconds(
-            kwargs
-                .as_ref()
-                .and_then(|k| k.get_item("duration_s").ok().flatten())
-                .map(|obj| extract_seconds(&obj))
-                .transpose()?
-                .unwrap_or(DEFAULT_DURATION_S),
-        );
+        let duration_s = match kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("duration_s").ok().flatten())
+            .map(|obj| extract_seconds(&obj))
+            .transpose()?
+        {
+            Some(v) if v > 0 => v,
+            Some(_) => {
+                return Err(PyValueError::new_err("duration_s must be positive"));
+            }
+            None => DEFAULT_DURATION_S,
+        };
+        let duration = Duration::try_seconds(duration_s).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "duration_s too large for chrono Duration: {duration_s}"
+            ))
+        })?;
 
         let output_to_parquet = kwargs
             .as_ref()
@@ -2352,16 +2370,41 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     }
 
     if let Ok(v) = obj.extract::<f64>() {
-        return Ok(v.round() as i64);
+        return ok_f64_seconds(v);
     }
 
     if let Ok(seconds) = obj.getattr("total_seconds")?.call0()?.extract::<f64>() {
-        return Ok(seconds.round() as i64);
+        return ok_f64_seconds(seconds);
     }
 
     Err(PyValueError::new_err(
         "expected seconds as int/float or datetime.timedelta",
     ))
+}
+
+fn ok_f64_seconds(v: f64) -> PyResult<i64> {
+    if !v.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "duration must be finite, got {v}"
+        )));
+    }
+    let rounded = v.round();
+    // i64::MIN as f64 is exactly −2^63; i64::MAX as f64 rounds up to 2^63.
+    // f64 values outside [−2^63, 2^63] cannot be losslessly represented as i64.
+    if rounded < (i64::MIN as f64) || rounded > (i64::MAX as f64) {
+        return Err(PyValueError::new_err(format!(
+            "duration too large for i64: {v}"
+        )));
+    }
+    let result = rounded as i64;
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            (result as f64 - v).abs() < 1.0,
+            "extract_seconds: round-trip error f64 {v} -> i64 {result} exceeds 1-second tolerance"
+        );
+    }
+    Ok(result)
 }
 
 fn default_start() -> DateTime<FixedOffset> {
@@ -2620,12 +2663,14 @@ mod tests {
         EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
     };
     use pyo3::Bound;
+    use pyo3::IntoPyObject;
     use pyo3::PyErr;
     use pyo3::Python;
     use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 
     use super::default_start;
+    use super::extract_seconds;
     use super::pv_config_from_py;
     use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
@@ -3330,6 +3375,77 @@ mod tests {
             assert!(err.is_instance_of::<PyValueError>(py));
             let msg = to_py_value_string(err, py);
             assert!(msg.contains("missing required key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn extract_seconds_rejects_inf() {
+        Python::attach(|py| {
+            let test_values = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
+            for val in test_values {
+                let obj = val.into_pyobject(py).unwrap();
+                let err = extract_seconds(obj.as_any()).unwrap_err();
+                assert!(
+                    err.is_instance_of::<PyValueError>(py),
+                    "expected PyValueError for {val}"
+                );
+                let msg = to_py_value_string(err, py);
+                assert!(
+                    msg.contains("must be finite"),
+                    "expected 'must be finite' in error for {val}, got: {msg}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn extract_seconds_rejects_overflow() {
+        Python::attach(|py| {
+            let test_values = [1e20_f64, -1e20_f64];
+            for val in test_values {
+                let obj = val.into_pyobject(py).unwrap();
+                let err = extract_seconds(obj.as_any()).unwrap_err();
+                assert!(
+                    err.is_instance_of::<PyValueError>(py),
+                    "expected PyValueError for {val}"
+                );
+                let msg = to_py_value_string(err, py);
+                assert!(
+                    msg.contains("too large for i64"),
+                    "expected 'too large for i64' in error for {val}, got: {msg}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn extract_seconds_accepts_negative_finite_f64() {
+        Python::attach(|py| {
+            let cases: [(f64, i64); 2] = [(-100.0, -100), (-1e15_f64, -1_000_000_000_000_000)];
+            for (input, expected) in cases {
+                let obj = input.into_pyobject(py).unwrap();
+                let result = extract_seconds(obj.as_any()).unwrap();
+                assert_eq!(
+                    result, expected,
+                    "extract_seconds({input}) = {result}, expected {expected}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn extract_seconds_returns_correct_i64_for_finite_f64() {
+        Python::attach(|py| {
+            let cases: [(f64, i64); 5] =
+                [(3600.0, 3600), (3600.7, 3601), (2.3, 2), (2.7, 3), (0.0, 0)];
+            for (input, expected) in cases {
+                let obj = input.into_pyobject(py).unwrap();
+                let result = extract_seconds(obj.as_any()).unwrap();
+                assert_eq!(
+                    result, expected,
+                    "extract_seconds({input}) = {result}, expected {expected}"
+                );
+            }
         });
     }
 }

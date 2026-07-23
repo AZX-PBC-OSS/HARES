@@ -16,6 +16,7 @@ const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
 const DEFAULT_STEP_S: i64 = 60;
 const DEFAULT_CHUNK_SIZE: usize = 10_000;
+const MAX_CHRONO_SECONDS: i64 = i64::MAX / 1_000;
 
 fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if obj.is_none() {
@@ -153,10 +154,20 @@ impl PySimulationConfig {
         if duration <= 0 {
             return Err(PyValueError::new_err("duration_s must be positive"));
         }
+        if duration > MAX_CHRONO_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "duration_s too large for chrono Duration: {duration}"
+            )));
+        }
 
         let time_res = time_res_s.unwrap_or(DEFAULT_STEP_S);
         if time_res <= 0 {
             return Err(PyValueError::new_err("time_res_s must be positive"));
+        }
+        if time_res > MAX_CHRONO_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "time_res_s too large for chrono Duration: {time_res}"
+            )));
         }
 
         if duration % time_res != 0 {
@@ -259,6 +270,11 @@ impl PySimulationConfig {
         if value <= 0 {
             return Err(PyValueError::new_err("duration_s must be positive"));
         }
+        if value > MAX_CHRONO_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "duration_s too large for chrono Duration: {value}"
+            )));
+        }
         self.duration = value;
         Ok(())
     }
@@ -272,6 +288,11 @@ impl PySimulationConfig {
     pub fn set_time_res_s(&mut self, value: i64) -> PyResult<()> {
         if value <= 0 {
             return Err(PyValueError::new_err("time_res_s must be positive"));
+        }
+        if value > MAX_CHRONO_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "time_res_s too large for chrono Duration: {value}"
+            )));
         }
         self.time_res = value;
         Ok(())
@@ -490,8 +511,18 @@ impl PySimulationConfig {
         }
         Ok(SimulationConfig {
             start_time: self.start_time,
-            duration: Duration::seconds(self.duration),
-            time_res: Duration::seconds(self.time_res),
+            duration: Duration::try_seconds(self.duration).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "duration_s too large for chrono Duration: {}",
+                    self.duration
+                ))
+            })?,
+            time_res: Duration::try_seconds(self.time_res).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "time_res_s too large for chrono Duration: {}",
+                    self.time_res
+                ))
+            })?,
             output_verbosity: self.output_verbosity,
             output_path: self.output_path.clone().map(PathBuf::from),
             write_output: self.write_output,
@@ -818,5 +849,105 @@ impl PyDwellingConfig {
             resample_overrides,
             patches: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pyo3::Python;
+    use pyo3::exceptions::PyValueError;
+
+    use super::{MAX_CHRONO_SECONDS, PySimulationConfig};
+
+    #[test]
+    fn new_rejects_duration_s_above_chrono_bound() {
+        Python::attach(|py| {
+            let too_large = MAX_CHRONO_SECONDS + 1;
+            let err = PySimulationConfig::new(
+                None,
+                Some(too_large),
+                Some(60),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = format!("{}", err.value(py));
+            assert!(msg.contains("too large for chrono Duration"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn new_rejects_time_res_s_above_chrono_bound() {
+        Python::attach(|py| {
+            let too_large = MAX_CHRONO_SECONDS + 1;
+            let err = PySimulationConfig::new(
+                None,
+                Some(3600),
+                Some(too_large),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = format!("{}", err.value(py));
+            assert!(msg.contains("too large for chrono Duration"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn to_sim_config_accepts_boundary_values() {
+        Python::attach(|_py| {
+            let cfg = PySimulationConfig::new(
+                None,
+                Some(MAX_CHRONO_SECONDS),
+                Some(5),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let sc = cfg.to_sim_config().unwrap();
+            assert_eq!(
+                sc.duration.num_seconds(),
+                MAX_CHRONO_SECONDS,
+                "to_sim_config should accept values at the chrono bound"
+            );
+        });
     }
 }

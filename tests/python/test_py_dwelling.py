@@ -226,3 +226,155 @@ class TestStepError:
         for name in equipment:
             assert isinstance(name, str), f"equipment key should be a string, got {type(name)}"
             assert len(name) > 0, "equipment name should be non-empty"
+
+
+class TestDurationValidation:
+    def test_duration_s_inf_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match=r"duration must be finite"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=float("inf"),
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_duration_s_neg_inf_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match=r"duration must be finite"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=float("-inf"),
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_time_res_s_inf_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match=r"duration must be finite"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=3600,
+                time_res_s=float("inf"),
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_duration_s_zero_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match=r"positive"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=0,
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_time_res_s_zero_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match=r"positive"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=3600,
+                time_res_s=0,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_duration_s_above_chrono_bound_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        # 1e17 fits in i64 but exceeds chrono's Duration::seconds bound (~9.22e15).
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=1e17,
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_time_res_s_above_chrono_bound_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=3600,
+                time_res_s=1e17,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_duration_s_int_above_chrono_bound_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        # Plain int (10**17) exercises extract_seconds's i64 branch (A),
+        # which skips ok_f64_seconds and relies solely on try_seconds.
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=10**17,
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
+    def test_time_res_s_int_above_chrono_bound_raises_value_error(self):
+        from ochre_next import Dwelling
+
+        # Plain int (10**17) exercises extract_seconds's i64 branch (A),
+        # which skips ok_f64_seconds and relies solely on try_seconds.
+        with pytest.raises(ValueError, match="too large for chrono Duration"):
+            Dwelling.from_hpxml(
+                HPXML,
+                SCHEDULE,
+                WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=3600,
+                time_res_s=10**17,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+
