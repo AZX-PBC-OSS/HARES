@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 from pathlib import Path
 
 import pytest
@@ -1086,3 +1087,142 @@ def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
     assert "NaN mismatch" in warning_text, (
         f"warning should report 'NaN mismatch', got: {warning_text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# time_res_s configurability (T-0518)
+# ---------------------------------------------------------------------------
+
+
+def test_vec_gym_time_res_s_explicit_30():
+    """VecDwellingGymEnv with time_res_s=30 computes _max_steps accordingly."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    episode_len = timedelta(minutes=5)
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=episode_len,
+        time_res_s=30.0,
+    )
+    expected = max(1, int(math.ceil(episode_len.total_seconds() / 30.0)))
+    assert env._max_steps == expected, (
+        f"expected _max_steps={expected}, got {env._max_steps}"
+    )
+    assert env._time_res_s == 30.0
+
+
+def test_vec_gym_time_res_s_explicit_60_regression():
+    """VecDwellingGymEnv with time_res_s=60 matches old hardcoded behavior."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    episode_len = timedelta(minutes=5)
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=episode_len,
+        time_res_s=60.0,
+    )
+    expected = max(1, int(math.ceil(episode_len.total_seconds() / 60.0)))
+    assert env._max_steps == expected
+    assert env._time_res_s == 60.0
+
+
+def test_vec_gym_time_res_s_none_uses_dwelling_config():
+    """time_res_s=None reads from the first dwelling's config without warning."""
+    import warnings
+
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    episode_len = timedelta(minutes=5)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=episode_len,
+            time_res_s=None,
+        )
+
+    # _make_dwelling passes time_res_s=60, so the dwelling config should have it.
+    assert env._time_res_s == 60.0
+    expected = max(1, int(math.ceil(episode_len.total_seconds() / 60.0)))
+    assert env._max_steps == expected
+
+    fallback_warnings = [
+        x for x in w
+        if issubclass(x.category, UserWarning) and "time_res_s" in str(x.message)
+    ]
+    assert len(fallback_warnings) == 0, (
+        f"expected no fallback warning, got: {[str(x.message) for x in fallback_warnings]}"
+    )
+
+
+def test_vec_gym_time_res_s_none_fallback_warning():
+    """time_res_s=None with an object lacking config() produces fallback warning."""
+    import warnings
+
+    class _DwellingLike:
+        def initialize(self) -> None:
+            pass
+
+        def save_state(self) -> bytes:
+            return b"{}"
+
+    dwellings: list = [_DwellingLike() for _ in range(2)]
+    episode_len = timedelta(minutes=5)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=episode_len,
+            time_res_s=None,
+        )
+
+    fallback_warnings = [
+        x for x in w
+        if issubclass(x.category, UserWarning) and "time_res_s" in str(x.message)
+    ]
+    assert len(fallback_warnings) == 1, (
+        f"expected exactly one fallback warning, got {len(fallback_warnings)}: "
+        f"{[str(x.message) for x in fallback_warnings]}"
+    )
+    assert env._time_res_s == 60.0
+    expected = max(1, int(math.ceil(episode_len.total_seconds() / 60.0)))
+    assert env._max_steps == expected
+
+
+def test_vec_gym_time_res_s_zero_raises():
+    """time_res_s=0.0 raises ValueError instead of ZeroDivisionError."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(ValueError, match=r"time_res_s must be positive"):
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+            time_res_s=0.0,
+        )
+
+
+def test_vec_gym_time_res_s_negative_raises():
+    """time_res_s=-30.0 raises ValueError instead of silent wrong _max_steps."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(ValueError, match=r"time_res_s must be positive"):
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+            time_res_s=-30.0,
+        )

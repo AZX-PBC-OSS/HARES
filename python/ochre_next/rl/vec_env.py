@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
+import logging
+import math
 import multiprocessing
 import secrets
 from typing import Any
@@ -44,6 +46,7 @@ class VecDwellingGymEnv:
         action_space_config: Mapping[str, Sequence[str]],
         reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
+        time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
         verify_observation_equivalence: bool = False,
     ) -> None:
@@ -116,7 +119,45 @@ class VecDwellingGymEnv:
         self._reward_fn = reward_fn
         self._verify_observation_equivalence = verify_observation_equivalence
         self._steps_elapsed = np.zeros(self.num_envs, dtype=np.int64)
-        self._max_steps = max(1, int(np.ceil(episode_length.total_seconds() / 60.0)))
+
+        _time_res: float
+        _fallback: bool = False
+        if time_res_s is not None:
+            if time_res_s <= 0:
+                raise ValueError(
+                    f"time_res_s must be positive, got {time_res_s}"
+                )
+            _time_res = time_res_s
+        else:
+            try:
+                _cfg_time_res = self._dwellings[0].config().time_res_s
+                if _cfg_time_res and _cfg_time_res > 0:
+                    _time_res = float(_cfg_time_res)
+                else:
+                    _time_res = 60.0
+                    _fallback = True
+            except Exception:
+                _time_res = 60.0
+                _fallback = True
+
+        if _fallback:
+            warnings.warn(
+                "Cannot determine time_res_s from dwelling config; falling back to 60.0 s. "
+                "Pass time_res_s explicitly to VecDwellingGymEnv or ensure the first "
+                "dwelling has a valid sim config.",
+                stacklevel=2,
+            )
+
+        self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / _time_res)))
+        self._time_res_s = _time_res
+
+        _logger = logging.getLogger(__name__)
+        _logger.info(
+            "VecDwellingGymEnv constructed: _max_steps=%d, time_res_s=%.1f, num_envs=%d",
+            self._max_steps,
+            _time_res,
+            self.num_envs,
+        )
 
     def _apply_controls(self, dwelling: PyDwelling, action_row: np.ndarray) -> None:
         low = self.action_space.low if hasattr(self.action_space, "low") else self.action_space["low"]
