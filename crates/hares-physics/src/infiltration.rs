@@ -869,28 +869,123 @@ pub const SHIELDING_NORMAL: f64 = 0.5 / 3.0;
 /// ELA coefficients for a vented attic zone.
 ///
 /// Uses `hor_lk_frac = 0.75` (Walker-Wilson 1998 Table 2: ceiling-dominated
-/// leakage). Terrain and shielding use suburban/normal defaults.
-pub fn attic_ela_coefficients(attic_height_m: f64, building_height_m: f64) -> (f64, f64) {
-    calculate_ela_coefficients(
+/// leakage). Shielding and terrain are configurable to match the building site.
+///
+/// # Parameters
+/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
+///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+pub fn attic_ela_coefficients(
+    attic_height_m: f64,
+    building_height_m: f64,
+    shielding: ShieldingClass,
+    terrain: TerrainClass,
+) -> (f64, f64) {
+    let (stack, wind) = calculate_ela_coefficients(
         0.75,
         attic_height_m,
         building_height_m,
-        TerrainClass::Suburban,
-        SHIELDING_NORMAL,
-    )
+        terrain,
+        shielding.raw() / 3.0,
+    );
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            stack > 0.0,
+            "attic ELA stack coefficient must be positive: {stack}"
+        );
+        assert!(
+            wind > 0.0,
+            "attic ELA wind coefficient must be positive: {wind}"
+        );
+        // Walker & Wilson (1998) Table 3: wind_coeff ∝ s_g² where s_g = raw/3.
+        // For unchanged heights/terrain the ratio wind(worse_shielding) / wind(better_shielding)
+        // must equal (raw_worse / raw_better)². Verify against Exposed / WellShielded = (0.9/0.3)² = 9.
+        let (_, wind_exposed) = calculate_ela_coefficients(
+            0.75,
+            attic_height_m,
+            building_height_m,
+            terrain,
+            ShieldingClass::Exposed.raw() / 3.0,
+        );
+        let (_, wind_shielded) = calculate_ela_coefficients(
+            0.75,
+            attic_height_m,
+            building_height_m,
+            terrain,
+            ShieldingClass::WellShielded.raw() / 3.0,
+        );
+        let observed_ratio = wind_exposed / wind_shielded;
+        let expected_ratio =
+            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
+        assert!(
+            (observed_ratio - expected_ratio).abs() < 1e-12,
+            "attic ELA wind coefficient shielding scaling violated: \
+             expected Exposed/WellShielded ratio {expected_ratio}, got {observed_ratio} \
+             (exposed={wind_exposed}, shielded={wind_shielded})"
+        );
+    }
+
+    (stack, wind)
 }
 
 /// ELA coefficients for a garage zone at ground level.
 ///
 /// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage).
-pub fn garage_ela_coefficients(garage_height_m: f64) -> (f64, f64) {
-    calculate_ela_coefficients(
-        0.4,
-        garage_height_m,
-        0.0,
-        TerrainClass::Suburban,
-        SHIELDING_NORMAL,
-    )
+/// Shielding and terrain are configurable to match the building site.
+///
+/// # Parameters
+/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
+///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+pub fn garage_ela_coefficients(
+    garage_height_m: f64,
+    shielding: ShieldingClass,
+    terrain: TerrainClass,
+) -> (f64, f64) {
+    let (stack, wind) =
+        calculate_ela_coefficients(0.4, garage_height_m, 0.0, terrain, shielding.raw() / 3.0);
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            stack > 0.0,
+            "garage ELA stack coefficient must be positive: {stack}"
+        );
+        assert!(
+            wind > 0.0,
+            "garage ELA wind coefficient must be positive: {wind}"
+        );
+        // Walker & Wilson (1998) Table 3: wind_coeff ∝ s_g² where s_g = raw/3.
+        let (_, wind_exposed) = calculate_ela_coefficients(
+            0.4,
+            garage_height_m,
+            0.0,
+            terrain,
+            ShieldingClass::Exposed.raw() / 3.0,
+        );
+        let (_, wind_shielded) = calculate_ela_coefficients(
+            0.4,
+            garage_height_m,
+            0.0,
+            terrain,
+            ShieldingClass::WellShielded.raw() / 3.0,
+        );
+        let observed_ratio = wind_exposed / wind_shielded;
+        let expected_ratio =
+            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
+        assert!(
+            (observed_ratio - expected_ratio).abs() < 1e-12,
+            "garage ELA wind coefficient shielding scaling violated: \
+             expected Exposed/WellShielded ratio {expected_ratio}, got {observed_ratio} \
+             (exposed={wind_exposed}, shielded={wind_shielded})"
+        );
+    }
+
+    (stack, wind)
 }
 
 #[cfg(test)]
@@ -1706,7 +1801,8 @@ mod tests {
 
     #[test]
     fn ela_coefficients_garage_produces_positive_values() {
-        let (stack, wind) = super::garage_ela_coefficients(2.5);
+        let (stack, wind) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
         assert!(stack > 0.0, "garage stack_coeff must be positive: {stack}");
         assert!(wind > 0.0, "garage wind_coeff must be positive: {wind}");
     }
@@ -1776,7 +1872,8 @@ mod tests {
 
     #[test]
     fn attic_ela_convenience_matches_raw() {
-        let (s1, w1) = super::attic_ela_coefficients(1.5, 5.0);
+        let (s1, w1) =
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
         let (s2, w2) = super::calculate_ela_coefficients(
             0.75,
             1.5,
@@ -1790,7 +1887,8 @@ mod tests {
 
     #[test]
     fn garage_ela_convenience_matches_raw() {
-        let (s1, w1) = super::garage_ela_coefficients(2.5);
+        let (s1, w1) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
         let (s2, w2) = super::calculate_ela_coefficients(
             0.4,
             2.5,
@@ -1800,6 +1898,151 @@ mod tests {
         );
         approx_eq(s1, s2, 1e-15);
         approx_eq(w1, w2, 1e-15);
+    }
+
+    // --- Shielding class scaling tests (Walker & Wilson 1998 Table 3) ---
+
+    #[test]
+    fn attic_ela_exposed_wind_ratio_matches_shielding_table() {
+        // Walker & Wilson (1998) Table 3: C'_exposed / C'_normal = 0.30 / 0.167 ≈ 1.8
+        // wind_coeff ∝ C'², so wind_exposed / wind_normal ≈ 1.8² = 3.24
+        let (_, w_normal) =
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        let (_, w_exposed) = super::attic_ela_coefficients(
+            1.5,
+            5.0,
+            ShieldingClass::Exposed,
+            TerrainClass::Suburban,
+        );
+        let ratio = w_exposed / w_normal;
+        let expected_ratio = (ShieldingClass::Exposed.raw() / ShieldingClass::Normal.raw()).powi(2);
+        // 0.9/0.5 = 1.8; 1.8² = 3.24
+        approx_eq(ratio, expected_ratio, 1e-14);
+    }
+
+    #[test]
+    fn attic_ela_well_shielded_wind_ratio_matches_shielding_table() {
+        // Walker & Wilson (1998) Table 3: C'_well_shielded / C'_normal = 0.096 / 0.167 ≈ 0.575
+        // wind_coeff ∝ C'², so wind_shielded / wind_normal ≈ (0.3/0.5)² = 0.36
+        let (_, w_normal) =
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        let (_, w_shielded) = super::attic_ela_coefficients(
+            1.5,
+            5.0,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        );
+        let ratio = w_shielded / w_normal;
+        let expected_ratio =
+            (ShieldingClass::WellShielded.raw() / ShieldingClass::Normal.raw()).powi(2);
+        // 0.3/0.5 = 0.6; 0.6² = 0.36
+        approx_eq(ratio, expected_ratio, 1e-14);
+    }
+
+    #[test]
+    fn attic_ela_exposed_to_well_shielded_ratio_is_nine() {
+        // Walker & Wilson (1998) Table 3: C'_exposed / C'_well_shielded = 0.30 / 0.096 ≈ 3.125
+        // wind_coeff ∝ C'², so ratio = (0.9/0.3)² = 9.0
+        let (_, w_shielded) = super::attic_ela_coefficients(
+            1.5,
+            5.0,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        );
+        let (_, w_exposed) = super::attic_ela_coefficients(
+            1.5,
+            5.0,
+            ShieldingClass::Exposed,
+            TerrainClass::Suburban,
+        );
+        let ratio = w_exposed / w_shielded;
+        let expected_ratio =
+            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
+        approx_eq(expected_ratio, 9.0, 1e-14);
+        approx_eq(ratio, expected_ratio, 1e-14);
+    }
+
+    #[test]
+    fn garage_ela_exposed_wind_is_larger_than_normal() {
+        let (_, w_normal) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
+        let (_, w_exposed) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+        assert!(
+            w_exposed > w_normal,
+            "exposed wind_coeff must exceed normal: exposed={w_exposed}, normal={w_normal}"
+        );
+    }
+
+    #[test]
+    fn garage_ela_normal_is_intermediate_between_shielded_and_exposed() {
+        let (_, w_shielded) = super::garage_ela_coefficients(
+            2.5,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        );
+        let (_, w_normal) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
+        let (_, w_exposed) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+        assert!(
+            w_shielded < w_normal,
+            "well-shielded wind_coeff must be less than normal: shielded={w_shielded}, normal={w_normal}"
+        );
+        assert!(
+            w_normal < w_exposed,
+            "normal wind_coeff must be less than exposed: normal={w_normal}, exposed={w_exposed}"
+        );
+    }
+
+    #[test]
+    fn garage_ela_shielding_does_not_affect_stack_coefficient() {
+        // Stack coefficient depends on hor_lk_frac and zone height, not on shielding.
+        let (s_shielded, _) = super::garage_ela_coefficients(
+            2.5,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        );
+        let (s_exposed, _) =
+            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+        approx_eq(s_shielded, s_exposed, 1e-15);
+    }
+
+    // --- Regression: exposed rural attic produces correct wind coefficient ---
+
+    #[test]
+    fn attic_ela_exposed_rural_wind_coeff_matches_reference_value() {
+        // Exposed rural attic must produce the wind coefficient derived from the
+        // ASHRAE terrain power-law, not the hardcoded suburban-normal default.
+        //
+        // Attic: hor_lk_frac = 0.75, attic_height = 1.5 m, building_height = 5.0 m.
+        // h_total = 1.5 + 5.0 = 6.5 m.
+        // ShieldingClass::Exposed: raw = 0.9, shielding = 0.9/3 = 0.3.
+        // TerrainClass::Rural: alpha = 0.14, delta_m = 270.0.
+        //
+        // f_t = (δ_met/h_met)^α_met × (h_total/δ_site)^α_site
+        //     = (270.0/10.0)^0.14 × (6.5/270.0)^0.14
+        //     = (6.5/10.0)^0.14              [α_met = α_rural, δ_met = δ_rural]
+        // f_w = 0.3 × (1 − 0.75)^(1/3) × f_t
+        // wind_coeff = f_w² / 100
+
+        let (_, w) =
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Exposed, TerrainClass::Rural);
+
+        let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
+            * (6.5_f64 / RURAL_DELTA_M).powf(RURAL_ALPHA);
+        let f_w = (ShieldingClass::Exposed.raw() / 3.0) * (1.0_f64 - 0.75).powf(1.0 / 3.0) * f_t;
+        let expected = f_w * f_w / 100.0;
+
+        approx_eq(w, expected, 1e-15);
+
+        // Additionally verify the result differs from the suburban-normal default.
+        let (_, w_default) =
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        assert!(
+            (w - w_default).abs() > 1e-15,
+            "exposed rural attic wind_coeff must differ from suburban-normal"
+        );
     }
 
     #[test]

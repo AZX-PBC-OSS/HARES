@@ -825,7 +825,11 @@ fn aim2_flow_varies_with_climate_unlike_fixed_n20() {
 #[test]
 fn ela_model_varies_with_conditions_unlike_constant_ach() {
     let garage_height_m = 2.4_f64;
-    let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m);
+    let (stack_coeff, wind_coeff) = garage_ela_coefficients(
+        garage_height_m,
+        ShieldingClass::Normal,
+        TerrainClass::Suburban,
+    );
 
     // Coefficients must be positive (non-degenerate)
     assert!(

@@ -13,6 +13,7 @@ use hares_envelope::{
     ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
+use hares_physics::infiltration::{ShieldingClass, TerrainClass};
 use hares_types::{EnvironmentState, FluidType, HaresError, LoopId, ZoneId};
 
 use super::Result;
@@ -1182,6 +1183,33 @@ pub(crate) fn build_default_solvers(
                 .count()
                 .max(1) as f64;
 
+        // --- Site-level terrain and shielding ---
+        // Extracted once before the zone loop to avoid recomputation per-zone.
+        // These drive terrain-corrected wind coefficients for all ELA infiltration
+        // (conditioned zone uses them via aim2_coefficients_from_ach50; attic, garage,
+        // and foundation use them via the parameterized convenience functions).
+        let terrain = site_type_to_terrain(&building.site.site_type);
+        let shielding = shielding_str_to_class(building.site.shielding_of_home.as_deref());
+
+        if building.site.site_type.is_none() {
+            tracing::warn!(
+                "building site type not specified; defaulting to {:?} for ELA wind correction",
+                terrain
+            );
+        }
+        if building.site.shielding_of_home.is_none() {
+            tracing::warn!(
+                "building shielding-of-home not specified; defaulting to {:?} for ELA wind correction",
+                shielding
+            );
+        }
+
+        let conditioned_area = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+            .and_then(|z| z.floor_area_m2);
+
         for (zone_idx, bz) in building.zones.iter().enumerate() {
             let zone_id = env
                 .zones
@@ -1194,9 +1222,6 @@ pub(crate) fn build_default_solvers(
                     if let Some(ach) = building.infiltration_constant_ach {
                         InfiltrationMethod::Ach { ach }
                     } else if let Some(ach50) = resolved_ach50 {
-                        let terrain = site_type_to_terrain(&building.site.site_type);
-                        let shielding =
-                            shielding_str_to_class(building.site.shielding_of_home.as_deref());
                         let foundation = if has_vented_crawlspace(building) {
                             FoundationLeakageClass::VentedCrawlspace
                         } else {
@@ -1216,6 +1241,21 @@ pub(crate) fn build_default_solvers(
                             n_i: N_I_DEFAULT,
                             floors_above_grade: building.floors_above_grade.unwrap_or(1.0),
                         });
+
+                        #[cfg(feature = "observe")]
+                        tracing::info!(
+                            target: "observe",
+                            zone_type = "conditioned",
+                            ?shielding,
+                            ?terrain,
+                            zone_idx,
+                            c_s = coeffs.c_s,
+                            c_w = coeffs.c_w,
+                            shelter_coeff = coeffs.shelter_coeff,
+                            n_i = coeffs.n_i,
+                            "conditioned zone AIM-2 infiltration coefficients"
+                        );
+
                         InfiltrationMethod::AshraeWindStack {
                             c_s: coeffs.c_s,
                             c_w: coeffs.c_w,
@@ -1226,35 +1266,38 @@ pub(crate) fn build_default_solvers(
                         InfiltrationMethod::Ach { ach: 0.0 }
                     }
                 }
-                ZoneType::Attic => {
-                    let conditioned_area = building
-                        .zones
-                        .iter()
-                        .find(|z| z.zone_type == ZoneType::Conditioned)
-                        .and_then(|z| z.floor_area_m2);
-                    attic_infiltration_method(bz, conditioned_area, building_height_m, zone_idx)?
-                }
+                ZoneType::Attic => attic_infiltration_method(
+                    bz,
+                    conditioned_area,
+                    building_height_m,
+                    shielding,
+                    terrain,
+                    zone_idx,
+                )?,
                 ZoneType::Garage => {
-                    let conditioned_area = building
-                        .zones
-                        .iter()
-                        .find(|z| z.zone_type == ZoneType::Conditioned)
-                        .and_then(|z| z.floor_area_m2);
                     let garage_height_m = bz
                         .volume_m3
                         .zip(bz.floor_area_m2)
                         .and_then(|(v, a)| (a > 0.0).then_some(v / a))
                         .unwrap_or(default_ceiling_height_m);
-                    garage_infiltration_method(bz, conditioned_area, garage_height_m, zone_idx)?
+                    garage_infiltration_method(
+                        bz,
+                        conditioned_area,
+                        garage_height_m,
+                        shielding,
+                        terrain,
+                        zone_idx,
+                    )?
                 }
                 ZoneType::Foundation => {
-                    let conditioned_area = building
-                        .zones
-                        .iter()
-                        .find(|z| z.zone_type == ZoneType::Conditioned)
-                        .and_then(|z| z.floor_area_m2);
                     let foundation_height_m = foundation_height_m(bz);
-                    foundation_infiltration_method(bz, conditioned_area, foundation_height_m)
+                    foundation_infiltration_method(
+                        bz,
+                        conditioned_area,
+                        foundation_height_m,
+                        shielding,
+                        terrain,
+                    )
                 }
                 ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => {
                     continue;
@@ -1433,9 +1476,11 @@ fn foundation_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     conditioned_floor_area_m2: Option<f64>,
     foundation_height_m: Option<f64>,
+    shielding: ShieldingClass,
+    terrain: TerrainClass,
 ) -> hares_envelope::InfiltrationMethod {
     use hares_envelope::InfiltrationMethod;
-    use hares_physics::infiltration::{SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients};
+    use hares_physics::infiltration::calculate_ela_coefficients;
 
     if let Some(ach) = zone.ventilation_ach {
         return InfiltrationMethod::Ach { ach };
@@ -1447,13 +1492,20 @@ fn foundation_infiltration_method(
             foundation_height_m,
         ) {
             let ela_m2 = sla * floor_area_m2;
-            let (stack_coeff, wind_coeff) = calculate_ela_coefficients(
-                0.0,
-                height_m,
-                0.0,
-                TerrainClass::Suburban,
-                SHIELDING_NORMAL,
+            let (stack_coeff, wind_coeff) =
+                calculate_ela_coefficients(0.0, height_m, 0.0, terrain, shielding.raw() / 3.0);
+
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                target: "observe",
+                zone_type = "foundation",
+                ?shielding,
+                ?terrain,
+                stack_coeff,
+                wind_coeff,
+                "foundation infiltration coefficients"
             );
+
             return InfiltrationMethod::Ela {
                 ela_m2,
                 stack_coeff,
@@ -1476,6 +1528,8 @@ fn attic_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     conditioned_floor_area_m2: Option<f64>,
     building_height_m: f64,
+    shielding: ShieldingClass,
+    terrain: TerrainClass,
     _zone_idx: usize,
 ) -> Result<hares_envelope::InfiltrationMethod> {
     use hares_envelope::InfiltrationMethod;
@@ -1497,7 +1551,21 @@ fn attic_infiltration_method(
             .filter(|&v| v > 0.0)
             .map(|v| 2.0 * v / floor_area_m2)
             .unwrap_or(1.5);
-        let (stack_coeff, wind_coeff) = attic_ela_coefficients(attic_height_m, building_height_m);
+        let (stack_coeff, wind_coeff) =
+            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain);
+
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            zone_type = "attic",
+            ?shielding,
+            ?terrain,
+            zone_idx = _zone_idx,
+            stack_coeff,
+            wind_coeff,
+            "attic infiltration coefficients"
+        );
+
         return Ok(InfiltrationMethod::Ela {
             ela_m2,
             stack_coeff,
@@ -1519,7 +1587,21 @@ fn attic_infiltration_method(
             .filter(|&v| v > 0.0)
             .map(|v| 2.0 * v / floor_area_m2)
             .unwrap_or(1.5);
-        let (stack_coeff, wind_coeff) = attic_ela_coefficients(attic_height_m, building_height_m);
+        let (stack_coeff, wind_coeff) =
+            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain);
+
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            zone_type = "attic",
+            ?shielding,
+            ?terrain,
+            zone_idx = _zone_idx,
+            stack_coeff,
+            wind_coeff,
+            "attic infiltration coefficients (vented default SLA)"
+        );
+
         return Ok(InfiltrationMethod::Ela {
             ela_m2,
             stack_coeff,
@@ -1535,6 +1617,8 @@ fn garage_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     conditioned_floor_area_m2: Option<f64>,
     garage_height_m: f64,
+    shielding: ShieldingClass,
+    terrain: TerrainClass,
     zone_idx: usize,
 ) -> Result<hares_envelope::InfiltrationMethod> {
     use hares_envelope::InfiltrationMethod;
@@ -1567,7 +1651,19 @@ fn garage_infiltration_method(
         .unwrap_or(28.0);
 
     let ela_m2 = sla * floor_area_m2;
-    let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m);
+    let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m, shielding, terrain);
+
+    #[cfg(feature = "observe")]
+    tracing::info!(
+        target: "observe",
+        zone_type = "garage",
+        ?shielding,
+        ?terrain,
+        zone_idx,
+        stack_coeff,
+        wind_coeff,
+        "garage infiltration coefficients"
+    );
 
     Ok(InfiltrationMethod::Ela {
         ela_m2,
@@ -1596,7 +1692,7 @@ mod tests {
     use hares_envelope::InfiltrationMethod;
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_physics::infiltration::{
-        N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
+        N_I_DEFAULT, SHIELDING_NORMAL, ShieldingClass, TerrainClass, calculate_ela_coefficients,
         garage_ela_coefficients,
     };
     use hares_types::ZoneId;
@@ -2221,7 +2317,13 @@ mod tests {
     #[test]
     fn foundation_sla_resolves_to_ela() {
         let zone = foundation_zone(Some(50.0), Some(75.0), false, None, Some(0.0002));
-        let method = foundation_infiltration_method(&zone, Some(100.0), Some(1.5));
+        let method = foundation_infiltration_method(
+            &zone,
+            Some(100.0),
+            Some(1.5),
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        );
         match method {
             InfiltrationMethod::Ela {
                 ela_m2,
@@ -2246,7 +2348,13 @@ mod tests {
     #[test]
     fn foundation_ach_takes_precedence_over_sla() {
         let zone = foundation_zone(Some(50.0), Some(75.0), true, Some(3.0), Some(0.0002));
-        let method = foundation_infiltration_method(&zone, Some(100.0), Some(1.5));
+        let method = foundation_infiltration_method(
+            &zone,
+            Some(100.0),
+            Some(1.5),
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        );
         assert_eq!(method, InfiltrationMethod::Ach { ach: 3.0 });
     }
 
@@ -2256,11 +2364,23 @@ mod tests {
         let unvented = foundation_zone(Some(50.0), Some(75.0), false, None, None);
 
         assert_eq!(
-            foundation_infiltration_method(&vented, Some(100.0), Some(1.5)),
+            foundation_infiltration_method(
+                &vented,
+                Some(100.0),
+                Some(1.5),
+                ShieldingClass::Normal,
+                TerrainClass::Suburban,
+            ),
             InfiltrationMethod::Ach { ach: 2.0 }
         );
         assert_eq!(
-            foundation_infiltration_method(&unvented, Some(100.0), Some(1.5)),
+            foundation_infiltration_method(
+                &unvented,
+                Some(100.0),
+                Some(1.5),
+                ShieldingClass::Normal,
+                TerrainClass::Suburban,
+            ),
             InfiltrationMethod::Ach { ach: 0.0 }
         );
     }
@@ -2271,11 +2391,23 @@ mod tests {
         let unvented = foundation_zone(None, None, false, None, Some(0.0002));
 
         assert_eq!(
-            foundation_infiltration_method(&vented, None, None),
+            foundation_infiltration_method(
+                &vented,
+                None,
+                None,
+                ShieldingClass::Normal,
+                TerrainClass::Suburban,
+            ),
             InfiltrationMethod::Ach { ach: 2.0 }
         );
         assert_eq!(
-            foundation_infiltration_method(&unvented, None, None),
+            foundation_infiltration_method(
+                &unvented,
+                None,
+                None,
+                ShieldingClass::Normal,
+                TerrainClass::Suburban,
+            ),
             InfiltrationMethod::Ach { ach: 0.0 }
         );
     }
@@ -2283,8 +2415,15 @@ mod tests {
     #[test]
     fn attic_vented_defaults_to_resnet_sla() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
-        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
-            .expect("vented attic with no rate must use default SLA");
+        let method = attic_infiltration_method(
+            &zone,
+            Some(100.0),
+            5.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            3,
+        )
+        .expect("vented attic with no rate must use default SLA");
         let InfiltrationMethod::Ela { ela_m2, .. } = method else {
             panic!("expected ELA method from default SLA, got {method:?}");
         };
@@ -2299,8 +2438,15 @@ mod tests {
     #[test]
     fn attic_vented_with_sla_builds_successfully() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, Some(0.003));
-        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
-            .expect("vented attic with SLA=0.003 must succeed");
+        let method = attic_infiltration_method(
+            &zone,
+            Some(100.0),
+            5.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            3,
+        )
+        .expect("vented attic with SLA=0.003 must succeed");
         let InfiltrationMethod::Ela { ela_m2, .. } = method else {
             panic!("expected ELA method from provided SLA, got {method:?}");
         };
@@ -2314,7 +2460,15 @@ mod tests {
     #[test]
     fn attic_unvented_default_is_minimal_ach() {
         let zone = attic_zone(Some(100.0), Some(120.0), false, None, None);
-        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("method");
+        let method = attic_infiltration_method(
+            &zone,
+            Some(100.0),
+            5.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            3,
+        )
+        .expect("method");
         assert_eq!(method, InfiltrationMethod::Ach { ach: 0.1 });
     }
 
@@ -2391,14 +2545,30 @@ mod tests {
     #[test]
     fn garage_ach_takes_precedence_over_sla() {
         let zone = garage_zone(Some(28.0), Some(67.2), Some(5.0), Some(0.0003));
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         assert_eq!(method, InfiltrationMethod::Ach { ach: 5.0 });
     }
 
     #[test]
     fn garage_sla_resolves_to_ela() {
         let zone = garage_zone(Some(28.0), Some(67.2), None, Some(0.0003));
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         match method {
             InfiltrationMethod::Ela {
                 ela_m2,
@@ -2406,7 +2576,8 @@ mod tests {
                 wind_coeff,
             } => {
                 assert!((ela_m2 - 0.0084).abs() < 1e-9);
-                let (expected_stack, expected_wind) = garage_ela_coefficients(2.4);
+                let (expected_stack, expected_wind) =
+                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban);
                 assert!((stack_coeff - expected_stack).abs() < 1e-12);
                 assert!((wind_coeff - expected_wind).abs() < 1e-12);
             }
@@ -2417,7 +2588,15 @@ mod tests {
     #[test]
     fn garage_default_sla_fallback_produces_nonzero_ela() {
         let zone = garage_zone(Some(28.0), Some(67.2), None, None);
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         match method {
             InfiltrationMethod::Ela {
                 ela_m2,
@@ -2426,7 +2605,8 @@ mod tests {
             } => {
                 // SLA = 3.0e-4, floor area = 28 m² → ela_m2 = 0.0084
                 assert!((ela_m2 - 0.0084).abs() < 1e-9);
-                let (expected_stack, expected_wind) = garage_ela_coefficients(2.4);
+                let (expected_stack, expected_wind) =
+                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban);
                 assert!((stack_coeff - expected_stack).abs() < 1e-12);
                 assert!((wind_coeff - expected_wind).abs() < 1e-12);
             }
@@ -2439,7 +2619,15 @@ mod tests {
         // The ELA model produces time-varying infiltration unlike a constant ACH.
         // Verify that the returned method is ELA, not Ach.
         let zone = garage_zone(Some(28.0), Some(67.2), None, None);
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         assert!(
             matches!(method, InfiltrationMethod::Ela { .. }),
             "garage default must be ELA for climate-aware infiltration, got {method:?}"
@@ -2449,7 +2637,15 @@ mod tests {
     #[test]
     fn garage_uses_conditioned_floor_area_as_fallback() {
         let zone = garage_zone(None, Some(67.2), None, Some(0.0003));
-        let method = garage_infiltration_method(&zone, Some(50.0), 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            Some(50.0),
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         match method {
             InfiltrationMethod::Ela { ela_m2, .. } => {
                 assert!(
@@ -2464,7 +2660,15 @@ mod tests {
     #[test]
     fn garage_without_any_floor_area_uses_default_28m2() {
         let zone = garage_zone(None, Some(67.2), None, None);
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         match method {
             InfiltrationMethod::Ela { ela_m2, .. } => {
                 // SLA = 3.0e-4, fallback floor area = 28 m² → ela_m2 = 0.0084
@@ -2480,7 +2684,15 @@ mod tests {
         // The new code must never return Ach when no zone-level ACH is given.
         // Even the default path returns ELA, not Ach.
         let zone = garage_zone(Some(28.0), Some(67.2), None, None);
-        let method = garage_infiltration_method(&zone, None, 2.4, 0).expect("method");
+        let method = garage_infiltration_method(
+            &zone,
+            None,
+            2.4,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("method");
         assert!(
             !matches!(method, InfiltrationMethod::Ach { .. }),
             "garage must not use constant-Ach method; got {method:?}"
@@ -2490,8 +2702,10 @@ mod tests {
     #[test]
     fn garage_height_derived_from_zone_geometry() {
         // Zone has volume=67.2 m³, floor_area=28 m² → height = 2.4 m.
-        let (stack_coeff, wind_coeff) = garage_ela_coefficients(67.2 / 28.0);
-        let expected_stack = garage_ela_coefficients(2.4).0;
+        let (stack_coeff, wind_coeff) =
+            garage_ela_coefficients(67.2 / 28.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        let expected_stack =
+            garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban).0;
         assert!(
             (stack_coeff - expected_stack).abs() < 1e-12,
             "coefficients must match for equivalent height"
