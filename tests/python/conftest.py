@@ -27,7 +27,7 @@ def make_dwelling(
 ):
     from ochre_next import Dwelling
 
-    return Dwelling.from_hpxml(
+    dw = Dwelling.from_hpxml(
         HPXML,
         SCHEDULE,
         WEATHER,
@@ -40,3 +40,5 @@ def make_dwelling(
         output_verbosity=output_verbosity,
         **kw,
     )
+    dw.initialize()
+    return dw

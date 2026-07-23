@@ -167,6 +167,60 @@ class TestTelemetry:
 
 
 class TestStepError:
+    def test_step_without_initialize_raises_runtime_error(self):
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=3600,
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+        )
+
+        with pytest.raises(RuntimeError, match=r"step\(\) called before initialize"):
+            dw.step()
+
+    def test_simulate_without_initialize_raises_runtime_error(self):
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=3600,
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+        )
+
+        with pytest.raises(RuntimeError, match=r"simulate\(\) called before initialize"):
+            dw.simulate()
+
+    def test_step_after_initialize_succeeds(self):
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=3600,
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+        )
+        dw.initialize()
+        result = dw.step()
+        assert "timestamp" in result
+
     def test_step_past_end_raises_runtime_error(self):
         from ochre_next import Dwelling
 

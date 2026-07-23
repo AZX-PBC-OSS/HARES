@@ -655,6 +655,11 @@ impl PyDwelling {
                 "custom panic hook must be installed before simulation"
             );
         }
+        if !self.initialized {
+            return Err(PyRuntimeError::new_err(
+                "PyDwelling.simulate() called before initialize(). Call dwelling.initialize() first.",
+            ));
+        }
         let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
                 let mut dwelling = self.acquire_hares()?;
@@ -704,6 +709,11 @@ impl PyDwelling {
                 panic_hook::is_installed(),
                 "custom panic hook must be installed before step"
             );
+        }
+        if !self.initialized {
+            return Err(PyRuntimeError::new_err(
+                "PyDwelling.step() called before initialize(). Call dwelling.initialize() first.",
+            ));
         }
         let step_result: Result<Result<hares_core::StepResult, HaresError>, _> =
             py.detach(|| std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core())));
@@ -1862,6 +1872,12 @@ impl PyDwelling {
     /// with [`FATAL_DWELLING_PREFIX`], allowing [`batch_step_py`] to distinguish
     /// permanent from transient failures. Transient [`step`] errors carry no prefix.
     pub(crate) fn step_core_string(&self) -> Result<hares_core::StepResult, String> {
+        if !self.initialized {
+            return Err(
+                "PyDwelling.step() called before initialize(). Call dwelling.initialize() first."
+                    .to_string(),
+            );
+        }
         let mut dwelling = self.acquire_string()?;
         dwelling.step().map_err(|e| e.to_string())
     }

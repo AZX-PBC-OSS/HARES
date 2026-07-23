@@ -38,7 +38,9 @@ def dwelling():
     else:
         pytest.skip("OCHRE fixtures not available")
 
-    return dwelling_class.from_hpxml(hpxml, schedule, weather)
+    dw = dwelling_class.from_hpxml(hpxml, schedule, weather)
+    dw.initialize()
+    return dw
 
 
 @pytest.fixture(scope="session")
