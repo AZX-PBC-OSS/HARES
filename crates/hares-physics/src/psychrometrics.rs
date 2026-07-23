@@ -34,12 +34,24 @@ const SPECIFIC_HEAT_LIQUID_WATER_KJ_KG_K: f64 = 4.186;
 /// in the psychrometer equation above 0°C. Value per ASHRAE: 2.381 kJ/(kg·K).
 const SPECIFIC_HEAT_WET_BULB_ABOVE_FREEZE: f64 = 2.381;
 const SPECIFIC_HEAT_ICE_KJ_KG_K: f64 = 2.1;
-/// Specific heat of ice used in the below-freezing wet-bulb formula [kJ/(kg·K)].
+/// Psychrometer coefficient for sub-freezing wet-bulb [kJ/(kg·K)].
 ///
-/// ASHRAE HOF 2021 Ch.1 Eq. 37: this term represents the ice-side heat capacity
-/// in the psychrometer equation below 0°C. Value per ASHRAE: 2.006 kJ/(kg·K).
-/// (The previous value of 0.24 was an IP unit value in BTU/lb/°F -- incorrect for SI.)
-const SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE: f64 = 2.006;
+/// ASHRAE HOF 2017 Ch.1 Eq. 37: c_s_wb = c_p_ice − c_p_v = 2.1 − 1.86 = 0.24.
+const SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE: f64 = 0.24;
+
+/// Invariant: sub-freezing psychrometer coefficient must satisfy the
+/// derivation c_p_ice − c_p_v = 2.1 − 1.86 = 0.24 within 1e-6 tolerance.
+/// Checked once at first access in debug/check_invariants builds.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+static CHECK_PSYCHROMETER_INVARIANT: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+    let expected = SPECIFIC_HEAT_ICE_KJ_KG_K - SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K;
+    let actual = SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE;
+    assert!(
+        (actual - expected).abs() < 1e-6,
+        "SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE ({actual}) does not satisfy \
+         c_p_ice − c_p_v = {expected}"
+    );
+});
 
 /// Saturation vapor pressure for water [Pa] at temperature `t_c` [°C].
 ///
@@ -81,6 +93,11 @@ pub fn humidity_ratio_from_tdp_typed(t_dp: Temperature, p: Pressure) -> f64 {
 
 /// Humidity ratio from dry-bulb [°C], wet-bulb [°C], and pressure [Pa].
 pub fn humidity_ratio_from_twb(t_db_c: f64, t_wb_c: f64, p_pa: f64) -> f64 {
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        *CHECK_PSYCHROMETER_INVARIANT;
+    }
+
     let w_sat = humidity_ratio_from_tdp(t_wb_c, p_pa);
 
     let w = if t_wb_c >= 0.0 {
@@ -89,6 +106,16 @@ pub fn humidity_ratio_from_twb(t_db_c: f64, t_wb_c: f64, p_pa: f64) -> f64 {
             / (LATENT_HEAT_VAPORISATION_KJ_KG + SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K * t_db_c
                 - SPECIFIC_HEAT_LIQUID_WATER_KJ_KG_K * t_wb_c)
     } else {
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                target: "observe",
+                t_db_c,
+                t_wb_c,
+                coefficient = SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE,
+                "humidity_ratio_from_twb: sub-freezing wet-bulb coefficient applied"
+            );
+        }
         ((LATENT_HEAT_SUBLIMATION_KJ_KG - SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE * t_wb_c) * w_sat
             - SPECIFIC_HEAT_DRY_AIR_KJ_KG_K * (t_db_c - t_wb_c))
             / (LATENT_HEAT_SUBLIMATION_KJ_KG + SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K * t_db_c
@@ -524,21 +551,87 @@ mod tests {
 
     // --- Regression tests for previously fixed physics bugs ---
 
-    /// Regression: below-freezing wet-bulb used 0.24 (IP unit) instead of 2.006 kJ/(kg·K) (SI).
-    /// ASHRAE HOF 2021 Eq. 37. With the old constant the result would be wildly wrong.
+    /// Regression: sub-freezing wet-bulb psychrometer coefficient was 2.006 kJ/(kg·K)
+    /// instead of the correct ASHRAE HOF 2017 Ch.1 Eq. 37 value of 0.24 kJ/(kg·K).
+    /// The erroneous 2.006 was derived from an incorrect IP-to-SI conversion of 0.24
+    /// BTU/(lb·°F) (≈1.005 kJ/(kg·K), not 2.006). The coefficient is c_p_ice − c_p_v
+    /// = 2.1 − 1.86 = 0.24 kJ/(kg·K). This test validates against a hardcoded PsychroLib
+    /// reference value at Tdb=−2°C, Twb=−5°C, P=101325 Pa to ≤0.1% relative tolerance.
     #[test]
     fn humidity_ratio_from_twb_sub_freezing_uses_correct_ice_specific_heat() {
-        // Wet-bulb at -5°C, dry-bulb at -2°C
         let w = humidity_ratio_from_twb(-2.0, -5.0, 101325.0);
-        // At these conditions, humidity ratio should be small but positive
         assert!(w > 0.0, "sub-freezing humidity ratio must be positive");
-        assert!(w < 0.005, "sub-freezing humidity ratio must be small");
-        // Saturation humidity ratio at -5°C is approximately 0.00254 kg/kg
-        let w_sat = humidity_ratio_from_tdp(-5.0, 101325.0);
+
+        // PsychroLib GetHumRatioFromTWetBulb(-2.0, -5.0, 101325.0) SI mode.
+        let expected = 0.001_407_141_115_594_964_8;
+        let rel_err = (w - expected).abs() / expected;
         assert!(
-            w <= w_sat * 1.01,
-            "humidity ratio must not exceed saturation at wet-bulb temp"
+            rel_err < 0.001,
+            "humidity_ratio_from_twb(-2,-5,101325) = {w:.16}, PsychroLib = {expected:.16}, \
+             rel_err = {rel_err:.5}"
         );
+    }
+
+    /// Unit test: the sub-freezing psychrometer coefficient satisfies
+    /// c_s_wb = c_p_ice − c_p_v = 2.1 − 1.86 = 0.24 within 1e-6 tolerance.
+    #[test]
+    fn sub_freezing_psychrometer_coefficient_satisfies_derivation() {
+        let c_s_wb = SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE;
+        let derived = SPECIFIC_HEAT_ICE_KJ_KG_K - SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K;
+        assert!(
+            (c_s_wb - derived).abs() < 1e-6,
+            "SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE ({c_s_wb}) does not satisfy \
+             c_p_ice − c_p_v = {derived}"
+        );
+    }
+
+    /// Cross-vendor validation: HARES sub-freezing humidity_ratio_from_twb matches
+    /// PsychroLib reference values within 0.1% across a grid of sub-freezing
+    /// conditions (−20°C ≤ Tdb ≤ 0°C, −20°C ≤ Twb ≤ 0°C, Twb ≤ Tdb).
+    /// Reference values obtained by running PsychroLib SI mode:
+    ///   psychrolib.GetHumRatioFromTWetBulb(tdb, twb, 101325.0)
+    #[test]
+    fn sub_freezing_humidity_ratio_matches_psychrolib_reference_grid() {
+        let p = 101325.0;
+        let refs: &[(f64, f64, f64)] = &[
+            (-20.0, -20.0, 0.000_634_471_175_821_024_6),
+            (-15.0, -20.0, 1e-07),
+            (-15.0, -15.0, 0.001_016_292_235_970_069),
+            (-10.0, -20.0, 1e-07),
+            (-10.0, -15.0, 1e-07),
+            (-10.0, -10.0, 0.001_599_417_523_209_671),
+            (-5.0, -20.0, 1e-07),
+            (-5.0, -15.0, 1e-07),
+            (-5.0, -10.0, 1e-07),
+            (-5.0, -5.0, 0.002_475_893_534_154_24),
+            (-2.0, -20.0, 1e-07),
+            (-2.0, -15.0, 1e-07),
+            (-2.0, -10.0, 1e-07),
+            (-2.0, -5.0, 0.001_407_141_115_594_965),
+            (-2.0, -2.0, 0.003_194_127_916_451_78),
+            (0.0, -20.0, 1e-07),
+            (0.0, -15.0, 1e-07),
+            (0.0, -10.0, 1e-07),
+            (0.0, -5.0, 0.000_696_972_284_420_870_9),
+            (0.0, -2.0, 0.002_480_034_995_751_335),
+            (0.0, 0.0, 0.003_774_097_814_000_255),
+        ];
+        let mut checked = 0usize;
+        for &(t_db, t_wb, expected) in refs {
+            let w = humidity_ratio_from_twb(t_db, t_wb, p);
+            let err = if expected > 1e-6 {
+                (w - expected).abs() / expected
+            } else {
+                (w - expected).abs()
+            };
+            assert!(
+                err < 0.001,
+                "humidity_ratio_from_twb({t_db},{t_wb},{p}) = {w:.16}, \
+                 PsychroLib = {expected:.16}, err = {err:.5}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 21, "must cover all 21 sub-freezing conditions");
     }
 
     /// Regression: above-freezing wet-bulb psychrometer coefficient was 2.326 instead of
