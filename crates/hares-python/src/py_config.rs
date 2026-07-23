@@ -60,8 +60,13 @@ fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     )))
 }
 
-fn default_start_time() -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(DEFAULT_START).expect("valid default start time")
+fn default_start_time() -> PyResult<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
+        PyValueError::new_err(format!(
+            "internal error: default start time constant is invalid: {}",
+            e
+        ))
+    })
 }
 
 pub(crate) fn parse_rotation_policy(value: &str) -> PyResult<hares_io::RotationPolicy> {
@@ -145,10 +150,10 @@ impl PySimulationConfig {
         retain_batches: Option<bool>,
         rotation: Option<String>,
     ) -> PyResult<Self> {
-        let start_time = start_time
-            .map(|s| parse_datetime_str(&s))
-            .transpose()?
-            .unwrap_or_else(default_start_time);
+        let start_time = match start_time {
+            Some(s) => parse_datetime_str(&s)?,
+            None => default_start_time()?,
+        };
 
         let duration = duration_s.unwrap_or(DEFAULT_DURATION_S);
         if duration <= 0 {
@@ -773,13 +778,10 @@ impl PyDwellingConfig {
 
 impl PyDwellingConfig {
     pub fn to_dwelling_config(&self) -> PyResult<DwellingConfig> {
-        let sim_config = self
-            .config
-            .as_ref()
-            .map(|c| c.to_sim_config())
-            .transpose()?
-            .unwrap_or_else(|| SimulationConfig {
-                start_time: default_start_time(),
+        let sim_config = match self.config.as_ref() {
+            Some(c) => c.to_sim_config()?,
+            None => SimulationConfig {
+                start_time: default_start_time()?,
                 duration: Duration::seconds(DEFAULT_DURATION_S),
                 time_res: Duration::seconds(DEFAULT_STEP_S),
                 output_verbosity: 0,
@@ -793,7 +795,8 @@ impl PyDwellingConfig {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
                 rotation: hares_io::RotationPolicy::None,
-            });
+            },
+        };
 
         let resample_overrides: Option<ResampleOverrides> = self
             .resample_overrides
@@ -857,7 +860,9 @@ mod tests {
     use pyo3::Python;
     use pyo3::exceptions::PyValueError;
 
-    use super::{MAX_CHRONO_SECONDS, PySimulationConfig};
+    use chrono::DateTime;
+
+    use super::{DEFAULT_START, MAX_CHRONO_SECONDS, PySimulationConfig, default_start_time};
 
     #[test]
     fn new_rejects_duration_s_above_chrono_bound() {
@@ -949,5 +954,19 @@ mod tests {
                 "to_sim_config should accept values at the chrono bound"
             );
         });
+    }
+
+    #[test]
+    fn test_default_start_is_valid_rfc3339() {
+        DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START must be valid");
+    }
+
+    #[test]
+    fn test_default_start_time_returns_expected_value() {
+        let dt = default_start_time().unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
+            "2019-01-01T00:00:00+0000"
+        );
     }
 }

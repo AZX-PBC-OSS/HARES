@@ -2081,12 +2081,15 @@ pub(crate) fn build_config(
     let sim_config = if let Some(py_cfg) = py_config {
         py_cfg.to_sim_config()?
     } else {
-        let start_time = kwargs
+        let start_time = match kwargs
             .as_ref()
             .and_then(|k| k.get_item("start_time").ok().flatten())
             .map(|obj| extract_datetime(&obj))
             .transpose()?
-            .unwrap_or_else(default_start);
+        {
+            Some(dt) => dt,
+            None => default_start()?,
+        };
 
         let time_res_s = match kwargs
             .as_ref()
@@ -2407,8 +2410,13 @@ fn ok_f64_seconds(v: f64) -> PyResult<i64> {
     Ok(result)
 }
 
-fn default_start() -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START is a valid RFC3339 constant")
+fn default_start() -> PyResult<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
+        PyValueError::new_err(format!(
+            "internal error: default start time constant is invalid: {}",
+            e
+        ))
+    })
 }
 
 fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
@@ -2672,7 +2680,7 @@ mod tests {
     use super::default_start;
     use super::extract_seconds;
     use super::pv_config_from_py;
-    use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
+    use super::{DEFAULT_START, parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
     use crate::utils::{extract_datetime, parse_datetime_str};
 
@@ -2895,8 +2903,13 @@ mod tests {
     }
 
     #[test]
+    fn test_default_start_is_valid_rfc3339() {
+        chrono::DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START must be valid");
+    }
+
+    #[test]
     fn test_default_start_returns_expected_value() {
-        let result = default_start();
+        let result = default_start().unwrap();
         assert_eq!(
             result.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
             "2019-01-01T00:00:00+0000"
