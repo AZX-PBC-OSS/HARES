@@ -210,10 +210,12 @@ impl Equipment for ZoneTemperatureSniffer {
 fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
     let recorded: ZoneTempRecord = Arc::new(Mutex::new(Vec::new()));
     let mut dwelling = build_dwelling("zone-state-defect1");
-    dwelling.add_equipment(Box::new(ZoneTemperatureSniffer::new(
-        "zone_temp_sniffer",
-        Arc::clone(&recorded),
-    )));
+    dwelling
+        .add_equipment(Box::new(ZoneTemperatureSniffer::new(
+            "zone_temp_sniffer",
+            Arc::clone(&recorded),
+        )))
+        .expect("add_equipment must succeed");
 
     // Run several timesteps.
     for _ in 0..5 {

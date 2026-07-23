@@ -199,68 +199,87 @@ fn spy_recorded(dwelling: &Dwelling, name: &str) -> f64 {
 }
 
 #[test]
-fn add_equipment_auto_renames_on_collision() {
-    let mut dwelling = build_dwelling("auto_rename");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8002)));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8003)));
-
-    let names: Vec<&str> = dwelling
-        .equipment()
-        .iter()
-        .map(|e| e.descriptor().name.as_str())
-        .collect();
-    assert_eq!(names, vec!["PV", "PV #2", "PV #3"]);
-    assert_eq!(dwelling.equipment().len(), 3);
+fn add_equipment_rejects_duplicate_names() {
+    let mut dwelling = build_dwelling("reject_dupes");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)))
+        .expect("first add_equipment must succeed");
+    let result =
+        dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8002)));
+    assert!(
+        result.is_err(),
+        "add_equipment with duplicate name 'PV' must return Err"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("duplicate equipment name"),
+        "error message must mention duplicate name, got: {err_msg}"
+    );
 }
 
 #[test]
 fn add_equipment_accepts_unique_names() {
     let mut dwelling = build_dwelling("unique_names");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "PV #1",
-        EndUse::PV,
-        0x8001,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "PV #2",
-        EndUse::PV,
-        0x8002,
-    )));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "PV #1",
+            EndUse::PV,
+            0x8001,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "PV #2",
+            EndUse::PV,
+            0x8002,
+        )))
+        .expect("add_equipment must succeed");
     assert_eq!(dwelling.equipment().len(), 2);
 }
 
 #[test]
 fn add_equipment_unique_different_types_ok() {
     let mut dwelling = build_dwelling("diff_types");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "Battery",
-        EndUse::BATTERY,
-        0x8002,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("EV", EndUse::EV, 0x8003)));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "Battery",
+            EndUse::BATTERY,
+            0x8002,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new("EV", EndUse::EV, 0x8003)))
+        .expect("add_equipment must succeed");
     assert_eq!(dwelling.equipment().len(), 3);
 }
 
 #[test]
 fn by_end_use_fans_out_to_all_matching_instances() {
     let mut dwelling = build_dwelling("fan_out");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "Battery #1",
-        EndUse::BATTERY,
-        0x8001,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "Battery #2",
-        EndUse::BATTERY,
-        0x8002,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "PV #1",
-        EndUse::PV,
-        0x8003,
-    )));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "Battery #1",
+            EndUse::BATTERY,
+            0x8001,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "Battery #2",
+            EndUse::BATTERY,
+            0x8002,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "PV #1",
+            EndUse::PV,
+            0x8003,
+        )))
+        .expect("add_equipment must succeed");
 
     dwelling.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByEndUse(EndUse::BATTERY),
@@ -289,16 +308,20 @@ fn by_end_use_fans_out_to_all_matching_instances() {
 #[test]
 fn by_name_targets_single_instance_only() {
     let mut dwelling = build_dwelling("by_name_one");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "Battery #1",
-        EndUse::BATTERY,
-        0x8001,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "Battery #2",
-        EndUse::BATTERY,
-        0x8002,
-    )));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "Battery #1",
+            EndUse::BATTERY,
+            0x8001,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "Battery #2",
+            EndUse::BATTERY,
+            0x8002,
+        )))
+        .expect("add_equipment must succeed");
 
     dwelling.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByName(Arc::from("Battery #2")),
@@ -322,16 +345,20 @@ fn by_name_targets_single_instance_only() {
 #[test]
 fn ambiguous_by_name_warns_and_delivers_nothing() {
     let mut dwelling = build_dwelling("ambiguous_by_name");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "PV #1",
-        EndUse::PV,
-        0x8001,
-    )));
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new(
-        "PV #2",
-        EndUse::PV,
-        0x8002,
-    )));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "PV #1",
+            EndUse::PV,
+            0x8001,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new(
+            "PV #2",
+            EndUse::PV,
+            0x8002,
+        )))
+        .expect("add_equipment must succeed");
 
     dwelling.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByName(Arc::from("PV")),
@@ -364,7 +391,9 @@ fn ambiguous_by_name_warns_and_delivers_nothing() {
 #[test]
 fn single_instance_by_name_still_matches_bare_name() {
     let mut dwelling = build_dwelling("single_bare");
-    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)));
+    dwelling
+        .add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)))
+        .expect("add_equipment must succeed");
 
     dwelling.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByName(Arc::from("PV")),

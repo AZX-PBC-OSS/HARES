@@ -81,7 +81,9 @@ fn build_dwelling_with_base_load(tag: &str) -> (PathBuf, Dwelling) {
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
     eq.init(&config, &env).expect("init ScheduledLoad");
-    dwelling.add_equipment(Box::new(eq));
+    dwelling
+        .add_equipment(Box::new(eq))
+        .expect("add_equipment must succeed");
 
     (toml_path, dwelling)
 }
@@ -122,7 +124,9 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
-    dwelling_b.add_equipment(Box::new(eq_b));
+    dwelling_b
+        .add_equipment(Box::new(eq_b))
+        .expect("add_equipment must succeed");
 
     dwelling_b
         .load_checkpoint(checkpoint.clone())
@@ -164,7 +168,9 @@ fn equipment_core_populated_after_checkpoint_restore() {
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
-    dwelling_b.add_equipment(Box::new(eq_b));
+    dwelling_b
+        .add_equipment(Box::new(eq_b))
+        .expect("add_equipment must succeed");
 
     dwelling_b
         .load_checkpoint(checkpoint.clone())
@@ -224,7 +230,9 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     let config2 = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2);
     let mut eq2 = ScheduledLoad::new(config2.clone(), EndUse::PLUG_LOADS, "Plug");
     eq2.init(&config2, &env_a).expect("init Plug");
-    dwelling_a.add_equipment(Box::new(eq2));
+    dwelling_a
+        .add_equipment(Box::new(eq2))
+        .expect("add_equipment must succeed");
 
     for _ in 0..3 {
         dwelling_a.step().expect("step in dwelling A");
@@ -253,7 +261,9 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init Lighting");
-    dwelling_b.add_equipment(Box::new(eq_b));
+    dwelling_b
+        .add_equipment(Box::new(eq_b))
+        .expect("add_equipment must succeed");
 
     let mut raw2_b: HashMap<String, ConfigValue> = HashMap::new();
     raw2_b.insert("power_schedule_source".to_string(), "constant".into());
@@ -262,7 +272,9 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     let config2_b = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2_b);
     let mut eq2_b = ScheduledLoad::new(config2_b.clone(), EndUse::PLUG_LOADS, "Plug");
     eq2_b.init(&config2_b, &env_b).expect("init Plug");
-    dwelling_b.add_equipment(Box::new(eq2_b));
+    dwelling_b
+        .add_equipment(Box::new(eq2_b))
+        .expect("add_equipment must succeed");
 
     dwelling_b
         .load_checkpoint(checkpoint)
@@ -307,7 +319,9 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
-    dwelling_b.add_equipment(Box::new(eq_b));
+    dwelling_b
+        .add_equipment(Box::new(eq_b))
+        .expect("add_equipment must succeed");
 
     dwelling_b
         .load_checkpoint(checkpoint.clone())
@@ -380,7 +394,9 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
     .unwrap();
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &env).expect("init EV");
-    dwelling.add_equipment(Box::new(ev));
+    dwelling
+        .add_equipment(Box::new(ev))
+        .expect("add_equipment must succeed");
 }
 
 /// Verifies that after `load_checkpoint`, EV equipment_core entries contain
@@ -429,7 +445,9 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
-    dwelling_b.add_equipment(Box::new(eq_b));
+    dwelling_b
+        .add_equipment(Box::new(eq_b))
+        .expect("add_equipment must succeed");
 
     // Re-add EV (same order as dwelling A).
     add_ev_to_dwelling(&mut dwelling_b);

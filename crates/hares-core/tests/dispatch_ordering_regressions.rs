@@ -305,7 +305,9 @@ fn actor_curtailment_applies_same_step_to_nonthermal_equipment() {
     let stub_name = "pv_stub_same_step";
     let base_kw = 5.0;
     let mut dwelling = build_dwelling("blocker1");
-    dwelling.add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)));
+    dwelling
+        .add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)))
+        .expect("add_equipment must succeed");
 
     // Actor fires on step 0 (first simulated step). With the fix the stub's
     // step() sees the curtailment in the same timestep the actor emitted it.
@@ -363,7 +365,9 @@ fn equipment_core_reflects_current_step_after_dispatch() {
     let stub_name = "pv_stub_env_core";
     let base_kw = 4.0;
     let mut dwelling = build_dwelling("blocker2");
-    dwelling.add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)));
+    dwelling
+        .add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)))
+        .expect("add_equipment must succeed");
 
     // Step once at baseline.
     dwelling.step().expect("step1 ok");
@@ -419,7 +423,9 @@ fn equipment_telemetry_populated_for_every_equipment_after_step() {
     let stub_name = "pv_stub_telemetry";
     let base_kw = 3.0;
     let mut dwelling = build_dwelling("blocker3");
-    dwelling.add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)));
+    dwelling
+        .add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)))
+        .expect("add_equipment must succeed");
 
     assert!(
         dwelling.latest_env().equipment_telemetry.is_empty(),
@@ -462,7 +468,9 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
     // Scenario A: Safety queued externally (pre-dispatch), Schedule emitted
     // by actor (post-decide). Safety must win -> full curtailment observed.
     let mut dwelling_a = build_dwelling("blocker4a");
-    dwelling_a.add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)));
+    dwelling_a
+        .add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)))
+        .expect("add_equipment must succeed");
     dwelling_a.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByName(Arc::from(stub_name)),
         signal: ControlSignal::CurtailmentPercent { percent: 100.0 },
@@ -487,7 +495,9 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
     // Scenario B: Schedule queued externally, Safety emitted by actor.
     // Safety must still win -> full curtailment.
     let mut dwelling_b = build_dwelling("blocker4b");
-    dwelling_b.add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)));
+    dwelling_b
+        .add_equipment(Box::new(StubPowerEquipment::new(stub_name, base_kw)))
+        .expect("add_equipment must succeed");
     dwelling_b.queue_dispatch(DispatchRequest {
         target: DispatchTarget::ByName(Arc::from(stub_name)),
         signal: ControlSignal::CurtailmentPercent { percent: 0.0 },

@@ -3132,31 +3132,20 @@ impl Dwelling {
     /// hot-loop efficiency. This method maintains those caches when adding
     /// equipment after construction.
     ///
-    /// If an equipment with the same name already exists, the incoming
-    /// equipment is automatically renamed using the `"Name #N"` convention
-    /// (e.g. a second `"PV"` becomes `"PV #2"`).
-    pub fn add_equipment(&mut self, mut eq: Box<dyn Equipment>) {
+    /// Duplicate equipment names are rejected with an error — the caller
+    /// must provide unique names. This matches the construction-time check
+    /// that enforces name uniqueness during dwelling build.
+    pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) -> Result<()> {
         let name = eq.descriptor().name.clone();
         if self.equipment.iter().any(|e| e.descriptor().name == name) {
-            let count = self
-                .equipment
-                .iter()
-                .filter(|e| {
-                    let n = e.descriptor().name.as_str();
-                    n == name.as_str() || n.starts_with(&format!("{name} #"))
-                })
-                .count()
-                + 1;
-            let new_name = format!("{name} #{count}");
-            tracing::warn!(
-                incoming = %name,
-                renamed = %new_name,
-                "add_equipment: renaming duplicate equipment to avoid collision"
-            );
-            eq.rename(new_name);
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment name '{}' is not allowed",
+                name
+            )));
         }
         self.equipment.push(eq);
         self.refresh_equipment_caches();
+        Ok(())
     }
 
     /// Removes all equipment and refreshes internal caches.

@@ -304,7 +304,9 @@ mod tests {
                 .init(&ideal_config, dwelling.latest_env())
                 .expect("init Ideal HVAC");
 
-            dwelling.add_equipment(ideal_hvac);
+            dwelling
+                .add_equipment(ideal_hvac)
+                .expect("add_equipment must succeed");
 
             eprintln!(
                 "[{mode_name}] Equipment after IdealHvac injection: {:?}",

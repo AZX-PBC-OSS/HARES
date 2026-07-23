@@ -995,7 +995,7 @@ impl PyDwelling {
             eq.set_u_neg_table(table.clone()).map_err(to_py_err)?;
         }
 
-        dwelling.add_equipment(eq);
+        dwelling.add_equipment(eq).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1041,7 +1041,7 @@ impl PyDwelling {
         }
         eq.init(&config, &init_env).map_err(to_py_err)?;
 
-        dwelling.add_equipment(eq);
+        dwelling.add_equipment(eq).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1063,7 +1063,7 @@ impl PyDwelling {
                 .map_err(to_py_err)?;
         }
 
-        dwelling.add_equipment(eq);
+        dwelling.add_equipment(eq).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1138,7 +1138,7 @@ impl PyDwelling {
 
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
-        dwelling.add_equipment(eq);
+        dwelling.add_equipment(eq).map_err(to_py_err)?;
 
         let fuel_economy = spec.capacity_kwh / spec.range_miles;
         let seed_bytes = {
@@ -1180,7 +1180,7 @@ impl PyDwelling {
             .map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
-        dwelling.add_equipment(eq);
+        dwelling.add_equipment(eq).map_err(to_py_err)?;
         Ok(())
     }
 

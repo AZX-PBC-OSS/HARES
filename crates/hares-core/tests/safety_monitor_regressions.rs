@@ -221,7 +221,9 @@ fn safety_tier_heating_overrides_grid_tier_off_during_freeze() {
     let target = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
 
     let mut dwelling = build_dwelling("safety-beats-grid");
-    dwelling.add_equipment(Box::new(ModeTrackingEquipment::new(equip_name)));
+    dwelling
+        .add_equipment(Box::new(ModeTrackingEquipment::new(equip_name)))
+        .expect("add_equipment must succeed");
 
     // Register GridOffActor that emits Grid-tier Off every step.
     let grid_actor = GridOffActor::new("grid_off", target.clone());
@@ -265,7 +267,9 @@ fn safety_tier_heating_vs_grid_off_both_target_by_name() {
     let target_name = DispatchTarget::ByName(Arc::from(equip_name));
 
     let mut dwelling = build_dwelling("safety-vs-grid-named");
-    dwelling.add_equipment(Box::new(ModeTrackingEquipment::new(equip_name)));
+    dwelling
+        .add_equipment(Box::new(ModeTrackingEquipment::new(equip_name)))
+        .expect("add_equipment must succeed");
 
     let grid_actor = GridOffActor::new("grid_off_named", target_name.clone());
     dwelling.add_actor(Box::new(grid_actor));

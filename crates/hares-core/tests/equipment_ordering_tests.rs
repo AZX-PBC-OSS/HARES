@@ -376,24 +376,30 @@ fn equipment_step_order_respects_stage_rank_in_live_dwelling() {
     let log: StepOrderLog = Arc::new(Mutex::new(Vec::new()));
 
     let mut dwelling = build_dwelling("step-order-1");
-    dwelling.add_equipment(Box::new(StepOrderSpy::new(
-        "PV",
-        ExecutionStage::Independent,
-        Arc::clone(&log),
-        EndUse::PV,
-    )));
-    dwelling.add_equipment(Box::new(StepOrderSpy::new(
-        "Battery",
-        ExecutionStage::Electrical,
-        Arc::clone(&log),
-        EndUse::BATTERY,
-    )));
-    dwelling.add_equipment(Box::new(StepOrderSpy::new(
-        "Furnace",
-        ExecutionStage::Thermal,
-        Arc::clone(&log),
-        EndUse::HVAC_HEATING,
-    )));
+    dwelling
+        .add_equipment(Box::new(StepOrderSpy::new(
+            "PV",
+            ExecutionStage::Independent,
+            Arc::clone(&log),
+            EndUse::PV,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(StepOrderSpy::new(
+            "Battery",
+            ExecutionStage::Electrical,
+            Arc::clone(&log),
+            EndUse::BATTERY,
+        )))
+        .expect("add_equipment must succeed");
+    dwelling
+        .add_equipment(Box::new(StepOrderSpy::new(
+            "Furnace",
+            ExecutionStage::Thermal,
+            Arc::clone(&log),
+            EndUse::HVAC_HEATING,
+        )))
+        .expect("add_equipment must succeed");
 
     // Step twice to exercise the ordering loop (first step may have init
     // behaviour; second step confirms stable ordering).
@@ -448,19 +454,22 @@ fn pv_generation_visible_to_thermal_in_same_step() {
             ExecutionStage::Independent,
             Arc::clone(&log),
             EndUse::PV,
-        )));
+        )))
+        .expect("add_equipment must succeed");
         d.add_equipment(Box::new(StepOrderSpy::new(
             "Battery",
             ExecutionStage::Electrical,
             Arc::clone(&log),
             EndUse::BATTERY,
-        )));
+        )))
+        .expect("add_equipment must succeed");
         d.add_equipment(Box::new(StepOrderSpy::new(
             "Furnace",
             ExecutionStage::Thermal,
             Arc::clone(&log),
             EndUse::HVAC_HEATING,
-        )));
+        )))
+        .expect("add_equipment must succeed");
 
         (d, log)
     };

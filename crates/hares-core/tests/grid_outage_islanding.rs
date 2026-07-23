@@ -91,7 +91,9 @@ fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
     eq.init(&config, &env).expect("init ScheduledLoad");
-    dwelling.add_equipment(Box::new(eq));
+    dwelling
+        .add_equipment(Box::new(eq))
+        .expect("add_equipment must succeed");
     dwelling
 }
 
@@ -147,7 +149,9 @@ fn add_battery_with_discharge_limit(
     let env = dwelling.latest_env().clone();
     let mut bat = Battery::new(config.clone());
     bat.init(&config, &env).expect("init Battery");
-    dwelling.add_equipment(Box::new(bat));
+    dwelling
+        .add_equipment(Box::new(bat))
+        .expect("add_equipment must succeed");
 }
 
 /// Utility outage without any backup source: the bus is dead and the

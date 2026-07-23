@@ -79,6 +79,36 @@ class TestAddEquipment:
         tel = dw.telemetry().equipment()
         assert "TestEV" in tel["names"], "EV should appear in equipment telemetry"
 
+    def test_add_battery_rejects_duplicate_name(self):
+        from ochre_next import Battery
+
+        dw = _make_dwelling()
+        bat1 = Battery("TestBat", 10.0)
+        dw.add_battery(bat1)
+        bat2 = Battery("TestBat", 12.0)
+        with pytest.raises(ValueError, match="duplicate equipment name"):
+            dw.add_battery(bat2)
+
+    def test_add_pv_rejects_duplicate_name(self):
+        from ochre_next import PV
+
+        dw = _make_dwelling()
+        pv1 = PV("TestPV", 5.0, 30.0, 180.0)
+        dw.add_pv(pv1)
+        pv2 = PV("TestPV", 3.0, 20.0, 200.0)
+        with pytest.raises(ValueError, match="duplicate equipment name"):
+            dw.add_pv(pv2)
+
+    def test_add_ev_rejects_duplicate_name(self):
+        from ochre_next import EV
+
+        dw = _make_dwelling()
+        ev1 = EV("TestEV", capacity_kwh=75.0)
+        dw.add_ev(ev1)
+        ev2 = EV("TestEV", capacity_kwh=60.0)
+        with pytest.raises(ValueError, match="duplicate equipment name"):
+            dw.add_ev(ev2)
+
     def test_add_protocol_bridge_appears_in_equipment_names(self):
         from ochre_next import ProtocolBridge
 
