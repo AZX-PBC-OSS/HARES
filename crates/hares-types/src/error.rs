@@ -31,6 +31,8 @@ pub enum HaresError {
     Simulation(String),
     #[error("tariff error: {0}")]
     Tariff(String),
+    #[error("invalid state: {0}")]
+    InvalidState(String),
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,
@@ -104,6 +106,7 @@ mod tests {
                 value: -500.0,
                 step_index: 10,
             },
+            HaresError::InvalidState("equipment already initialized".to_string()),
         ];
         for err in errors {
             let json = serde_json::to_string(&err).expect("serialize error");

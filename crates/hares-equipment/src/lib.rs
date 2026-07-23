@@ -329,6 +329,35 @@ pub trait Equipment: Send + Sync {
     }
 
     // -----------------------------------------------------------------
+    // Initialization lifecycle guard
+    // -----------------------------------------------------------------
+
+    /// Whether this equipment has been fully registered via
+    /// [`Dwelling::add_equipment`] and is now running — LUT setters
+    /// reject calls when this returns `true`.
+    fn is_initialized(&self) -> bool {
+        false
+    }
+
+    /// Called by [`Dwelling::add_equipment`] after successful registration.
+    /// Equipment that supports LUT injection must override this to gate
+    /// further mutation.
+    fn mark_initialized(&mut self) {}
+
+    /// Temporarily clears the initialized guard for [`Dwelling`]'s own
+    /// reconfiguration methods (`set_battery_lut`, `clear_battery_lut`,
+    /// `set_ev_charging_curve_lut`, `clear_ev_charging_curve_lut`).
+    /// The guard exists to block unmediated mutation via a raw
+    /// `dyn Equipment` reference held outside `Dwelling`'s control;
+    /// **authorized** reconfiguration through `Dwelling`'s own methods
+    /// calls this first, performs the LUT mutation while the gate is
+    /// down, then calls [`mark_initialized`] to restore it.
+    ///
+    /// Equipment that supports LUT injection must override this to
+    /// clear the flag.
+    fn unmark_initialized(&mut self) {}
+
+    // -----------------------------------------------------------------
     // LUT injection (overridden by Battery and EV)
     // -----------------------------------------------------------------
 
@@ -337,6 +366,12 @@ pub trait Equipment: Send + Sync {
         &mut self,
         _lut: Option<ndinterp::RegularGridInterpolator>,
     ) -> Result<()> {
+        if self.is_initialized() {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set charging curve LUT",
+                self.descriptor().name
+            )));
+        }
         Err(HaresError::Equipment(format!(
             "equipment '{}' does not support charging curve LUT",
             self.descriptor().name
@@ -345,6 +380,12 @@ pub trait Equipment: Send + Sync {
 
     /// Replace the OCV table with a custom one (e.g. LFP, NCA chemistry).
     fn set_ocv_table(&mut self, _table: battery::OcvTable) -> Result<()> {
+        if self.is_initialized() {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set OCV table",
+                self.descriptor().name
+            )));
+        }
         Err(HaresError::Equipment(format!(
             "equipment '{}' does not support OCV table",
             self.descriptor().name
@@ -353,6 +394,12 @@ pub trait Equipment: Send + Sync {
 
     /// Replace the negative electrode potential table.
     fn set_u_neg_table(&mut self, _table: battery::UNegTable) -> Result<()> {
+        if self.is_initialized() {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set UNeg table",
+                self.descriptor().name
+            )));
+        }
         Err(HaresError::Equipment(format!(
             "equipment '{}' does not support UNeg table",
             self.descriptor().name
@@ -445,6 +492,7 @@ mod tests {
         mode: OperatingMode,
         state_value: f64,
         core_output: CoreOutput,
+        initialized: bool,
     }
 
     impl MockEquipment {
@@ -472,6 +520,7 @@ mod tests {
                 mode: OperatingMode::Off,
                 state_value: 0.0,
                 core_output: CoreOutput::default(),
+                initialized: false,
             }
         }
     }
@@ -557,6 +606,18 @@ mod tests {
                 self.telemetry.insert("x", self.state_value);
             }
             Ok(())
+        }
+
+        fn is_initialized(&self) -> bool {
+            self.initialized
+        }
+
+        fn mark_initialized(&mut self) {
+            self.initialized = true;
+        }
+
+        fn unmark_initialized(&mut self) {
+            self.initialized = false;
         }
     }
 
@@ -754,6 +815,26 @@ mod tests {
     fn default_ocv_source_returns_none() {
         let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         assert!(eq.ocv_source().is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Initialized guard trait-level tests (T-0534)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn default_lut_setters_reject_after_mark_initialized() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        eq.mark_initialized();
+        assert!(eq.is_initialized());
+        let table = crate::battery::ocv::OcvTable::default_li_nmc();
+        let err = eq.set_ocv_table(table).unwrap_err();
+        assert!(err.to_string().contains("already initialized"));
+    }
+
+    #[test]
+    fn default_is_initialized_returns_false() {
+        let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert!(!eq.is_initialized());
     }
 
     #[test]

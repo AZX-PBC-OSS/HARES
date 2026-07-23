@@ -3040,10 +3040,23 @@ impl Dwelling {
 
         match (lut_type, lut) {
             (BatteryLutType::ChargingCurve, BatteryLutData::ChargingCurve(interp)) => {
-                eq.set_charging_curve_lut(Some(*interp))
+                eq.unmark_initialized();
+                let result = eq.set_charging_curve_lut(Some(*interp));
+                eq.mark_initialized();
+                result
             }
-            (BatteryLutType::Ocv, BatteryLutData::Ocv(table)) => eq.set_ocv_table(table),
-            (BatteryLutType::UNeg, BatteryLutData::UNeg(table)) => eq.set_u_neg_table(table),
+            (BatteryLutType::Ocv, BatteryLutData::Ocv(table)) => {
+                eq.unmark_initialized();
+                let result = eq.set_ocv_table(table);
+                eq.mark_initialized();
+                result
+            }
+            (BatteryLutType::UNeg, BatteryLutData::UNeg(table)) => {
+                eq.unmark_initialized();
+                let result = eq.set_u_neg_table(table);
+                eq.mark_initialized();
+                result
+            }
             _ => Err(HaresError::Equipment(format!(
                 "mismatched lut_type and data for equipment '{}'",
                 name
@@ -3060,7 +3073,12 @@ impl Dwelling {
             .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
 
         match lut_type {
-            BatteryLutType::ChargingCurve => eq.set_charging_curve_lut(None),
+            BatteryLutType::ChargingCurve => {
+                eq.unmark_initialized();
+                let result = eq.set_charging_curve_lut(None);
+                eq.mark_initialized();
+                result
+            }
             BatteryLutType::Ocv => eq.reset_ocv_table(),
             BatteryLutType::UNeg => eq.reset_u_neg_table(),
         }
@@ -3078,7 +3096,10 @@ impl Dwelling {
             .find(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
 
-        eq.set_charging_curve_lut(Some(lut))
+        eq.unmark_initialized();
+        let result = eq.set_charging_curve_lut(Some(lut));
+        eq.mark_initialized();
+        result
     }
 
     /// Clear the charging curve LUT on an EV equipment by name.
@@ -3089,7 +3110,10 @@ impl Dwelling {
             .find(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
 
-        eq.set_charging_curve_lut(None)
+        eq.unmark_initialized();
+        let result = eq.set_charging_curve_lut(None);
+        eq.mark_initialized();
+        result
     }
 
     /// Returns the current environment state (zone temps, weather, grid, time).
@@ -3135,7 +3159,7 @@ impl Dwelling {
     /// Duplicate equipment names are rejected with an error — the caller
     /// must provide unique names. This matches the construction-time check
     /// that enforces name uniqueness during dwelling build.
-    pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) -> Result<()> {
+    pub fn add_equipment(&mut self, mut eq: Box<dyn Equipment>) -> Result<()> {
         let name = eq.descriptor().name.clone();
         if self.equipment.iter().any(|e| e.descriptor().name == name) {
             return Err(HaresError::Equipment(format!(
@@ -3143,6 +3167,9 @@ impl Dwelling {
                 name
             )));
         }
+        // Mark the equipment as initialized so post-registration LUT mutation
+        // via the Equipment trait setters is rejected (T-0534).
+        eq.mark_initialized();
         self.equipment.push(eq);
         self.refresh_equipment_caches();
         Ok(())
@@ -7250,6 +7277,7 @@ mod tests {
         last_soc_target: f64,
         last_dr_level: Option<DRLevel>,
         core_output: CoreOutput,
+        initialized: bool,
     }
 
     impl TestEquipment {
@@ -7289,6 +7317,7 @@ mod tests {
                 last_soc_target: 0.0,
                 last_dr_level: None,
                 core_output: CoreOutput::default(),
+                initialized: false,
             }
         }
     }
@@ -7372,6 +7401,18 @@ mod tests {
                 _ => {}
             }
             Ok(())
+        }
+
+        fn is_initialized(&self) -> bool {
+            self.initialized
+        }
+
+        fn mark_initialized(&mut self) {
+            self.initialized = true;
+        }
+
+        fn unmark_initialized(&mut self) {
+            self.initialized = false;
         }
     }
 
@@ -13965,6 +14006,78 @@ master_seed = 42
         assert!(
             reactive_col.metadata().get("unit_source").is_none(),
             "reactive power column should not get unit_source when equipment declares no kVAR field"
+        );
+    }
+
+    #[test]
+    fn add_equipment_rejects_direct_lut_mutation_via_trait_reference() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-test-lut-guard-{nanos}.toml"));
+            path
+        };
+        fs::write(
+            &toml_path,
+            r#"building_id = 999
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+[materials]
+wall_r_value_m2_k_w = 2.8
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+[schedule]
+occupancy = 1.0
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = fs::remove_file(&toml_path);
+
+        let eq = Box::new(TestEquipment::new(
+            "GuardTest",
+            ControlCapabilities::empty(),
+        ));
+        dwelling
+            .add_equipment(eq)
+            .expect("add_equipment should succeed");
+
+        let eq_ref = dwelling
+            .equipment
+            .iter_mut()
+            .find(|e| e.descriptor().name == "GuardTest")
+            .expect("equipment should be in dwelling after add_equipment");
+
+        let err = eq_ref
+            .set_ocv_table(OcvTable::default_li_nmc())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "rejection must be an initialization guard error, got: {:?}",
+            err
         );
     }
 }

@@ -179,6 +179,10 @@ pub struct Ev {
     /// port, CoreOutput, and telemetry. Positive = absorbing, negative =
     /// supplying.
     reactive_power_kvar: f64,
+
+    /// Guards against post-registration LUT mutation via the `Equipment` trait
+    /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
+    initialized: bool,
 }
 
 impl Ev {
@@ -335,6 +339,7 @@ impl Ev {
                     .max(config.get_f64(KEY_V2L_MAX_DISCHARGE_KW).unwrap_or(0.0))
             }),
             reactive_power_kvar: 0.0,
+            initialized: false,
             degradation: crate::battery::degradation::DegradationState::default(),
             rainflow: crate::battery::degradation::RainflowCounter::default(),
             ocv_table: OcvTable::for_chemistry(chemistry),
@@ -1646,10 +1651,28 @@ impl Equipment for Ev {
         Ok(())
     }
 
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    fn mark_initialized(&mut self) {
+        self.initialized = true;
+    }
+
+    fn unmark_initialized(&mut self) {
+        self.initialized = false;
+    }
+
     fn set_charging_curve_lut(
         &mut self,
         lut: Option<crate::ndinterp::RegularGridInterpolator>,
     ) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set charging curve LUT",
+                self.descriptor().name
+            )));
+        }
         self.charging_curve_lut = lut;
         Ok(())
     }
@@ -1659,12 +1682,24 @@ impl Equipment for Ev {
     }
 
     fn set_ocv_table(&mut self, table: OcvTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set OCV table",
+                self.descriptor().name
+            )));
+        }
         self.ocv_table = table;
         self.custom_ocv = true;
         Ok(())
     }
 
     fn set_u_neg_table(&mut self, table: UNegTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set UNeg table",
+                self.descriptor().name
+            )));
+        }
         self.u_neg_table = table;
         self.custom_u_neg = true;
         Ok(())

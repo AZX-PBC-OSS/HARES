@@ -411,6 +411,10 @@ pub struct Battery {
     /// `island_source_available` even when charged and dischargeable.
     grid_forming: bool,
 
+    /// Guards against post-registration LUT mutation via the `Equipment` trait
+    /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
+    initialized: bool,
+
     /// Count of SOCTarget signals that violated SOC ordering constraints
     /// (min_soc < target_soc < max_soc) and were auto-corrected.
     /// Gated on `observe` feature for diagnostic CSV output.
@@ -517,6 +521,7 @@ impl Battery {
             grid_export_rule: GridExportRule::Unrestricted,
             min_dwell_steps: 0,
             grid_forming: true,
+            initialized: false,
             #[cfg(feature = "observe")]
             setpoint_violation_count: 0,
         }
@@ -1917,21 +1922,51 @@ impl Equipment for Battery {
         Ok(())
     }
 
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    fn mark_initialized(&mut self) {
+        self.initialized = true;
+    }
+
+    fn unmark_initialized(&mut self) {
+        self.initialized = false;
+    }
+
     fn set_charging_curve_lut(
         &mut self,
         lut: Option<crate::ndinterp::RegularGridInterpolator>,
     ) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set charging curve LUT",
+                self.descriptor().name
+            )));
+        }
         self.charging_curve_lut = lut;
         Ok(())
     }
 
     fn set_ocv_table(&mut self, table: OcvTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set OCV table",
+                self.descriptor().name
+            )));
+        }
         self.ocv_table = table;
         self.custom_ocv = true;
         Ok(())
     }
 
     fn set_u_neg_table(&mut self, table: UNegTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set UNeg table",
+                self.descriptor().name
+            )));
+        }
         self.u_neg_table = table;
         self.custom_u_neg = true;
         Ok(())
@@ -4827,6 +4862,91 @@ mod tests {
             (p - 1.1054).abs() < 1e-3,
             "should be default NMC U_neg at SOC=0"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Initialized guard: post-registration LUT rejection (T-0534)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn set_ocv_table_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        // Before initialization, LUT setters succeed.
+        bat.set_ocv_table(table.clone()).unwrap();
+        // Mark as initialized (as Dwelling::add_equipment would).
+        bat.mark_initialized();
+        // After initialization, LUT setters must reject.
+        let err = bat.set_ocv_table(table).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn set_charging_curve_lut_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut.clone())).unwrap();
+        bat.mark_initialized();
+        let err = bat.set_charging_curve_lut(Some(lut)).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn set_u_neg_table_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        bat.set_u_neg_table(table.clone()).unwrap();
+        bat.mark_initialized();
+        let err = bat.set_u_neg_table(table).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lut_setters_succeed_before_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        assert!(
+            bat.set_ocv_table(table).is_ok(),
+            "LUT setter should succeed before initialization"
+        );
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        assert!(
+            bat.set_charging_curve_lut(Some(lut)).is_ok(),
+            "charging curve setter should succeed before initialization"
+        );
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        assert!(
+            bat.set_u_neg_table(table).is_ok(),
+            "u_neg setter should succeed before initialization"
+        );
+    }
+
+    #[test]
+    fn is_initialized_defaults_false() {
+        let config = battery_config(&[]);
+        let bat = Battery::new(config);
+        assert!(!bat.is_initialized());
+    }
+
+    #[test]
+    fn mark_initialized_sets_flag() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.mark_initialized();
+        assert!(bat.is_initialized());
     }
 
     #[test]
