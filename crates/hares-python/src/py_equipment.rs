@@ -48,12 +48,20 @@ pub fn extract_charging_lut(
         .ok_or_else(|| PyValueError::new_err("charging_curve_lut dict missing 'lut' key"))?;
     let values = extract_flat_f32(py, &lut_arr)?;
 
-    RegularGridInterpolator::new(
+    let interp = RegularGridInterpolator::new(
         vec![soc, temp, crate_ax, soh],
         values,
         ExtrapolationStrategy::Clamp,
     )
-    .map_err(|e| PyValueError::new_err(e.to_string()))
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if interp.ndim() != 4 {
+        return Err(PyValueError::new_err(format!(
+            "charging_curve_lut must have exactly 4 dimensions (SOC × temp × c_rate × SOH), got {}",
+            interp.ndim()
+        )));
+    }
+    Ok(interp)
 }
 
 fn extract_f64_axis(_py: Python<'_>, dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<f64>> {
@@ -96,12 +104,20 @@ fn load_npz_lut(py: Python<'_>, path: &str) -> PyResult<RegularGridInterpolator>
         .extract()?;
     let values = extract_flat_f32(py, &data.get_item("lut")?)?;
 
-    RegularGridInterpolator::new(
+    let interp = RegularGridInterpolator::new(
         vec![soc, temp, crate_ax, soh],
         values,
         ExtrapolationStrategy::Clamp,
     )
-    .map_err(|e| PyValueError::new_err(e.to_string()))
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if interp.ndim() != 4 {
+        return Err(PyValueError::new_err(format!(
+            "charging_curve_lut must have exactly 4 dimensions (SOC × temp × c_rate × SOH), got {}",
+            interp.ndim()
+        )));
+    }
+    Ok(interp)
 }
 
 #[pyclass(name = "Battery")]

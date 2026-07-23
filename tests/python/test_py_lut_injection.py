@@ -265,16 +265,36 @@ class TestValidation:
                 ocv_table=[(0.5, 3.6), (0.3, 3.4), (1.0, 4.2)],
             )
 
+    def test_invalid_charging_lut_empty_axis_raises(self):
+        lut = {
+            "soc_grid": np.array([]),  # empty axis
+            "temp_grid": np.array([25.0]),
+            "crate_grid": np.array([1.0]),
+            "soh_grid": np.array([1.0]),
+            "lut": np.array([], dtype=np.float32),
+        }
+        with pytest.raises(Exception, match="empty"):
+            Battery("TestBat", 10.0, charging_curve_lut=lut)
+
     def test_invalid_charging_lut_shape_mismatch_raises(self):
+        """LUT values with incorrect length must raise an error."""
         lut = {
             "soc_grid": np.array([0.0, 0.5, 1.0]),
             "temp_grid": np.array([25.0]),
             "crate_grid": np.array([1.0]),
             "soh_grid": np.array([1.0]),
-            "lut": np.array([1.0, 0.5], dtype=np.float32),  # wrong length
+            "lut": np.array([1.0, 0.5], dtype=np.float32),
         }
         with pytest.raises(Exception, match="length"):
             Battery("TestBat", 10.0, charging_curve_lut=lut)
+
+    def test_charging_lut_dimension_check_passes_for_valid_4d(self):
+        """Valid 4D LUT must be accepted (ndim check must pass)."""
+        lut = _simple_charging_lut()
+        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        dw = _make_dwelling()
+        dw.add_battery(bat)
+        assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
 
 
 # ---------------------------------------------------------------------------

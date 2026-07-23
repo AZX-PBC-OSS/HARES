@@ -268,8 +268,9 @@ impl RegularGridInterpolator {
     /// to accelerate temporally-coherent queries, falling back to binary
     /// search when the target has moved more than `HUNT_THRESHOLD` steps.
     ///
-    /// # Panics
-    /// Panics if `point.len() != self.ndim()`.
+    /// # Errors
+    /// Returns `HaresError::Equipment` if `point.len() != self.ndim()`.
+    ///
     /// In debug/check_invariants builds, panics if any coordinate is non-finite
     /// (NaN or ±Inf).
     /// In debug/check_invariants builds, panics if strategy is `NaN` and any
@@ -280,14 +281,14 @@ impl RegularGridInterpolator {
     /// sentinel when any coordinate is non-finite, or when strategy is `NaN`
     /// and any coordinate is out of bounds. Callers should treat NaN results
     /// as an error signal.
-    pub fn interpolate(&mut self, point: &[f64]) -> f32 {
-        assert_eq!(
-            point.len(),
-            self.axes.len(),
-            "interpolate: expected {} coordinates, got {}",
-            self.axes.len(),
-            point.len()
-        );
+    pub fn interpolate(&mut self, point: &[f64]) -> crate::Result<f32> {
+        if point.len() != self.ndim() {
+            return Err(HaresError::Equipment(format!(
+                "RegularGridInterpolator: expected {} dimensions, got {}",
+                self.ndim(),
+                point.len()
+            )));
+        }
 
         // Guard against non-finite query coordinates. In debug/invariant builds
         // the assertion fires first with a descriptive message; in optimized
@@ -301,7 +302,7 @@ impl RegularGridInterpolator {
         );
 
         if !all_finite {
-            return f32::NAN;
+            return Ok(f32::NAN);
         }
 
         let ndim = self.axes.len();
@@ -338,7 +339,7 @@ impl RegularGridInterpolator {
                     }
                     #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
                     {
-                        return f32::NAN;
+                        return Ok(f32::NAN);
                     }
                 }
             }
@@ -420,7 +421,7 @@ impl RegularGridInterpolator {
             result += weight * self.values[flat_idx] as f64;
         }
 
-        result as f32
+        Ok(result as f32)
     }
 }
 
@@ -516,9 +517,9 @@ mod tests {
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        assert!((interp.interpolate(&[0.0]) - 0.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5]) - 5.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[1.0]) - 10.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.0]).unwrap() - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5]).unwrap() - 5.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[1.0]).unwrap() - 10.0).abs() < 1e-5);
     }
 
     #[test]
@@ -530,9 +531,9 @@ mod tests {
         )
         .unwrap();
         // Below lower bound → clamp to first value.
-        assert!((interp.interpolate(&[-1.0]) - 2.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[-1.0]).unwrap() - 2.0).abs() < 1e-5);
         // Above upper bound → clamp to last value.
-        assert!((interp.interpolate(&[2.0]) - 8.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[2.0]).unwrap() - 8.0).abs() < 1e-5);
     }
 
     #[test]
@@ -545,10 +546,10 @@ mod tests {
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        assert!((interp.interpolate(&[0.5, 0.5]) - 1.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.0, 0.0]) - 0.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[1.0, 1.0]) - 2.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.25, 0.75]) - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 0.5]).unwrap() - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.0, 0.0]).unwrap() - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[1.0, 1.0]).unwrap() - 2.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.25, 0.75]).unwrap() - 1.0).abs() < 1e-5);
     }
 
     #[test]
@@ -564,7 +565,7 @@ mod tests {
         let values = vec![0.5f32; total];
         let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
-        assert!((interp.interpolate(&[0.3, 15.0, 0.5, 0.85]) - 0.5).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.3, 15.0, 0.5, 0.85]).unwrap() - 0.5).abs() < 1e-5);
     }
 
     #[test]
@@ -589,10 +590,10 @@ mod tests {
         }
         let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
-        assert!((interp.interpolate(&[0.0, 0.5, 0.5, 0.5]) - 0.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[1.0, 0.5, 0.5, 0.5]) - 1.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5, 0.5, 0.5, 0.5]) - 0.5).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.25, 0.0, 0.0, 0.0]) - 0.25).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.0, 0.5, 0.5, 0.5]).unwrap() - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[1.0, 0.5, 0.5, 0.5]).unwrap() - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 0.5, 0.5, 0.5]).unwrap() - 0.5).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.25, 0.0, 0.0, 0.0]).unwrap() - 0.25).abs() < 1e-5);
     }
 
     #[test]
@@ -604,9 +605,9 @@ mod tests {
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        assert!((interp.interpolate(&[0.25]) - 0.5).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5]) - 1.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.75]) - 0.5).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.25]).unwrap() - 0.5).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5]).unwrap() - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.75]).unwrap() - 0.5).abs() < 1e-5);
     }
 
     #[test]
@@ -669,9 +670,9 @@ mod tests {
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        assert!((interp.interpolate(&[0.0]) - 3.125).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5]) - 3.125).abs() < 1e-5);
-        assert!((interp.interpolate(&[1.0]) - 3.125).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.0]).unwrap() - 3.125).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5]).unwrap() - 3.125).abs() < 1e-5);
+        assert!((interp.interpolate(&[1.0]).unwrap() - 3.125).abs() < 1e-5);
     }
 
     #[test]
@@ -733,9 +734,9 @@ mod tests {
         )
         .unwrap();
         // Out of bounds on both axes → clamp to corner (1,1) = 11.0
-        assert!((interp.interpolate(&[5.0, 5.0]) - 11.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[5.0, 5.0]).unwrap() - 11.0).abs() < 1e-5);
         // Out of bounds negative → clamp to corner (0,0) = 0.0
-        assert!((interp.interpolate(&[-5.0, -5.0]) - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[-5.0, -5.0]).unwrap() - 0.0).abs() < 1e-5);
     }
 
     #[test]
@@ -759,9 +760,9 @@ mod tests {
         }
         let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
-        assert!((interp.interpolate(&[0.5, 0.0, 0.5, 0.5]) - 0.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5, 1.0, 0.5, 0.5]) - 1.0).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5, 0.5, 0.5, 0.5]) - 0.5).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 0.0, 0.5, 0.5]).unwrap() - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 1.0, 0.5, 0.5]).unwrap() - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 0.5, 0.5, 0.5]).unwrap() - 0.5).abs() < 1e-5);
     }
 
     #[test]
@@ -776,15 +777,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expected 2 coordinates")]
-    fn interpolate_panics_on_wrong_point_len() {
+    fn interpolate_wrong_dimension_returns_err() {
         let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0], vec![0.0, 1.0]],
             vec![0.0; 4],
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        interp.interpolate(&[0.5]); // wrong: 1 coord for 2D
+        let result = interp.interpolate(&[0.5]); // 1 coord for 2D
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expected 2 dimensions"), "got: {msg}");
+        assert!(msg.contains("got 1"), "got: {msg}");
     }
 
     // ── ExtrapolationStrategy tests ──────────────────────────────────────
@@ -802,14 +806,14 @@ mod tests {
     fn strategy_clamp_fully_oob_returns_corner_value() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
         // Both coords OOB — clamp both to 1.0, bilinear at (1.0,1.0) → f(1,1)=11.0
-        assert!((interp.interpolate(&[2.0, 2.0]) - 11.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[2.0, 2.0]).unwrap() - 11.0).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_clamp_mixed_oob() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
         // y OOB (2.0), x in-bounds (0.5) — clamp y to 1.0, interp x → f(0.5,1.0)=6.0
-        assert!((interp.interpolate(&[0.5, 2.0]) - 6.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 2.0]).unwrap() - 6.0).abs() < 1e-5);
     }
 
     /// In debug/check_invariants builds, NaN strategy panics on OOB.
@@ -821,7 +825,7 @@ mod tests {
     )]
     fn strategy_nan_fully_oob_returns_nan() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
-        let result = interp.interpolate(&[2.0, 2.0]);
+        let result = interp.interpolate(&[2.0, 2.0]).unwrap();
         #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
         assert!(result.is_nan());
         // In invariant builds the panic already asserted — disable the unused warning
@@ -837,7 +841,7 @@ mod tests {
     )]
     fn strategy_nan_mixed_oob_returns_nan() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
-        let result = interp.interpolate(&[0.5, 2.0]);
+        let result = interp.interpolate(&[0.5, 2.0]).unwrap();
         #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
         assert!(result.is_nan());
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -849,8 +853,8 @@ mod tests {
         let mut clamp = make_2d_grid_with_strategy(ExtrapolationStrategy::Clamp);
         let mut nan_interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
         let point = [0.25, 0.75];
-        let v_clamp = clamp.interpolate(&point);
-        let v_nan = nan_interp.interpolate(&point);
+        let v_clamp = clamp.interpolate(&point).unwrap();
+        let v_nan = nan_interp.interpolate(&point).unwrap();
         assert!((v_clamp - v_nan).abs() < 1e-5);
         assert!(!v_nan.is_nan());
     }
@@ -859,7 +863,7 @@ mod tests {
     fn strategy_linear_fully_oob_extrapolates() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::Linear);
         // f(x,y) = x*10 + y. At (2.0, 2.0): f = 20 + 2 = 22.0
-        assert!((interp.interpolate(&[2.0, 2.0]) - 22.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[2.0, 2.0]).unwrap() - 22.0).abs() < 1e-5);
     }
 
     #[test]
@@ -870,7 +874,7 @@ mod tests {
         // Weights: (1-0.5)*(1-2.0)=0.5*(-1)=-0.5 for (0,0), (1-0.5)*2.0=1.0 for (0,1),
         //          0.5*(-1)=-0.5 for (1,0), 0.5*2.0=1.0 for (1,1)
         // Values: 0, 1, 10, 11 → result = -0.5*0 + 1.0*1 + -0.5*10 + 1.0*11 = 0 + 1 - 5 + 11 = 7.0
-        assert!((interp.interpolate(&[0.5, 2.0]) - 7.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 2.0]).unwrap() - 7.0).abs() < 1e-5);
     }
 
     #[test]
@@ -880,21 +884,21 @@ mod tests {
         // Weights: (1-(-1))*(1-0.5)=2*0.5=1 for (0,0), 2*0.5=1 for (0,1),
         //          (-1)*(1-0.5)=-0.5 for (1,0), -1*0.5=-0.5 for (1,1)
         // Result: 1*0 + 1*1 + -0.5*10 + -0.5*11 = 0 + 1 - 5 - 5.5 = -9.5
-        assert!((interp.interpolate(&[-1.0, 0.5]) - (-9.5)).abs() < 1e-5);
+        assert!((interp.interpolate(&[-1.0, 0.5]).unwrap() - (-9.5)).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_nearest_neighbor_fully_oob_snaps_to_corner() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
         // behaves identically to Clamp for 2-point axes
-        assert!((interp.interpolate(&[2.0, 2.0]) - 11.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[2.0, 2.0]).unwrap() - 11.0).abs() < 1e-5);
     }
 
     #[test]
     fn strategy_nearest_neighbor_mixed_oob() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NearestNeighbor);
         // behaves identically to Clamp for 2-point axes
-        assert!((interp.interpolate(&[0.5, 2.0]) - 6.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 2.0]).unwrap() - 6.0).abs() < 1e-5);
     }
 
     #[test]
@@ -906,7 +910,7 @@ mod tests {
             ExtrapolationStrategy::NearestNeighbor,
         ] {
             let mut interp = make_2d_grid_with_strategy(strategy);
-            let result = interp.interpolate(&[0.5, 0.5]); // in-bounds, should not panic
+            let result = interp.interpolate(&[0.5, 0.5]).unwrap(); // in-bounds, should not panic
             assert!(!result.is_nan() || strategy == ExtrapolationStrategy::NaN);
             // in-bounds should never be NaN even with NaN strategy
             if strategy == ExtrapolationStrategy::NaN {
@@ -926,7 +930,7 @@ mod tests {
             ExtrapolationStrategy::Linear,
         )
         .unwrap();
-        let result = interp.interpolate(&[3.0]);
+        let result = interp.interpolate(&[3.0]).unwrap();
         assert!((result - 3.0).abs() < 1e-5, "expected 3.0, got {result}");
     }
 
@@ -938,7 +942,7 @@ mod tests {
             ExtrapolationStrategy::Linear,
         )
         .unwrap();
-        let result = interp.interpolate(&[-1.0]);
+        let result = interp.interpolate(&[-1.0]).unwrap();
         assert!(
             (result - (-1.0)).abs() < 1e-5,
             "expected -1.0, got {result}"
@@ -992,8 +996,8 @@ mod tests {
                 vec![vec![0.3, 15.0, 0.5, 0.85]]
             };
             for pt in &test_points {
-                let v_linear = interp.interpolate(pt);
-                let v_clamp = clamp.interpolate(pt);
+                let v_linear = interp.interpolate(pt).unwrap();
+                let v_clamp = clamp.interpolate(pt).unwrap();
                 assert!(
                     (v_linear - v_clamp).abs() < 1e-5,
                     "Linear vs Clamp mismatch at {:?}: linear={v_linear}, clamp={v_clamp}",
@@ -1012,9 +1016,9 @@ mod tests {
         )
         .unwrap();
         // Single-element axis: bracket returns (0, 0.0), result is the lone value.
-        let result = interp.interpolate(&[0.0]);
+        let result = interp.interpolate(&[0.0]).unwrap();
         assert!((result - 3.125).abs() < 1e-5);
-        let result = interp.interpolate(&[1.0]);
+        let result = interp.interpolate(&[1.0]).unwrap();
         assert!((result - 3.125).abs() < 1e-5);
     }
 
@@ -1038,7 +1042,7 @@ mod tests {
         }
 
         // First query at mid-range positions: should update the cache from 0.
-        let _result = interp.interpolate(&[0.51, 25.0, 1.0, 0.85]);
+        let _result = interp.interpolate(&[0.51, 25.0, 1.0, 0.85]).unwrap();
         // After first query, cached brackets should reflect actual positions.
         assert!(
             interp.cached_bracket[0] > 0,
@@ -1061,7 +1065,7 @@ mod tests {
         let first_cache: Vec<usize> = interp.cached_bracket.clone();
 
         // Second query: small movement — should use linear hunting, not binary search.
-        let _result = interp.interpolate(&[0.50, 25.0, 1.0, 0.85]);
+        let _result = interp.interpolate(&[0.50, 25.0, 1.0, 0.85]).unwrap();
         // Most dimensions unchanged; SOC moved slightly from 0.51 to 0.50.
         // Cache should still be near the first positions.
         for (dim, &prev) in first_cache.iter().enumerate() {
@@ -1073,7 +1077,7 @@ mod tests {
         }
 
         // Third query: large jump in one dimension — falls back to binary search.
-        let _result = interp.interpolate(&[0.9, -5.0, 0.05, 0.95]);
+        let _result = interp.interpolate(&[0.9, -5.0, 0.05, 0.95]).unwrap();
         // Temp went from 25.0 to -5.0 — a big jump that should trigger binary fallback.
         // The result should still be correct (0.5 constant grid).
         assert!(
@@ -1107,7 +1111,7 @@ mod tests {
         )
         .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::NAN])
+            interp.interpolate(&[f64::NAN]).unwrap()
         }));
         match result {
             Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
@@ -1124,7 +1128,7 @@ mod tests {
         )
         .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::INFINITY])
+            interp.interpolate(&[f64::INFINITY]).unwrap()
         }));
         match result {
             Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
@@ -1141,7 +1145,7 @@ mod tests {
         )
         .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::NEG_INFINITY])
+            interp.interpolate(&[f64::NEG_INFINITY]).unwrap()
         }));
         match result {
             Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
@@ -1157,7 +1161,7 @@ mod tests {
         let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[0.5, f64::NAN, 0.5])
+            interp.interpolate(&[0.5, f64::NAN, 0.5]).unwrap()
         }));
         match result {
             Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),

@@ -516,15 +516,15 @@ impl Ev {
         dt: Duration,
         charge_derate: f64,
         max_power_kw: f64,
-    ) -> f64 {
+    ) -> crate::Result<f64> {
         if self.connection_state == EvConnectionState::HomePluggedIn
             && let Some(setpoint) = self.power_setpoint_kw
             && setpoint < 0.0
         {
             if self.v2g_enabled {
-                return self.compute_v2g_discharge(dt) * self.dr_power_fraction();
+                return Ok(self.compute_v2g_discharge(dt) * self.dr_power_fraction());
             } else if self.v2l_enabled {
-                return self.compute_v2l_discharge(dt) * self.dr_power_fraction();
+                return Ok(self.compute_v2l_discharge(dt) * self.dr_power_fraction());
             }
         }
 
@@ -547,7 +547,7 @@ impl Ev {
         };
 
         if self.soc >= soc_limit {
-            return 0.0;
+            return Ok(0.0);
         }
 
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
@@ -563,7 +563,7 @@ impl Ev {
             } else {
                 0.0
             };
-            rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh]) as f64
+            rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh])? as f64
         } else {
             rated
         };
@@ -720,7 +720,7 @@ impl Ev {
         {
             power = power.min(limit.max(0.0));
         }
-        power * self.dr_power_fraction()
+        Ok(power * self.dr_power_fraction())
     }
 
     /// Returns the CC‑CV tapering multiplier for a given SOC.
@@ -1127,10 +1127,10 @@ impl Ev {
         env: &EnvironmentState,
         dt: Duration,
         max_power_kw: f64,
-    ) -> (f64, f64, bool) {
+    ) -> crate::Result<(f64, f64, bool)> {
         let charge_derate = self.charge_derate_factor();
         let charger_kw =
-            self.compute_charging_power_kw(env.current_time, dt, charge_derate, max_power_kw);
+            self.compute_charging_power_kw(env.current_time, dt, charge_derate, max_power_kw)?;
 
         let is_v2l_discharge = charger_kw < 0.0;
 
@@ -1144,7 +1144,7 @@ impl Ev {
             0.0
         };
 
-        (charger_kw, heater_kw, is_v2l_discharge)
+        Ok((charger_kw, heater_kw, is_v2l_discharge))
     }
 
     fn apply_soc_and_thermal(
@@ -1236,7 +1236,7 @@ impl Equipment for Ev {
         match self.connection_state {
             EvConnectionState::HomePluggedIn => {
                 let (mut charger_kw, mut heater_kw, is_v2l_discharge) =
-                    self.run_charging_physics(env, dt, self.rated_power_kw);
+                    self.run_charging_physics(env, dt, self.rated_power_kw)?;
 
                 // Grid outage (de-energized bus): the EVSE has no supply, so
                 // charging and battery preconditioning stop — gated at the
@@ -1288,7 +1288,7 @@ impl Equipment for Ev {
             }
             EvConnectionState::AwayPluggedIn => {
                 let (charger_kw, heater_kw, _is_v2l_discharge) =
-                    self.run_charging_physics(env, dt, self.away_charger_power_kw);
+                    self.run_charging_physics(env, dt, self.away_charger_power_kw)?;
 
                 // Away charging: no V2L/V2G, no residential port contribution.
                 // The away charger is off-site from the residential grid — no

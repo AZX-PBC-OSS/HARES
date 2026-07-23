@@ -603,7 +603,7 @@ impl Battery {
 
     /// Determine the target charge/discharge power based on control state and
     /// Stage 1 accumulated electrical power.
-    fn determine_target_power(&mut self, net_load_kw: f64, dt_hours: f64) -> f64 {
+    fn determine_target_power(&mut self, net_load_kw: f64, dt_hours: f64) -> crate::Result<f64> {
         // Priority 1: explicit power setpoint from external control
         if let Some(setpoint) = self.power_setpoint_kw {
             return self.clamp_power(setpoint);
@@ -644,11 +644,11 @@ impl Battery {
                 return self.clamp_power(charge);
             } else if self.solar_only_charging {
                 // No PV surplus and solar-only mode -- do not charge from grid
-                return 0.0;
+                return Ok(0.0);
             }
         }
 
-        0.0
+        Ok(0.0)
     }
 
     /// Clamp power to hardware charge/discharge limits and any active import/export limits.
@@ -660,7 +660,7 @@ impl Battery {
     ///
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
-    fn clamp_power(&mut self, power_kw: f64) -> f64 {
+    fn clamp_power(&mut self, power_kw: f64) -> crate::Result<f64> {
         let temp_derate = self
             .capacity_derate_model
             .evaluate(self.cell_temp_c)
@@ -676,7 +676,7 @@ impl Battery {
                 } else {
                     0.0
                 };
-                hw_max *= lut.interpolate(&[self.soc, self.cell_temp_c, c_rate, soh]) as f64;
+                hw_max *= lut.interpolate(&[self.soc, self.cell_temp_c, c_rate, soh])? as f64;
             }
             let limit = self
                 .import_limit_kw
@@ -685,7 +685,7 @@ impl Battery {
             let limit = self
                 .external_power_limit_kw
                 .map_or(limit, |pl| limit.min(pl));
-            power_kw.min(limit)
+            Ok(power_kw.min(limit))
         } else {
             let hw_max = self.max_discharge_kw * dr_fraction;
             let limit = self
@@ -695,7 +695,7 @@ impl Battery {
             let limit = self
                 .external_power_limit_kw
                 .map_or(limit, |pl| limit.min(pl));
-            power_kw.max(-limit)
+            Ok(power_kw.max(-limit))
         }
     }
 
@@ -1200,7 +1200,7 @@ impl Equipment for Battery {
 
         // -- Determine target power --
         let mut target_power_kw = if self.grid_connected && !bus_dead {
-            self.determine_target_power(net_load_kw, dt_hours)
+            self.determine_target_power(net_load_kw, dt_hours)?
         } else {
             0.0
         };
@@ -4884,7 +4884,7 @@ mod tests {
         bat.set_charging_curve_lut(Some(lut)).unwrap();
         bat.soc = 0.9;
 
-        let clamped = bat.clamp_power(5.0);
+        let clamped = bat.clamp_power(5.0).unwrap();
         assert!(
             clamped < 2.0,
             "charge should be tapered at high SOC with LUT, got {clamped}"
@@ -4897,7 +4897,7 @@ mod tests {
         let mut bat = Battery::new(config);
         bat.soc = 0.5;
         // Without LUT, charge power should be near max (5 kW)
-        let clamped = bat.clamp_power(5.0);
+        let clamped = bat.clamp_power(5.0).unwrap();
         assert!(
             clamped > 4.0,
             "without LUT, charge should be near max, got {clamped}"
@@ -4930,11 +4930,11 @@ mod tests {
 
         // At 25C → power fraction 1.0, full power
         bat.cell_temp_c = 25.0;
-        let warm = bat.clamp_power(5.0);
+        let warm = bat.clamp_power(5.0).unwrap();
 
         // At -10C → power fraction 0.5, half power
         bat.cell_temp_c = -10.0;
-        let cold = bat.clamp_power(5.0);
+        let cold = bat.clamp_power(5.0).unwrap();
 
         assert!(
             cold < warm,
@@ -4951,7 +4951,7 @@ mod tests {
         bat.soc = 0.5;
 
         // Discharge (negative power) should not be affected by charging LUT
-        let clamped = bat.clamp_power(-5.0);
+        let clamped = bat.clamp_power(-5.0).unwrap();
         assert!(
             clamped < -4.0,
             "discharge should not be limited by charging LUT, got {clamped}"
@@ -4970,14 +4970,14 @@ mod tests {
             points: vec![(-20.0, 0.2), (25.0, 0.5)],
         };
 
-        let clamped = bat.clamp_power(-5.0);
+        let clamped = bat.clamp_power(-5.0).unwrap();
         assert!(
             (clamped - (-5.0)).abs() < 1e-9,
             "discharge clamp_power should not apply capacity_derate_model; expected -5.0, got {clamped}"
         );
 
         // Charge branch still uses capacity_derate_model (interpolates ~0.41 at -10C → 5.0 * 0.41 ≈ 2.05)
-        let charge_clamped = bat.clamp_power(5.0);
+        let charge_clamped = bat.clamp_power(5.0).unwrap();
         assert!(
             charge_clamped < 3.0,
             "charge clamp_power should still apply capacity_derate_model, got {charge_clamped}"
