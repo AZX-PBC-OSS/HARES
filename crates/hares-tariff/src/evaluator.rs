@@ -2525,6 +2525,55 @@ mod tests {
     }
 
     #[test]
+    fn evaluator_custom_may_october_seasonal_split() {
+        use hares_types::SeasonalSplit;
+
+        let may_oct = SeasonalSplit::new(5, 10).unwrap();
+        let tariff = ElectricTariff {
+            name: Some("may-oct".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: SUMMER_PEAK,
+                },
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::Winter,
+                    rate_per_kwh: WINTER_PEAK,
+                },
+            ],
+            seasonal_split: Some(may_oct),
+            ..Default::default()
+        };
+
+        // June (month 6) — summer with May-October split.
+        let jun = New_York.with_ymd_and_hms(2025, 6, 16, 12, 0, 0).unwrap();
+        let ev_jun =
+            TariffEvaluator::new(tariff.clone(), jun, jun + Duration::hours(1), 3600).unwrap();
+        assert_eq!(
+            ev_jun.current_price(),
+            SUMMER_PEAK,
+            "June should use summer rate with May-October split"
+        );
+
+        // November (month 11) — winter with May-October split.
+        let nov = New_York.with_ymd_and_hms(2025, 11, 17, 12, 0, 0).unwrap();
+        let ev_nov =
+            TariffEvaluator::new(tariff.clone(), nov, nov + Duration::hours(1), 3600).unwrap();
+        assert_eq!(
+            ev_nov.current_price(),
+            WINTER_PEAK,
+            "November should use winter rate with May-October split"
+        );
+    }
+
+    #[test]
     fn evaluator_seasonal_split_none_fallback_june_september() {
         // Split=None → June–September default.
         let tariff = ElectricTariff {
