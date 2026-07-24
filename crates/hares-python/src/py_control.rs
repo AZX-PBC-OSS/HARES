@@ -29,15 +29,16 @@ impl PyControlSignal {
         reactive_kvar: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        validate_non_negative(kw, "active_power_kw")?;
+        Ok(Self {
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: kw,
                 reactive_power_kvar: reactive_kvar,
                 min_soc,
                 max_soc,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -71,20 +72,22 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn ideal_capacity(capacity_w: f64) -> Self {
-        Self {
+    pub fn ideal_capacity(capacity_w: f64) -> PyResult<Self> {
+        validate_non_negative(capacity_w, "capacity_w")?;
+        Ok(Self {
             signal: ControlSignal::IdealCapacity {
                 capacity_w,
                 degraded: false,
             },
-        }
+        })
     }
 
     #[staticmethod]
-    pub fn load_fraction(fraction: f64) -> Self {
-        Self {
+    pub fn load_fraction(fraction: f64) -> PyResult<Self> {
+        validate_range(fraction, 0.0, 1.0, "fraction")?;
+        Ok(Self {
             signal: ControlSignal::LoadFraction { fraction },
-        }
+        })
     }
 
     #[staticmethod]
@@ -129,14 +132,21 @@ impl PyControlSignal {
 
     #[staticmethod]
     #[pyo3(signature = (target, min=None, max=None))]
-    pub fn soc_target(target: f64, min: Option<f64>, max: Option<f64>) -> Self {
-        Self {
+    pub fn soc_target(target: f64, min: Option<f64>, max: Option<f64>) -> PyResult<Self> {
+        validate_range(target, 0.0, 1.0, "target_soc")?;
+        if let Some(v) = min {
+            validate_range(v, 0.0, 1.0, "min_soc")?;
+        }
+        if let Some(v) = max {
+            validate_range(v, 0.0, 1.0, "max_soc")?;
+        }
+        Ok(Self {
             signal: ControlSignal::SOCTarget {
                 target_soc: target,
                 min_soc: min,
                 max_soc: max,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -153,13 +163,14 @@ impl PyControlSignal {
 
     #[staticmethod]
     #[pyo3(signature = (max_power_kw, ramp_rate_kw_per_s=None))]
-    pub fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> Self {
-        Self {
+    pub fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> PyResult<Self> {
+        validate_non_negative(max_power_kw, "max_power_kw")?;
+        Ok(Self {
             signal: ControlSignal::PowerLimit {
                 max_power_kw,
                 ramp_rate_kw_per_s,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -168,14 +179,15 @@ impl PyControlSignal {
         on_fraction: f64,
         period_s: Option<f64>,
         component: Option<PyDutyCycleComponent>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        validate_range(on_fraction, 0.0, 1.0, "on_fraction")?;
+        Ok(Self {
             signal: ControlSignal::DutyCycle {
                 on_fraction,
                 period_s,
                 component: component.map(RustDutyCycleComponent::from),
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -196,10 +208,11 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn curtailment_percent(percent: f64) -> Self {
-        Self {
+    pub fn curtailment_percent(percent: f64) -> PyResult<Self> {
+        validate_range(percent, 0.0, 100.0, "percent")?;
+        Ok(Self {
             signal: ControlSignal::CurtailmentPercent { percent },
-        }
+        })
     }
 
     #[staticmethod]
@@ -269,35 +282,39 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn ev_drive(kwh: f64) -> Self {
-        Self {
+    pub fn ev_drive(kwh: f64) -> PyResult<Self> {
+        validate_non_negative(kwh, "kwh")?;
+        Ok(Self {
             signal: ControlSignal::EvDrive { kwh },
-        }
+        })
     }
 
     #[staticmethod]
-    pub fn ev_away_charge(power_kw: f64) -> Self {
-        Self {
+    pub fn ev_away_charge(power_kw: f64) -> PyResult<Self> {
+        validate_non_negative(power_kw, "power_kw")?;
+        Ok(Self {
             signal: ControlSignal::EvAwayCharge { power_kw },
-        }
+        })
     }
 
     #[staticmethod]
-    pub fn ev_set_ready_by(departure_hour: f64, target_soc: f64) -> Self {
-        Self {
+    pub fn ev_set_ready_by(departure_hour: f64, target_soc: f64) -> PyResult<Self> {
+        validate_range(target_soc, 0.0, 1.0, "target_soc")?;
+        Ok(Self {
             signal: ControlSignal::EvSetReadyBy {
                 departure_hour,
                 target_soc,
             },
-        }
+        })
     }
 
     #[staticmethod]
     #[pyo3(signature = (fraction))]
-    pub fn max_capacity_fraction(fraction: f64) -> Self {
-        Self {
+    pub fn max_capacity_fraction(fraction: f64) -> PyResult<Self> {
+        validate_range(fraction, 0.0, 1.0, "fraction")?;
+        Ok(Self {
             signal: ControlSignal::MaxCapacityFraction { fraction },
-        }
+        })
     }
 
     #[staticmethod]
@@ -319,12 +336,16 @@ impl PyControlSignal {
             "ModeOverride" => ControlSignal::ModeOverride {
                 mode: parse_mode_or_enum(d, "mode")?,
             },
-            "PowerSetpoint" => ControlSignal::PowerSetpoint {
-                active_power_kw: dict_required(d, "active_power_kw")?,
-                reactive_power_kvar: dict_optional(d, "reactive_power_kvar")?,
-                min_soc: dict_optional(d, "min_soc")?,
-                max_soc: dict_optional(d, "max_soc")?,
-            },
+            "PowerSetpoint" => {
+                let active_power_kw: f64 = dict_required(d, "active_power_kw")?;
+                validate_non_negative(active_power_kw, "active_power_kw")?;
+                ControlSignal::PowerSetpoint {
+                    active_power_kw,
+                    reactive_power_kvar: dict_optional(d, "reactive_power_kvar")?,
+                    min_soc: dict_optional(d, "min_soc")?,
+                    max_soc: dict_optional(d, "max_soc")?,
+                }
+            }
             "HumiditySetpoint" => ControlSignal::HumiditySetpoint {
                 target_rh: dict_required(d, "target_rh")?,
                 min_rh: dict_optional(d, "min_rh")?,
@@ -334,23 +355,45 @@ impl PyControlSignal {
                 enabled: dict_required(d, "enabled")?,
                 solar_only_charging: dict_required(d, "solar_only_charging")?,
             },
-            "PowerLimit" => ControlSignal::PowerLimit {
-                max_power_kw: dict_required(d, "max_power_kw")?,
-                ramp_rate_kw_per_s: dict_optional(d, "ramp_rate_kw_per_s")?,
-            },
-            "SOCTarget" => ControlSignal::SOCTarget {
-                target_soc: dict_required(d, "target_soc")?,
-                min_soc: dict_optional(d, "min_soc")?,
-                max_soc: dict_optional(d, "max_soc")?,
-            },
-            "DutyCycle" => ControlSignal::DutyCycle {
-                on_fraction: dict_required(d, "on_fraction")?,
-                period_s: dict_optional(d, "period_s")?,
-                component: parse_duty_cycle_component_or_enum(d, "component")?,
-            },
-            "LoadFraction" => ControlSignal::LoadFraction {
-                fraction: dict_required(d, "fraction")?,
-            },
+            "PowerLimit" => {
+                let max_power_kw: f64 = dict_required(d, "max_power_kw")?;
+                validate_non_negative(max_power_kw, "max_power_kw")?;
+                ControlSignal::PowerLimit {
+                    max_power_kw,
+                    ramp_rate_kw_per_s: dict_optional(d, "ramp_rate_kw_per_s")?,
+                }
+            }
+            "SOCTarget" => {
+                let target_soc: f64 = dict_required(d, "target_soc")?;
+                validate_range(target_soc, 0.0, 1.0, "target_soc")?;
+                let min_soc: Option<f64> = dict_optional(d, "min_soc")?;
+                if let Some(v) = min_soc {
+                    validate_range(v, 0.0, 1.0, "min_soc")?;
+                }
+                let max_soc: Option<f64> = dict_optional(d, "max_soc")?;
+                if let Some(v) = max_soc {
+                    validate_range(v, 0.0, 1.0, "max_soc")?;
+                }
+                ControlSignal::SOCTarget {
+                    target_soc,
+                    min_soc,
+                    max_soc,
+                }
+            }
+            "DutyCycle" => {
+                let on_fraction: f64 = dict_required(d, "on_fraction")?;
+                validate_range(on_fraction, 0.0, 1.0, "on_fraction")?;
+                ControlSignal::DutyCycle {
+                    on_fraction,
+                    period_s: dict_optional(d, "period_s")?,
+                    component: parse_duty_cycle_component_or_enum(d, "component")?,
+                }
+            }
+            "LoadFraction" => {
+                let fraction: f64 = dict_required(d, "fraction")?;
+                validate_range(fraction, 0.0, 1.0, "fraction")?;
+                ControlSignal::LoadFraction { fraction }
+            }
             "GridConnect" => ControlSignal::GridConnect {
                 connected: dict_required(d, "connected")?,
             },
@@ -362,9 +405,11 @@ impl PyControlSignal {
                 protocol: ProtocolId(dict_required(d, "protocol")?),
                 payload: dict_required(d, "payload")?,
             },
-            "CurtailmentPercent" => ControlSignal::CurtailmentPercent {
-                percent: dict_required(d, "percent")?,
-            },
+            "CurtailmentPercent" => {
+                let percent: f64 = dict_required(d, "percent")?;
+                validate_range(percent, 0.0, 100.0, "percent")?;
+                ControlSignal::CurtailmentPercent { percent }
+            }
             "ReactiveSetpoint" => ControlSignal::ReactiveSetpoint {
                 kvar: dict_required(d, "kvar")?,
             },
@@ -374,10 +419,14 @@ impl PyControlSignal {
             "InverterPriorityMode" => ControlSignal::InverterPriorityMode {
                 priority: parse_inverter_priority_or_enum(d, "priority")?,
             },
-            "IdealCapacity" => ControlSignal::IdealCapacity {
-                capacity_w: dict_required(d, "capacity_w")?,
-                degraded: false,
-            },
+            "IdealCapacity" => {
+                let capacity_w: f64 = dict_required(d, "capacity_w")?;
+                validate_non_negative(capacity_w, "capacity_w")?;
+                ControlSignal::IdealCapacity {
+                    capacity_w,
+                    degraded: false,
+                }
+            }
             "ThermalSetpointDelta" => ControlSignal::ThermalSetpointDelta {
                 heating_delta_c: dict_optional(d, "heating_delta_c")?,
                 cooling_delta_c: dict_optional(d, "cooling_delta_c")?,
@@ -403,22 +452,32 @@ impl PyControlSignal {
                     .map_err(PyValueError::new_err)?;
                 ControlSignal::EvPlugIn { state }
             }
-            "EvDrive" => ControlSignal::EvDrive {
-                kwh: dict_required(d, "kwh")?,
-            },
-            "EvAwayCharge" => ControlSignal::EvAwayCharge {
-                power_kw: dict_required(d, "power_kw")?,
-            },
-            "EvSetReadyBy" => ControlSignal::EvSetReadyBy {
-                departure_hour: dict_required(d, "departure_hour")?,
-                target_soc: dict_required(d, "target_soc")?,
-            },
+            "EvDrive" => {
+                let kwh: f64 = dict_required(d, "kwh")?;
+                validate_non_negative(kwh, "kwh")?;
+                ControlSignal::EvDrive { kwh }
+            }
+            "EvAwayCharge" => {
+                let power_kw: f64 = dict_required(d, "power_kw")?;
+                validate_non_negative(power_kw, "power_kw")?;
+                ControlSignal::EvAwayCharge { power_kw }
+            }
+            "EvSetReadyBy" => {
+                let target_soc: f64 = dict_required(d, "target_soc")?;
+                validate_range(target_soc, 0.0, 1.0, "target_soc")?;
+                ControlSignal::EvSetReadyBy {
+                    departure_hour: dict_required(d, "departure_hour")?,
+                    target_soc,
+                }
+            }
             "EventDelay" => ControlSignal::EventDelay {
                 delay_s: dict_required(d, "delay_s")?,
             },
-            "MaxCapacityFraction" => ControlSignal::MaxCapacityFraction {
-                fraction: dict_required(d, "fraction")?,
-            },
+            "MaxCapacityFraction" => {
+                let fraction: f64 = dict_required(d, "fraction")?;
+                validate_range(fraction, 0.0, 1.0, "fraction")?;
+                ControlSignal::MaxCapacityFraction { fraction }
+            }
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported control signal type `{kind}`"
@@ -693,6 +752,34 @@ where
     }
 }
 
+fn validate_non_negative(value: f64, name: &str) -> PyResult<()> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    if value < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be >= 0, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_range(value: f64, min: f64, max: f64, name: &str) -> PyResult<()> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    if value < min || value > max {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be in [{min}, {max}], got {value}"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_mode(mode: &str) -> PyResult<OperatingMode> {
     match mode {
         "Off" => Ok(OperatingMode::Off),
@@ -811,5 +898,450 @@ mod tests {
             sig.signal,
             ControlSignal::EventDelay { delay_s: 30.0 }
         ));
+    }
+
+    // --- constructor validation: non-negative ---
+
+    #[test]
+    fn power_setpoint_rejects_negative_kw() {
+        assert!(PyControlSignal::power_setpoint(-1.0, None, None, None).is_err());
+    }
+
+    #[test]
+    fn power_setpoint_accepts_zero_and_positive() {
+        assert!(PyControlSignal::power_setpoint(0.0, None, None, None).is_ok());
+        assert!(PyControlSignal::power_setpoint(1.0, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn ideal_capacity_rejects_negative() {
+        assert!(PyControlSignal::ideal_capacity(-1.0).is_err());
+    }
+
+    #[test]
+    fn ideal_capacity_accepts_zero_and_positive() {
+        assert!(PyControlSignal::ideal_capacity(0.0).is_ok());
+        assert!(PyControlSignal::ideal_capacity(5000.0).is_ok());
+    }
+
+    #[test]
+    fn power_limit_rejects_negative() {
+        assert!(PyControlSignal::power_limit(-1.0, None).is_err());
+    }
+
+    #[test]
+    fn power_limit_accepts_zero_and_positive() {
+        assert!(PyControlSignal::power_limit(0.0, None).is_ok());
+        assert!(PyControlSignal::power_limit(5.0, None).is_ok());
+    }
+
+    #[test]
+    fn ev_drive_rejects_negative_kwh() {
+        assert!(PyControlSignal::ev_drive(-1.0).is_err());
+    }
+
+    #[test]
+    fn ev_drive_accepts_zero_and_positive() {
+        assert!(PyControlSignal::ev_drive(0.0).is_ok());
+        assert!(PyControlSignal::ev_drive(5.0).is_ok());
+    }
+
+    #[test]
+    fn ev_away_charge_rejects_negative_power() {
+        assert!(PyControlSignal::ev_away_charge(-1.0).is_err());
+    }
+
+    #[test]
+    fn ev_away_charge_accepts_zero_and_positive() {
+        assert!(PyControlSignal::ev_away_charge(0.0).is_ok());
+        assert!(PyControlSignal::ev_away_charge(11.5).is_ok());
+    }
+
+    // --- constructor validation: fraction [0, 1] ---
+
+    #[test]
+    fn load_fraction_rejects_out_of_range() {
+        assert!(PyControlSignal::load_fraction(-0.1).is_err());
+        assert!(PyControlSignal::load_fraction(1.1).is_err());
+    }
+
+    #[test]
+    fn load_fraction_accepts_boundaries() {
+        assert!(PyControlSignal::load_fraction(0.0).is_ok());
+        assert!(PyControlSignal::load_fraction(1.0).is_ok());
+        assert!(PyControlSignal::load_fraction(0.75).is_ok());
+    }
+
+    #[test]
+    fn duty_cycle_rejects_out_of_range_fraction() {
+        assert!(PyControlSignal::duty_cycle(-0.1, None, None).is_err());
+        assert!(PyControlSignal::duty_cycle(1.5, None, None).is_err());
+    }
+
+    #[test]
+    fn duty_cycle_accepts_boundaries() {
+        assert!(PyControlSignal::duty_cycle(0.0, None, None).is_ok());
+        assert!(PyControlSignal::duty_cycle(1.0, None, None).is_ok());
+        assert!(PyControlSignal::duty_cycle(0.5, Some(300.0), None).is_ok());
+    }
+
+    #[test]
+    fn max_capacity_fraction_rejects_out_of_range() {
+        assert!(PyControlSignal::max_capacity_fraction(-0.1).is_err());
+        assert!(PyControlSignal::max_capacity_fraction(1.1).is_err());
+    }
+
+    #[test]
+    fn max_capacity_fraction_accepts_boundaries() {
+        assert!(PyControlSignal::max_capacity_fraction(0.0).is_ok());
+        assert!(PyControlSignal::max_capacity_fraction(1.0).is_ok());
+    }
+
+    // --- constructor validation: SOC [0, 1] ---
+
+    #[test]
+    fn soc_target_rejects_out_of_range() {
+        assert!(PyControlSignal::soc_target(-0.1, None, None).is_err());
+        assert!(PyControlSignal::soc_target(1.1, None, None).is_err());
+        assert!(PyControlSignal::soc_target(0.5, Some(-0.1), None).is_err());
+        assert!(PyControlSignal::soc_target(0.5, None, Some(1.1)).is_err());
+    }
+
+    #[test]
+    fn soc_target_accepts_boundaries() {
+        assert!(PyControlSignal::soc_target(0.0, None, None).is_ok());
+        assert!(PyControlSignal::soc_target(1.0, None, None).is_ok());
+        assert!(PyControlSignal::soc_target(0.8, Some(0.2), Some(1.0)).is_ok());
+    }
+
+    #[test]
+    fn ev_set_ready_by_rejects_out_of_range_soc() {
+        assert!(PyControlSignal::ev_set_ready_by(7.0, -0.1).is_err());
+        assert!(PyControlSignal::ev_set_ready_by(7.0, 1.1).is_err());
+    }
+
+    #[test]
+    fn ev_set_ready_by_accepts_boundaries() {
+        assert!(PyControlSignal::ev_set_ready_by(7.0, 0.0).is_ok());
+        assert!(PyControlSignal::ev_set_ready_by(7.0, 1.0).is_ok());
+        assert!(PyControlSignal::ev_set_ready_by(7.0, 0.85).is_ok());
+    }
+
+    // --- constructor validation: percent [0, 100] ---
+
+    #[test]
+    fn curtailment_percent_rejects_out_of_range() {
+        assert!(PyControlSignal::curtailment_percent(-1.0).is_err());
+        assert!(PyControlSignal::curtailment_percent(100.1).is_err());
+    }
+
+    #[test]
+    fn curtailment_percent_accepts_boundaries() {
+        assert!(PyControlSignal::curtailment_percent(0.0).is_ok());
+        assert!(PyControlSignal::curtailment_percent(100.0).is_ok());
+        assert!(PyControlSignal::curtailment_percent(50.0).is_ok());
+    }
+
+    // --- from_dict validation ---
+
+    fn test_requires_python<F>(f: F)
+    where
+        F: for<'py> FnOnce(Python<'py>),
+    {
+        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
+        // guards against double-initialisation race conditions.
+        unsafe {
+            pyo3::ffi::Py_Initialize();
+        }
+        // SAFETY: interpreter is now initialised.
+        let py = unsafe { Python::assume_attached() };
+        f(py);
+    }
+
+    #[test]
+    fn from_dict_rejects_negative_power_setpoint() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "PowerSetpoint").unwrap();
+            d.set_item("active_power_kw", -1.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_negative_max_power() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "PowerLimit").unwrap();
+            d.set_item("max_power_kw", -1.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_soc() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "SOCTarget").unwrap();
+            d.set_item("target_soc", 1.5_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_duty_cycle() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "DutyCycle").unwrap();
+            d.set_item("on_fraction", 1.5_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_load_fraction() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "LoadFraction").unwrap();
+            d.set_item("fraction", -0.5_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_curtailment() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "CurtailmentPercent").unwrap();
+            d.set_item("percent", 150.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_negative_capacity_w() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "IdealCapacity").unwrap();
+            d.set_item("capacity_w", -1.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_negative_ev_drive() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "EvDrive").unwrap();
+            d.set_item("kwh", -1.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_negative_ev_away_charge() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "EvAwayCharge").unwrap();
+            d.set_item("power_kw", -1.0_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_ev_target_soc() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "EvSetReadyBy").unwrap();
+            d.set_item("departure_hour", 7.0_f64).unwrap();
+            d.set_item("target_soc", 1.5_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_out_of_range_max_capacity_fraction() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "MaxCapacityFraction").unwrap();
+            d.set_item("fraction", -0.5_f64).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_accepts_valid_boundary_values() {
+        test_requires_python(|py| {
+            let cls = py.get_type::<PyControlSignal>();
+            let cases: [(&str, &[(&str, f64)]); 15] = [
+                ("PowerSetpoint", &[("active_power_kw", 0.0)]),
+                ("PowerLimit", &[("max_power_kw", 0.0)]),
+                ("SOCTarget", &[("target_soc", 0.0)]),
+                ("SOCTarget", &[("target_soc", 1.0)]),
+                ("DutyCycle", &[("on_fraction", 0.0)]),
+                ("DutyCycle", &[("on_fraction", 1.0)]),
+                ("LoadFraction", &[("fraction", 0.0)]),
+                ("LoadFraction", &[("fraction", 1.0)]),
+                ("CurtailmentPercent", &[("percent", 0.0)]),
+                ("CurtailmentPercent", &[("percent", 100.0)]),
+                ("IdealCapacity", &[("capacity_w", 0.0)]),
+                ("EvDrive", &[("kwh", 0.0)]),
+                ("EvAwayCharge", &[("power_kw", 0.0)]),
+                ("MaxCapacityFraction", &[("fraction", 0.0)]),
+                ("MaxCapacityFraction", &[("fraction", 1.0)]),
+            ];
+            for (variant, fields) in cases {
+                let d = PyDict::new(py);
+                d.set_item("type", variant).unwrap();
+                for &(k, v) in fields {
+                    d.set_item(k, v).unwrap();
+                }
+                let result = PyControlSignal::from_dict(&cls, &d);
+                assert!(
+                    result.is_ok(),
+                    "from_dict should accept {variant} with {fields:?}, got {result:?}"
+                );
+            }
+        });
+    }
+
+    // --- NaN rejection: non-negative validators ---
+
+    #[test]
+    fn power_setpoint_rejects_nan() {
+        assert!(PyControlSignal::power_setpoint(f64::NAN, None, None, None).is_err());
+    }
+
+    #[test]
+    fn ideal_capacity_rejects_nan() {
+        assert!(PyControlSignal::ideal_capacity(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn power_limit_rejects_nan() {
+        assert!(PyControlSignal::power_limit(f64::NAN, None).is_err());
+    }
+
+    #[test]
+    fn ev_drive_rejects_nan() {
+        assert!(PyControlSignal::ev_drive(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn ev_away_charge_rejects_nan() {
+        assert!(PyControlSignal::ev_away_charge(f64::NAN).is_err());
+    }
+
+    // --- NaN rejection: range validators [0, 1] ---
+
+    #[test]
+    fn load_fraction_rejects_nan() {
+        assert!(PyControlSignal::load_fraction(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn duty_cycle_rejects_nan() {
+        assert!(PyControlSignal::duty_cycle(f64::NAN, None, None).is_err());
+    }
+
+    #[test]
+    fn soc_target_rejects_nan() {
+        assert!(PyControlSignal::soc_target(f64::NAN, None, None).is_err());
+        assert!(PyControlSignal::soc_target(0.5, Some(f64::NAN), None).is_err());
+        assert!(PyControlSignal::soc_target(0.5, None, Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn curtailment_percent_rejects_nan() {
+        assert!(PyControlSignal::curtailment_percent(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn ev_set_ready_by_rejects_nan() {
+        assert!(PyControlSignal::ev_set_ready_by(7.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn max_capacity_fraction_rejects_nan() {
+        assert!(PyControlSignal::max_capacity_fraction(f64::NAN).is_err());
+    }
+
+    // --- NaN rejection: from_dict ---
+
+    #[test]
+    fn from_dict_rejects_nan_power_setpoint() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "PowerSetpoint").unwrap();
+            d.set_item("active_power_kw", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_nan_soc_target() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "SOCTarget").unwrap();
+            d.set_item("target_soc", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_nan_duty_cycle() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "DutyCycle").unwrap();
+            d.set_item("on_fraction", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_nan_ev_drive() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "EvDrive").unwrap();
+            d.set_item("kwh", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_nan_curtailment_percent() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "CurtailmentPercent").unwrap();
+            d.set_item("percent", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
+    }
+
+    #[test]
+    fn from_dict_rejects_nan_ideal_capacity() {
+        test_requires_python(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "IdealCapacity").unwrap();
+            d.set_item("capacity_w", f64::NAN).unwrap();
+            let cls = py.get_type::<PyControlSignal>();
+            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+        });
     }
 }

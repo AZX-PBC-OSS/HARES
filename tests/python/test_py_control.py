@@ -25,10 +25,177 @@ class TestControlSignalConstructors:
         assert sig.to_dict()["active_power_kw"] == 1.5
         assert "PowerSetpoint" in repr(sig)
 
-    def test_power_setpoint_with_reactive(self):
-        sig = ControlSignal.power_setpoint(1.5, 0.5)
-        d = sig.to_dict()
-        assert d["reactive_power_kvar"] == 0.5
+    def test_power_setpoint_rejects_negative_kw(self):
+        with pytest.raises(ValueError):
+            ControlSignal.power_setpoint(-1.0)
+
+    def test_power_setpoint_accepts_zero_and_positive(self):
+        sig = ControlSignal.power_setpoint(0.0)
+        assert sig.to_dict()["active_power_kw"] == 0.0
+        sig = ControlSignal.power_setpoint(1.5)
+        assert sig.to_dict()["active_power_kw"] == 1.5
+
+    def test_ideal_capacity_rejects_negative(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ideal_capacity(-1.0)
+
+    def test_ideal_capacity_accepts_zero_and_positive(self):
+        sig = ControlSignal.ideal_capacity(0.0)
+        assert sig.to_dict()["capacity_w"] == 0.0
+        sig = ControlSignal.ideal_capacity(5000.0)
+        assert sig.to_dict()["capacity_w"] == 5000.0
+
+    def test_load_fraction_rejects_out_of_range(self):
+        with pytest.raises(ValueError):
+            ControlSignal.load_fraction(-0.1)
+        with pytest.raises(ValueError):
+            ControlSignal.load_fraction(1.1)
+
+    def test_load_fraction_accepts_boundaries(self):
+        sig = ControlSignal.load_fraction(0.0)
+        assert sig.to_dict()["fraction"] == 0.0
+        sig = ControlSignal.load_fraction(1.0)
+        assert sig.to_dict()["fraction"] == 1.0
+        sig = ControlSignal.load_fraction(0.75)
+        assert sig.to_dict()["fraction"] == 0.75
+
+    def test_soc_target_rejects_out_of_range(self):
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=-0.1)
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=1.1)
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=0.5, min=-0.1)
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=0.5, max=1.1)
+
+    def test_soc_target_accepts_boundaries(self):
+        sig = ControlSignal.soc_target(target=0.0)
+        assert sig.to_dict()["target_soc"] == 0.0
+        sig = ControlSignal.soc_target(target=1.0)
+        assert sig.to_dict()["target_soc"] == 1.0
+        sig = ControlSignal.soc_target(target=0.8, min=0.2, max=1.0)
+        assert sig.to_dict()["target_soc"] == 0.8
+
+    def test_power_limit_rejects_negative(self):
+        with pytest.raises(ValueError):
+            ControlSignal.power_limit(max_power_kw=-1.0)
+
+    def test_power_limit_accepts_zero_and_positive(self):
+        sig = ControlSignal.power_limit(max_power_kw=0.0)
+        assert sig.to_dict()["max_power_kw"] == 0.0
+        sig = ControlSignal.power_limit(max_power_kw=5.0)
+        assert sig.to_dict()["max_power_kw"] == 5.0
+
+    def test_curtailment_percent_rejects_out_of_range(self):
+        with pytest.raises(ValueError):
+            ControlSignal.curtailment_percent(-1.0)
+        with pytest.raises(ValueError):
+            ControlSignal.curtailment_percent(100.1)
+
+    def test_curtailment_percent_accepts_boundaries(self):
+        sig = ControlSignal.curtailment_percent(0.0)
+        assert sig.to_dict()["percent"] == 0.0
+        sig = ControlSignal.curtailment_percent(100.0)
+        assert sig.to_dict()["percent"] == 100.0
+        sig = ControlSignal.curtailment_percent(50.0)
+        assert sig.to_dict()["percent"] == 50.0
+
+    def test_ev_drive_rejects_negative_kwh(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_drive(-1.0)
+
+    def test_ev_drive_accepts_zero_and_positive(self):
+        sig = ControlSignal.ev_drive(0.0)
+        assert sig.to_dict()["kwh"] == 0.0
+        sig = ControlSignal.ev_drive(5.0)
+        assert sig.to_dict()["kwh"] == 5.0
+
+    def test_ev_away_charge_rejects_negative_power(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_away_charge(-1.0)
+
+    def test_ev_away_charge_accepts_zero_and_positive(self):
+        sig = ControlSignal.ev_away_charge(0.0)
+        assert sig.to_dict()["power_kw"] == 0.0
+        sig = ControlSignal.ev_away_charge(11.5)
+        assert sig.to_dict()["power_kw"] == 11.5
+
+    def test_ev_set_ready_by_rejects_out_of_range_soc(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_set_ready_by(7.0, -0.1)
+        with pytest.raises(ValueError):
+            ControlSignal.ev_set_ready_by(7.0, 1.1)
+
+    def test_ev_set_ready_by_accepts_boundaries(self):
+        sig = ControlSignal.ev_set_ready_by(7.0, 0.0)
+        assert sig.to_dict()["target_soc"] == 0.0
+        sig = ControlSignal.ev_set_ready_by(7.0, 1.0)
+        assert sig.to_dict()["target_soc"] == 1.0
+        sig = ControlSignal.ev_set_ready_by(7.0, 0.85)
+        assert sig.to_dict()["target_soc"] == 0.85
+
+    def test_max_capacity_fraction_rejects_out_of_range(self):
+        with pytest.raises(ValueError):
+            ControlSignal.max_capacity_fraction(-0.1)
+        with pytest.raises(ValueError):
+            ControlSignal.max_capacity_fraction(1.1)
+
+    def test_max_capacity_fraction_accepts_boundaries(self):
+        sig = ControlSignal.max_capacity_fraction(0.0)
+        assert sig.to_dict()["fraction"] == 0.0
+        sig = ControlSignal.max_capacity_fraction(1.0)
+        assert sig.to_dict()["fraction"] == 1.0
+        sig = ControlSignal.max_capacity_fraction(0.5)
+        assert sig.to_dict()["fraction"] == 0.5
+
+    def test_power_setpoint_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.power_setpoint(float("nan"))
+
+    def test_ideal_capacity_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ideal_capacity(float("nan"))
+
+    def test_load_fraction_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.load_fraction(float("nan"))
+
+    def test_soc_target_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=float("nan"))
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=0.5, min=float("nan"))
+        with pytest.raises(ValueError):
+            ControlSignal.soc_target(target=0.5, max=float("nan"))
+
+    def test_power_limit_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.power_limit(max_power_kw=float("nan"))
+
+    def test_curtailment_percent_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.curtailment_percent(float("nan"))
+
+    def test_ev_drive_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_drive(float("nan"))
+
+    def test_ev_away_charge_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_away_charge(float("nan"))
+
+    def test_ev_set_ready_by_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.ev_set_ready_by(7.0, float("nan"))
+
+    def test_max_capacity_fraction_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.max_capacity_fraction(float("nan"))
+
+    def test_duty_cycle_rejects_nan(self):
+        with pytest.raises(ValueError):
+            ControlSignal.duty_cycle(on_fraction=float("nan"))
 
     def test_thermal_setpoint(self):
         sig = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
@@ -164,10 +331,12 @@ class TestControlSignalConstructors:
         d = sig.to_dict()
         assert d["component"] == "BackupElement"
 
-    def test_duty_cycle_domain_validation(self):
-        sig = ControlSignal.duty_cycle(on_fraction=1.5)
-        d = sig.to_dict()
-        assert d["on_fraction"] == 1.5
+    def test_duty_cycle_domain_validation_rejects(self):
+        """Duty cycle on_fraction outside [0,1] raises ValueError."""
+        with pytest.raises(ValueError):
+            ControlSignal.duty_cycle(on_fraction=1.5)
+        with pytest.raises(ValueError):
+            ControlSignal.duty_cycle(on_fraction=-0.1)
 
     def test_grid_connect(self):
         sig = ControlSignal.grid_connect(connected=True)
@@ -282,7 +451,7 @@ class TestControlSignalFromDict:
         sig = ControlSignal.from_dict(d)
         assert sig.to_dict()["heating_setpoint_c"] == 20.0
 
-    def test_from_dict_all_18_variants(self):
+    def test_from_dict_all_25_variants(self):
         variants = [
             {"type": "PowerSetpoint", "active_power_kw": 1.0},
             {"type": "ThermalSetpoint", "heating_setpoint_c": 20.0},
@@ -303,7 +472,14 @@ class TestControlSignalFromDict:
             {"type": "ProtocolNative", "protocol": 42, "payload": b"\x01"},
             {"type": "IdealCapacity", "capacity_w": 5000.0},
             {"type": "IdealCapacityModeOverride", "mode": "Auto"},
+            {"type": "EvPlugIn", "state": "HomePluggedIn"},
+            {"type": "EvDrive", "kwh": 5.0},
+            {"type": "EvAwayCharge", "power_kw": 11.5},
+            {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 0.85},
+            {"type": "EventDelay", "delay_s": 300.0},
+            {"type": "MaxCapacityFraction", "fraction": 0.5},
         ]
+        assert len(variants) == 25
         for v in variants:
             sig = ControlSignal.from_dict(v)
             assert sig.to_dict()["type"] == v["type"]
@@ -367,6 +543,71 @@ class TestControlSignalFromDict:
         sig = ControlSignal.from_dict(d)
         assert sig.to_dict()["mode"] == "Off"
 
+    def test_from_dict_rejects_invalid_values(self):
+        """from_dict raises ValueError for out-of-range numeric fields."""
+        invalid_cases = [
+            {"type": "PowerSetpoint", "active_power_kw": -1.0},
+            {"type": "PowerLimit", "max_power_kw": -1.0},
+            {"type": "SOCTarget", "target_soc": 1.5},
+            {"type": "SOCTarget", "target_soc": -0.1},
+            {"type": "DutyCycle", "on_fraction": 1.5},
+            {"type": "DutyCycle", "on_fraction": -0.1},
+            {"type": "LoadFraction", "fraction": -0.5},
+            {"type": "CurtailmentPercent", "percent": 150.0},
+            {"type": "IdealCapacity", "capacity_w": -1.0},
+            {"type": "EvDrive", "kwh": -1.0},
+            {"type": "EvAwayCharge", "power_kw": -1.0},
+            {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 1.5},
+            {"type": "MaxCapacityFraction", "fraction": -0.5},
+        ]
+        for case in invalid_cases:
+            with pytest.raises(ValueError):
+                ControlSignal.from_dict(case)
+
+    def test_from_dict_rejects_nan_values(self):
+        """from_dict raises ValueError for NaN in numeric fields."""
+        nan_cases = [
+            {"type": "PowerSetpoint", "active_power_kw": float("nan")},
+            {"type": "PowerLimit", "max_power_kw": float("nan")},
+            {"type": "SOCTarget", "target_soc": float("nan")},
+            {"type": "DutyCycle", "on_fraction": float("nan")},
+            {"type": "LoadFraction", "fraction": float("nan")},
+            {"type": "CurtailmentPercent", "percent": float("nan")},
+            {"type": "IdealCapacity", "capacity_w": float("nan")},
+            {"type": "EvDrive", "kwh": float("nan")},
+            {"type": "EvAwayCharge", "power_kw": float("nan")},
+            {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": float("nan")},
+            {"type": "MaxCapacityFraction", "fraction": float("nan")},
+        ]
+        for case in nan_cases:
+            with pytest.raises(ValueError):
+                ControlSignal.from_dict(case)
+
+    def test_from_dict_accepts_valid_boundary_values(self):
+        """from_dict accepts valid boundary values (0.0, 1.0, 100.0)."""
+        valid_cases = [
+            {"type": "PowerSetpoint", "active_power_kw": 0.0},
+            {"type": "PowerLimit", "max_power_kw": 0.0},
+            {"type": "SOCTarget", "target_soc": 0.0},
+            {"type": "SOCTarget", "target_soc": 1.0},
+            {"type": "DutyCycle", "on_fraction": 0.0},
+            {"type": "DutyCycle", "on_fraction": 1.0},
+            {"type": "LoadFraction", "fraction": 0.0},
+            {"type": "LoadFraction", "fraction": 1.0},
+            {"type": "CurtailmentPercent", "percent": 0.0},
+            {"type": "CurtailmentPercent", "percent": 100.0},
+            {"type": "IdealCapacity", "capacity_w": 0.0},
+            {"type": "EvDrive", "kwh": 0.0},
+            {"type": "EvAwayCharge", "power_kw": 0.0},
+            {"type": "MaxCapacityFraction", "fraction": 0.0},
+            {"type": "MaxCapacityFraction", "fraction": 1.0},
+            {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 0.0},
+            {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 1.0},
+        ]
+        for case in valid_cases:
+            sig = ControlSignal.from_dict(case)
+            assert sig.to_dict()["type"] == case["type"]
+
     def test_from_dict_missing_required_key_raises(self):
         d = {"type": "PowerSetpoint"}
         with pytest.raises(ValueError):
@@ -382,8 +623,11 @@ class TestControlSignalRoundTrip:
     """Test to_dict -> from_dict round-trip for all variants."""
 
     def test_power_setpoint_round_trip(self):
-        original = ControlSignal.power_setpoint(1.5, 0.3)
+        original = ControlSignal.power_setpoint(1.5, 0.3, min_soc=0.2, max_soc=0.9)
         d = original.to_dict()
+        assert d["reactive_power_kvar"] == 0.3
+        assert d["min_soc"] == 0.2
+        assert d["max_soc"] == 0.9
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
 
