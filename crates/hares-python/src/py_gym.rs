@@ -426,7 +426,7 @@ pub fn batch_step_py(
             let py_signal = PyControlSignal {
                 signal: signal.clone(),
             };
-            dwelling_ref.apply_control(equipment.clone(), &py_signal)?;
+            dwelling_ref.apply_control(equipment.clone(), &py_signal, None)?;
         }
     }
 

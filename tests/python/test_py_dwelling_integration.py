@@ -914,3 +914,60 @@ class TestDerSimulationExplorer:
         assert df.height == expected_rows, (
             f"Expected {expected_rows} rows, got {df.height}"
         )
+
+
+# ---------------------------------------------------------------------------
+# apply_control priority override
+# ---------------------------------------------------------------------------
+
+
+class TestApplyControlPriority:
+    def test_apply_control_backward_compatible_without_priority(self):
+        """Omitting `priority` parameter preserves backwards-compatible behaviour
+        and the signal is dispatched at its default (signal-derived) tier."""
+        from ochre_next import ControlSignal
+
+        dw = _init_dwelling()
+        name = _find_thermal_equipment(dw)
+        signal = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
+        dw.apply_control(name, signal)
+        step = dw.step()
+        assert isinstance(step, dict)
+        assert "hvac_heating_w" in step
+        assert isinstance(step["hvac_heating_w"], (int, float))
+
+    def test_safety_priority_overrides_lower_priority_in_same_step(self):
+        """Queues two conflicting ThermalSetpoints with different priorities
+        and verifies the Safety-tier signal wins arbitration.
+
+        A UserOverride ThermalSetpoint (tier 1) suppresses heating to -50 C,
+        then a Safety ThermalSetpoint (tier 3) forces heating at 50 C.
+        The Safety signal must win — hvac_heating_w is non-zero.
+        """
+        from ochre_next import ControlSignal, Priority
+
+        dw = _init_dwelling(duration_s=900, time_res_s=60)
+        name = _find_thermal_equipment(dw)
+
+        for _ in range(3):
+            dw.step()
+
+        # Safety override signal — forces heating; queued first so
+        # only correct tier arbitration (not same-tier FIFO) can make it win
+        dw.apply_control(
+            name,
+            ControlSignal.thermal_setpoint(heat_c=50.0, cool_c=25.0),
+            priority=Priority.safety(),
+        )
+        # UserOverride suppress signal — queued second; must be rejected
+        # by the dispatcher's cross-tier priority-inversion protection
+        dw.apply_control(
+            name,
+            ControlSignal.thermal_setpoint(heat_c=-50.0, cool_c=25.0),
+        )
+
+        step = dw.step()
+        assert step["hvac_heating_w"] > 0, (
+            f"Safety-priority signal must win arbitration: "
+            f"hvac_heating_w={step['hvac_heating_w']}"
+        )

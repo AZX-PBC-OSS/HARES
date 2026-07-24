@@ -38,6 +38,7 @@ pyo3::create_exception!(_hares, FatalDwellingError, pyo3::exceptions::PyRuntimeE
 
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
+use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
 use crate::py_config::parse_rotation_policy;
 use crate::py_control::PyControlSignal;
@@ -775,10 +776,17 @@ impl PyDwelling {
         Ok(out.unbind().into())
     }
 
-    pub fn apply_control(&self, name: String, signal: &PyControlSignal) -> PyResult<()> {
+    #[pyo3(signature = (name, signal, priority=None))]
+    pub fn apply_control(
+        &self,
+        name: String,
+        signal: &PyControlSignal,
+        priority: Option<PyPriority>,
+    ) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
+        let tier = priority.map(|p| p.into_priority_tier());
         dwelling
-            .apply_control_validated(&name, signal.signal.clone())
+            .apply_control_validated(&name, signal.signal.clone(), tier)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 

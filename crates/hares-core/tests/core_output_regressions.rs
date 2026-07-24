@@ -218,6 +218,7 @@ fn battery_core_output_matches_dwelling_aggregation() {
                 min_soc: None,
                 max_soc: None,
             },
+            None,
         )
         .expect("battery power setpoint must validate");
 

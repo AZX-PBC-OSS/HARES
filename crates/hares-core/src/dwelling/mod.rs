@@ -2804,9 +2804,20 @@ impl Dwelling {
     /// dispatcher's telemetry capture still fires at step time; re-applying an
     /// idempotent state-assignment is safe.
     ///
+    /// When `priority` is `None`, the tier is derived from the signal type via
+    /// the centralised `From<&ControlSignal> for PriorityTier` mapping.
+    /// When `Some(tier)`, the explicit tier is used instead — this allows
+    /// external callers (e.g. Python bridges) to elevate a signal's priority
+    /// (e.g. a freeze-protection `ThermalSetpoint` at `Safety`).
+    ///
     /// Returns `Err` if the equipment is not found or the signal is rejected
     /// by the equipment's current state (e.g. EvDrive while plugged in).
-    pub fn apply_control_validated(&mut self, name: &str, signal: ControlSignal) -> Result<()> {
+    pub fn apply_control_validated(
+        &mut self,
+        name: &str,
+        signal: ControlSignal,
+        priority: Option<PriorityTier>,
+    ) -> Result<()> {
         let is_immediate = signal.is_immediate_state_update();
         if is_immediate {
             let eq = self
@@ -2823,7 +2834,16 @@ impl Dwelling {
                 .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
             eq.validate_signal(&signal)?;
         }
-        let priority = PriorityTier::from(&signal);
+        let priority = priority.unwrap_or_else(|| PriorityTier::from(&signal));
+        if matches!(priority, PriorityTier::Safety | PriorityTier::Grid) {
+            tracing::warn!(
+                equipment = name,
+                priority_tier = ?priority,
+                signal = ?signal,
+                "Control signal with elevated priority received via non-actor path; \
+                 this may indicate a manual override that should be reviewed",
+            );
+        }
         self.control_dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from(name)),
             signal,

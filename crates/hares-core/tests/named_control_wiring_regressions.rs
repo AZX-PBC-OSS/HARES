@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use hares_control::PriorityTier;
 use hares_core::{Dwelling, DwellingConfig, StepResult};
 use hares_io::SimulationConfig;
 use hares_types::{ControlCapabilities, ControlSignal, EndUse, OperatingMode};
@@ -102,7 +103,7 @@ fn simulate_with_named_control(
     for step_idx in 0..=target_step {
         if step_idx == target_step {
             dwelling
-                .apply_control_validated(equipment_name, signal.clone())
+                .apply_control_validated(equipment_name, signal.clone(), None)
                 .expect("control should validate");
         }
         steps.push(dwelling.step().expect("fixture step must succeed"));
@@ -168,5 +169,55 @@ fn named_thermal_setpoint_reaches_hvac_on_same_step() {
     assert!(
         controlled_heat < baseline_heat * 0.2,
         "ThermalSetpoint must suppress HVAC heating on the same step: baseline={baseline_heat:.6} W controlled={controlled_heat:.6} W step={target_step}"
+    );
+}
+
+#[test]
+fn safety_priority_thermal_setpoint_overrides_user_override_in_same_step() {
+    let fixture = "cz2a_gas_furnace_ac_res_wh";
+    let equipment_name = first_heating_equipment_name(&load_fixture(fixture));
+    let (baseline, target_step) = simulate_until_first_active_heating(fixture, &equipment_name);
+
+    let mut dwelling = load_fixture(fixture);
+    let mut steps = Vec::new();
+
+    for step_idx in 0..=target_step {
+        if step_idx == target_step {
+            dwelling
+                .apply_control_validated(
+                    &equipment_name,
+                    ControlSignal::ThermalSetpoint {
+                        heating_setpoint_c: Some(50.0),
+                        cooling_setpoint_c: None,
+                        deadband_c: None,
+                    },
+                    Some(PriorityTier::Safety),
+                )
+                .expect("safety-priority control should validate");
+            dwelling
+                .apply_control_validated(
+                    &equipment_name,
+                    ControlSignal::ThermalSetpoint {
+                        heating_setpoint_c: Some(-50.0),
+                        cooling_setpoint_c: None,
+                        deadband_c: None,
+                    },
+                    None,
+                )
+                .expect("user-override control should validate");
+        }
+        steps.push(dwelling.step().expect("fixture step must succeed"));
+    }
+
+    let baseline_heat = baseline[target_step].hvac_heating_w;
+    let priority_heat = steps[target_step].hvac_heating_w;
+    assert!(
+        baseline_heat > 0.0,
+        "baseline step must include active heating to validate priority arbitration"
+    );
+    assert!(
+        priority_heat > baseline_heat * 0.2,
+        "Safety-priority ThermalSetpoint must override UserOverride suppress signal: \
+         baseline={baseline_heat:.6} W priority={priority_heat:.6} W step={target_step}"
     );
 }
