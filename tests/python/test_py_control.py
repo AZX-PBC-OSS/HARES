@@ -923,6 +923,33 @@ class TestNewDispatchRequestConstructors:
         assert req.target == "hvac"
         assert "MaxCapacityFraction" in repr(req.signal)
 
+    def test_duty_cycle_with_component(self):
+        req = DispatchRequest.duty_cycle(
+            "hpwh", 0.5, component=DutyCycleComponent.Compressor
+        )
+        assert req.target == "hpwh"
+        assert "Compressor" in repr(req.signal)
+
+    def test_duty_cycle_with_component_backup_element(self):
+        req = DispatchRequest.duty_cycle(
+            "hpwh", 0.3, component=DutyCycleComponent.BackupElement
+        )
+        assert req.target == "hpwh"
+        assert "BackupElement" in repr(req.signal)
+
+    def test_duty_cycle_backward_compatible_without_component(self):
+        req = DispatchRequest.duty_cycle("hvac", 0.5)
+        assert req.target == "hvac"
+        assert "DutyCycle" in repr(req.signal)
+
+    def test_duty_cycle_component_via_signal_constructor(self):
+        sig = Signal.duty_cycle(0.5, component=DutyCycleComponent.Compressor)
+        assert "Compressor" in repr(sig)
+
+    def test_duty_cycle_signal_backward_compatible(self):
+        sig = Signal.duty_cycle(0.5)
+        assert "DutyCycle" in repr(sig)
+
     def test_priority_defaults_to_schedule(self):
         req = DispatchRequest.humidity_setpoint("dehumidifier", target_rh=0.5)
         assert req.priority == Priority.Schedule

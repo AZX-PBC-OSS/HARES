@@ -34,9 +34,14 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EnvironmentState, EvConnectionState, OperatingMode, ProtocolId};
+use hares_types::{
+    ControlSignal, DutyCycleComponent, EnvironmentState, EvConnectionState, OperatingMode,
+    ProtocolId,
+};
 
-use crate::py_enums::{PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority};
+use crate::py_enums::{
+    PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -243,6 +248,7 @@ pub enum PySignal {
     DutyCycle {
         on_fraction: f64,
         period_s: Option<f64>,
+        component: Option<PyDutyCycleComponent>,
     },
     DemandResponse {
         level: PyDRLevel,
@@ -404,10 +410,11 @@ impl PySignal {
             PySignal::DutyCycle {
                 on_fraction,
                 period_s,
+                component,
             } => ControlSignal::DutyCycle {
                 on_fraction,
                 period_s,
-                component: None,
+                component: component.map(DutyCycleComponent::from),
             },
             PySignal::DemandResponse { level, duration_s } => ControlSignal::DemandResponse {
                 level: level.into_dr_level(),
@@ -481,9 +488,30 @@ impl PySignal {
                 0,
                 "PySignal variant mapped to zero-capability ControlSignal"
             );
+            if let ControlSignal::DutyCycle {
+                component: Some(_),
+                on_fraction,
+                ..
+            } = &result
+            {
+                debug_assert!(
+                    on_fraction.is_finite() && (0.0..=1.0).contains(on_fraction),
+                    "DutyCycle with component field has invalid on_fraction: {on_fraction}"
+                );
+            }
         }
         #[cfg(feature = "observe")]
-        dispatch_observer::record_dispatch(&result);
+        {
+            dispatch_observer::record_dispatch(&result);
+            if let ControlSignal::DutyCycle {
+                component: Some(comp),
+                on_fraction,
+                ..
+            } = &result
+            {
+                dispatch_observer::record_duty_cycle_component(*comp, *on_fraction);
+            }
+        }
         result
     }
 }
@@ -492,9 +520,11 @@ impl PySignal {
 mod dispatch_observer {
     use std::sync::{LazyLock, Mutex};
 
-    use hares_types::ControlSignal;
+    use hares_types::{ControlSignal, DutyCycleComponent};
 
     static COUNTERS: LazyLock<Mutex<[u64; 25]>> = LazyLock::new(|| Mutex::new([0; 25]));
+    static DUTY_CYCLE_COMPONENT_EVENTS: LazyLock<Mutex<Vec<(DutyCycleComponent, f64)>>> =
+        LazyLock::new(|| Mutex::new(Vec::new()));
 
     fn variant_index(signal: &ControlSignal) -> usize {
         match signal {
@@ -530,6 +560,12 @@ mod dispatch_observer {
         let idx = variant_index(signal);
         if let Ok(mut counters) = COUNTERS.lock() {
             counters[idx] += 1;
+        }
+    }
+
+    pub fn record_duty_cycle_component(component: DutyCycleComponent, on_fraction: f64) {
+        if let Ok(mut events) = DUTY_CYCLE_COMPONENT_EVENTS.lock() {
+            events.push((component, on_fraction));
         }
     }
 }
@@ -694,11 +730,12 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, on_fraction, period_s=None, priority=None))]
+    #[pyo3(signature = (target, on_fraction, period_s=None, component=None, priority=None))]
     fn duty_cycle(
         target: String,
         on_fraction: f64,
         period_s: Option<f64>,
+        component: Option<PyDutyCycleComponent>,
         priority: Option<PyPriority>,
     ) -> PyResult<Self> {
         Ok(Self {
@@ -706,6 +743,7 @@ impl PyDispatchRequest {
             signal: PySignal::DutyCycle {
                 on_fraction,
                 period_s,
+                component,
             },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
@@ -1040,11 +1078,16 @@ impl PySignal {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (on_fraction, period_s=None))]
-    fn duty_cycle(on_fraction: f64, period_s: Option<f64>) -> Self {
+    #[pyo3(signature = (on_fraction, period_s=None, component=None))]
+    fn duty_cycle(
+        on_fraction: f64,
+        period_s: Option<f64>,
+        component: Option<PyDutyCycleComponent>,
+    ) -> Self {
         PySignal::DutyCycle {
             on_fraction,
             period_s,
+            component,
         }
     }
 
@@ -1431,6 +1474,86 @@ mod tests {
         assert!(matches!(
             dr.signal,
             ControlSignal::MaxCapacityFraction { fraction: f } if f == 0.6
+        ));
+    }
+
+    #[test]
+    fn duty_cycle_with_component_round_trips_through_into_control_signal() {
+        let signal = PySignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: None,
+            component: Some(PyDutyCycleComponent::Compressor),
+        };
+        let cs = signal.into_control_signal();
+        assert!(matches!(
+            cs,
+            ControlSignal::DutyCycle {
+                on_fraction,
+                component: Some(DutyCycleComponent::Compressor),
+                ..
+            } if (on_fraction - 0.5).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn duty_cycle_with_backup_element_round_trips() {
+        let signal = PySignal::DutyCycle {
+            on_fraction: 0.3,
+            period_s: None,
+            component: Some(PyDutyCycleComponent::BackupElement),
+        };
+        let cs = signal.into_control_signal();
+        assert!(matches!(
+            cs,
+            ControlSignal::DutyCycle {
+                on_fraction,
+                component: Some(DutyCycleComponent::BackupElement),
+                ..
+            } if (on_fraction - 0.3).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn duty_cycle_without_component_round_trips() {
+        let signal = PySignal::DutyCycle {
+            on_fraction: 0.7,
+            period_s: Some(300.0),
+            component: None,
+        };
+        let cs = signal.into_control_signal();
+        assert!(matches!(
+            cs,
+            ControlSignal::DutyCycle {
+                on_fraction,
+                period_s: Some(300.0),
+                component: None,
+            } if (on_fraction - 0.7).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn duty_cycle_with_component_round_trips_through_dispatch_request() {
+        let req = PyDispatchRequest {
+            target: "hpwh".to_string(),
+            signal: PySignal::DutyCycle {
+                on_fraction: 0.3,
+                period_s: None,
+                component: Some(PyDutyCycleComponent::BackupElement),
+            },
+            priority: PyPriority::Schedule,
+        };
+        let dr = req.into_dispatch_request();
+        assert!(matches!(
+            dr.target,
+            DispatchTarget::ByName(ref name) if name.as_ref() == "hpwh"
+        ));
+        assert!(matches!(
+            dr.signal,
+            ControlSignal::DutyCycle {
+                on_fraction,
+                component: Some(DutyCycleComponent::BackupElement),
+                ..
+            } if (on_fraction - 0.3).abs() < f64::EPSILON
         ));
     }
 }
