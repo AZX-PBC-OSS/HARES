@@ -16,7 +16,7 @@ const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
 const DEFAULT_STEP_S: i64 = 60;
 const DEFAULT_CHUNK_SIZE: usize = 10_000;
-const MAX_CHRONO_SECONDS: i64 = i64::MAX / 1_000;
+pub(crate) const MAX_CHRONO_SECONDS: i64 = i64::MAX / 1_000;
 
 fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if obj.is_none() {

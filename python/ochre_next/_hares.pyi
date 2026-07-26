@@ -2228,6 +2228,7 @@ class Fleet:
         weather_dir: str,
         filter: dict[str, str] | None = ...,
         resstock_version: ResStockVersion | str | None = ...,
+        duration_s: int | None = ...,
     ) -> Fleet: ...
     def simulate(
         self,

@@ -1102,7 +1102,9 @@ dependencies = [
  "hares-core",
  "hares-io",
  "hares-types",
+ "parquet",
  "rayon",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

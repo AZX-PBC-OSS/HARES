@@ -18,7 +18,7 @@ use crate::conversions::{
     chrono_to_py_datetime, dwelling_metrics_to_polars_df, fleet_results_to_py,
     record_batches_to_polars_df,
 };
-use crate::py_config::PyDwellingConfig;
+use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig};
 use crate::py_control::PyControlSignal;
 use crate::py_enums::{PyAggregationResolution, PyResStockVersion};
 use crate::py_telemetry::PyTelemetry;
@@ -117,7 +117,7 @@ impl PyFleet {
     }
 
     #[classmethod]
-    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None))]
+    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None, duration_s=None))]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
         metadata_path: String,
@@ -125,6 +125,7 @@ impl PyFleet {
         weather_dir: String,
         filter: Option<&Bound<'_, PyDict>>,
         resstock_version: Option<Bound<'_, PyAny>>,
+        duration_s: Option<i64>,
     ) -> PyResult<Self> {
         let parsed_filter = filter
             .map(dict_to_filter)
@@ -136,12 +137,28 @@ impl PyFleet {
             None => Some(IoResStockVersion::V2025_1),
         };
 
+        let duration = match duration_s {
+            Some(s) => {
+                if s <= 0 {
+                    return Err(PyValueError::new_err("duration_s must be positive"));
+                }
+                if s > MAX_CHRONO_SECONDS {
+                    return Err(PyValueError::new_err(format!(
+                        "duration_s too large for chrono Duration: {s}"
+                    )));
+                }
+                Some(chrono::Duration::seconds(s))
+            }
+            None => None,
+        };
+
         let fleet = Fleet::from_resstock(
             Path::new(&metadata_path),
             Path::new(&hpxml_dir),
             Path::new(&weather_dir),
             parsed_version,
             parsed_filter,
+            duration,
         )
         .map_err(to_py_err)?;
 

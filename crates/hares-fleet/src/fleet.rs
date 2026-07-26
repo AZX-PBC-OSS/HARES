@@ -136,16 +136,28 @@ impl Fleet {
     /// Constructs a fleet from ResStock metadata and local data directories.
     ///
     /// `resstock_version` defaults to the latest known schema when `None`.
+    /// `duration` overrides the default 24-hour simulation duration;
+    /// when `None`, the default of 24 hours is used for backward compatibility.
     pub fn from_resstock(
         metadata_path: &Path,
         hpxml_dir: &Path,
         weather_dir: &Path,
         resstock_version: Option<ResStockVersion>,
         filter: Option<HashMap<String, String>>,
+        duration: Option<chrono::Duration>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
         let buildings = parse_resstock_metadata(metadata_path, version, hpxml_dir)
             .map_err(|err| FleetError::ResStock(err.to_string()))?;
+
+        let sim_config = resstock_sim_config(duration);
+        let duration_hours = sim_config.duration.num_seconds() as f64 / 3600.0;
+
+        tracing::info!(
+            duration_hours,
+            "ResStock fleet simulation duration: {:.1} hours",
+            duration_hours,
+        );
 
         let mut resolved = 0usize;
         let mut unresolved = 0usize;
@@ -186,7 +198,7 @@ impl Fleet {
                         schedule_path: building.schedule_path,
                         weather_path,
                         defaults_path: None,
-                        sim_config: default_resstock_sim_config(),
+                        sim_config: sim_config.clone(),
                         overrides: None,
                         bldg_id: building.bldg_id,
                         initialization_duration: Some(std::time::Duration::from_secs(
@@ -764,14 +776,14 @@ fn map_status(status: &CoreSimStatus) -> SimStatus {
     }
 }
 
-fn default_resstock_sim_config() -> SimulationConfig {
+fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
     SimulationConfig {
         start_time: FixedOffset::east_opt(0)
             .expect("valid UTC offset")
             .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
             .single()
             .expect("valid constant simulation start timestamp"),
-        duration: Duration::hours(24),
+        duration: duration.unwrap_or_else(|| Duration::hours(24)),
         time_res: Duration::minutes(1),
         output_verbosity: 0,
         output_path: None,
@@ -1016,6 +1028,13 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::arrow_writer::ArrowWriter;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -2088,5 +2107,87 @@ mod tests {
             validate_fleet_building_zone(&hpxml_path, &csv_path, 4),
             ZoneMatchStatus::Skipped
         );
+    }
+
+    fn write_resstock_parquet_v2025(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("building_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float64, false),
+            Field::new("upgrade_id", DataType::Int64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch");
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("writer");
+        writer.write(&batch).expect("write");
+        writer.close().expect("close");
+    }
+
+    #[test]
+    fn from_resstock_default_duration() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq);
+
+        let fleet = Fleet::from_resstock(
+            &pq,
+            tmp.path(),
+            tmp.path(),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+        )
+        .expect("fleet construction");
+
+        assert!(
+            !fleet.entries.is_empty(),
+            "fleet should have at least one entry"
+        );
+        for entry in &fleet.entries {
+            assert_eq!(
+                entry.config.sim_config.duration,
+                Duration::hours(24),
+                "default duration should be 24 hours"
+            );
+        }
+    }
+
+    #[test]
+    fn from_resstock_with_custom_duration() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq);
+
+        let fleet = Fleet::from_resstock(
+            &pq,
+            tmp.path(),
+            tmp.path(),
+            Some(ResStockVersion::V2025_1),
+            None,
+            Some(Duration::days(365)),
+        )
+        .expect("fleet construction");
+
+        assert!(
+            !fleet.entries.is_empty(),
+            "fleet should have at least one entry"
+        );
+        for entry in &fleet.entries {
+            assert_eq!(
+                entry.config.sim_config.duration,
+                Duration::days(365),
+                "custom duration should be {d} days",
+                d = 365
+            );
+        }
     }
 }
