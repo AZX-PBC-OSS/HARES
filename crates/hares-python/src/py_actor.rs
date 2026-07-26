@@ -106,7 +106,7 @@ impl hares_core::Actor for PyActorWrapper {
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
-        let executed = Python::try_attach(|py| {
+        Python::attach(|py| {
             let obj = self.obj.bind(py);
 
             // Refresh cached name in case Python code updated it
@@ -146,13 +146,14 @@ impl hares_core::Actor for PyActorWrapper {
                     self.last_error = Some(msg);
                 }
             }
-            true
         });
 
-        if executed.is_none() {
-            tracing::error!(
-                actor = %self.name,
-                "Python GIL not available for actor decide() - this should not happen in Python-driven simulations"
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                Python::try_attach(|py| py.import("sys").is_ok()).unwrap_or(false),
+                "Python interpreter unreachable after PyActorWrapper::decide() — \
+                 Python init state may be corrupted"
             );
         }
     }
@@ -1628,5 +1629,51 @@ mod tests {
                 "dispatch buffer should be empty after decide() raises"
             );
         });
+    }
+
+    #[test]
+    fn py_actor_decide_executes_from_rust_driven_thread_without_pre_held_gil() {
+        // Create the wrapper on the main thread while holding the GIL.
+        // After Python::attach returns the GIL is released, so the
+        // spawned thread starts without the GIL held. The decide() call
+        // uses Python::attach internally and must acquire it cleanly.
+        let wrapper = Python::attach(|py| {
+            let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
+            PyActorWrapper::new(py, actor_obj)
+        });
+
+        let handle = std::thread::spawn(move || {
+            let mut wrapper = wrapper;
+            let env = hares_core::actor::testing::test_env().build();
+            let mut out = Vec::new();
+
+            // This is the key assertion: decide() must succeed even though
+            // this thread started without the GIL. Python::attach in
+            // decide() acquires the GIL, runs the Python method, and
+            // releases it — all transparently.
+            wrapper.decide(&env, &mut out);
+
+            // PyActor base class has no decide() method; calling it raises
+            // AttributeError which the wrapper converts to last_error.
+            assert!(
+                !wrapper.healthy(),
+                "PyActorWrapper should be unhealthy after decide() raises"
+            );
+            assert!(
+                wrapper.last_error.is_some(),
+                "PyActorWrapper should have last_error set after decide() raises"
+            );
+            let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert!(
+                err_msg.contains("AttributeError"),
+                "last_error should contain AttributeError, got: {err_msg}"
+            );
+            assert!(
+                out.is_empty(),
+                "dispatch buffer should be empty after decide() raises"
+            );
+        });
+
+        handle.join().expect("spawned thread panicked");
     }
 }
