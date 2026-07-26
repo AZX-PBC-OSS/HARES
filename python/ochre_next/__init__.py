@@ -97,6 +97,7 @@ from ._hares import GasEnergyMetrics
 # Tariff types
 from ._hares import ElectricTariff
 from ._hares import TariffBuilder
+from ._hares import TariffEvaluator
 from ._hares import GasTariff
 from ._hares import GasTariffBuilder
 from ._hares import BillingPeriodSummary
@@ -222,6 +223,7 @@ __all__ = [
     # Tariffs
     "ElectricTariff",
     "TariffBuilder",
+    "TariffEvaluator",
     "GasTariff",
     "GasTariffBuilder",
     "BillingPeriodSummary",

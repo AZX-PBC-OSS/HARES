@@ -1,3 +1,5 @@
+use chrono::{DateTime, FixedOffset, TimeZone};
+use hares_tariff::TariffEvaluator;
 use hares_tariff::types::{
     DemandRate, ElectricTariff, EnergyRate, ExportMode, ExportRate, FixedCharges, GasTariff,
     GasTieredBlock, RatchetConfig, TieredBlock,
@@ -7,6 +9,10 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyType};
+
+use crate::py_telemetry::PyBillingPeriodSummary;
+use crate::utils::extract_datetime;
+use crate::utils::extract_seconds;
 
 fn parse_season(s: &str) -> PyResult<SeasonFilter> {
     match s.to_lowercase().as_str() {
@@ -216,6 +222,120 @@ impl PyElectricTariff {
 
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PyTariffEvaluator
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "TariffEvaluator")]
+pub struct PyTariffEvaluator {
+    evaluator: TariffEvaluator,
+    tariff_name: String,
+    start_time: DateTime<FixedOffset>,
+    end_time: DateTime<FixedOffset>,
+}
+
+fn fixed_offset_to_tz(dt: DateTime<FixedOffset>) -> DateTime<chrono_tz::Tz> {
+    let naive = dt.naive_utc();
+    chrono_tz::UTC.from_utc_datetime(&naive)
+}
+
+#[pymethods]
+impl PyTariffEvaluator {
+    #[new]
+    fn new(
+        tariff: &PyElectricTariff,
+        start: &Bound<'_, pyo3::PyAny>,
+        end: &Bound<'_, pyo3::PyAny>,
+        interval: &Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<Self> {
+        let start_dt: DateTime<FixedOffset> = extract_datetime(start)?;
+        let end_dt: DateTime<FixedOffset> = extract_datetime(end)?;
+        let interval_s = extract_seconds(interval)?;
+        if interval_s <= 0 {
+            return Err(PyValueError::new_err("interval must be > 0 seconds"));
+        }
+        let interval_s = interval_s as u32;
+
+        let tz_start = fixed_offset_to_tz(start_dt);
+        let tz_end = fixed_offset_to_tz(end_dt);
+
+        let evaluator = TariffEvaluator::new(tariff.inner.clone(), tz_start, tz_end, interval_s)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let tariff_name = tariff
+            .inner
+            .name
+            .clone()
+            .unwrap_or_else(|| "<unnamed>".to_string());
+
+        Ok(Self {
+            evaluator,
+            tariff_name,
+            start_time: start_dt,
+            end_time: end_dt,
+        })
+    }
+
+    fn step(
+        &mut self,
+        net_power_kw: f64,
+        dt_seconds: f64,
+        current_time: &Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<Option<PyBillingPeriodSummary>> {
+        let dt: DateTime<FixedOffset> = extract_datetime(current_time)?;
+        let tz_dt = fixed_offset_to_tz(dt);
+        Ok(self
+            .evaluator
+            .step(net_power_kw, 0.0, dt_seconds, tz_dt)
+            .map(|s| PyBillingPeriodSummary::from_rust(&s)))
+    }
+
+    fn finalize(
+        &mut self,
+        sim_end: &Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<Option<PyBillingPeriodSummary>> {
+        let end: DateTime<FixedOffset> = extract_datetime(sim_end)?;
+        let tz_end = fixed_offset_to_tz(end);
+        Ok(self
+            .evaluator
+            .finalize(tz_end)
+            .map(|s| PyBillingPeriodSummary::from_rust(&s)))
+    }
+
+    #[getter]
+    fn current_metrics(&self) -> PyBillingPeriodSummary {
+        PyBillingPeriodSummary::from_rust(&self.evaluator.current_metrics())
+    }
+
+    #[getter]
+    fn tariff_name(&self) -> &str {
+        &self.tariff_name
+    }
+
+    #[getter]
+    fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Py<pyo3::PyAny>> {
+        let datetime = py.import("datetime")?.getattr("datetime")?;
+        let obj = datetime.call_method1("fromisoformat", (self.start_time.to_rfc3339(),))?;
+        Ok(obj.unbind())
+    }
+
+    #[getter]
+    fn end_time<'py>(&self, py: Python<'py>) -> PyResult<Py<pyo3::PyAny>> {
+        let datetime = py.import("datetime")?.getattr("datetime")?;
+        let obj = datetime.call_method1("fromisoformat", (self.end_time.to_rfc3339(),))?;
+        Ok(obj.unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TariffEvaluator(tariff='{}', steps={}/{})",
+            self.tariff_name,
+            self.evaluator.step_index(),
+            self.evaluator.total_steps(),
+        )
     }
 }
 
@@ -786,5 +906,294 @@ impl PyGasTariffBuilder {
             "GasTariffBuilder(name={name:?}, tiered_rates={})",
             self.tiered_rates.len(),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyList;
+
+    fn make_datetime(py: Python<'_>, iso: &str) -> PyResult<Py<pyo3::PyAny>> {
+        let dt_mod = py.import("datetime")?;
+        let dt_cls = dt_mod.getattr("datetime")?;
+        let obj = dt_cls.call_method1("fromisoformat", (iso,))?;
+        Ok(obj.unbind())
+    }
+
+    fn make_timedelta(py: Python<'_>, hours: i64) -> PyResult<Py<pyo3::PyAny>> {
+        let dt_mod = py.import("datetime")?;
+        let td_cls = dt_mod.getattr("timedelta")?;
+        let obj = td_cls.call1((0, hours * 3600))?;
+        Ok(obj.unbind())
+    }
+
+    fn advance_datetime(
+        py: Python<'_>,
+        base_dt: &Py<pyo3::PyAny>,
+        step: usize,
+        interval_seconds: i64,
+    ) -> PyResult<Py<pyo3::PyAny>> {
+        let dt_mod = py.import("datetime")?;
+        let td_cls = dt_mod.getattr("timedelta")?;
+        let offset = td_cls.call1((0, step as i64 * interval_seconds))?;
+
+        let result = base_dt.bind(py).call_method1("__add__", (offset,))?;
+        Ok(result.unbind())
+    }
+
+    fn build_flat_tariff(py: Python<'_>, rate: f64) -> PyResult<Py<PyElectricTariff>> {
+        let builder = PyTariffBuilder::new();
+        let mut builder = Py::new(py, builder)?;
+
+        builder = PyTariffBuilder::set_name(builder, py, "flat-test".into());
+
+        let windows: Vec<Py<pyo3::PyAny>> = {
+            let d = PyDict::new(py);
+            d.set_item("day", "any")?;
+            d.set_item("start_hour", 0.0_f64)?;
+            d.set_item("end_hour", 24.0_f64)?;
+            vec![d.into_any().unbind()]
+        };
+        let py_windows = PyList::new(py, windows)?;
+        builder = PyTariffBuilder::add_tou_period(builder, py, "flat".into(), &py_windows, "all")?;
+
+        builder = PyTariffBuilder::add_energy_rate(builder, py, "flat".into(), "all", rate)?;
+
+        let tariff = PyTariffBuilder::build(&builder.bind(py).borrow())?;
+        Py::new(py, tariff)
+    }
+
+    fn step_evaluator(
+        py: Python<'_>,
+        ev: &mut PyTariffEvaluator,
+        start: &Py<pyo3::PyAny>,
+        power_fn: impl Fn(usize) -> f64,
+        interval_s: i64,
+        n_steps: usize,
+    ) -> PyResult<Vec<PyBillingPeriodSummary>> {
+        let mut summaries = Vec::new();
+        for i in 0..n_steps {
+            let ct = advance_datetime(py, start, i + 1, interval_s)?;
+            if let Some(s) = ev.step(power_fn(i), interval_s as f64, ct.bind(py).as_any())? {
+                summaries.push(s);
+            }
+        }
+        Ok(summaries)
+    }
+
+    #[test]
+    fn tariff_evaluator_standalone_flat_rate() {
+        pyo3::Python::attach(|py| {
+            let tariff_py = build_flat_tariff(py, 0.12).unwrap();
+            let tariff = tariff_py.bind(py).borrow();
+            let start = make_datetime(py, "2025-01-01T00:00:00Z").unwrap();
+            let end = make_datetime(py, "2026-01-01T00:00:00Z").unwrap();
+            let interval = make_timedelta(py, 1).unwrap();
+
+            let mut ev = PyTariffEvaluator::new(
+                &tariff,
+                start.bind(py).as_any(),
+                end.bind(py).as_any(),
+                interval.bind(py).as_any(),
+            )
+            .unwrap();
+
+            let summaries = step_evaluator(py, &mut ev, &start, |_| 1.0, 3600, 8760).unwrap();
+
+            let final_summary = ev
+                .finalize(end.bind(py).as_any())
+                .unwrap()
+                .expect("finalize should return summary");
+
+            let total_energy: f64 = summaries
+                .iter()
+                .map(|s| s.total_import_kwh)
+                .chain(std::iter::once(final_summary.total_import_kwh))
+                .sum();
+            let total_cost: f64 = summaries
+                .iter()
+                .map(|s| s.energy_charge_usd)
+                .chain(std::iter::once(final_summary.energy_charge_usd))
+                .sum();
+
+            let expected_kwh = 8760.0;
+            let expected_cost = expected_kwh * 0.12;
+            assert!(
+                (total_energy - expected_kwh).abs() < 1e-6,
+                "expected {expected_kwh} kWh, got {total_energy}"
+            );
+            assert!(
+                (total_cost - expected_cost).abs() < 1e-6,
+                "expected ${expected_cost}, got ${total_cost}"
+            );
+        });
+    }
+
+    #[test]
+    fn tariff_evaluator_tou_pricing() {
+        pyo3::Python::attach(|py| {
+            let builder = PyTariffBuilder::new();
+            let mut builder = Py::new(py, builder)?;
+
+            builder = PyTariffBuilder::set_name(builder, py, "tou-test".into());
+
+            let on_peak_windows: Vec<Py<pyo3::PyAny>> = {
+                let d = PyDict::new(py);
+                d.set_item("day", "weekdays")?;
+                d.set_item("start_hour", 16.0_f64)?;
+                d.set_item("end_hour", 21.0_f64)?;
+                vec![d.into_any().unbind()]
+            };
+            let py_windows = PyList::new(py, on_peak_windows)?;
+            builder =
+                PyTariffBuilder::add_tou_period(builder, py, "on-peak".into(), &py_windows, "all")?;
+
+            let off_peak_windows: Vec<Py<pyo3::PyAny>> = {
+                let d = PyDict::new(py);
+                d.set_item("day", "any")?;
+                d.set_item("start_hour", 0.0_f64)?;
+                d.set_item("end_hour", 24.0_f64)?;
+                vec![d.into_any().unbind()]
+            };
+            let py_windows = PyList::new(py, off_peak_windows)?;
+            builder = PyTariffBuilder::add_tou_period(
+                builder,
+                py,
+                "off-peak".into(),
+                &py_windows,
+                "all",
+            )?;
+
+            builder = PyTariffBuilder::add_energy_rate(builder, py, "on-peak".into(), "all", 0.35)?;
+            builder =
+                PyTariffBuilder::add_energy_rate(builder, py, "off-peak".into(), "all", 0.10)?;
+
+            let tariff = PyTariffBuilder::build(&builder.bind(py).borrow())?;
+            let tariff = Py::new(py, tariff)?;
+            let tariff_ref = tariff.bind(py).borrow();
+
+            // Jan 6 2025 is a Monday; simulate 24 hours
+            let start = make_datetime(py, "2025-01-06T00:00:00Z")?;
+            let end = make_datetime(py, "2025-01-07T00:00:00Z")?;
+            let interval = make_timedelta(py, 1)?;
+
+            let mut ev = PyTariffEvaluator::new(
+                &tariff_ref,
+                start.bind(py).as_any(),
+                end.bind(py).as_any(),
+                interval.bind(py).as_any(),
+            )?;
+
+            let summaries = step_evaluator(
+                py,
+                &mut ev,
+                &start,
+                |hour| {
+                    if (16..21).contains(&(hour as u32)) {
+                        2.0
+                    } else {
+                        1.0
+                    }
+                },
+                3600,
+                24,
+            )?;
+
+            let final_s = ev
+                .finalize(end.bind(py).as_any())?
+                .expect("should have summary");
+
+            let total_import: f64 = summaries
+                .iter()
+                .map(|s| s.total_import_kwh)
+                .chain(std::iter::once(final_s.total_import_kwh))
+                .sum();
+            let total_cost: f64 = summaries
+                .iter()
+                .map(|s| s.energy_charge_usd)
+                .chain(std::iter::once(final_s.energy_charge_usd))
+                .sum();
+
+            // 19 off-peak hours * 1 kW + 5 peak hours * 2 kW = 29 kWh
+            assert!(
+                (total_import - 29.0).abs() < 1e-6,
+                "expected 29 kWh, got {total_import}"
+            );
+            // 19 * 1 * 0.10 + 10 * 0.35 = 1.90 + 3.50 = 5.40
+            let expected_cost = 19.0 * 0.10 + 10.0 * 0.35;
+            assert!(
+                (total_cost - expected_cost).abs() < 1e-6,
+                "expected ${expected_cost}, got ${total_cost}"
+            );
+
+            Ok::<_, pyo3::PyErr>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn tariff_evaluator_idempotent() {
+        pyo3::Python::attach(|py| {
+            let tariff_py = build_flat_tariff(py, 0.12)?;
+            let tariff_ref = tariff_py.bind(py).borrow();
+            let start = make_datetime(py, "2025-01-01T00:00:00Z")?;
+            let end = make_datetime(py, "2025-01-02T00:00:00Z")?;
+            let interval = make_timedelta(py, 1)?;
+
+            let run = || -> PyResult<Vec<PyBillingPeriodSummary>> {
+                let mut ev = PyTariffEvaluator::new(
+                    &tariff_ref,
+                    start.bind(py).as_any(),
+                    end.bind(py).as_any(),
+                    interval.bind(py).as_any(),
+                )?;
+
+                let mut summaries = Vec::new();
+                for i in 0..24 {
+                    let load = if i % 2 == 0 { 2.0 } else { 1.0 };
+                    let ct = advance_datetime(py, &start, i + 1, 3600)?;
+                    if let Some(s) = ev.step(load, 3600.0, ct.bind(py).as_any())? {
+                        summaries.push(s);
+                    }
+                }
+                if let Some(s) = ev.finalize(end.bind(py).as_any())? {
+                    summaries.push(s);
+                }
+                Ok(summaries)
+            };
+
+            let first = run()?;
+            let second = run()?;
+
+            assert_eq!(first.len(), second.len(), "summary count should match");
+            for (i, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+                assert!(
+                    (a.total_import_kwh - b.total_import_kwh).abs() < 1e-10,
+                    "summary[{i}] total_import_kwh mismatch: {} vs {}",
+                    a.total_import_kwh,
+                    b.total_import_kwh
+                );
+                assert!(
+                    (a.energy_charge_usd - b.energy_charge_usd).abs() < 1e-10,
+                    "summary[{i}] energy_charge_usd mismatch: {} vs {}",
+                    a.energy_charge_usd,
+                    b.energy_charge_usd
+                );
+                assert!(
+                    (a.net_bill_usd - b.net_bill_usd).abs() < 1e-10,
+                    "summary[{i}] net_bill_usd mismatch: {} vs {}",
+                    a.net_bill_usd,
+                    b.net_bill_usd
+                );
+            }
+
+            Ok::<_, PyErr>(())
+        })
+        .unwrap();
     }
 }

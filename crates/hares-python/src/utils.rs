@@ -104,6 +104,59 @@ pub fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<FixedOffset
     parse_datetime_str(&iso)
 }
 
+/// Extract a duration in seconds from a Python object.
+///
+/// Accepts:
+/// - raw `int`/`float` seconds
+/// - `datetime.timedelta` objects (via `total_seconds()`)
+///
+/// Values are rounded to the nearest integer second. Returns an error for
+/// non-finite, out-of-range, or unrecognised inputs.
+pub fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    if let Ok(v) = obj.extract::<i64>() {
+        return Ok(v);
+    }
+
+    if let Ok(v) = obj.extract::<f64>() {
+        return ok_f64_seconds(v);
+    }
+
+    if let Ok(seconds) = obj.getattr("total_seconds")?.call0()?.extract::<f64>() {
+        return ok_f64_seconds(seconds);
+    }
+
+    Err(PyValueError::new_err(
+        "expected seconds as int/float or datetime.timedelta",
+    ))
+}
+
+/// Round and validate a floating-point duration value for conversion to [`i64`].
+///
+/// Rejects non-finite values and values outside the safe `i64` range.
+/// Includes a debug-assertion round-trip check when debug assertions are enabled.
+pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
+    if !v.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "duration must be finite, got {v}"
+        )));
+    }
+    let rounded = v.round();
+    if rounded < (i64::MIN as f64) || rounded > (i64::MAX as f64) {
+        return Err(PyValueError::new_err(format!(
+            "duration too large for i64: {v}"
+        )));
+    }
+    let result = rounded as i64;
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            (result as f64 - v).abs() < 1.0,
+            "extract_seconds: round-trip error f64 {v} -> i64 {result} exceeds 1-second tolerance"
+        );
+    }
+    Ok(result)
+}
+
 /// Parse a resample method name string, returning a typed [`ResampleMethod`]
 /// or a `PyValueError` listing the valid methods.
 ///

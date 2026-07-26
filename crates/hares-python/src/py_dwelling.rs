@@ -51,6 +51,7 @@ use crate::py_equipment::{
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::extract_datetime;
+use crate::utils::extract_seconds;
 use crate::utils::parse_resample_method;
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
@@ -2391,49 +2392,6 @@ where
     }
 }
 
-fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
-    if let Ok(v) = obj.extract::<i64>() {
-        return Ok(v);
-    }
-
-    if let Ok(v) = obj.extract::<f64>() {
-        return ok_f64_seconds(v);
-    }
-
-    if let Ok(seconds) = obj.getattr("total_seconds")?.call0()?.extract::<f64>() {
-        return ok_f64_seconds(seconds);
-    }
-
-    Err(PyValueError::new_err(
-        "expected seconds as int/float or datetime.timedelta",
-    ))
-}
-
-fn ok_f64_seconds(v: f64) -> PyResult<i64> {
-    if !v.is_finite() {
-        return Err(PyValueError::new_err(format!(
-            "duration must be finite, got {v}"
-        )));
-    }
-    let rounded = v.round();
-    // i64::MIN as f64 is exactly −2^63; i64::MAX as f64 rounds up to 2^63.
-    // f64 values outside [−2^63, 2^63] cannot be losslessly represented as i64.
-    if rounded < (i64::MIN as f64) || rounded > (i64::MAX as f64) {
-        return Err(PyValueError::new_err(format!(
-            "duration too large for i64: {v}"
-        )));
-    }
-    let result = rounded as i64;
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            (result as f64 - v).abs() < 1.0,
-            "extract_seconds: round-trip error f64 {v} -> i64 {result} exceeds 1-second tolerance"
-        );
-    }
-    Ok(result)
-}
-
 fn default_start() -> PyResult<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
         PyValueError::new_err(format!(
@@ -2703,10 +2661,10 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 
     use super::default_start;
-    use super::extract_seconds;
     use super::pv_config_from_py;
     use super::{DEFAULT_START, parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
+    use crate::utils::extract_seconds;
     use crate::utils::{extract_datetime, parse_datetime_str};
 
     #[derive(Debug)]

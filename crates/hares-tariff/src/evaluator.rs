@@ -699,6 +699,49 @@ impl TariffEvaluator {
             .sum()
     }
 
+    /// Snapshot of the current billing period without closing it.
+    ///
+    /// Returns a [`BillingPeriodSummary`] reflecting accumulated state up to the
+    /// current step, with fixed charges prorated to the current time. Demand and
+    /// tiered energy charges use the latest peak/cumulative values but do not
+    /// reset the billing state — unlike [`finalize`](Self::finalize).
+    pub fn current_metrics(&self) -> BillingPeriodSummary {
+        let month = self.billing_state.period_start().month() as u8;
+        let demand_charge = self.compute_demand_charge(month);
+
+        let current_time = self.simulation_start
+            + Duration::seconds(self.step_index as i64 * self.interval_seconds as i64);
+        let actual_end = current_time.min(self.billing_state.period_end());
+        let elapsed_days = (actual_end - self.billing_state.period_start())
+            .num_days()
+            .max(0) as f64;
+        let fixed_charge = self.tariff.fixed_charges.monthly_usd
+            + self.tariff.fixed_charges.daily_usd * elapsed_days;
+
+        let energy_charge = compute_tiered_energy_cost(
+            self.billing_state.cumulative_import_kwh(),
+            &self.tariff.tiered_rates,
+            month,
+            self.tariff.seasonal_split.as_ref(),
+            self.billing_state.cumulative_energy_cost_usd(),
+        );
+        let export_credit = self.billing_state.cumulative_export_credit_usd();
+
+        BillingPeriodSummary::new(
+            self.billing_state.period_start(),
+            actual_end,
+            energy_charge,
+            demand_charge,
+            fixed_charge,
+            export_credit,
+            self.tariff.minimum_charge,
+            self.tariff.minimum_charge_excludes_export,
+            self.billing_state.peak_demand_kw(),
+            self.billing_state.cumulative_import_kwh(),
+            self.billing_state.cumulative_export_kwh(),
+        )
+    }
+
     pub fn billing_state(&self) -> &BillingState {
         &self.billing_state
     }

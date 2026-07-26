@@ -43,7 +43,9 @@ use py_metrics::{
     PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape, PyUsableRoofArea};
-use py_tariff::{PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder};
+use py_tariff::{
+    PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder, PyTariffEvaluator,
+};
 use py_telemetry::{PyBillingPeriodSummary, PyTariffTelemetry, PyTelemetry};
 use py_weather::PyWeatherTimeSeries;
 
@@ -132,6 +134,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPvSizingResult>()?;
     m.add_class::<PyElectricTariff>()?;
     m.add_class::<PyTariffBuilder>()?;
+    m.add_class::<PyTariffEvaluator>()?;
     m.add_class::<PyGasTariff>()?;
     m.add_class::<PyGasTariffBuilder>()?;
     m.add_class::<PyBillingPeriodSummary>()?;
