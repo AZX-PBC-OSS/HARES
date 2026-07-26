@@ -75,6 +75,10 @@ impl PyActor {
 pub struct PyActorWrapper {
     obj: Py<PyActor>,
     name: Arc<str>,
+    /// Set when `decide()` raises an exception or returns an invalid type.
+    /// Once set, `healthy()` returns false and the engine should not dispatch
+    /// output from this actor.
+    pub last_error: Option<String>,
 }
 
 impl PyActorWrapper {
@@ -87,6 +91,7 @@ impl PyActorWrapper {
         Self {
             name: Arc::from(name),
             obj,
+            last_error: None,
         }
     }
 }
@@ -94,6 +99,10 @@ impl PyActorWrapper {
 impl hares_core::Actor for PyActorWrapper {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn healthy(&self) -> bool {
+        self.last_error.is_none()
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
@@ -118,19 +127,23 @@ impl hares_core::Actor for PyActorWrapper {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        let msg = format!("decide() returned invalid type: {e}");
+                        tracing::error!(
                             actor = %self.name,
                             error = %e,
                             "Python actor decide() returned invalid type"
                         );
+                        self.last_error = Some(msg);
                     }
                 },
                 Err(e) => {
-                    tracing::warn!(
+                    let msg = format!("decide() raised exception: {e}");
+                    tracing::error!(
                         actor = %self.name,
                         error = %e,
                         "Python actor decide() raised exception"
                     );
+                    self.last_error = Some(msg);
                 }
             }
             true
@@ -1448,6 +1461,7 @@ impl PyDRLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_core::Actor;
 
     #[test]
     fn max_capacity_fraction_signal_converts_to_control_signal() {
@@ -1555,5 +1569,64 @@ mod tests {
                 ..
             } if (on_fraction - 0.3).abs() < f64::EPSILON
         ));
+    }
+
+    fn ensure_python<F>(f: F)
+    where
+        F: for<'py> FnOnce(Python<'py>),
+    {
+        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
+        // guards against double-initialisation race conditions.
+        unsafe {
+            pyo3::ffi::Py_Initialize();
+        }
+        // SAFETY: interpreter is now initialised.
+        let py = unsafe { Python::assume_attached() };
+        f(py);
+    }
+
+    #[test]
+    fn py_actor_wrapper_healthy_returns_true_when_no_error() {
+        ensure_python(|py| {
+            let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
+            let wrapper = PyActorWrapper::new(py, actor_obj);
+            assert!(wrapper.healthy(), "fresh PyActorWrapper should be healthy");
+            assert!(
+                wrapper.last_error.is_none(),
+                "fresh PyActorWrapper should have no error"
+            );
+        });
+    }
+
+    #[test]
+    fn py_actor_wrapper_healthy_returns_false_after_decide_raises() {
+        ensure_python(|py| {
+            let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
+            let mut wrapper = PyActorWrapper::new(py, actor_obj);
+
+            let env = hares_core::actor::testing::test_env().build();
+            let mut out = Vec::new();
+            // PyActor base class has no decide() method — calling it will
+            // raise an AttributeError which triggers the error path.
+            wrapper.decide(&env, &mut out);
+
+            assert!(
+                !wrapper.healthy(),
+                "PyActorWrapper should be unhealthy after decide() raises"
+            );
+            assert!(
+                wrapper.last_error.is_some(),
+                "PyActorWrapper should have last_error set after decide() raises"
+            );
+            let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert!(
+                err_msg.contains("AttributeError"),
+                "last_error should contain AttributeError, got: {err_msg}"
+            );
+            assert!(
+                out.is_empty(),
+                "dispatch buffer should be empty after decide() raises"
+            );
+        });
     }
 }

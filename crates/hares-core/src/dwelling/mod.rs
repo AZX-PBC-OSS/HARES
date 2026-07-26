@@ -4750,6 +4750,8 @@ impl Dwelling {
         let mut actor_skips: usize = 0;
         #[cfg(feature = "observe")]
         let mut actor_calls: usize = 0;
+        #[cfg(feature = "observe")]
+        let mut actor_error_count: usize = 0;
         #[cfg(debug_assertions)]
         let mut executed_actors: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
@@ -4816,6 +4818,17 @@ impl Dwelling {
 
                         self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
 
+                        if !self.actors[idx].healthy() {
+                            #[cfg(feature = "observe")]
+                            {
+                                actor_error_count += 1;
+                            }
+                            tracing::error!(
+                                actor = %self.actors[idx].name(),
+                                "actor is unhealthy after decide() — dispatch output may be compromised"
+                            );
+                        }
+
                         #[cfg(feature = "actor_profiling")]
                         self.per_actor_timing.push((idx, start.elapsed()));
                     }
@@ -4848,6 +4861,21 @@ impl Dwelling {
                         i,
                     );
                 }
+            }
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Assert all actors are healthy after the decide phase.
+            // An unhealthy actor indicates a Python exception or invalid return
+            // type was silently swallowed at the decide() call site.
+            for (i, actor) in self.actors.iter().enumerate() {
+                assert!(
+                    actor.healthy(),
+                    "Actor '{}' (index {}) is unhealthy after ActorDecide phase",
+                    actor.name(),
+                    i,
+                );
             }
         }
 
@@ -5586,6 +5614,7 @@ impl Dwelling {
                 phases: obs_phases,
                 actor_skips,
                 actor_calls,
+                actor_error_count,
                 moisture_invariant,
                 time_sin: {
                     let fhour = self.latest_env.current_time.hour() as f64
@@ -10368,6 +10397,49 @@ occupancy = 1.0
             _out: &mut Vec<hares_control::DispatchRequest>,
         ) {
         }
+    }
+
+    // Actor that always reports unhealthy, used to verify that the dwelling
+    // health check catches actor errors after decide().
+    struct UnhealthyStubActor {
+        name: String,
+    }
+    impl crate::Actor for UnhealthyStubActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn healthy(&self) -> bool {
+            false
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+        }
+    }
+
+    #[test]
+    fn run_timestep_panics_on_unhealthy_actor() {
+        let toml_path = unique_temp_toml("unhealthy_actor");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let unhealthy = UnhealthyStubActor {
+            name: "UnhealthyActor".to_string(),
+        };
+        dwelling.add_actor(Box::new(unhealthy));
+
+        // The dwelling debug_assert should fire because the actor reports
+        // unhealthy after decide(). In debug builds (tests), this panics.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dwelling.run_timestep(false).unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "run_timestep should panic when an actor is unhealthy"
+        );
     }
 
     // ---------------------------------------------------------------

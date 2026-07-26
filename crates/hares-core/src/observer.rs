@@ -25,6 +25,8 @@ pub struct StepSnapshot {
     pub actor_skips: usize,
     /// Number of actors whose `decide()` was called this step.
     pub actor_calls: usize,
+    /// Number of actors that were unhealthy (error flag set) after `decide()` this step.
+    pub actor_error_count: usize,
     /// Per-step moisture invariant capture from `check_moisture`.
     /// Populated when `check_invariants` is active; `None` when only
     /// the `observe` feature is enabled without invariant checks.

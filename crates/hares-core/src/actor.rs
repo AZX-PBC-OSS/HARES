@@ -64,6 +64,18 @@ pub trait Actor: Send + Sync + 'static {
     /// * `out` - Pre-allocated output buffer to append dispatch requests to.
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>);
 
+    /// Whether the actor is in a healthy state suitable for decision-making.
+    ///
+    /// An unhealthy actor has encountered an unrecoverable error — e.g. a Python
+    /// exception during `decide()` — and its dispatch output must not be trusted.
+    /// The engine should skip unhealthy actors and, in checked builds, abort the
+    /// simulation.
+    ///
+    /// Default: `true` (Rust-native actors have no external failure path by default).
+    fn healthy(&self) -> bool {
+        true
+    }
+
     /// Called after Independent-stage equipment (including PV) has stepped
     /// but before Electrical-stage equipment (including battery) steps.
     ///
@@ -434,6 +446,12 @@ mod tests {
     fn actor_trait_interests_default_empty() {
         let actor = TestActor::new("test_actor", vec![]);
         assert!(actor.interests().is_empty());
+    }
+
+    #[test]
+    fn actor_trait_healthy_defaults_true() {
+        let actor = TestActor::new("test_actor", vec![]);
+        assert!(actor.healthy());
     }
 
     #[test]
