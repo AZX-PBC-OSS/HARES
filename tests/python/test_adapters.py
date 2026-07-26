@@ -421,6 +421,252 @@ class TestPybammBatteryEfficiencyLut:
         finally:
             pybamm_battery._HAS_PYBAMM = original
 
+    # --- chemistry-specific nominal voltage ---
+
+    def test_metadata_includes_v_nominal_for_nmc(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        lut = pybamm_battery.generate_efficiency_lut(
+            chemistry="NMC",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+        )
+        assert lut.metadata["v_nominal"] == 3.6
+
+    def test_metadata_includes_v_nominal_for_lfp(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        lut = pybamm_battery.generate_efficiency_lut(
+            chemistry="LFP",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+        )
+        assert lut.metadata["v_nominal"] == 3.2
+
+    def test_metadata_includes_v_nominal_for_lto(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        lut = pybamm_battery.generate_efficiency_lut(
+            chemistry="LTO",
+            capacity_ah=50,
+            n_series=20,
+            n_parallel=6,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+        )
+        assert lut.metadata["v_nominal"] == 2.4
+
+    def test_explicit_v_nominal_overrides_chemistry(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        lut = pybamm_battery.generate_efficiency_lut(
+            chemistry="LFP",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            v_nominal=3.85,
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+        )
+        assert lut.metadata["v_nominal"] == 3.85
+
+    def test_invalid_v_nominal_raises_assertion_error(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        with pytest.raises(AssertionError, match="Invalid nominal voltage"):
+            pybamm_battery.generate_efficiency_lut(
+                chemistry="NMC",
+                capacity_ah=50,
+                n_series=14,
+                n_parallel=4,
+                temperature_range_c=(0, 45),
+                soc_range=(0.1, 0.95),
+                v_nominal=0.0,
+                power_range_kw=(-5, 5),
+                age_cycles=0,
+            )
+
+    def test_invalid_high_v_nominal_raises_assertion_error(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        with pytest.raises(AssertionError, match="Invalid nominal voltage"):
+            pybamm_battery.generate_efficiency_lut(
+                chemistry="NMC",
+                capacity_ah=50,
+                n_series=14,
+                n_parallel=4,
+                temperature_range_c=(0, 45),
+                soc_range=(0.1, 0.95),
+                v_nominal=5.0,
+                power_range_kw=(-5, 5),
+                age_cycles=0,
+            )
+
+    def test_hash_differs_by_v_nominal(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        h_nmc = pybamm_battery._canonical_hash_efficiency(
+            "NMC", 50, 14, 4, 3.6, (0, 45), (0.1, 0.95), (-5, 5), 0,
+        )
+        h_lfp = pybamm_battery._canonical_hash_efficiency(
+            "LFP", 50, 14, 4, 3.2, (0, 45), (0.1, 0.95), (-5, 5), 0,
+        )
+        assert h_nmc != h_lfp
+
+    def test_cache_invalidated_by_different_v_nominal(self, tmp_path: Path) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        lut1 = pybamm_battery.generate_efficiency_lut(
+            chemistry="NMC",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+            cache_dir=cache_dir,
+        )
+        assert lut1.metadata.get("cached") is False
+
+        lut2 = pybamm_battery.generate_efficiency_lut(
+            chemistry="LFP",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+            cache_dir=cache_dir,
+        )
+        assert lut2.metadata.get("cached") is False
+
+    def test_unknown_chemistry_falls_back_to_3_6v(self) -> None:
+        from ochre_next.adapters import pybamm_battery
+
+        lut = pybamm_battery.generate_efficiency_lut(
+            chemistry="UNKNOWN",
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0, 45),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5, 5),
+            age_cycles=0,
+        )
+        assert lut.metadata["v_nominal"] == 3.6
+
+    def test_default_efficiency_lut_unchanged_for_nmc(self) -> None:
+        """Regression: NMC default efficiency values must be numerically unchanged."""
+        from ochre_next.adapters import pybamm_battery
+
+        original = pybamm_battery._HAS_PYBAMM
+        try:
+            pybamm_battery._HAS_PYBAMM = False
+            lut = pybamm_battery.generate_efficiency_lut(
+                chemistry="NMC",
+                capacity_ah=50,
+                n_series=14,
+                n_parallel=4,
+                temperature_range_c=(0, 45),
+                soc_range=(0.1, 0.95),
+                power_range_kw=(-5, 5),
+                age_cycles=0,
+            )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original
+
+        assert lut.table.num_rows > 0
+        eff_col = lut.table.column("efficiency").to_pylist()
+        assert all(0.80 <= e <= 1.0 for e in eff_col), "efficiency values must be in [0.80, 1.0]"
+        assert any(e != 0.95 for e in eff_col), "efficiency must vary across grid points"
+
+    def test_run_pybamm_efficiency_uses_chemistry_specific_voltage(self) -> None:
+        """LFP (3.2V) and LTO (2.4V) feed different currents into PyBaMM than
+        NMC (3.6V) for the same input power, because per-cell nominal voltage
+        directly governs the current calculation.  A regression that
+        reintroduces a hardcoded 3.6 V would cause all chemistries to produce
+        identical current sets and this test would fail."""
+        from ochre_next.adapters import pybamm_battery
+
+        def _build_fake_pybamm(currents: list[float]) -> mock.MagicMock:
+            fake = mock.MagicMock()
+
+            class _TrackingDict(dict):
+                def __setitem__(self, key, value):
+                    if key == "Current function [A]":
+                        currents.append(float(value))
+                    super().__setitem__(key, value)
+
+            fake.ParameterValues.side_effect = lambda _name: _TrackingDict()
+            return fake
+
+        common = dict(
+            capacity_ah=50,
+            n_series=14,
+            n_parallel=4,
+            temperature_range_c=(0.0, 45.0),
+            soc_range=(0.1, 0.95),
+            power_range_kw=(-5.0, 5.0),
+            age_cycles=0,
+        )
+
+        nmc_currents: list[float] = []
+        fake_nmc = _build_fake_pybamm(nmc_currents)
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_nmc):
+            pybamm_battery._run_pybamm_efficiency(
+                chemistry="NMC",
+                v_nominal=3.6,
+                **common,
+            )
+
+        lfp_currents: list[float] = []
+        fake_lfp = _build_fake_pybamm(lfp_currents)
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_lfp):
+            pybamm_battery._run_pybamm_efficiency(
+                chemistry="LFP",
+                v_nominal=3.2,
+                **common,
+            )
+
+        lto_currents: list[float] = []
+        fake_lto = _build_fake_pybamm(lto_currents)
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_lto):
+            pybamm_battery._run_pybamm_efficiency(
+                chemistry="LTO",
+                v_nominal=2.4,
+                **common,
+            )
+
+        assert nmc_currents != lfp_currents, (
+            "NMC (3.6V) and LFP (3.2V) must produce different PyBaMM currents"
+        )
+        assert lfp_currents != lto_currents, (
+            "LFP (3.2V) and LTO (2.4V) must produce different PyBaMM currents"
+        )
+
+        assert nmc_currents != lto_currents, (
+            "NMC (3.6V) and LTO (2.4V) must produce different PyBaMM currents"
+        )
+
 
 class TestPybammBatteryDegradationParams:
     """Tests for pybamm_battery.generate_degradation_params."""

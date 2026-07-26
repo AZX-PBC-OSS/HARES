@@ -30,6 +30,18 @@ LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_EFFICIENCY = 0.95
 
+# Per-cell nominal voltages from sam_battery._BUILTIN_DEFAULTS.
+# NMC, NCA, LFP, LTO have verified entries in _BUILTIN_DEFAULTS
+# with matching v_nominal values.  Unknown chemistries fall back
+# to the NMC default of 3.6 V at the call site
+# (CHEMISTRY_NOMINAL_VOLTAGE.get(chemistry.upper(), 3.6)).
+CHEMISTRY_NOMINAL_VOLTAGE: dict[str, float] = {
+    "NMC": 3.6,
+    "NCA": 3.6,
+    "LFP": 3.2,
+    "LTO": 2.4,
+}
+
 
 class DegradationConfig(TypedDict):
     model: str
@@ -61,6 +73,7 @@ def _canonical_hash_efficiency(
     capacity_ah: float,
     n_series: int,
     n_parallel: int,
+    v_nominal: float,
     temperature_range_c: tuple[float, float],
     soc_range: tuple[float, float],
     power_range_kw: tuple[float, float],
@@ -78,6 +91,7 @@ def _canonical_hash_efficiency(
         "soc_range_min": f"{soc_range[0]:.6f}",
         "temperature_range_c_max": f"{temperature_range_c[1]:.6f}",
         "temperature_range_c_min": f"{temperature_range_c[0]:.6f}",
+        "v_nominal": f"{v_nominal:.6f}",
     }
     canonical = "".join(f"{k}={v};" for k, v in sorted(parts.items()))
     return hashlib.sha256(canonical.encode()).hexdigest()
@@ -224,12 +238,14 @@ def _run_pybamm_efficiency(
     capacity_ah: float,
     n_series: int,
     n_parallel: int,
+    v_nominal: float,
     temperature_range_c: tuple[float, float],
     soc_range: tuple[float, float],
     power_range_kw: tuple[float, float],
     age_cycles: int,
 ) -> pa.Table:
     """Run PyBaMM SPM to generate an efficiency LUT."""
+    assert v_nominal > 0 and 2.0 <= v_nominal <= 4.5, f"Invalid nominal voltage: {v_nominal}"
     model = _pybamm.lithium_ion.SPM()
 
     soc_points = _linspace(soc_range[0], soc_range[1], 5)
@@ -250,7 +266,7 @@ def _run_pybamm_efficiency(
                     param["Ambient temperature [K]"] = temp_c + 273.15
                     param["Nominal cell capacity [A.h]"] = capacity_ah
 
-                    current_a = (power_kw * 1000.0) / (3.6 * n_series) if power_kw != 0 else 0.01
+                    current_a = (power_kw * 1000.0) / (v_nominal * n_series) if power_kw != 0 else 0.01
                     param["Current function [A]"] = abs(current_a)
 
                     sim = _pybamm.Simulation(model, parameter_values=param)
@@ -298,6 +314,7 @@ def generate_efficiency_lut(
     temperature_range_c: tuple[float, float],
     soc_range: tuple[float, float],
     *,
+    v_nominal: float | None = None,
     power_range_kw: tuple[float, float],
     age_cycles: int,
     cache_dir: Path | None = None,
@@ -318,6 +335,10 @@ def generate_efficiency_lut(
         ``(min, max)`` temperature range in Celsius.
     soc_range:
         ``(min, max)`` state-of-charge range (0-1).
+    v_nominal:
+        Per-cell nominal voltage in volts.  If ``None``, derived from
+        ``chemistry`` via ``CHEMISTRY_NOMINAL_VOLTAGE`` (falls back to 3.6 V).
+        NMC/NCA: 3.6 V, LFP: 3.2 V, LTO: 2.4 V.
     power_range_kw:
         ``(min, max)`` power range in kW (negative = charging).
     age_cycles:
@@ -330,11 +351,17 @@ def generate_efficiency_lut(
     EfficiencyLut
         A look-up table object.  Call ``.save(path)`` to write Parquet.
     """
+    if v_nominal is None:
+        v_nominal = CHEMISTRY_NOMINAL_VOLTAGE.get(chemistry.upper(), 3.6)
+
+    assert v_nominal > 0 and 2.0 <= v_nominal <= 4.5, f"Invalid nominal voltage: {v_nominal}"
+
     content_hash = _canonical_hash_efficiency(
         chemistry,
         capacity_ah,
         n_series,
         n_parallel,
+        v_nominal,
         temperature_range_c,
         soc_range,
         power_range_kw,
@@ -346,7 +373,7 @@ def generate_efficiency_lut(
         if _cache_valid(cached_path, content_hash):
             LOGGER.info("Efficiency LUT cache hit: %s", cached_path)
             table = pq.read_table(cached_path)
-            return EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": True})
+            return EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": True, "v_nominal": v_nominal})
 
     if _HAS_PYBAMM:
         LOGGER.info("Running PyBaMM SPM to generate efficiency LUT for %s", chemistry)
@@ -355,16 +382,17 @@ def generate_efficiency_lut(
             capacity_ah,
             n_series,
             n_parallel,
+            v_nominal,
             temperature_range_c,
             soc_range,
             power_range_kw,
             age_cycles,
         )
-        lut = EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": False, "source": "pybamm"})
+        lut = EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": False, "source": "pybamm", "v_nominal": v_nominal})
     else:
         LOGGER.info("PyBaMM not installed; using built-in defaults for efficiency LUT")
         table = _build_default_efficiency_table(soc_range, power_range_kw, temperature_range_c)
-        lut = EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": False, "source": "defaults"})
+        lut = EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": False, "source": "defaults", "v_nominal": v_nominal})
 
     if cache_dir is not None:
         cached_path = Path(cache_dir) / "efficiency_lut.parquet"
