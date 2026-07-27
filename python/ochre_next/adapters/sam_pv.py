@@ -71,6 +71,7 @@ def _canonical_hash(
     latitude_deg: float,
     longitude_deg: float,
     elevation_m: float,
+    inv_efficiency: float,
 ) -> str:
     """Compute a deterministic SHA-256 hash of all input parameters.
 
@@ -84,6 +85,7 @@ def _canonical_hash(
         "array_type": f"{array_type:.6f}",
         "azimuth": f"{azimuth:.6f}",
         "elevation_m": f"{elevation_m:.6f}",
+        "inv_efficiency": f"{inv_efficiency:.6f}",
         "latitude_deg": f"{latitude_deg:.6f}",
         "longitude_deg": f"{longitude_deg:.6f}",
         "module_type": f"{module_type:.6f}",
@@ -290,8 +292,18 @@ def _run_pvwatts(
     module_type: int,
     array_type: int,
     weather_file: Path,
+    *,
+    inv_efficiency: float,
 ) -> PvWattsOutput:
-    """Run PySAM PVWatts and return hourly results."""
+    """Run PySAM PVWatts and return hourly results.
+
+    Parameters
+    ----------
+    inv_efficiency:
+        Inverter efficiency as a fraction (0.0–1.0). Passes through to SAM's
+        ``SystemDesign.inv_eff`` (percentage scale) so the AC output embeds
+        the caller's chosen efficiency rather than SAM's default 0.96.
+    """
     if _pvwatts is None:
         raise ImportError(
             "PySAM is required for SAM PV adapter; install with: "
@@ -305,6 +317,9 @@ def _run_pvwatts(
     pv.SystemDesign.azimuth = azimuth
     pv.SystemDesign.module_type = module_type
     pv.SystemDesign.array_type = array_type
+    # SAM PVWatts inv_eff is a percentage (0–100); convert from fraction.
+    pv.SystemDesign.inv_eff = inv_efficiency * 100.0
+    LOGGER.info("SAM PVWatts inv_eff set to %.4f (%.2f %%)", inv_efficiency, inv_efficiency * 100.0)
     pv.execute()
 
     return {
@@ -566,6 +581,7 @@ def generate_pv_lut(
     array_type: int,
     weather_file: Path,
     *,
+    inv_efficiency: float = 0.96,
     cache_dir: Path | None = None,
 ) -> PvLut:
     """Generate a PV power LUT using PySAM PVWatts.
@@ -589,6 +605,11 @@ def generate_pv_lut(
     weather_file:
         Path to an EPW weather file.  The EPW header is parsed for
         latitude, longitude, timezone, and elevation.
+    inv_efficiency:
+        Inverter efficiency as a fraction (0.0–1.0). Passes through to SAM's
+        ``SystemDesign.inv_eff`` so the LUT AC output embeds this value
+        rather than SAM's default 0.96. Defaults to 0.96 (SAM PVWatts v8
+        default; NREL/TP-7A40-80694).
     cache_dir:
         Optional directory for caching.  When provided, the adapter will
         check for a cached LUT and skip PySAM if the inputs have not changed.
@@ -615,6 +636,7 @@ def generate_pv_lut(
         latitude_deg=latitude_deg,
         longitude_deg=longitude_deg,
         elevation_m=elevation_m,
+        inv_efficiency=inv_efficiency,
     )
 
     if cache_dir is not None:
@@ -638,7 +660,7 @@ def generate_pv_lut(
                 elevation_m=elevation_m,
             )
 
-    LOGGER.info("Running PySAM PVWatts to generate PV LUT")
+    LOGGER.info("Running PySAM PVWatts to generate PV LUT (inv_eff=%.4f)", inv_efficiency)
     raw = _run_pvwatts(
         system_capacity_kw=system_capacity_kw,
         tilt=tilt,
@@ -646,6 +668,7 @@ def generate_pv_lut(
         module_type=module_type,
         array_type=array_type,
         weather_file=weather_file,
+        inv_efficiency=inv_efficiency,
     )
     _validate_pvwatts_output(raw)
     table = _build_lut_table(

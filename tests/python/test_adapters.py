@@ -36,6 +36,27 @@ class TestSamPvGeneratePvLut:
             "losses": 0.14,
         }
 
+    def test_generate_pv_lut_passes_inv_efficiency_to_sam(self, tmp_path: Path) -> None:
+        """generate_pv_lut must pass inv_efficiency through to _run_pvwatts."""
+        from ochre_next.adapters import sam_pv
+
+        weather = self._make_weather_file(tmp_path)
+        raw_output = self._mock_pvwatts_output()
+
+        with mock.patch.object(sam_pv, "_run_pvwatts", return_value=raw_output) as mock_run:
+            sam_pv.generate_pv_lut(
+                system_capacity_kw=5.0,
+                tilt=30.0,
+                azimuth=180.0,
+                module_type=0,
+                array_type=0,
+                weather_file=weather,
+                inv_efficiency=0.97,
+            )
+
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["inv_efficiency"] == 0.97
+
     def test_malformed_pvwatts_output_raises_value_error(self, tmp_path: Path) -> None:
         """A pvwatts mapping missing required keys must fail with a clear
         ValueError, not a bare KeyError from deep inside LUT construction."""

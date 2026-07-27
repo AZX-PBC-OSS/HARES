@@ -845,6 +845,29 @@ impl PV {
                          fallback applies HARES inverter_efficiency to SAM AC output. \
                          Re-generate LUT with updated sam_pv.py adapter.",
                     );
+                } else {
+                    // T-0556: SAM's PVWatts AC output embeds the inv_eff that was
+                    // passed to it at generation time. When the LUT metadata
+                    // inv_eff differs from the configured inverter_efficiency, the
+                    // T-0086 correction path will recover DC from sam_inv_eff and
+                    // re-apply self.inverter_efficiency — producing AC scaled by
+                    // self.inverter_efficiency / sam_inv_eff. This is correct for
+                    // the T-0086 use case (deliberate mismatch) but indicates a
+                    // likely misconfiguration when the intent was to use the same
+                    // value in both places. Warn so users can verify.
+                    if (sam_inv_eff - self.inverter_efficiency).abs() > 1e-6 {
+                        tracing::warn!(
+                            lut_path = %path,
+                            lut_sam_inv_eff = sam_inv_eff,
+                            configured_inverter_efficiency = self.inverter_efficiency,
+                            "PV LUT SAM inverter efficiency ({sam_inv_eff}) differs from \
+                             configured inverter_efficiency ({}); \
+                             AC power will be scaled by {:.4} / {sam_inv_eff} = {:.4}.",
+                            self.inverter_efficiency,
+                            self.inverter_efficiency,
+                            self.inverter_efficiency / sam_inv_eff,
+                        );
+                    }
                 }
 
                 self.luts_by_surface.insert(surface_id, lut);
@@ -5219,5 +5242,117 @@ mod tests {
         // irradiance for the SAM NOCT calculation.
         approx_eq(ac_lut_path, ac_no_lut);
         approx_eq(dc_lut_path, dc_no_lut);
+    }
+
+    // --- T-0556: LUT-path inverter efficiency correctness ---
+
+    /// When `PvConfig.inverter_efficiency` is set to a non-default value
+    /// (e.g. 0.97 instead of SAM's default 0.96) and the LUT was generated
+    /// with the same `inv_eff`, the LUT-path correction must produce correct
+    /// DC and AC power — no double-application or under-application of
+    /// inverter efficiency.
+    ///
+    /// LUT AC output (3.0 kW) embeds `sam_inv_eff = 0.97`. The correction
+    /// recovers DC: `dc = 3.0 / 0.97 / (1 - 0.14) * (1 - 0.14) = 3.0 / 0.97`,
+    /// then re-applies HARES efficiency: `ac = dc * 0.97 = 3.0`.
+    #[test]
+    fn lut_path_produces_correct_dc_power_with_non_default_efficiency() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        let sam_inv_eff = 0.97;
+        let sam_losses = 0.14;
+        let lut_ac = 3.0;
+        let hares_inv_eff = 0.97;
+        let hares_losses = 0.14;
+
+        let path = unique_temp_path("pv_lut_t0556_nondefault", "parquet");
+        write_pv_lut_parquet_with_meta(&path, lut_ac, sam_inv_eff, sam_losses);
+
+        let mut typed = base_pv_typed_config();
+        typed.equipment_id = Some(55);
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(hares_inv_eff);
+        typed.system_losses_fraction = Some(hares_losses);
+        let cfg =
+            EquipmentConfig::from_typed("PV T-0556".to_string(), "PV".to_string(), typed).unwrap();
+
+        let mut env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        env.weather.solar_altitude_deg = 60.0; // zenith = 30
+        env.weather.solar_azimuth_deg = 180.0;
+        env.weather.ghi_w_m2 = 0.0;
+        env.weather.dni_w_m2 = 0.0;
+        env.weather.dhi_w_m2 = 0.0;
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env)
+            .expect("init pv with non-default efficiency LUT");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv");
+
+        let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0);
+        let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
+
+        // AC must equal the raw LUT AC (no double-application of inv_eff).
+        approx_eq(ac, lut_ac);
+        // DC must equal raw AC divided by inv_eff (with losses cancelling).
+        // dc = lut_ac / sam_inv_eff / (1 - sam_losses) * (1 - hares_losses)
+        //    = lut_ac / 0.97 / 0.86 * 0.86 = lut_ac / 0.97
+        let expected_dc = lut_ac / sam_inv_eff;
+        approx_eq(dc, expected_dc);
+    }
+
+    /// The non-LUT path must still apply `self.inverter_efficiency` to
+    /// convert DC power to AC power. This verifies the non-LUT path is
+    /// unchanged by the T-0556 fix (which only affects the LUT path).
+    #[test]
+    fn non_lut_path_still_applies_inverter_efficiency() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(56);
+        cfg.inverter_efficiency = Some(0.97);
+        cfg.system_losses_fraction = Some(0.05);
+        let cfg =
+            EquipmentConfig::from_typed("PV NonLUT".to_string(), "PV".to_string(), cfg).unwrap();
+
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+            1.0,
+        );
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0);
+        let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
+
+        // Non-LUT: AC = DC * inverter_efficiency.
+        let expected_ac = dc * 0.97;
+        approx_eq(ac, expected_ac);
+        assert!(ac > 0.0, "PV must produce positive AC under STC");
+        assert!(
+            dc > ac,
+            "DC ({dc}) must be > AC ({ac}) when inverter_efficiency < 1.0"
+        );
     }
 }
