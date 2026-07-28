@@ -410,21 +410,29 @@ def generate_degradation_params(
 ) -> DegradationParams:
     """Generate battery degradation parameters.
 
+    Provides constant built-in defaults.  PyBaMM degradation extraction is not
+    implemented — degradation is handled by the Rust Smith et al. 2017 model
+    in ``crates/hares-equipment/src/battery/degradation.rs`` and the Python
+    adapter returns the reference coefficients as a pass-through.
+
     Parameters
     ----------
     chemistry:
-        Battery chemistry (e.g. ``"NMC"``, ``"LFP"``).
+        Battery chemistry (e.g. ``"NMC"``, ``"LFP"``).  Ignored — the defaults
+        are chemistry-independent.
     capacity_ah:
-        Cell capacity in Ah.
+        Cell capacity in Ah.  Ignored — the defaults are capacity-independent.
     temperature_range_c:
-        Reference temperature in Celsius.
+        Reference temperature in Celsius.  Ignored — the defaults are
+        temperature-independent.
     cache_dir:
         Optional directory for caching.
 
     Returns
     -------
     DegradationParams
-        A parameter object.  Call ``.save(path)`` to write TOML.
+        A parameter object with ``metadata["source"] == "builtin"``.
+        Call ``.save(path)`` to write TOML.
     """
     content_hash = _canonical_hash_degradation(chemistry, capacity_ah, temperature_range_c)
 
@@ -434,25 +442,16 @@ def generate_degradation_params(
             LOGGER.info("Degradation params cache hit: %s", cached_path)
             return DegradationParams(
                 params=dict(_DEFAULT_DEGRADATION),
-                metadata={"content_hash": content_hash, "cached": True},
+                metadata={"content_hash": content_hash, "cached": True, "source": "builtin"},
             )
 
-    if _HAS_PYBAMM:
-        LOGGER.info("Running PyBaMM to extract degradation params for %s", chemistry)
-        try:
-            _pybamm.ParameterValues("Chen2020")
-            params = dict(_DEFAULT_DEGRADATION)
-            params["chemistry"] = chemistry
-            params["capacity_ah"] = capacity_ah
-            params["reference_temperature_c"] = temperature_range_c
-        except Exception:
-            LOGGER.warning("PyBaMM degradation extraction failed; using defaults")
-            params = dict(_DEFAULT_DEGRADATION)
-    else:
-        LOGGER.info("PyBaMM not installed; using built-in defaults for degradation params")
-        params = dict(_DEFAULT_DEGRADATION)
+    LOGGER.info("Degradation params use built-in defaults; PyBaMM degradation extraction not implemented")
+    params = dict(_DEFAULT_DEGRADATION)
 
-    result = DegradationParams(params=params, metadata={"content_hash": content_hash, "cached": False})
+    result = DegradationParams(
+        params=params,
+        metadata={"content_hash": content_hash, "cached": False, "source": "builtin"},
+    )
 
     if cache_dir is not None:
         cached_path = Path(cache_dir) / "degradation_params.toml"

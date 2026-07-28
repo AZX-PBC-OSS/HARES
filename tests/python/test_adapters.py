@@ -733,6 +733,65 @@ class TestPybammBatteryDegradationParams:
         finally:
             pybamm_battery._HAS_PYBAMM = original
 
+    def test_produces_consistent_output_with_and_without_pybamm(self) -> None:
+        """Degradation params must be identical regardless of PyBaMM availability."""
+        from ochre_next.adapters import pybamm_battery
+
+        original = pybamm_battery._HAS_PYBAMM
+        try:
+            pybamm_battery._HAS_PYBAMM = False
+            result_without = pybamm_battery.generate_degradation_params(
+                chemistry="NMC",
+                capacity_ah=50,
+                temperature_range_c=25.0,
+            )
+            pybamm_battery._HAS_PYBAMM = True
+            result_with = pybamm_battery.generate_degradation_params(
+                chemistry="NMC",
+                capacity_ah=50,
+                temperature_range_c=25.0,
+            )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original
+
+        assert result_without.params == result_with.params, (
+            "params must be identical with and without PyBaMM"
+        )
+
+    def test_metadata_indicates_builtin_source(self) -> None:
+        """metadata["source"] must be "builtin" so consumers can distinguish
+        parameter origins."""
+        from ochre_next.adapters import pybamm_battery
+
+        result = pybamm_battery.generate_degradation_params(
+            chemistry="LFP",
+            capacity_ah=100,
+            temperature_range_c=30.0,
+        )
+        assert result.metadata["source"] == "builtin"
+
+    def test_existing_degradation_toml_unchanged(self, tmp_path: Path) -> None:
+        """Degradation params TOML output must be byte-identical to prevent
+        regressions in downstream consumers that depend on the TOML format."""
+        from ochre_next.adapters import pybamm_battery
+
+        result = pybamm_battery.generate_degradation_params(
+            chemistry="NMC",
+            capacity_ah=50,
+            temperature_range_c=25.0,
+        )
+        out_path = tmp_path / "degradation_params.toml"
+        result.save(out_path)
+
+        expected = (
+            "calendar_a = -7280.0\n"
+            "calendar_q = 4.14e-10\n"
+            "cycle_d = 0.7\n"
+            "cycle_q = 0.000264\n"
+            'model = "rainflow_arrhenius"\n'
+        )
+        assert out_path.read_text() == expected
+
 
 # ---------------------------------------------------------------------------
 # Fallback chain (__init__)
