@@ -2899,4 +2899,27 @@ mod tests {
             pos_xmas.altitude_deg
         );
     }
+
+    /// Verify that `window_u_factor_decomposition()` returns r_glass consistent
+    /// with 1/U − r_int − r_ext at plausible NFRC rating U-factors.
+    ///
+    /// EnergyPlus Simple Window Model Step 1:
+    ///   r_glass = 1/U − r_int − r_ext
+    /// The polynomial is designed so this identity holds analytically; this test
+    /// confirms numeric round-trip consistency across the residential window range.
+    #[test]
+    fn window_u_factor_decomposition_r_glass_consistent_with_1_over_u_minus_films() {
+        // NFRC rating range covers high-performance to single-pane windows.
+        for &u in &[0.3, 0.5, 1.0, 1.8, 3.0, 5.5] {
+            let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u).expect("valid U-factor");
+            let r_total = 1.0 / u;
+            let r_glass_expected = r_total - r_int - r_ext;
+            let diff = (r_glass - r_glass_expected).abs();
+            assert!(
+                diff < 1e-12,
+                "U={u}: r_glass={r_glass:.12e}, \
+                 1/U - r_int - r_ext = {r_glass_expected:.12e}, diff={diff:.3e}"
+            );
+        }
+    }
 }

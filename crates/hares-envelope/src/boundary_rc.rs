@@ -157,6 +157,14 @@ pub struct BoundaryInput {
     /// priority over `material_layers`.
     pub precomputed_rc: Vec<PrecomputedRCLayer>,
     /// Assembly R-value fallback [m²·K/W], used when no valid material layers.
+    ///
+    /// Dual-role field: for fenestration boundaries (windows, skylights) this
+    /// carries the EnergyPlus Step 1 polynomial `r_glass` (glass-only resistance)
+    /// set by `hares-core::dwelling::conversions::building_to_boundary_inputs`.
+    /// The solver builder (`hares-core::dwelling::solver_builder`) reads this
+    /// value directly for SHGC decomposition, and the RC network (this crate)
+    /// uses it as the single resistance in the fallback-R path. For opaque
+    /// boundaries, this is the assembly material R-value (film subtracted).
     pub fallback_r_m2_k_w: f64,
     /// Interior air-film resistance [m²·K/W] for this boundary.
     pub r_film_interior_m2_k_w: f64,

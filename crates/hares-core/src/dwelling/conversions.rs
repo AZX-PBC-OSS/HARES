@@ -309,11 +309,11 @@ pub fn building_to_boundary_inputs(
                     let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u)?;
                     (r_glass, r_int, r_ext)
                 } else {
-                    tracing::warn!(
-                        boundary = %bd.id,
-                        "fenestration boundary has no U-factor -- using generic film resistances"
-                    );
-                    (fallback_r, r_film_int, r_film_ext)
+                    return Err(HaresError::Dwelling(format!(
+                        "fenestration boundary '{}' has missing or non-positive U-factor; \
+                         <UFactor> must be present with a positive value per HPXML §6.5",
+                        bd.id
+                    )));
                 }
             } else {
                 (fallback_r, r_film_int, r_film_ext)
@@ -2475,6 +2475,158 @@ mod tests {
         );
     }
 
+    /// Fenestration boundary with U-factor = 0.0 is rejected by the
+    /// boundary-construction validation in `building_to_boundary_inputs`
+    /// before any physics computation occurs.
+    ///
+    /// Regression: T-0571 round 2 — `u_factor_w_m2_k: Some(0.0)` reached the
+    /// invariant comparison in solver_builder with a TARP-derived fallback,
+    /// producing a false "r_glass divergence" panic. The fix (round 3) rejects
+    /// non-positive U-factors here with a named `HaresError::Dwelling`.
+    #[test]
+    fn window_zero_u_factor_rejected_in_boundary_construction() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "Win1".to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: "Win1".to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(0.0),
+                shgc: Some(0.6),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let result = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let err = result.expect_err("U=0 window must produce Dwelling error");
+        assert!(
+            matches!(err, HaresError::Dwelling(_)),
+            "error must be HaresError::Dwelling, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing or non-positive"),
+            "error message must mention 'missing or non-positive', got: {msg}"
+        );
+        assert!(
+            msg.contains("HPXML"),
+            "error message must mention HPXML, got: {msg}"
+        );
+    }
+
+    /// Negative U-factor follows the same validation path as
+    /// `Some(0.0)`. The `filter(|&u| u > 0.0)` guard at
+    /// conversions.rs:308 excludes both zero and negative values,
+    /// routing them to the `HaresError::Dwelling` return.
+    #[test]
+    fn window_negative_u_factor_rejected_in_boundary_construction() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "Win1".to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: "Win1".to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(-0.5),
+                shgc: Some(0.6),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let result = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let err = result.expect_err("U=-0.5 window must produce Dwelling error");
+        assert!(
+            matches!(err, HaresError::Dwelling(_)),
+            "error must be HaresError::Dwelling, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing or non-positive"),
+            "error message must mention 'missing or non-positive', got: {msg}"
+        );
+    }
+
     /// Skylight U-factor decomposition follows the same EnergyPlus Simple
     /// Window Model Step 1 path as a Window, verifying that the fenestration
     /// code path is wired for the new `BoundaryType::Skylight` variant.
@@ -2550,6 +2702,126 @@ mod tests {
             "skylight interior emissivity should be 0.84 (NFRC), got {}",
             sk_input.interior_emissivity
         );
+    }
+
+    /// Integration test: full window boundary construction pipeline.
+    ///
+    /// Verifies that for fenestration boundaries with valid U-factor, the E+
+    /// Step 1 polynomial `r_glass` flows through to `fallback_r_m2_k_w` and
+    /// the film resistances match the E+ polynomial (not TARP), even at
+    /// non-NFRC conditions (high wind speed).
+    #[test]
+    fn window_boundary_input_carries_eplus_r_glass_and_film_resistances() {
+        // NFRC-typical U=1.8 double-pane low-e.
+        let u_factor = 1.8;
+        let window_id = "Wint";
+
+        let n_film_resistances = [
+            // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
+            (2.0, 10.0, "NFRC"),
+            // Non-NFRC: high wind (15 m/s — storm conditions), extreme ΔT.
+            (15.0, 35.0, "high-wind"),
+        ];
+
+        for &(wind_m_s, _delta_t_k, label) in &n_film_resistances {
+            let building = hares_io::Building {
+                boundaries: vec![Boundary {
+                    id: window_id.to_string(),
+                    boundary_type: BoundaryType::Window,
+                    area_m2: 4.0,
+                    azimuth_deg: Some(180.0),
+                    assembly_r_value_m2_k_w: None,
+                    r_value_layers_m2_k_w: vec![],
+                    interior_zone: Some(ZoneType::Conditioned),
+                    exterior_zone: Some(ZoneType::Outdoor),
+                    material_layers: vec![],
+                    construction_type: None,
+                    finish_type: None,
+                    insulation_details: None,
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
+                    tilt_deg: Some(90.0),
+                    framing_factor: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
+                }],
+                windows: vec![Window {
+                    id: window_id.to_string(),
+                    area_m2: 4.0,
+                    azimuth_deg: Some(180.0),
+                    u_factor_w_m2_k: Some(u_factor),
+                    shgc: Some(0.40),
+                    interior_shading_fraction: 1.0,
+                    winter_shading_fraction: 1.0,
+                    fraction_operable: 0.0,
+                    exterior_shading_summer: 1.0,
+                    exterior_shading_winter: 1.0,
+                    attached_to_wall_id: None,
+                }],
+                ..minimal_building(
+                    vec![Zone {
+                        zone_type: ZoneType::Conditioned,
+                        floor_area_m2: Some(100.0),
+                        volume_m3: Some(250.0),
+                        attached_wall_ids: vec![],
+                        duct_systems: vec![],
+                        vented: false,
+                        ventilation_ach: None,
+                        ventilation_sla: None,
+                    }],
+                    vec![],
+                )
+            };
+            let store = load_defaults_store();
+            let inputs = building_to_boundary_inputs(&building, 1, &store, wind_m_s, 10.0, 10.0)
+                .unwrap_or_else(|e| panic!("building_to_boundary_inputs failed at {label}: {e}"));
+            assert_eq!(inputs.len(), 1, "{label}: expected 1 boundary input");
+            let bi = &inputs[0];
+
+            // The E+ Step 1 polynomial values for U=1.8:
+            // r_int = 1/(0.359073·ln(1.8) + 6.949915) ≈ 0.139646
+            // r_ext = 1/(0.025342·1.8 + 29.163853)    ≈ 0.034236
+            // r_glass = 1/1.8 − r_int − r_ext          ≈ 0.381674
+            let (expected_r_glass, expected_r_int, expected_r_ext) =
+                hares_physics::solar::window_u_factor_decomposition(u_factor)
+                    .expect("valid U-factor");
+
+            assert!(
+                (bi.r_film_interior_m2_k_w - expected_r_int).abs() < 1e-5,
+                "{label}: r_film_int must be E+ polynomial value {expected_r_int:.6}, \
+                 got {:.6}",
+                bi.r_film_interior_m2_k_w
+            );
+            assert!(
+                (bi.r_film_exterior_m2_k_w - expected_r_ext).abs() < 1e-5,
+                "{label}: r_film_ext must be E+ polynomial value {expected_r_ext:.6}, \
+                 got {:.6}",
+                bi.r_film_exterior_m2_k_w
+            );
+            assert!(
+                (bi.fallback_r_m2_k_w - expected_r_glass).abs() < 1e-5,
+                "{label}: fallback_r_m2_k_w must be E+ polynomial r_glass \
+                 {expected_r_glass:.6}, got {:.6}",
+                bi.fallback_r_m2_k_w
+            );
+
+            // At high wind speed, the TARP film_resistances() would compute
+            // a much lower exterior film R. Verify that fenestration
+            // boundaries use the E+ polynomial (≈0.034), NOT TARP which
+            // would be ≈0.01–0.02 at 15 m/s.
+            if label == "high-wind" {
+                assert!(
+                    bi.r_film_exterior_m2_k_w > 0.03,
+                    "{label}: at high wind, r_film_ext ({:.6}) should still be \
+                     E+ polynomial (~0.034), not TARP wind-dependent value",
+                    bi.r_film_exterior_m2_k_w
+                );
+            }
+        }
     }
 
     /// Boundary with no R-value sources (no AssemblyEffectiveRValue, no

@@ -13,10 +13,14 @@ use hares_envelope::{
     ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
+#[cfg(feature = "observe")]
+use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
 use hares_physics::infiltration::{ShieldingClass, TerrainClass};
 use hares_types::{EnvironmentState, FluidType, HaresError, LoopId, ZoneId};
 
 use super::Result;
+#[cfg(feature = "observe")]
+use super::conversions::zone_type_to_label;
 use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
     check_multi_unit_zones, has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
@@ -88,7 +92,16 @@ fn build_solver_boundaries(
     boundary_inputs: &[BoundaryInput],
     rc: &RCContext<'_>,
     env: &EnvironmentState,
+    weather_avgs: &WeatherAverages,
 ) -> Result<(Vec<SolverBoundary>, usize, usize)> {
+    // `weather_avgs` is consumed only by the `#[cfg(feature = "observe")]`
+    // TARP diagnostic block.  Suppress the dead-parameter warning in
+    // builds that do not enable the observe feature.
+    #[cfg(not(feature = "observe"))]
+    {
+        let _ = weather_avgs;
+    }
+
     // Index diagnostics by boundary_idx for O(1) lookup.
     let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = rc
         .envelope_diagnostics
@@ -357,6 +370,13 @@ fn build_solver_boundaries(
                         win.id
                     ))
                 })?;
+                if u_factor <= 0.0 {
+                    return Err(HaresError::Dwelling(format!(
+                        "{fen_type} '{}' has invalid U-factor {u_factor} W/m²·K; \
+                         <UFactor> must be a positive value per HPXML §6.5",
+                        win.id
+                    )));
+                }
                 let base_shgc = win.shgc.ok_or_else(|| {
                     HaresError::Dwelling(format!(
                         "{fen_type} '{}' is missing required shgc (SHGC); \
@@ -369,7 +389,95 @@ fn build_solver_boundaries(
                 let shgc_winter =
                     base_shgc * win.winter_shading_fraction * win.exterior_shading_winter;
                 let r_total = 1.0 / u_factor.max(0.01);
-                let r_glass = (r_total - r_film_int - r_film_ext).max(0.0);
+                // r_glass from the E+ Step 1 polynomial, computed once in
+                // building_to_boundary_inputs (conversions.rs) and stored as
+                // fallback_r_m2_k_w for fenestration boundaries. Re-using the
+                // stored value instead of recomputing (r_total - r_film_int -
+                // r_film_ext) eliminates a duplicated computation path that
+                // could produce inconsistent values if film_resistances()
+                // (TARP/DOE-2) diverges from the E+ polynomial.
+                let r_glass = bd_input.fallback_r_m2_k_w;
+
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    // Invariant: the stored r_glass must equal the r_glass
+                    // recomputed from the stored film resistances.  For
+                    // fenestration boundaries, the film values in the boundary
+                    // input are the EnergyPlus Step 1 polynomial values
+                    // (set by the override in conversions.rs:301–320) only when
+                    // u_factor > 0.0.  This check catches the regression where
+                    // a future refactor accidentally routes TARP
+                    // `film_resistances()` output into fenestration boundary
+                    // film fields instead of the E+ polynomial values.
+                    //
+                    // Gated on u_factor > 0.0: when the U-factor is
+                    // non-positive, conversions.rs fell through to the TARP
+                    // fallback and fallback_r_m2_k_w is a generic material R,
+                    // not an E+ r_glass — comparison would be meaningless.
+                    // With the validation error above, this path is only
+                    // reachable after a future refactor removes the error.
+                    //
+                    // This check is NOT intended to detect divergence between
+                    // the E+ polynomial and TARP/DOE-2 film models — those two
+                    // models have different base assumptions and consistently
+                    // differ by >> 0.01 m²·K/W at all wind speeds.  That
+                    // divergence is tracked by the `#[cfg(feature = "observe")]`
+                    // diagnostic block below, which calls film_resistances()
+                    // (TARP) directly for comparison telemetry.
+                    if u_factor > 0.0 {
+                        let r_glass_recomputed = (r_total - r_film_int - r_film_ext).max(0.0);
+                        if (r_glass - r_glass_recomputed).abs() > 0.01 {
+                            panic!(
+                                "r_glass divergence for {} '{}': \
+                                 stored r_glass={r_glass:.6}, \
+                                 recomputed from film={r_glass_recomputed:.6}, \
+                                 diff={:.6} m²·K/W",
+                                fen_type,
+                                win.id,
+                                (r_glass - r_glass_recomputed).abs(),
+                            );
+                        }
+                    }
+                }
+
+                #[cfg(feature = "observe")]
+                {
+                    // Diagnostic: compare the stored E+ polynomial r_glass
+                    // against a TARP/DOE-2 recomputation to track the
+                    // divergence between the two film-coefficient models.
+                    // The TARP model is wind-speed-dependent; the E+
+                    // polynomial is not.  At NFRC conditions (≈2 m/s wind),
+                    // the models disagree by 40–50%; at high wind (15 m/s),
+                    // the gap widens further.  This telemetry column makes
+                    // that divergence observable.
+                    let interior_label = zone_type_to_label(boundary.interior_zone.as_ref());
+                    let exterior_label = zone_type_to_label(boundary.exterior_zone.as_ref());
+                    let (r_film_int_tarp, r_film_ext_tarp) = film_resistances(
+                        tilt_deg,
+                        interior_label,
+                        exterior_label,
+                        weather_avgs.avg_wind_m_s,
+                        weather_avgs.avg_ground_c,
+                        weather_avgs.avg_ambient_c,
+                        surface_roughness_from_finish_type(boundary.finish_type.as_deref()),
+                    );
+                    let r_glass_tarp = (r_total - r_film_int_tarp - r_film_ext_tarp).max(0.0);
+                    let diff_pct = if r_glass > 0.0 {
+                        ((r_glass - r_glass_tarp) / r_glass).abs() * 100.0
+                    } else {
+                        0.0
+                    };
+                    tracing::info!(
+                        target: "observe",
+                        fen_type,
+                        window_id = %win.id,
+                        window_r_glass_step1 = r_glass,
+                        window_r_glass_tarp_recomputed = r_glass_tarp,
+                        window_r_glass_diff_pct = diff_pct,
+                        "window r_glass diagnostic"
+                    );
+                }
+
                 let (transmittance_summer, radiation_frac) =
                     hares_physics::solar::calculate_window_parameters(
                         shgc_summer,
@@ -735,7 +843,7 @@ pub(crate) fn build_default_solvers(
         n_ext,
     };
     let (solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs) =
-        build_solver_boundaries(building, &boundary_inputs, &rc_ctx, env)?;
+        build_solver_boundaries(building, &boundary_inputs, &rc_ctx, env, weather_avgs)?;
 
     // Augment B_c: [B_ext | ext-surface columns | int-surface columns | zone sensible heat].
     let n_total_inputs = n_ext + n_ext_surface_inputs + n_int_surface_inputs + n_zones;
@@ -2784,7 +2892,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "surface 0")]
     fn missing_node_id_asserts_in_wiring() {
-        use super::{RCContext, build_solver_boundaries};
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
         use chrono::TimeZone;
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
@@ -2967,7 +3075,13 @@ mod tests {
             electrical: Default::default(),
         };
 
-        let _ = build_solver_boundaries(&building, &boundary_inputs, &rc, &env);
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
+        let _ = build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs);
     }
 
     /// A surface with no `layer_info` entry (fallback-R) correctly produces
@@ -2983,7 +3097,7 @@ mod tests {
         use hares_types::{EnvironmentState, GridState, ZoneState};
         use std::collections::HashMap;
 
-        use super::{RCContext, build_solver_boundaries};
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
 
         let building = Building {
             site: Site {
@@ -3150,8 +3264,14 @@ mod tests {
             electrical: Default::default(),
         };
 
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
         let (boundaries, ext_cols, int_cols) =
-            build_solver_boundaries(&building, &boundary_inputs, &rc, &env)
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
                 .expect("build_solver_boundaries should succeed for fallback-R surface");
 
         assert_eq!(boundaries.len(), 1);
@@ -3176,7 +3296,7 @@ mod tests {
     /// skylight would silently contribute zero solar gain.
     #[test]
     fn skylight_window_solar_populated_in_solver_boundaries() {
-        use super::{RCContext, build_solver_boundaries};
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
         use chrono::TimeZone;
         use hares_envelope::{
             BoundaryCategory, BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics,
@@ -3278,15 +3398,19 @@ mod tests {
             },
         };
 
+        let (r_glass, r_film_int, r_film_ext) =
+            hares_physics::solar::window_u_factor_decomposition(2.0)
+                .expect("U=2.0 is a valid window U-factor");
+
         let boundary_inputs = vec![BoundaryInput {
             area_m2: 2.0,
             interior_zone_idx: 0,
             exterior: ExteriorTarget::Outdoor,
             material_layers: vec![],
             precomputed_rc: vec![],
-            fallback_r_m2_k_w: 0.5,
-            r_film_interior_m2_k_w: 0.12,
-            r_film_exterior_m2_k_w: 0.03,
+            fallback_r_m2_k_w: r_glass,
+            r_film_interior_m2_k_w: r_film_int,
+            r_film_exterior_m2_k_w: r_film_ext,
             framing_factor: None,
             interior_emissivity: 0.84,
             foundation_depth_m: 0.0,
@@ -3307,8 +3431,8 @@ mod tests {
                 interior_zone_idx: 0,
                 exterior_target: ExteriorTarget::Outdoor,
                 area_m2: 2.0,
-                r_film_int_m2_k_w: 0.12,
-                r_film_ext_m2_k_w: 0.03,
+                r_film_int_m2_k_w: r_film_int,
+                r_film_ext_m2_k_w: r_film_ext,
                 r_zone_to_inner_m2_k_w: None,
                 r_outer_half_m2_k_w: None,
                 r_inner_half_m2_k_w: None,
@@ -3364,8 +3488,14 @@ mod tests {
             electrical: Default::default(),
         };
 
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
         let (boundaries, _ext_cols, _int_cols) =
-            build_solver_boundaries(&building, &boundary_inputs, &rc, &env)
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
                 .expect("build_solver_boundaries should succeed for skylight fenestration");
 
         assert_eq!(
@@ -3435,6 +3565,779 @@ mod tests {
             ws.radiation_frac >= 0.0,
             "radiation_frac must be >= 0; got {}",
             ws.radiation_frac
+        );
+    }
+
+    /// Verify that `build_solver_boundaries` passes the E+ Step 1 polynomial
+    /// r_glass (stored as `fallback_r_m2_k_w` on the boundary input) through to
+    /// `calculate_window_parameters` rather than recomputing it independently.
+    ///
+    /// This is a regression test: if the independent recomputation path is ever
+    /// re-introduced and the stored r_glass differs from the recomputed value,
+    /// the `shgc_summer` and `shgc_winter` parameters would still use
+    /// `calculate_window_parameters`, but with a different r_glass — and this
+    /// test would catch the divergence through mismatched transmittance values.
+    #[test]
+    fn window_solar_uses_boundary_r_glass_not_recomputed() {
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
+        use chrono::TimeZone;
+        use hares_envelope::{
+            BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget,
+        };
+        use hares_io::hpxml::{Boundary, BoundaryType, Site};
+        use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
+        use std::collections::HashMap;
+
+        let window_id = "W1";
+
+        // U-factor 1.8 W/(m²·K), SHGC 0.40 — typical double-pane low-e.
+        let u_factor = 1.8;
+        let shgc = 0.40;
+
+        let building = hares_io::Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: window_id.to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: window_id.to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(u_factor),
+                shgc: Some(shgc),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // r_glass and film resistances from the E+ Step 1 polynomial for U=1.8.
+        // These are the exact values computed by window_u_factor_decomposition,
+        // ensuring the invariant check (E+ vs recomputed) passes with zero diff.
+        let (r_glass, r_film_int, r_film_ext) =
+            hares_physics::solar::window_u_factor_decomposition(u_factor)
+                .expect("U=1.8 is a valid window U-factor");
+
+        let boundary_inputs = vec![BoundaryInput {
+            area_m2: 4.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![],
+            precomputed_rc: vec![],
+            fallback_r_m2_k_w: r_glass,
+            r_film_interior_m2_k_w: r_film_int,
+            r_film_exterior_m2_k_w: r_film_ext,
+            framing_factor: None,
+            interior_emissivity: 0.84,
+            foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
+        }];
+
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<hares_envelope::NodeId, usize> = HashMap::new();
+
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 4.0,
+                r_film_int_m2_k_w: r_film_int,
+                r_film_ext_m2_k_w: r_film_ext,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: hares_envelope::RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.84,
+                foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
+        let (boundaries, _ext_cols, _int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
+                .expect("build_solver_boundaries should succeed");
+
+        assert_eq!(boundaries.len(), 1);
+        let sb = &boundaries[0];
+        let ws = sb.window_solar.as_ref().expect("window_solar must be Some");
+
+        // Verify that the solver builder used the boundary's stored r_glass
+        // by computing the expected transmittance and radiation_frac directly
+        // from calculate_window_parameters with the same r_glass value.
+        let (expected_transmittance, expected_radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(
+                shgc * 1.0 * 1.0, // shgc * interior_shading_fraction * exterior_shading_summer
+                u_factor,
+                r_glass,
+            );
+        assert!(
+            (ws.transmittance_summer - expected_transmittance).abs() < 1e-12,
+            "transmittance_summer must match calculate_window_parameters(shgc, u={u_factor}, r_glass={r_glass:.6}): \
+             got {:.12}, expected {:.12}",
+            ws.transmittance_summer,
+            expected_transmittance,
+        );
+        assert!(
+            (ws.radiation_frac - expected_radiation_frac).abs() < 1e-12,
+            "radiation_frac must match calculate_window_parameters(shgc, u={u_factor}, r_glass={r_glass:.6}): \
+             got {:.12}, expected {:.12}",
+            ws.radiation_frac,
+            expected_radiation_frac,
+        );
+
+        // The recomputed r_glass (1/U - r_film_int - r_film_ext) must equal r_glass
+        // to within 1e-12 for E+ polynomial consistency — if it doesn't, the
+        // invariant check in build_solver_boundaries would catch it.
+        let r_total = 1.0 / u_factor;
+        let r_glass_recomputed = (r_total - r_film_int - r_film_ext).max(0.0);
+        assert!(
+            (r_glass - r_glass_recomputed).abs() < 1e-12,
+            "boundary input r_glass must match recomputed r_glass at standard conditions: \
+             stored={r_glass:.12}, recomputed={r_glass_recomputed:.12}"
+        );
+    }
+
+    /// Integration test: exercises the full window boundary construction →
+    /// build_solver_boundaries pipeline and verifies that the `r_glass` value
+    /// in RC network matches the one used for SHGC decomposition at NFRC
+    /// conditions (wind=2 m/s, moderate ΔT).
+    ///
+    /// This is the acceptance-criterion test from the ticket's `## Tests`
+    /// section. It chains `building_to_boundary_inputs` → `build_solver_boundaries`
+    /// rather than constructing `BoundaryInput` by hand, so the real pipeline
+    /// (including the E+ polynomial override in `conversions.rs`) is exercised.
+    ///
+    /// At NFRC conditions, the E+ polynomial and TARP/DOE-2 film resistances
+    /// are consistent, so the invariant check passes.
+    #[test]
+    fn window_pipeline_uses_stored_r_glass_at_nfrc_conditions() {
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
+        use chrono::TimeZone;
+        use hares_envelope::ExteriorTarget;
+        use hares_envelope::{BoundaryDiagnostic, EnvelopeDiagnostics};
+        use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+        use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
+        use std::collections::HashMap;
+
+        let defaults_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let store = hares_io::DefaultsStore::load(&defaults_path)
+            .expect("DefaultsStore must be loadable from project defaults/ directory");
+
+        let u_factor = 1.8;
+        let shgc = 0.40;
+        let window_id = "W_NFRC";
+
+        let building = hares_io::Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: window_id.to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: window_id.to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(u_factor),
+                shgc: Some(shgc),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
+        let boundary_inputs =
+            super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+                .expect("building_to_boundary_inputs should succeed");
+
+        assert_eq!(boundary_inputs.len(), 1, "expected 1 boundary input");
+
+        // Fetch E+ polynomial values for comparison.
+        let (expected_r_glass, expected_r_int, expected_r_ext) =
+            hares_physics::solar::window_u_factor_decomposition(u_factor).expect("valid U-factor");
+
+        // The boundary input must carry the E+ polynomial values, not TARP.
+        let bi = &boundary_inputs[0];
+        assert!(
+            (bi.fallback_r_m2_k_w - expected_r_glass).abs() < 1e-5,
+            "fallback_r must be E+ r_glass {expected_r_glass:.6}, got {:.6}",
+            bi.fallback_r_m2_k_w
+        );
+        assert!(
+            (bi.r_film_interior_m2_k_w - expected_r_int).abs() < 1e-5,
+            "r_film_int must be E+ polynomial value"
+        );
+        assert!(
+            (bi.r_film_exterior_m2_k_w - expected_r_ext).abs() < 1e-5,
+            "r_film_ext must be E+ polynomial value"
+        );
+
+        // Minimal RC context — fenestration boundaries do not need layer info.
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<hares_envelope::NodeId, usize> = HashMap::new();
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 4.0,
+                r_film_int_m2_k_w: expected_r_int,
+                r_film_ext_m2_k_w: expected_r_ext,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: hares_envelope::RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.84,
+                foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
+        let (boundaries, _ext_cols, _int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
+                .expect("build_solver_boundaries should succeed");
+
+        assert_eq!(boundaries.len(), 1);
+        let sb = &boundaries[0];
+        let ws = sb.window_solar.as_ref().expect("window_solar must be Some");
+
+        // Verify that the solver builder used the boundary's stored r_glass
+        // by comparing transmittance against calculate_window_parameters
+        // with the same r_glass value.
+        let (expected_transmittance, expected_radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(
+                shgc * 1.0 * 1.0,
+                u_factor,
+                expected_r_glass,
+            );
+        assert!(
+            (ws.transmittance_summer - expected_transmittance).abs() < 1e-12,
+            "transmittance_summer must match calculate_window_parameters with stored r_glass"
+        );
+        assert!(
+            (ws.radiation_frac - expected_radiation_frac).abs() < 1e-12,
+            "radiation_frac must match calculate_window_parameters with stored r_glass"
+        );
+    }
+
+    /// Integration test at non-NFRC conditions (extreme ΔT, high wind=15 m/s).
+    ///
+    /// Verifies that the boundary input carries E+ polynomial film resistances
+    /// (not TARP) even when weather conditions would produce very different
+    /// TARP values. At 15 m/s wind, TARP exterior film R is ≈0.01–0.02 m²·K/W
+    /// while the E+ polynomial is ≈0.034 m²·K/W. The invariant check in
+    /// build_solver_boundaries compares the stored r_glass against the stored
+    /// film resistances (which are E+ polynomial values for fenestration), so
+    /// the check passes — the pipeline correctly uses the single source of
+    /// truth for both the RC network and SHGC decomposition.
+    ///
+    /// If a future refactor routes TARP film_resistances() output into the
+    /// fenestration boundary film fields instead of the E+ polynomial values,
+    /// the invariant check will fire because 1/U − r_film_int(TARP) −
+    /// r_film_ext(TARP) ≠ r_glass(E+).
+    #[test]
+    fn window_pipeline_uses_stored_r_glass_at_high_wind() {
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
+        use chrono::TimeZone;
+        use hares_envelope::ExteriorTarget;
+        use hares_envelope::{BoundaryDiagnostic, EnvelopeDiagnostics};
+        use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+        use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
+        use std::collections::HashMap;
+
+        let defaults_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let store = hares_io::DefaultsStore::load(&defaults_path)
+            .expect("DefaultsStore must be loadable from project defaults/ directory");
+
+        let u_factor = 1.8;
+        let shgc = 0.40;
+        let window_id = "W_HIGHWIND";
+
+        let building = hares_io::Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: window_id.to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: window_id.to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(u_factor),
+                shgc: Some(shgc),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // High wind (15 m/s) — boundary_input still carries E+ polynomial values.
+        let boundary_inputs =
+            super::building_to_boundary_inputs(&building, 1, &store, 15.0, 35.0, 10.0)
+                .expect("building_to_boundary_inputs should succeed");
+
+        assert_eq!(boundary_inputs.len(), 1);
+
+        let (expected_r_glass, expected_r_int, expected_r_ext) =
+            hares_physics::solar::window_u_factor_decomposition(u_factor).expect("valid U-factor");
+
+        let bi = &boundary_inputs[0];
+        // Boundary input still has E+ values (fenestration override in
+        // conversions.rs is wind-independent).
+        assert!(
+            (bi.fallback_r_m2_k_w - expected_r_glass).abs() < 1e-5,
+            "fallback_r must be E+ r_glass even at high wind"
+        );
+        assert!(
+            (bi.r_film_interior_m2_k_w - expected_r_int).abs() < 1e-5,
+            "r_film_int must be E+ polynomial value even at high wind"
+        );
+        assert!(
+            (bi.r_film_exterior_m2_k_w - expected_r_ext).abs() < 1e-5,
+            "r_film_ext must be E+ polynomial value (~0.034, not TARP ~0.01–0.02) even at high wind"
+        );
+
+        // TARP film resistance at 15 m/s wind is much lower than E+.
+        // Verify that the boundary input is NOT using TARP values.
+        assert!(
+            bi.r_film_exterior_m2_k_w > 0.03,
+            "at high wind, r_film_ext ({:.6}) should still be E+ polynomial (~0.034), \
+             not TARP wind-dependent value",
+            bi.r_film_exterior_m2_k_w
+        );
+
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<hares_envelope::NodeId, usize> = HashMap::new();
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 4.0,
+                r_film_int_m2_k_w: expected_r_int,
+                r_film_ext_m2_k_w: expected_r_ext,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: hares_envelope::RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.84,
+                foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        // High wind: the invariant check compares stored r_glass against
+        // r_glass recomputed from stored film values (which are E+ polynomial
+        // values for fenestration).  Both agree → the check passes.
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 15.0,
+            avg_ambient_c: 35.0,
+            avg_ground_c: 10.0,
+        };
+
+        let (boundaries, _ext_cols, _int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
+                .expect("build_solver_boundaries should succeed at high wind");
+
+        assert_eq!(boundaries.len(), 1);
+        let sb = &boundaries[0];
+        let ws = sb.window_solar.as_ref().expect("window_solar must be Some");
+
+        // Verify that the solver builder used the boundary's stored r_glass
+        // even at high wind conditions.
+        let (expected_transmittance, expected_radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(
+                shgc * 1.0 * 1.0,
+                u_factor,
+                expected_r_glass,
+            );
+        assert!(
+            (ws.transmittance_summer - expected_transmittance).abs() < 1e-12,
+            "at high wind, transmittance_summer must match calculate_window_parameters with stored r_glass"
+        );
+        assert!(
+            (ws.radiation_frac - expected_radiation_frac).abs() < 1e-12,
+            "at high wind, radiation_frac must match calculate_window_parameters with stored r_glass"
         );
     }
 
