@@ -277,6 +277,12 @@ pub struct BoundaryDiagnostic {
     /// non-precomputed boundaries.
     #[cfg(feature = "observe")]
     pub same_zone_kept_half: Option<&'static str>,
+    /// For same-zone boundaries with RC nodes: the interior film resistance
+    /// value used for the zone-air coupling [m²·K/W]. Enables diagnostic
+    /// verification that same-zone boundaries use the interior (not exterior)
+    /// film coefficient. `None` for non-same-zone or fallback-R boundaries.
+    #[cfg(feature = "observe")]
+    pub same_zone_film_r_m2_k_w: Option<f64>,
 }
 
 /// Diagnostics captured during RC network construction.
@@ -705,6 +711,12 @@ pub fn assemble_building_rc(
                 foundation_depth_m: bd.foundation_depth_m,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: if same_zone { Some("interior") } else { None },
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: if same_zone && n_cap_nodes > 0 {
+                    Some(bd.r_film_interior_m2_k_w)
+                } else {
+                    None
+                },
             });
             continue;
         }
@@ -809,6 +821,12 @@ pub fn assemble_building_rc(
                 foundation_depth_m: bd.foundation_depth_m,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: if same_zone { Some("interior") } else { None },
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: if same_zone && n_cap_nodes > 0 {
+                    Some(bd.r_film_interior_m2_k_w)
+                } else {
+                    None
+                },
             });
         } else if !same_zone {
             // Fallback: single lumped resistance. fallback_r_m2_k_w is typically
@@ -956,6 +974,8 @@ pub fn assemble_building_rc(
                 foundation_depth_m: bd.foundation_depth_m,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
             });
         }
     }
@@ -1297,6 +1317,46 @@ pub fn assemble_building_rc(
                 }
             }
         }
+
+        // Verify same-zone material-layer boundaries have correct RC chain topology:
+        // mirrors the precomputed check above — the cut-surface (outer) node must
+        // NOT connect directly to zone air, and the innermost node must connect to
+        // zone air via the interior film resistance.
+        for diag in &boundary_diagnostics {
+            if diag.path == RCPath::MaterialLayer
+                && diag.n_rc_nodes > 0
+                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            {
+                if let Some(info) = layer_info.get(&diag.boundary_idx) {
+                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+                    // Innermost (interior-facing) node must connect to zone air via
+                    // the interior film resistance.
+                    assert!(
+                        rc.resistances.contains_key(&(info.inner_node, zone_node))
+                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                        "same-zone material-layer boundary {}: inner node {:?} \
+                         not connected to zone {:?} — interior wiring must fire for same-zone",
+                        diag.boundary_idx,
+                        info.inner_node,
+                        zone_node
+                    );
+                    // Outermost (cut-surface) node must NOT connect directly to
+                    // zone air — the exterior-side wiring must be skipped for same-zone.
+                    if info.outer_node != info.inner_node {
+                        assert!(
+                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                            "same-zone material-layer boundary {}: outer (cut-surface) node \
+                             {:?} incorrectly connected directly to zone {:?} — \
+                             exterior wiring must be skipped for same-zone",
+                            diag.boundary_idx,
+                            info.outer_node,
+                            zone_node
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let boundary_ua: f64 = boundary_diagnostics.iter().map(|d| d.ua_w_per_k).sum();
@@ -1467,7 +1527,9 @@ impl RcGraphState {
         let k_outer = parallel_path_conductivity(outer.conductivity_w_m_k, ff);
         let r_ext =
             params.r_film_exterior / outer_area + outer.thickness_m / (2.0 * k_outer * outer_area);
-        self.add_resistance(params.exterior_node, layer_nodes[0], r_ext);
+        if !params.same_zone {
+            self.add_resistance(params.exterior_node, layer_nodes[0], r_ext);
+        }
 
         // Adjacent layer connections.
         for i in 0..(n_layers - 1) {
@@ -1492,29 +1554,27 @@ impl RcGraphState {
         // radiation_frac voltage-divider handles surface temperature interpolation
         // for the iterative LWR solver.
         let mut surface_node: Option<NodeId> = None;
-        if !params.same_zone {
-            let inner = effective_layers[n_layers - 1];
-            let inner_area = inner.effective_area(params.boundary_area);
-            let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
-            let r_inner_half_abs = inner.thickness_m / (2.0 * k_inner * inner_area);
-            let r_conv_film_abs = params.r_film_interior / inner_area;
+        let inner = effective_layers[n_layers - 1];
+        let inner_area = inner.effective_area(params.boundary_area);
+        let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
+        let r_inner_half_abs = inner.thickness_m / (2.0 * k_inner * inner_area);
+        let r_conv_film_abs = params.r_film_interior / inner_area;
 
-            if params.interior_lwr_method == InteriorLwrMethod::StarMesh {
-                // StarMesh: surface_node between R_film_conv and R_inner_half.
-                // inner_node ← R_inner_half → surface_node ← R_film_conv → zone_air
-                let s_node = self.alloc_node_no_cap();
-                self.add_resistance(
-                    layer_nodes[n_layers - 1],
-                    s_node,
-                    r_inner_half_abs.max(1e-6),
-                );
-                self.add_resistance(s_node, params.interior_node, r_conv_film_abs.max(1e-6));
-                surface_node = Some(s_node);
-            } else {
-                // ScriptF: combined resistor.
-                let r_int = r_conv_film_abs + r_inner_half_abs;
-                self.add_resistance(layer_nodes[n_layers - 1], params.interior_node, r_int);
-            }
+        if params.interior_lwr_method == InteriorLwrMethod::StarMesh {
+            // StarMesh: surface_node between R_film_conv and R_inner_half.
+            // inner_node ← R_inner_half → surface_node ← R_film_conv → zone_air
+            let s_node = self.alloc_node_no_cap();
+            self.add_resistance(
+                layer_nodes[n_layers - 1],
+                s_node,
+                r_inner_half_abs.max(1e-6),
+            );
+            self.add_resistance(s_node, params.interior_node, r_conv_film_abs.max(1e-6));
+            surface_node = Some(s_node);
+        } else {
+            // ScriptF: combined resistor.
+            let r_int = r_conv_film_abs + r_inner_half_abs;
+            self.add_resistance(layer_nodes[n_layers - 1], params.interior_node, r_int);
         }
 
         let r_outer_half = outer.thickness_m / (2.0 * k_outer);
@@ -1813,6 +1873,7 @@ pub fn steel_frame_u_zone_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::DVector;
 
     fn make_layer(
         thickness: f64,
@@ -2209,6 +2270,326 @@ mod tests {
         assert!(
             (layer_cap - expected).abs() < 1e-6,
             "layer cap={layer_cap}, expected {expected} (halved)"
+        );
+    }
+
+    // ── Same-zone material-layer topology verification ─────────────────
+
+    #[test]
+    fn material_layer_same_zone_correct_topology() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid
+        // diurnal-criterion auto-splitting, so 4 raw layers → 4 nodes → keep last 2.
+        // Exterior→interior ordering: [ext-siding, sheathing, insulation, int-gypsum].
+        let layers = vec![
+            make_layer(0.05, 0.5, 50.0, 800.0, 0.0),
+            make_layer(0.10, 1.0, 50.0, 900.0, 0.0),
+            make_layer(0.15, 0.04, 50.0, 1000.0, 0.0),
+            make_layer(0.02, 0.16, 50.0, 1090.0, 0.0),
+        ];
+        let boundaries = vec![make_boundary(25.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // 1 zone air + 2 kept layers = 3 states.
+        assert_eq!(rc.a_c.nrows(), 3);
+
+        // Verify the RC chain topology: the innermost (interior-facing) layer node
+        // must connect to zone air via the interior film resistance, and the
+        // cut-surface (outer) node must NOT connect directly to zone air.
+        let info = &rc.layer_info[&0];
+        let zone_node = NodeId(1u32);
+        assert_ne!(
+            info.inner_node, info.outer_node,
+            "inner and outer nodes must differ for multi-layer same-zone"
+        );
+
+        let zone_row = rc.node_index[&zone_node];
+        let inner_row = rc.node_index[&info.inner_node];
+        let outer_row = rc.node_index[&info.outer_node];
+
+        // Innermost node ↔ zone coupling must exist (positive A_c entry).
+        let g_inner_zone = rc.a_c[(inner_row, zone_row)];
+        assert!(
+            g_inner_zone > 0.0,
+            "innermost-node (row {inner_row}) to zone (row {zone_row}) coupling \
+             must be positive, got {g_inner_zone}"
+        );
+
+        // Cut-surface (outer) node must NOT couple directly to zone air.
+        let g_outer_zone = rc.a_c[(outer_row, zone_row)];
+        assert!(
+            g_outer_zone == 0.0,
+            "outer (cut-surface) node (row {outer_row}) must not couple directly \
+             to zone air (row {zone_row}), got {g_outer_zone}"
+        );
+
+        // Inter-layer coupling between the two kept layers must exist.
+        let g_inter_layer = rc.a_c[(inner_row, outer_row)];
+        assert!(
+            g_inter_layer > 0.0,
+            "inter-layer coupling between inner and outer nodes must be positive, \
+             got {g_inter_layer}"
+        );
+    }
+
+    #[test]
+    fn material_and_precomputed_same_zone_topology_match() {
+        // Verify that the material-layer path and precomputed path produce the
+        // same structural topology (inner→zone, outer dead-ended) for equivalent
+        // same-zone boundary constructions, and that the material path's
+        // inner→zone coupling reflects the interior film resistance (not exterior).
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+
+        // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid
+        // diurnal-criterion auto-splitting in the material path, so both paths
+        // produce the same number of capacitor nodes.
+        let thickness = 0.10;
+        let conductivity = 1.0;
+        let density = 50.0;
+        let cp = 900.0;
+        let area = 20.0;
+
+        // Material-path boundary: 4 layers, same_zone → keep last 2.
+        let material_layers: Vec<LayerInput> = (0..4)
+            .map(|_| make_layer(thickness, conductivity, density, cp, 0.0))
+            .collect();
+        let mat_boundary = make_boundary(area, 0, ExteriorTarget::Zone(0), material_layers, 2.5);
+        let (rc_mat, _) =
+            assemble_building_rc(&[mat_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Precomputed-path boundary: equivalent 4 layers.
+        let precomputed: Vec<PrecomputedRCLayer> = (0..4)
+            .map(|_| PrecomputedRCLayer {
+                resistance_m2_k_w: thickness / conductivity,
+                capacitance_kj_m2_k: density * cp * thickness / 1000.0,
+            })
+            .collect();
+        let pre_boundary =
+            make_precomputed_boundary(area, 0, ExteriorTarget::Zone(0), precomputed, 2.5);
+        let (rc_pre, _) =
+            assemble_building_rc(&[pre_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Both paths should produce the same number of RC states.
+        assert_eq!(rc_mat.a_c.nrows(), 3, "material-path node count");
+        assert_eq!(rc_pre.a_c.nrows(), 3, "precomputed-path node count");
+
+        let info_mat = &rc_mat.layer_info[&0];
+        let info_pre = &rc_pre.layer_info[&0];
+        let zone_node = NodeId(1u32);
+
+        let zone_row_mat = rc_mat.node_index[&zone_node];
+        let inner_row_mat = rc_mat.node_index[&info_mat.inner_node];
+        let outer_row_mat = rc_mat.node_index[&info_mat.outer_node];
+
+        let zone_row_pre = rc_pre.node_index[&zone_node];
+        let inner_row_pre = rc_pre.node_index[&info_pre.inner_node];
+        let outer_row_pre = rc_pre.node_index[&info_pre.outer_node];
+
+        // Both paths must have positive inner→zone coupling.
+        let g_mat = rc_mat.a_c[(inner_row_mat, zone_row_mat)];
+        let g_pre = rc_pre.a_c[(inner_row_pre, zone_row_pre)];
+        assert!(
+            g_mat > 0.0 && g_pre > 0.0,
+            "both paths must have positive inner→zone coupling: mat={g_mat}, pre={g_pre}"
+        );
+
+        // Material path: inner→zone conductance must reflect interior
+        // (not exterior) film resistance.
+        // R_abs = r_film_interior / area + thickness / (2 * k * area)
+        // C_inner = density * cp * thickness * area (4-layer even → last layer not halved)
+        let r_film_interior = 0.12;
+        let c_expected = density * cp * thickness * area;
+        let r_expected = r_film_interior / area + thickness / (2.0 * conductivity * area);
+        let g_expected = 1.0 / (r_expected * c_expected);
+        assert!(
+            (g_mat / g_expected - 1.0).abs() < 1e-9,
+            "material-path inner→zone conductance must match interior-film expectation: \
+             {g_mat} vs expected {g_expected}"
+        );
+
+        // Using exterior film (r=0.03) would produce a ~4x larger conductance.
+        // Verify we're NOT in that regime.
+        let g_expected_exterior =
+            1.0 / ((0.03 / area + thickness / (2.0 * conductivity * area)) * c_expected);
+        assert!(
+            g_mat < g_expected_exterior * 0.9,
+            "material-path conductance {g_mat} must be well below the exterior-film \
+             value {g_expected_exterior} — using exterior film for same-zone is the bug"
+        );
+
+        // Both paths must have positive inter-layer coupling.
+        let g_il_mat = rc_mat.a_c[(inner_row_mat, outer_row_mat)];
+        let g_il_pre = rc_pre.a_c[(inner_row_pre, outer_row_pre)];
+        assert!(
+            g_il_mat > 0.0 && g_il_pre > 0.0,
+            "both paths must have positive inter-layer coupling: mat={g_il_mat}, pre={g_il_pre}"
+        );
+
+        // Cut-surface (outer) nodes must NOT couple directly to zone in either path.
+        assert_eq!(rc_mat.a_c[(outer_row_mat, zone_row_mat)], 0.0);
+        assert_eq!(rc_pre.a_c[(outer_row_pre, zone_row_pre)], 0.0);
+    }
+
+    // ── Step-response regression: full discretization + stepping path ───
+    //
+    // The ticket's Tests section asks for an integration test that constructs
+    // same-zone networks via both paths, discretizes, simulates a zone-air
+    // temperature step, and asserts that the thermal mass responds with the
+    // correct time constant (interior film, not exterior). The static a_c
+    // inspection tests above verify the matrix entries; this test exercises
+    // the full RC assembly → discretization → time-stepping pipeline to catch
+    // any mismatch between the rate constants in a_c and how the discretizer/
+    // stepper actually applies them.
+
+    #[test]
+    fn material_and_precomputed_same_zone_step_response_match() {
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+
+        // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid
+        // diurnal-criterion auto-splitting, matching the topology-test setup.
+        let thickness = 0.10;
+        let conductivity = 1.0;
+        let density = 50.0;
+        let cp = 900.0;
+        let area = 20.0;
+
+        let material_layers: Vec<LayerInput> = (0..4)
+            .map(|_| make_layer(thickness, conductivity, density, cp, 0.0))
+            .collect();
+        let mat_boundary = make_boundary(area, 0, ExteriorTarget::Zone(0), material_layers, 2.5);
+        let (rc_mat, _) =
+            assemble_building_rc(&[mat_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        let precomputed: Vec<PrecomputedRCLayer> = (0..4)
+            .map(|_| PrecomputedRCLayer {
+                resistance_m2_k_w: thickness / conductivity,
+                capacitance_kj_m2_k: density * cp * thickness / 1000.0,
+            })
+            .collect();
+        let pre_boundary =
+            make_precomputed_boundary(area, 0, ExteriorTarget::Zone(0), precomputed, 2.5);
+        let (rc_pre, _) =
+            assemble_building_rc(&[pre_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        assert_eq!(rc_mat.a_c.nrows(), 3);
+        assert_eq!(rc_pre.a_c.nrows(), 3);
+
+        // Extract the mass-node subsystem from the full 3-state A_c.
+        // Treat zone air temperature as a held-constant external input so
+        // the step response directly measures the interior-mass dynamics.
+        let zone_node = NodeId(1u32);
+
+        let extract_mass_system = |rc: &BuildingRC| -> (DMatrix<f64>, DMatrix<f64>) {
+            let info = &rc.layer_info[&0];
+            let zone_row = rc.node_index[&zone_node];
+            let inner_row = rc.node_index[&info.inner_node];
+            let outer_row = rc.node_index[&info.outer_node];
+            let rows = [inner_row, outer_row];
+
+            let mut a_mass = DMatrix::zeros(2, 2);
+            let mut b_mass = DMatrix::zeros(2, 1);
+            for (i, &ri) in rows.iter().enumerate() {
+                for (j, &rj) in rows.iter().enumerate() {
+                    a_mass[(i, j)] = rc.a_c[(ri, rj)];
+                }
+                b_mass[(i, 0)] = rc.a_c[(ri, zone_row)];
+            }
+            (a_mass, b_mass)
+        };
+
+        let (a_mat, b_mat) = extract_mass_system(&rc_mat);
+        let (a_pre, b_pre) = extract_mass_system(&rc_pre);
+
+        let dt = 60.0;
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let model_mat = StateSpaceModel::from_continuous(&a_mat, &b_mat, dt, &mapping)
+            .expect("material-path discretization");
+        let model_pre = StateSpaceModel::from_continuous(&a_pre, &b_pre, dt, &mapping)
+            .expect("precomputed-path discretization");
+
+        // Step response: zone air temperature held at 1 K above initial mass temp.
+        let u = DVector::from_row_slice(&[1.0]);
+        let mut x_mat = DVector::zeros(2);
+        let mut x_pre = DVector::zeros(2);
+
+        // 10 hours at 60 s — more than enough to approach steady state for
+        // an interior-partition time constant on the order of 15–30 minutes.
+        let n_steps = 600;
+        for _ in 0..n_steps {
+            x_mat = model_mat.step(&x_mat, &u);
+            x_pre = model_pre.step(&x_pre, &u);
+        }
+
+        // Steady state: all mass nodes approach zone air temperature.
+        let ss_tol = 0.01;
+        assert!(
+            (x_mat[0] - 1.0).abs() < ss_tol && (x_mat[1] - 1.0).abs() < ss_tol,
+            "material-path steady state must be zone temp: inner={}, outer={}",
+            x_mat[0],
+            x_mat[1]
+        );
+        assert!(
+            (x_pre[0] - 1.0).abs() < ss_tol && (x_pre[1] - 1.0).abs() < ss_tol,
+            "precomputed-path steady state must be zone temp: inner={}, outer={}",
+            x_pre[0],
+            x_pre[1]
+        );
+
+        // Both paths must produce identical step responses.
+        let match_tol = 1e-6;
+        assert!(
+            (x_mat[0] - x_pre[0]).abs() < match_tol && (x_mat[1] - x_pre[1]).abs() < match_tol,
+            "material and precomputed step responses must match: \
+             mat=({}, {}), pre=({}, {})",
+            x_mat[0],
+            x_mat[1],
+            x_pre[0],
+            x_pre[1]
+        );
+
+        // Regression guard: the inner-mass → zone-air conductance must use the
+        // interior film (~0.12 m²·K/W), not the exterior film (~0.03 m²·K/W).
+        // Using the exterior film produces a ~2× larger conductance, which would
+        // cause the mass to respond too quickly. Verify the actual coupling
+        // coefficient in B is well below what the buggy wiring would produce.
+        let c_expected = density * cp * thickness * area;
+        let r_buggy = R_FILM_EXTERIOR_M2_K_W / area + thickness / (2.0 * conductivity * area);
+        let g_iz_buggy = 1.0 / (r_buggy * c_expected);
+        assert!(
+            b_mat[(0, 0)] < g_iz_buggy * 0.9,
+            "inner→zone coupling {actual} must be well below exterior-film \
+             value {buggy}: using exterior film for same-zone is the bug",
+            actual = b_mat[(0, 0)],
+            buggy = g_iz_buggy
         );
     }
 

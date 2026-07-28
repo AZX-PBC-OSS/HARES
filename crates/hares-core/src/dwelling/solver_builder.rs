@@ -2921,6 +2921,8 @@ mod tests {
                 foundation_depth_m: 0.0,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
             }],
             zone_capacitances_j_k: vec![1000.0],
             total_ua_w_per_k: 0.0,
@@ -3102,6 +3104,8 @@ mod tests {
                 foundation_depth_m: 0.0,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
             }],
             zone_capacitances_j_k: vec![1000.0],
             total_ua_w_per_k: 0.0,
@@ -3314,6 +3318,8 @@ mod tests {
                 foundation_depth_m: 0.0,
                 #[cfg(feature = "observe")]
                 same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
             }],
             zone_capacitances_j_k: vec![1000.0],
             total_ua_w_per_k: 0.0,
