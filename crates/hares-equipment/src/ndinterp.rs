@@ -55,6 +55,9 @@ pub struct RegularGridInterpolator {
     /// Throttle linear-extrapolation warnings to once per interpolator lifetime.
     #[serde(skip)]
     linear_extrap_warned: AtomicBool,
+    /// Throttle fallback-cell warnings to once per interpolator lifetime.
+    #[serde(skip)]
+    fallback_warned: AtomicBool,
     /// Last-known lower bracket index per axis, used to accelerate consecutive
     /// queries via linear hunting instead of binary search.
     #[serde(skip)]
@@ -75,6 +78,11 @@ pub struct RegularGridInterpolator {
     #[cfg(feature = "observe")]
     #[serde(skip)]
     pub binary_fallback_count: [AtomicU64; 8],
+    /// Per-cell boolean mask of the same shape as ``values``.
+    /// A truthy entry indicates the cell value was produced by fallback
+    /// extrapolation rather than direct solve.  Used by the charging-curve
+    /// LUT consumer to warn when interpolating into fallback cells.
+    fallback_mask: Option<Vec<u8>>,
 }
 
 impl Clone for RegularGridInterpolator {
@@ -87,6 +95,7 @@ impl Clone for RegularGridInterpolator {
             linear_extrap_warned: AtomicBool::new(
                 self.linear_extrap_warned.load(Ordering::Relaxed),
             ),
+            fallback_warned: AtomicBool::new(self.fallback_warned.load(Ordering::Relaxed)),
             // Reset cache on clone: clones from serde start cold.
             cached_bracket: vec![0usize; self.axes.len()],
             #[cfg(feature = "observe")]
@@ -124,6 +133,7 @@ impl Clone for RegularGridInterpolator {
                 AtomicU64::new(self.binary_fallback_count[6].load(Ordering::Relaxed)),
                 AtomicU64::new(self.binary_fallback_count[7].load(Ordering::Relaxed)),
             ],
+            fallback_mask: self.fallback_mask.clone(),
         }
     }
 }
@@ -214,6 +224,7 @@ impl RegularGridInterpolator {
             strides,
             strategy,
             linear_extrap_warned: AtomicBool::new(false),
+            fallback_warned: AtomicBool::new(false),
             cached_bracket,
             #[cfg(feature = "observe")]
             oob_count: AtomicU64::new(0),
@@ -250,6 +261,7 @@ impl RegularGridInterpolator {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ],
+            fallback_mask: None,
         })
     }
 
@@ -257,6 +269,22 @@ impl RegularGridInterpolator {
     #[inline]
     pub fn ndim(&self) -> usize {
         self.axes.len()
+    }
+
+    /// Attach a per-cell fallback mask.
+    ///
+    /// `mask` must be the same length as `values`.  Each entry is truthy if the
+    /// cell value was produced by fallback extrapolation rather than direct solve.
+    pub fn set_fallback_mask(&mut self, mask: Vec<u8>) -> crate::Result<()> {
+        if mask.len() != self.values.len() {
+            return Err(HaresError::Equipment(format!(
+                "RegularGridInterpolator fallback_mask length {} != values length {}",
+                mask.len(),
+                self.values.len()
+            )));
+        }
+        self.fallback_mask = Some(mask);
+        Ok(())
     }
 
     /// Interpolate at a single point.
@@ -419,6 +447,30 @@ impl RegularGridInterpolator {
                 };
             }
             result += weight * self.values[flat_idx] as f64;
+        }
+
+        // Check fallback mask: warn once if any contributing corner cell was
+        // produced by fallback extrapolation rather than direct solve.
+        if let Some(ref mask) = self.fallback_mask {
+            if !self.fallback_warned.load(Ordering::Relaxed) {
+                let any_fallback = (0..n_corners).any(|corner| {
+                    let mut flat_idx = 0usize;
+                    for (dim, lo) in lo_indices.iter().enumerate().take(ndim) {
+                        let bit = (corner >> dim) & 1;
+                        let idx = lo + bit as usize;
+                        let idx = idx.min(self.axes[dim].len() - 1);
+                        flat_idx += idx * self.strides[dim];
+                    }
+                    mask[flat_idx] != 0
+                });
+                if any_fallback {
+                    self.fallback_warned.store(true, Ordering::Relaxed);
+                    tracing::warn!(
+                        "Interpolating from charging-curve LUT cells that were filled by fallback \
+                         extrapolation; charge-rate limits may be conservative"
+                    );
+                }
+            }
         }
 
         Ok(result as f32)
@@ -1167,5 +1219,52 @@ mod tests {
             Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
             Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
         }
+    }
+
+    // ── Fallback mask tests ──────────────────────────────────────────────
+
+    #[test]
+    fn set_fallback_mask_accepts_valid_length() {
+        let axes = vec![
+            vec![0.0, 0.5, 1.0],
+            vec![-10.0, 25.0],
+            vec![0.5, 1.0],
+            vec![0.8, 1.0],
+        ];
+        let total: usize = axes.iter().map(|a| a.len()).product();
+        let values = vec![0.5f32; total];
+        let mut interp =
+            RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
+
+        interp.set_fallback_mask(vec![0u8; total]).unwrap();
+        let result = interp.interpolate(&[0.5, 25.0, 1.0, 0.9]).unwrap();
+        assert!((result - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn set_fallback_mask_rejects_wrong_length() {
+        let axes = vec![vec![0.0, 0.5, 1.0], vec![0.0, 1.0]];
+        let values = vec![0.5f32; 6];
+        let mut interp =
+            RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
+
+        let err = interp.set_fallback_mask(vec![0u8; 3]).unwrap_err();
+        assert!(err.to_string().contains("length"));
+    }
+
+    #[test]
+    fn set_fallback_mask_with_some_cells_marked() {
+        let axes = vec![vec![0.0, 0.5, 1.0], vec![0.0, 1.0]];
+        let values = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut interp =
+            RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
+
+        let mut mask = vec![0u8; 6];
+        mask[0] = 1;
+        mask[5] = 1;
+        interp.set_fallback_mask(mask).unwrap();
+
+        let result = interp.interpolate(&[0.25, 0.5]).unwrap();
+        assert!((result - 2.5).abs() < 1e-5);
     }
 }

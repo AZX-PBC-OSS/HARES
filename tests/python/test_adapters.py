@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
@@ -791,6 +792,217 @@ class TestPybammBatteryDegradationParams:
             'model = "rainflow_arrhenius"\n'
         )
         assert out_path.read_text() == expected
+
+
+# ---------------------------------------------------------------------------
+# PyBaMM Charging Curve LUT fallback (T-0558)
+# ---------------------------------------------------------------------------
+
+
+class TestChargingLutFallback:
+    """Tests for pybamm_battery.generate_charging_curve_lut fallback behaviour."""
+
+    def _setup_pybamm_mock(self, fail_indices: set[tuple[int, int, int]]) -> mock.MagicMock:
+        """Build a PyBaMM mock that fails at specific grid indices.
+
+        Each call to Simulation.solve consumes one grid point.  The mock
+        crashes with RuntimeError when the call count matches a fail index.
+        """
+        import itertools
+
+        from ochre_next.adapters import pybamm_battery
+
+        call_counter = {"count": 0}
+        grid_order: list[tuple[int, int, int]] = []
+        for (j, _t), (k, _cr), (h, _soh) in itertools.product(
+            enumerate(pybamm_battery._DEFAULT_TEMP_GRID),
+            enumerate(pybamm_battery._DEFAULT_CRATE_GRID),
+            enumerate(pybamm_battery._DEFAULT_SOH_GRID),
+        ):
+            grid_order.append((j, k, h))
+
+        n_pts = 50
+        throughput = np.linspace(0.0, 50.0, n_pts, dtype=np.float64)
+        current = np.ones(n_pts, dtype=np.float64)
+        current[-5:] = np.linspace(1.0, 0.05, 5)
+
+        class FakeTable:
+            def __init__(self, arr):
+                self.entries = arr
+
+        throughput_obj = FakeTable(throughput)
+        current_obj = FakeTable(current)
+
+        class FakeSol:
+            def __getitem__(self, key):
+                if key == "Throughput capacity [A.h]":
+                    return throughput_obj
+                if key == "Current [A]":
+                    return current_obj
+                return FakeTable(np.zeros(10))
+
+        class FakeSim:
+            def solve(self, initial_soc=None):
+                idx = grid_order[call_counter["count"]]
+                call_counter["count"] += 1
+                if idx in fail_indices:
+                    raise RuntimeError(f"Simulated solve failure at {idx}")
+                sol = FakeSol()
+                return sol
+
+        fake = mock.MagicMock()
+        fake.ParameterValues.side_effect = lambda name: {"Nominal cell capacity [A.h]": 50.0}
+        fake.lithium_ion.SPMe.return_value = object()
+        fake.Experiment.return_value = object()
+        fake.Simulation.return_value = FakeSim()
+
+        return fake
+
+    def test_cc_cv_fallback_uses_nearest_valid_neighbor(self) -> None:
+        """When a grid point fails, the fallback power_fraction comes from a
+        successfully-solved neighbor, not zeros."""
+        import numpy as np
+
+        from ochre_next.adapters import pybamm_battery
+
+        # PyBaMM is not installed; enable mock mode.
+        original_has_pybamm = pybamm_battery._HAS_PYBAMM
+        pybamm_battery._HAS_PYBAMM = True
+        try:
+            # Grid: 7 temps × 8 crates × 4 SOHs = 224 points.
+            # Fail the last temperature at highest C-rate and lowest SOH:
+            # temp[6] = 45°C, crate[7] = 2.0C, soh[0] = 0.70.
+            fail_idx: set[tuple[int, int, int]] = {(6, 7, 0)}
+            fake_pybamm = self._setup_pybamm_mock(fail_idx)
+
+            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+                result = pybamm_battery.generate_charging_curve_lut(
+                    param_set="Chen2020",
+                )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+
+        lut = result["lut"]
+        coverage = result["lut_coverage"]
+        mask = result["fallback_mask"]
+
+        assert coverage["grid_points_total"] == 7 * 8 * 4
+        assert coverage["grid_points_fallback"] == 1
+        assert coverage["grid_points_solved"] == coverage["grid_points_total"] - 1
+        assert mask.sum() == 1
+        assert mask[6, 7, 0] == 1
+
+        # The fallback cell must have non-zero power fractions (not zeros).
+        # Check middle SOC values (SOC=0 is always ~0 power_fraction).
+        fallback_values = lut[:, 6, 7, 0]
+        assert float(fallback_values[len(fallback_values) // 2]) > 0.0, (
+            "fallback cell must have non-zero power fractions at mid-SOC"
+        )
+
+        # The fallback cell should be a scaled version of a neighbor, not the
+        # same as any solved cell in the same temp row.
+        for h in range(4):
+            if (6, 7, h) not in fail_idx:
+                solved_vals = lut[:, 6, 7, h]
+                if solved_vals.sum() > 0:
+                    # Fallback is scaled by 0.9, so must differ from solved neighbor.
+                    assert not np.allclose(fallback_values, solved_vals), (
+                        "fallback cell must differ from solved neighbor (scaled by 0.9)"
+                    )
+
+    def test_cc_cv_fallback_when_no_neighbor_exists(self) -> None:
+        """When the very first grid point fails, there are no solved neighbors
+        and the fallback uses linear derating."""
+        from ochre_next.adapters import pybamm_battery
+
+        original_has_pybamm = pybamm_battery._HAS_PYBAMM
+        pybamm_battery._HAS_PYBAMM = True
+        try:
+            # Fail the very first grid point: temp[0] = -15°C, crate[0] = 0.04C, soh[0] = 0.70
+            fail_idx: set[tuple[int, int, int]] = {(0, 0, 0)}
+            fake_pybamm = self._setup_pybamm_mock(fail_idx)
+
+            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+                result = pybamm_battery.generate_charging_curve_lut(
+                    param_set="Chen2020",
+                )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+
+        lut = result["lut"]
+        coverage = result["lut_coverage"]
+        mask = result["fallback_mask"]
+
+        assert coverage["grid_points_fallback"] == 1
+        assert mask[0, 0, 0] == 1
+
+        fallback_values = lut[:, 0, 0, 0]
+        assert float(fallback_values[len(fallback_values) // 2]) > 0.0, (
+            "fallback cell must have non-zero power fractions for linear derating at mid-SOC"
+        )
+        # Linear derating: power_fraction starts at 1.0 and goes to 0.0.
+        assert float(fallback_values[0]) >= float(fallback_values[-1]), (
+            "linear derating should be monotonically non-increasing"
+        )
+
+    def test_lut_coverage_fields_present(self) -> None:
+        """Every ChargingCurveLutData must have lut_coverage and fallback_mask
+        regardless of whether any solves failed."""
+        from ochre_next.adapters import pybamm_battery
+
+        original_has_pybamm = pybamm_battery._HAS_PYBAMM
+        pybamm_battery._HAS_PYBAMM = True
+        try:
+            fake_pybamm = self._setup_pybamm_mock(set())
+
+            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+                result = pybamm_battery.generate_charging_curve_lut(
+                    param_set="Chen2020",
+                )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+
+        coverage = result["lut_coverage"]
+        mask = result["fallback_mask"]
+
+        assert coverage["grid_points_total"] == 7 * 8 * 4
+        assert coverage["grid_points_fallback"] == 0
+        assert coverage["grid_points_solved"] == coverage["grid_points_total"]
+        assert mask.sum() == 0
+
+    def test_charging_lut_no_zero_holes_at_physical_conditions(self) -> None:
+        """For T >= -10°C, C-rate >= 0.05C, SOH >= 0.7, all grid cells must
+        have non-zero max power fraction across the SOC range."""
+        import numpy as np
+
+        from ochre_next.adapters import pybamm_battery
+
+        original_has_pybamm = pybamm_battery._HAS_PYBAMM
+        pybamm_battery._HAS_PYBAMM = True
+        try:
+            fake_pybamm = self._setup_pybamm_mock(set())
+            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+                result = pybamm_battery.generate_charging_curve_lut(
+                    param_set="Chen2020",
+                )
+        finally:
+            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+
+        lut = result["lut"]
+        temp_arr = result["temp_grid"]
+        crate_arr = result["crate_grid"]
+        soh_arr = result["soh_grid"]
+
+        for j, t in enumerate(temp_arr):
+            for k, cr in enumerate(crate_arr):
+                for h, sh in enumerate(soh_arr):
+                    if t >= -10.0 and cr >= 0.05 and sh >= 0.7:
+                        vals = lut[:, j, k, h]
+                        max_pfrac = float(np.max(vals))
+                        assert max_pfrac > 0.0, (
+                            f"LUT cell has zero max power fraction at "
+                            f"T={t:.0f}°C C={cr:.3f}C SOH={sh:.0%}"
+                        )
 
 
 # ---------------------------------------------------------------------------

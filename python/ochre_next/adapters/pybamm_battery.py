@@ -57,6 +57,8 @@ class ChargingCurveLutData(TypedDict):
     crate_grid: npt.NDArray[np.float64]
     soh_grid: npt.NDArray[np.float64]
     lut: npt.NDArray[np.float32]
+    lut_coverage: dict[str, int]
+    fallback_mask: npt.NDArray[np.uint8]
 
 
 _DEFAULT_DEGRADATION: DegradationConfig = {
@@ -475,6 +477,103 @@ _DEFAULT_CRATE_GRID: list[float] = [0.04, 0.08, 0.15, 0.25, 0.50, 1.00, 1.50, 2.
 _DEFAULT_SOH_GRID: list[float] = [0.70, 0.80, 0.90, 1.00]
 
 
+def _normalized_distance(
+    t1: float, cr1: float, s1: float,
+    t2: float, cr2: float, s2: float,
+    temp_arr: npt.NDArray[np.float64],
+    crate_arr: npt.NDArray[np.float64],
+    soh_arr: npt.NDArray[np.float64],
+) -> float:
+    """Euclidean distance over normalized (T, C-rate, SOH) dimensions."""
+    t_range = float(temp_arr[-1] - temp_arr[0]) or 1.0
+    cr_range = float(crate_arr[-1] - crate_arr[0]) or 1.0
+    soh_range = float(soh_arr[-1] - soh_arr[0]) or 1.0
+    return float(np.sqrt(
+        ((t1 - t2) / t_range) ** 2
+        + ((cr1 - cr2) / cr_range) ** 2
+        + ((s1 - s2) / soh_range) ** 2
+    ))
+
+
+def _find_nearest_neighbor(
+    target: tuple[int, int, int],
+    solved: dict[tuple[int, int, int], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]],
+    temp_arr: npt.NDArray[np.float64],
+    crate_arr: npt.NDArray[np.float64],
+    soh_arr: npt.NDArray[np.float64],
+) -> tuple[int, int, int, npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
+    """Find nearest successfully-solved neighbor in normalized (T, C-rate, SOH) space.
+
+    Returns ``(j, k, h, soc_traj, pfrac_scaled)`` where ``pfrac_scaled`` is the
+    neighbor's power fraction trajectory multiplied by 0.9, or ``None``
+    if no solved neighbors exist.
+    """
+    if not solved:
+        return None
+
+    tj, tk, th = target
+    t = float(temp_arr[tj])
+    cr = float(crate_arr[tk])
+    s = float(soh_arr[th])
+
+    best_key: tuple[int, int, int] | None = None
+    best_dist: float = float("inf")
+
+    for key in solved:
+        nj, nk, nh = key
+        d = _normalized_distance(
+            t, cr, s,
+            float(temp_arr[nj]), float(crate_arr[nk]), float(soh_arr[nh]),
+            temp_arr, crate_arr, soh_arr,
+        )
+        if d < best_dist:
+            best_dist = d
+            best_key = key
+
+    if best_key is None:
+        return None
+    nj, nk, nh = best_key
+    n_soc, n_pfrac = solved[best_key]
+    return (nj, nk, nh, n_soc, n_pfrac * 0.9)
+
+
+def _interp_lut_column(
+    soc_arr: npt.NDArray[np.float64],
+    soc_traj: npt.NDArray[np.float64],
+    pfrac: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float32]:
+    """Interpolate a (SOC trajectory, power fraction) pair onto the LUT SOC grid.
+
+    Deduplicates the trajectory by unique SOC values (monotonically increasing),
+    then linearly interpolates onto ``soc_arr``.  Values are clamped to [0, 1]
+    and extrapolated left with the first power fraction value, right with 0.0.
+    """
+    _, unique_idx = np.unique(soc_traj, return_index=True)
+    soc_unique = soc_traj[unique_idx]
+    pfrac_unique = pfrac[unique_idx]
+    return np.clip(
+        np.interp(
+            soc_arr, soc_unique, pfrac_unique,
+            left=float(pfrac_unique[0]), right=0.0,
+        ),
+        0.0, 1.0,
+    ).astype(np.float32)
+
+
+def _linear_derating_fallback(
+    initial_soc: float,
+    c_rate: float,
+    n_soc_points: int,
+) -> npt.NDArray[np.float64]:
+    """Linear derating fallback when no solved neighbors exist.
+
+    Returns a power_fraction trajectory that linearly derates from 1.0
+    at ``initial_soc`` to 0.0 at SOC 1.0 and rescales by the nominal C-rate
+    to produce a conservative estimate.
+    """
+    return np.linspace(1.0, 0.0, n_soc_points, dtype=np.float64)
+
+
 def generate_charging_curve_lut(
     param_set: str = "Chen2020",
     *,
@@ -544,56 +643,115 @@ def generate_charging_curve_lut(
         if cache_path.exists():
             LOGGER.info("Loading cached charging curve LUT from %s", cache_path)
             data = np.load(cache_path, allow_pickle=False)
+            mask = data.get("fallback_mask", None)
+            if mask is not None:
+                grid_points_total = int(mask.size)
+                grid_points_fallback = int(mask.sum())
+            else:
+                grid_points_total = grid_points_fallback = 0
             return cast(ChargingCurveLutData, {
                 "soc_grid": data["soc_grid"],
                 "temp_grid": data["temp_grid"],
                 "crate_grid": data["crate_grid"],
                 "soh_grid": data["soh_grid"],
                 "lut": data["lut"],
+                "lut_coverage": {
+                    "grid_points_total": grid_points_total,
+                    "grid_points_solved": grid_points_total - grid_points_fallback,
+                    "grid_points_fallback": grid_points_fallback,
+                },
+                "fallback_mask": mask if mask is not None
+                    else np.zeros((0, 0, 0), dtype=np.uint8),
             })
 
     shape = (len(soc_arr), len(temp_arr), len(crate_arr), len(soh_arr))
     lut = np.zeros(shape, dtype=np.float32)
+    # Per-outer-cell fallback mask: one byte per (temp, crate, soh) cell.
+    fallback_mask = np.zeros(
+        (len(temp_arr), len(crate_arr), len(soh_arr)), dtype=np.uint8
+    )
     total = len(temp_arr) * len(crate_arr) * len(soh_arr)
     done = 0
+    # Stored (SOC trajectory, power_fraction) for each successfully solved
+    # grid point, used for nearest-neighbor fallback.
+    # Map key: (j, k, h) -> (soc_trajectory, power_fraction)
+    _Key = tuple[int, int, int]
+    _TrajPair = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+    solved: dict[_Key, _TrajPair] = {}
 
-    for (j, T), (k, cr), (h, soh) in itertools.product(
+    for (j, t), (k, cr), (h, soh_val) in itertools.product(
         enumerate(temp_arr),
         enumerate(crate_arr),
         enumerate(soh_arr),
     ):
-        soc_traj, pfrac = _simulate_cc_cv_single(
+        result = _simulate_cc_cv_single(
             param_set=param_set,
             v_upper=v_upper,
             v_lower=v_lower,
             cv_taper_cutoff=cv_taper_cutoff,
             initial_soc=float(soc_arr[0]),
-            T_celsius=float(T),
+            T_celsius=float(t),
             c_rate=float(cr),
-            soh=float(soh),
+            soh=float(soh_val),
             thermal_model=thermal_model,
             thermal_patch_source=thermal_patch_source,
             parameter_overrides=parameter_overrides,
         )
 
-        # Deduplicate SOC for monotonic interp
-        _, unique_idx = np.unique(soc_traj, return_index=True)
-        soc_unique = soc_traj[unique_idx]
-        pfrac_unique = pfrac[unique_idx]
+        if result is None:
+            neighbor = _find_nearest_neighbor(
+                (j, k, h), solved, temp_arr, crate_arr, soh_arr,
+            )
+            if neighbor is not None:
+                n_j, n_k, n_h, n_soc_traj, scaled_pfrac = neighbor
+                fallback_mask[j, k, h] = True
+                LOGGER.warning(
+                    "PyBaMM charging LUT fallback: T=%.0f°C C=%.3fC SOH=%.0f%% → "
+                    "nearest T=%.0f°C C=%.3fC SOH=%.0f%% distance=%.4f using %d-T sample",
+                    t, cr, soh_val * 100,
+                    temp_arr[n_j], crate_arr[n_k], soh_arr[n_h] * 100,
+                    _normalized_distance(
+                        t, cr, soh_val,
+                        temp_arr[n_j], crate_arr[n_k], soh_arr[n_h],
+                        temp_arr, crate_arr, soh_arr,
+                    ),
+                    len(solved),
+                )
+                lut[:, j, k, h] = _interp_lut_column(soc_arr, n_soc_traj, scaled_pfrac)
+                done += 1
+                LOGGER.info(
+                    "LUT %3d/%d (%.0f%%)  T=%+.0f°C  C=%.2fC  SOH=%.0f%%",
+                    done, total, 100.0 * done / total, t, cr, soh_val * 100,
+                )
+                continue
+            # No solved neighbors exist — use linear derating fallback.
+            pfrac_unique = _linear_derating_fallback(
+                float(soc_arr[0]), float(cr), len(soc_arr),
+            )
+            fallback_mask[j, k, h] = True
+            LOGGER.warning(
+                "PyBaMM charging LUT fallback: T=%.0f°C C=%.3fC SOH=%.0f%% → "
+                "no neighbor (first point failed), using linear derating",
+                t, cr, soh_val * 100,
+            )
+        else:
+            soc_traj, pfrac = result
+            solved[(j, k, h)] = (soc_traj, pfrac)
 
-        lut[:, j, k, h] = np.clip(
-            np.interp(
-                soc_arr, soc_unique, pfrac_unique,
-                left=float(pfrac_unique[0]), right=0.0,
-            ),
-            0.0, 1.0,
-        )
+        if result is not None:
+            lut[:, j, k, h] = _interp_lut_column(soc_arr, soc_traj, pfrac)
+        else:
+            lut[:, j, k, h] = _interp_lut_column(soc_arr, soc_arr, pfrac_unique)
 
         done += 1
         LOGGER.info(
             "LUT %3d/%d (%.0f%%)  T=%+.0f°C  C=%.2fC  SOH=%.0f%%",
-            done, total, 100.0 * done / total, T, cr, soh * 100,
+            done, total, 100.0 * done / total, t, cr, soh_val * 100,
         )
+
+    grid_points_total = int(fallback_mask.size)
+    grid_points_fallback = int(fallback_mask.sum())
+    grid_points_solved = grid_points_total - grid_points_fallback
 
     result: ChargingCurveLutData = {
         "soc_grid": soc_arr,
@@ -601,12 +759,26 @@ def generate_charging_curve_lut(
         "crate_grid": crate_arr,
         "soh_grid": soh_arr,
         "lut": lut,
+        "lut_coverage": {
+            "grid_points_total": grid_points_total,
+            "grid_points_solved": grid_points_solved,
+            "grid_points_fallback": grid_points_fallback,
+        },
+        "fallback_mask": fallback_mask,
     }
 
     if cache_path is not None:
         cache_path = Path(cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache_path, **cast(dict[str, Any], result))
+        np.savez_compressed(
+            cache_path,
+            soc_grid=result["soc_grid"],
+            temp_grid=result["temp_grid"],
+            crate_grid=result["crate_grid"],
+            soh_grid=result["soh_grid"],
+            lut=result["lut"],
+            fallback_mask=result["fallback_mask"],
+        )
         LOGGER.info("Saved charging curve LUT → %s", cache_path)
 
     return result
@@ -625,7 +797,7 @@ def _simulate_cc_cv_single(
     thermal_model: str | None,
     thermal_patch_source: str | None,
     parameter_overrides: dict[str, Any] | None,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
     """Run one CC-CV simulation and return (soc_trajectory, power_fraction)."""
     param = _pybamm.ParameterValues(param_set)
     param["Upper voltage cut-off [V]"] = v_upper
@@ -686,7 +858,7 @@ def _simulate_cc_cv_single(
             "PyBaMM solve failed T=%.0f°C C=%.3fC SOH=%.0f%%: %s",
             T_celsius, c_rate, soh * 100, exc,
         )
-        return np.array([soc_start, 1.0], dtype=np.float64), np.array([0.0, 0.0], dtype=np.float64)
+        return None
 
     cap_nom = float(param["Nominal cell capacity [A.h]"])
     throughput = sol["Throughput capacity [A.h]"].entries

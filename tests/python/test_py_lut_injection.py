@@ -111,6 +111,32 @@ class TestBatteryLutInjection:
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
+    def test_battery_construction_with_fallback_mask_succeeds(self):
+        """Construction succeeds when charging_curve_lut includes a non-empty
+        fallback_mask.  The 3D outer-grid mask must be broadcast to the full 4D
+        shape by broadcast_fallback_mask before reaching set_fallback_mask in
+        Rust.  A shape mismatch caused the round-1 PyValueError regression."""
+        soc_grid = np.array([0.0, 0.5, 1.0])
+        temp_grid = np.array([-10.0, 25.0])
+        crate_grid = np.array([0.5, 1.0])
+        soh_grid = np.array([0.8, 1.0])
+        n_soc = len(soc_grid)
+        n_temp = len(temp_grid)
+        n_crate = len(crate_grid)
+        n_soh = len(soh_grid)
+        lut = {
+            "soc_grid": soc_grid,
+            "temp_grid": temp_grid,
+            "crate_grid": crate_grid,
+            "soh_grid": soh_grid,
+            "lut": np.ones((n_soc, n_temp, n_crate, n_soh), dtype=np.float32),
+            "fallback_mask": np.zeros((n_temp, n_crate, n_soh), dtype=np.uint8),
+        }
+        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        dw = _make_dwelling()
+        dw.add_battery(bat)
+        assert "TestBat" in dw.equipment_names()
+
     def test_set_equipment_lut_charging_curve(self):
         bat = Battery("TestBat", 10.0)
         dw = _make_dwelling()

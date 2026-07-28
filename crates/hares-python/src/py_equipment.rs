@@ -48,12 +48,26 @@ pub fn extract_charging_lut(
         .ok_or_else(|| PyValueError::new_err("charging_curve_lut dict missing 'lut' key"))?;
     let values = extract_flat_f32(py, &lut_arr)?;
 
-    let interp = RegularGridInterpolator::new(
+    let n_soc = soc.len();
+    let n_temp = temp.len();
+    let n_crate = crate_ax.len();
+    let n_soh = soh.len();
+
+    let mut interp = RegularGridInterpolator::new(
         vec![soc, temp, crate_ax, soh],
         values,
         ExtrapolationStrategy::Clamp,
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if let Ok(Some(mask_obj)) = dict.get_item("fallback_mask") {
+        let flat = broadcast_fallback_mask(py, &mask_obj, n_soc, n_temp, n_crate, n_soh)?;
+        if !flat.is_empty() {
+            interp
+                .set_fallback_mask(flat)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+    }
 
     if interp.ndim() != 4 {
         return Err(PyValueError::new_err(format!(
@@ -62,6 +76,41 @@ pub fn extract_charging_lut(
         )));
     }
     Ok(interp)
+}
+
+fn broadcast_fallback_mask(
+    py: Python<'_>,
+    mask_obj: &Bound<'_, PyAny>,
+    n_soc: usize,
+    n_temp: usize,
+    n_crate: usize,
+    n_soh: usize,
+) -> PyResult<Vec<u8>> {
+    let ndim: usize = mask_obj.getattr("ndim")?.extract()?;
+    if ndim == 3 {
+        // Outer-grid mask from Python: shape (n_temp, n_crate, n_soh).
+        // Broadcast to full-grid shape (n_soc, n_temp, n_crate, n_soh).
+        let np = py.import("numpy")?;
+        let reshaped = mask_obj.call_method1(
+            "reshape",
+            ((1i64, n_temp as i64, n_crate as i64, n_soh as i64),),
+        )?;
+        let target = (n_soc as i64, n_temp as i64, n_crate as i64, n_soh as i64);
+        let full = np.call_method1("broadcast_to", (reshaped, target))?;
+        Ok(full
+            .call_method0("copy")?
+            .call_method1("astype", ("uint8",))?
+            .call_method0("ravel")?
+            .call_method0("tolist")?
+            .extract()?)
+    } else {
+        // Already full-grid mask (4D), use as-is.
+        Ok(mask_obj
+            .call_method1("astype", ("uint8",))?
+            .call_method0("ravel")?
+            .call_method0("tolist")?
+            .extract()?)
+    }
 }
 
 fn extract_f64_axis(_py: Python<'_>, dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<f64>> {
@@ -104,12 +153,26 @@ fn load_npz_lut(py: Python<'_>, path: &str) -> PyResult<RegularGridInterpolator>
         .extract()?;
     let values = extract_flat_f32(py, &data.get_item("lut")?)?;
 
-    let interp = RegularGridInterpolator::new(
+    let n_soc = soc.len();
+    let n_temp = temp.len();
+    let n_crate = crate_ax.len();
+    let n_soh = soh.len();
+
+    let mut interp = RegularGridInterpolator::new(
         vec![soc, temp, crate_ax, soh],
         values,
         ExtrapolationStrategy::Clamp,
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if let Ok(mask_obj) = data.get_item("fallback_mask") {
+        let flat = broadcast_fallback_mask(py, &mask_obj, n_soc, n_temp, n_crate, n_soh)?;
+        if !flat.is_empty() {
+            interp
+                .set_fallback_mask(flat)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+    }
 
     if interp.ndim() != 4 {
         return Err(PyValueError::new_err(format!(
