@@ -149,6 +149,8 @@ pub struct AutosizeContext {
     pub weather_lat: f64,
     /// Weather file longitude [°E] for ASHRAE 152 fallback lookup.
     pub weather_lon: f64,
+    /// Weather file elevation [m above sea level] for Perez airmass correction.
+    pub weather_elevation_m: f64,
     /// Duct DSE parameters for rebuilding typed equipment configs.
     pub duct_params: DuctDseParams,
     /// Sensible internal gains [W] for cooling autosizing.
@@ -464,6 +466,7 @@ pub fn autosize_equipment_capacities(
                     cooling_design_c,
                     ctx.weather_lat,
                     ctx.weather_lon,
+                    ctx.weather_elevation_m,
                     internal_gains_w,
                 )
                 .abs();
@@ -1196,6 +1199,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1252,6 +1256,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1313,6 +1318,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1371,6 +1377,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1432,6 +1439,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1490,6 +1498,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1513,6 +1522,7 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
+                0.0,
                 0.0,
                 0.0,
                 internal_gains_w,
@@ -1562,6 +1572,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1670,6 +1681,7 @@ mod tests {
                 35.0,
                 39.74, // Denver
                 -104.87,
+                1609.0,
                 0.0, // zero internal gains for baseline
             )
             .abs();
@@ -1752,6 +1764,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1811,6 +1824,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1874,6 +1888,7 @@ mod tests {
             }),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -1906,7 +1921,7 @@ mod tests {
             .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
             .abs();
         let solar = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
             .abs();
 
         assert!(
@@ -2199,6 +2214,7 @@ mod tests {
             }),
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -2278,6 +2294,7 @@ mod tests {
             design_conditions: None,
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -2360,6 +2377,7 @@ mod tests {
             }),
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -2416,7 +2434,8 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let peak = thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
+        let peak =
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
         assert!(peak.is_finite(), "cooling peak load must be finite");
         assert!(peak >= 0.0, "cooling capacity must be non-negative");
         assert!(
@@ -2467,7 +2486,7 @@ mod tests {
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
         let design_day_capacity =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
 
         // The design-day method uses a diurnal range of 11.7 °C, so the
         // outdoor temperature cycles between 23.3 and 35.0 °C. The peak
@@ -2544,7 +2563,7 @@ mod tests {
         assert!(h >= 0.0, "heating capacity must be non-negative");
 
         // Cooling
-        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0);
+        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0, 0.0);
         assert!(c.is_finite(), "cooling design-day must return finite value");
         assert!(c >= 0.0, "cooling capacity must be non-negative");
     }
@@ -2577,6 +2596,7 @@ mod tests {
                 39.74, // Denver
                 -104.87,
                 0.0,
+                0.0,
             )
             .abs();
 
@@ -2587,6 +2607,7 @@ mod tests {
                 design_outdoor,
                 39.74, // Denver
                 -104.87,
+                0.0,
                 0.0,
             )
             .abs();
@@ -2638,6 +2659,7 @@ mod tests {
                 39.74, // Denver
                 -104.87,
                 0.0,
+                0.0,
             )
             .abs();
 
@@ -2648,6 +2670,7 @@ mod tests {
                 design_outdoor,
                 39.74, // Denver
                 -104.87,
+                0.0,
                 0.0,
             )
             .abs();
@@ -2693,6 +2716,7 @@ mod tests {
                 39.74, // Denver
                 -104.87,
                 0.0,
+                0.0,
             )
             .abs();
 
@@ -2703,6 +2727,7 @@ mod tests {
                 35.0,
                 39.74, // Denver
                 -104.87,
+                0.0,
                 500.0, // 500 W internal gains
             )
             .abs();
@@ -2738,7 +2763,7 @@ mod tests {
         // Cooling-specific method with zero internal gains and zero solar
         // should match the DC-gain baseline.
         let cooling_zero_gains = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
             .abs();
 
         assert!(
@@ -2761,6 +2786,7 @@ mod tests {
             design_conditions: None,
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -2810,6 +2836,7 @@ mod tests {
             design_conditions: None,
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,
@@ -2842,6 +2869,7 @@ mod tests {
             design_conditions: None,
             weather_lat: 39.74,
             weather_lon: -104.87,
+            weather_elevation_m: 0.0,
             duct_params: DuctDseParams::default(),
             internal_gains_w: 800.0,
             internal_gains_latent_w: 200.0,
@@ -2869,9 +2897,9 @@ mod tests {
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
         let zero_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
         let with_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 500.0);
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 500.0);
 
         assert!(
             with_gains > zero_gains + 400.0,

@@ -302,6 +302,7 @@ pub fn clear_sky_irradiance_params(
 /// * `aoi_deg` -- angle of incidence on the surface [degrees]
 /// * `tilt_deg` -- surface tilt from horizontal [degrees]
 /// * `dni_extra` -- extraterrestrial normal irradiance [W/m²]
+/// * `elevation_m` -- site elevation [m above sea level] for airmass correction
 #[must_use]
 pub fn perez_sky_diffuse(
     dhi: f64,
@@ -310,6 +311,7 @@ pub fn perez_sky_diffuse(
     aoi_deg: f64,
     tilt_deg: f64,
     dni_extra: f64,
+    elevation_m: f64,
 ) -> f64 {
     if dhi < PEREZ_MIN_DHI {
         return 0.0;
@@ -324,11 +326,36 @@ pub fn perez_sky_diffuse(
     let tilt_rad = tilt_deg.to_radians();
     let aoi_rad = aoi_deg.to_radians();
 
-    // Simple secant airmass (spec-mandated; avoids Kasten-Young refraction
-    // correction that is irrelevant to the brightness coefficient delta).
-    let am = 1.0 / zenith_rad.cos();
-    if !am.is_finite() {
-        return 0.0;
+    // EnergyPlus SolarShading.cc:2718-2727 (AnisoSkyViewFactors): Perez
+    // brightness coefficient airmass. Uses a piecewise formula —
+    // elevation-corrected secant for z ≤ 75°, with a distinct high-zenith
+    // correction above 75° (constants 0.15, 93.9, -1.253). This is NOT the
+    // Kasten-Young (1989) approximation; EnergyPlus uses K-Y only for the
+    // separate ASHRAE Tau clear-sky path (WeatherManager.cc:4055), not for
+    // the Perez anisotropic sky model.
+    //
+    // Elevation is passed from the caller — site metadata should be threaded
+    // through to avoid the sea-level assumption.
+    let am = perez_airmass(zenith_deg, elevation_m);
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let am_h = (1.0 - 0.1 * elevation_m / 1000.0).max(0.1);
+        let ky_am = relative_airmass(zenith_deg) * am_h;
+        if zenith_deg < 70.0 {
+            let rel_diff = (am - ky_am).abs() / am;
+            assert!(
+                rel_diff < 0.01,
+                "Perez airmass ({am:.4}) vs K-Y ({ky_am:.4}) diverge at z={zenith_deg:.1}°: rel_diff={rel_diff:.6}"
+            );
+        } else {
+            tracing::warn!(
+                zenith_deg = zenith_deg,
+                perez_am = am,
+                ky_am = ky_am,
+                "airmass divergence at high zenith: Perez (EnergyPlus) vs K-Y diverge"
+            );
+        }
     }
 
     // Sky clearness epsilon
@@ -358,10 +385,77 @@ pub fn perez_sky_diffuse(
 }
 
 /// Kasten-Young (1989) relative airmass approximation.
+///
+/// Canonical form (per ASHRAE HoF 2009 Eq. 16, EnergyPlus WeatherManager.cc:4055):
+///   AM = 1 / (sin(altitude_deg) + 0.50572 × (altitude_deg + 6.07995)^(-1.6364))
+/// The zenith-based form used here substitutes altitude = 90° − zenith, so
+/// (96.07995 − zenith) = (6.07995 + altitude). The two forms are algebraically
+/// equivalent — the constant 96.07995 = 6.07995 + 90.
+///
+/// Zenith is clamped at 89.9° to keep the denominator away from zero and
+/// ensure the airmass is always finite.
+///
+/// **Scope:** This function is used for the ASHRAE Tau clear-sky design-day
+/// irradiance path (`clear_sky_irradiance`, `clear_sky_irradiance_params`).
+/// For the Perez (1990) anisotropic sky model's brightness coefficient delta
+/// term, HARES uses [`perez_airmass`] instead, matching EnergyPlus's
+/// `AnisoSkyViewFactors` formula (SolarShading.cc:2718-2724) — a distinct
+/// piecewise formula that is not Kasten-Young. EnergyPlus's own K-Y
+/// implementation (`WeatherManager.cc::AirMass`) is used exclusively for
+/// the ASHRAE Tau model and never for the Perez path.
+///
+/// # References
+/// - Kasten, F. and Young, T. (1989). "Revised optical air mass tables and
+///   approximating formula." Applied Optics 28:4735–4738.
+/// - ASHRAE HoF 2009 Ch.14 Eq. 16.
+/// - EnergyPlus WeatherManager.cc:4026–4058 (`AirMass` function, ASHRAE Tau
+///   solar model only).
 #[must_use]
 pub fn relative_airmass(zenith_deg: f64) -> f64 {
     let z = zenith_deg.min(89.9);
     1.0 / (z.to_radians().cos() + 0.50572 * (96.07995 - z).powf(-1.6364))
+}
+
+/// Relative airmass for the Perez (1990) sky brightness coefficient delta term.
+///
+/// Implements the airmass formula from EnergyPlus's anisotropic sky model
+/// (`SolarShading.cc::AnisoSkyViewFactors:2718-2724`), the authoritative
+/// reference for the Perez (1990) model in EnergyPlus:
+///
+/// ```text
+/// AirMassH = 1.0 − 0.1 × elevation_m / 1000.0
+///
+/// For zenith ≤ 75°:  AirMass = AirMassH / cos(zenith)
+/// For zenith > 75°:   AirMass = AirMassH / (cos(zenith) + 0.15 × (93.9 − zenith)^(−1.253))
+/// ```
+///
+/// where `AirMassH` is an elevation-dependent correction factor and zenith is
+/// in degrees. This is the formula EnergyPlus uses specifically in
+/// `AnisoSkyViewFactors` (called from `HeatBalanceSurfaceManager.cc:408`)
+/// for the Perez (1990) anisotropic sky model's brightness coefficient `Delta`
+/// term. It is **not** Kasten-Young (1989) — HARES reserves K-Y via
+/// [`relative_airmass`] for the separate ASHRAE Tau clear-sky irradiance path.
+///
+/// # Elevation
+///
+/// `elevation_m` is the site elevation in meters above sea level. At sea level
+/// (0 m), `AirMassH = 1.0` and the formula reduces to plain secant for
+/// z ≤ 75°. For typical residential elevations (< 1000 m), the correction
+/// factor is ≥ 0.9, producing a ≤ 10% reduction in airmass.
+///
+/// # References
+/// - EnergyPlus SolarShading.cc:2718-2727 (`AnisoSkyViewFactors`).
+/// - Perez et al. (1990) Solar Energy 44(5):271-289.
+#[must_use]
+pub fn perez_airmass(zenith_deg: f64, elevation_m: f64) -> f64 {
+    let z = zenith_deg.clamp(0.0, 90.0);
+    let cos_z = z.to_radians().cos().max(f64::EPSILON);
+    let am_h = (1.0 - 0.1 * elevation_m / 1000.0).max(0.1);
+    if z <= 75.0 {
+        am_h / cos_z
+    } else {
+        am_h / (cos_z + 0.15 * (93.9_f64 - z).powf(-1.253))
+    }
 }
 
 /// Select Perez coefficient bin index from sky clearness epsilon.
@@ -415,6 +509,7 @@ pub fn omni_directional_irradiance(
     day_of_year: u32,
     ground_albedo: f64,
     num_samples: usize,
+    elevation_m: f64,
 ) -> SurfaceIrradiance {
     let n = num_samples.max(1);
     let mut sum_direct = 0.0_f64;
@@ -435,6 +530,7 @@ pub fn omni_directional_irradiance(
             sample_azimuth,
             day_of_year,
             ground_albedo,
+            elevation_m,
         );
         sum_direct += irr.direct_w_m2;
         sum_diffuse += irr.diffuse_w_m2;
@@ -457,6 +553,10 @@ pub fn omni_directional_irradiance(
 /// This is the primary surface irradiance API for callers that have full solar
 /// geometry. Falls back to the isotropic model when the Perez model is
 /// undefined (high zenith, low DHI).
+///
+/// `elevation_m` is the site elevation in meters above sea level and is
+/// used by the Perez airmass correction factor (`AirMassH`). At sea level
+/// (0 m) the correction is 1.0; at 1000 m it is 0.9 (a 10% reduction).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn perez_tilted_irradiance(
@@ -470,6 +570,7 @@ pub fn perez_tilted_irradiance(
     surface_azimuth_deg: f64,
     day_of_year: u32,
     ground_albedo: f64,
+    elevation_m: f64,
 ) -> SurfaceIrradiance {
     // Nighttime: all components zero
     if ghi <= 0.0 && dni <= 0.0 && dhi <= 0.0 {
@@ -507,9 +608,11 @@ pub fn perez_tilted_irradiance(
     let tilt_rad = surface_tilt_deg.to_radians();
     let aoi_rad = aoi.to_radians();
 
-    // Extraterrestrial irradiance and airmass
+    // Extraterrestrial irradiance and airmass.
+    // Uses EnergyPlus SolarShading.cc:2718-2727 (AnisoSkyViewFactors)
+    // piecewise formula for Perez brightness coefficient — NOT Kasten-Young.
     let i0 = extraterrestrial_irradiance(day_of_year);
-    let am = relative_airmass(solar_zenith_deg);
+    let am = perez_airmass(solar_zenith_deg, elevation_m);
 
     // Sky clearness epsilon
     let zenith_rad_cubed = zenith_rad * zenith_rad * zenith_rad;
@@ -976,6 +1079,7 @@ mod tests {
             180.0,
             1,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         assert_eq!(irr.direct_w_m2, 0.0);
         assert_eq!(irr.diffuse_w_m2, 0.0);
@@ -1065,6 +1169,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
@@ -1101,6 +1206,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
@@ -1136,6 +1242,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         // Should not panic and all components should be >= 0
         assert!(result.direct_w_m2 >= 0.0);
@@ -1154,10 +1261,12 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let bare =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2);
-        let snow =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8);
+        let bare = perez_tilted_irradiance(
+            0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2, 0.0,
+        );
+        let snow = perez_tilted_irradiance(
+            0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8, 0.0,
+        );
 
         assert!(
             snow.reflected_w_m2 > bare.reflected_w_m2,
@@ -1494,6 +1603,7 @@ mod tests {
             180.0,
             172,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         assert_eq!(result.direct_w_m2, 0.0);
         assert_eq!(result.diffuse_w_m2, 0.0);
@@ -1516,6 +1626,7 @@ mod tests {
                 180.0,
                 172,
                 DEFAULT_GROUND_ALBEDO,
+                0.0,
             );
             assert!(
                 result.direct_w_m2.is_finite(),
@@ -1563,6 +1674,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
 
         // Direct beam on a 30-degree tilted surface facing the sun at 30-degree zenith
@@ -1608,6 +1720,100 @@ mod tests {
         assert!(am_extreme > am, "airmass at 89.9° should exceed 85°");
     }
 
+    /// Document the divergence profile between Kasten-Young (1989) airmass
+    /// and simple secant (1/cos(z)) across zenith angles 0°–87°.
+    ///
+    /// At moderate zenith (< 70°) the difference is < 1%. Above 80° it grows
+    /// rapidly: at z=87°, K-Y ≈ 15.2 and secant ≈ 19.1 (~25% relative).
+    /// This test is a living specification of when and how much the two
+    /// formulas differ, per Kasten & Young (1989).
+    #[test]
+    fn relative_airmass_vs_secant_divergence_profile() {
+        for z in [
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 85.0, 87.0,
+        ] {
+            let ky = relative_airmass(z);
+            let secant = 1.0 / z.to_radians().cos();
+            let rel_diff = if ky > 0.0 {
+                (ky - secant).abs() / ky
+            } else {
+                0.0
+            };
+
+            if z < 70.0 {
+                assert!(
+                    rel_diff < 0.01,
+                    "z={z}°: K-Y={ky:.4}, secant={secant:.4}, rel_diff={rel_diff:.6} > 1%"
+                );
+            }
+            assert!(ky.is_finite(), "K-Y is non-finite at z={z}°");
+            assert!(secant.is_finite(), "secant is non-finite at z={z}°");
+        }
+
+        // At z=87° the difference is significant (~25%).
+        let ky_87 = relative_airmass(87.0);
+        let secant_87 = 1.0 / 87.0_f64.to_radians().cos();
+        let rel_diff_87 = (ky_87 - secant_87).abs() / ky_87;
+        assert!(
+            rel_diff_87 > 0.15,
+            "z=87°: relative diff {:.3} should be > 15%, K-Y={:.4}, secant={:.4}",
+            rel_diff_87,
+            ky_87,
+            secant_87
+        );
+    }
+
+    /// Verify that `perez_sky_diffuse` and `perez_tilted_irradiance` produce
+    /// the same sky diffuse irradiance, confirming they use the same airmass
+    /// formula (EnergyPlus `AnisoSkyViewFactors` piecewise secant).
+    ///
+    /// Both functions compute epsilon, delta, f1, and f2 from the same inputs
+    /// and apply the same Perez three-component decomposition. The diffuse
+    /// output of `perez_tilted_irradiance` must match `perez_sky_diffuse`
+    /// exactly when given the same extraterrestrial irradiance.
+    #[test]
+    fn perez_sky_diffuse_and_perez_tilted_use_same_airmass() {
+        let dhi = 100.0;
+        let dni = 700.0;
+        let doy = 172;
+        let dni_extra = extraterrestrial_irradiance(doy);
+        let surf_az = 180.0;
+        let solar_az = 180.0;
+        let tilt_deg = 30.0;
+
+        for &zenith_deg in &[10.0, 30.0, 50.0, 70.0] {
+            let solar_alt = 90.0 - zenith_deg;
+            let aoi_deg = angle_of_incidence(tilt_deg, surf_az, solar_alt, solar_az);
+
+            let sky_diffuse =
+                perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
+
+            let ghi = dhi + dni * zenith_deg.to_radians().cos().max(0.0);
+            let full = perez_tilted_irradiance(
+                0,
+                ghi,
+                dni,
+                dhi,
+                zenith_deg,
+                solar_az,
+                tilt_deg,
+                surf_az,
+                doy,
+                DEFAULT_GROUND_ALBEDO,
+                0.0,
+            );
+
+            let diff = (full.diffuse_w_m2 - sky_diffuse).abs();
+            assert!(
+                diff < 1e-9,
+                "z={zenith_deg}°: perez_tilted diffuse={:.9}, perez_sky_diffuse={:.9}, diff={:e}",
+                full.diffuse_w_m2,
+                sky_diffuse,
+                diff,
+            );
+        }
+    }
+
     #[test]
     fn perez_clear_sky_diffuse_exceeds_isotropic_diffuse() {
         // Under clear conditions with high epsilon, the Perez model should
@@ -1633,6 +1839,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
@@ -1687,6 +1894,7 @@ mod tests {
                     surface_az,
                     doy,
                     DEFAULT_GROUND_ALBEDO,
+                    0.0,
                 )
                 .direct_w_m2
             })
@@ -1712,6 +1920,7 @@ mod tests {
                     surface_az,
                     doy,
                     DEFAULT_GROUND_ALBEDO,
+                    0.0,
                 )
                 .direct_w_m2
             })
@@ -1744,7 +1953,8 @@ mod tests {
         // Sun at zenith 30° azimuth 180°, surface south-facing 30° tilt → AOI = 0°
         let aoi_deg = angle_of_incidence(tilt_deg, 180.0, 90.0 - zenith_deg, 180.0);
 
-        let sky_diffuse = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+        let sky_diffuse =
+            perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
         assert!(
             (sky_diffuse - 113.4).abs() < 2.0,
             "Perez sky diffuse worked example: {sky_diffuse:.2} W/m², expected ~113.4 W/m²"
@@ -1762,7 +1972,8 @@ mod tests {
         let dni_extra = 1367.0;
         let aoi_deg = angle_of_incidence(tilt_deg, 180.0, 90.0 - zenith_deg, 180.0);
 
-        let sky_diffuse = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+        let sky_diffuse =
+            perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
         // Isotropic reference: dhi * (1 + cos(30°)) / 2 ≈ 200 * 0.933 = 186.6
         let iso_ref = dhi * (1.0 + tilt_deg.to_radians().cos()) * 0.5;
         assert!(
@@ -1786,7 +1997,8 @@ mod tests {
         let dni_extra = 1367.0;
         let aoi_deg = angle_of_incidence(tilt_deg, 180.0, 90.0 - zenith_deg, 180.0);
 
-        let sky_diffuse = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+        let sky_diffuse =
+            perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
         let iso_ref = dhi * (1.0 + tilt_deg.to_radians().cos()) * 0.5;
         assert!(
             sky_diffuse > iso_ref,
@@ -1797,8 +2009,14 @@ mod tests {
     /// Zero DHI (night or sensor floor) must return exactly 0.
     #[test]
     fn perez_sky_diffuse_zero_dhi_returns_zero() {
-        assert_eq!(perez_sky_diffuse(0.0, 800.0, 30.0, 0.0, 30.0, 1367.0), 0.0);
-        assert_eq!(perez_sky_diffuse(-1.0, 800.0, 30.0, 0.0, 30.0, 1367.0), 0.0);
+        assert_eq!(
+            perez_sky_diffuse(0.0, 800.0, 30.0, 0.0, 30.0, 1367.0, 0.0),
+            0.0
+        );
+        assert_eq!(
+            perez_sky_diffuse(-1.0, 800.0, 30.0, 0.0, 30.0, 1367.0, 0.0),
+            0.0
+        );
     }
 
     /// Perez diffuse exceeds isotropic diffuse on a tilted, sun-facing surface
@@ -1812,11 +2030,30 @@ mod tests {
         let dni_extra = 1370.0;
         let aoi_deg = angle_of_incidence(tilt_deg, 180.0, 90.0 - zenith_deg, 180.0);
 
-        let perez = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+        let perez = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
         let iso = dhi * (1.0 + tilt_deg.to_radians().cos()) * ISOTROPIC_VIEW_FACTOR;
         assert!(
             perez > iso,
             "Perez sky diffuse ({perez:.1}) must exceed isotropic ({iso:.1}) under clear sky"
+        );
+    }
+
+    /// perez_sky_diffuse invariant assertion does not panic at non-zero elevation.
+    ///
+    /// The debug invariant compares perez_airmass against relative_airmass and
+    /// must apply the same AirMassH elevation correction factor to both sides
+    /// before comparing. Without this, any realistic non-sea-level site panics
+    /// because the raw Perez airmass includes a multiplicative elevation term
+    /// (~0.84 at Denver) that K-Y does not.
+    ///
+    /// Denver elevation (1609 m) is a realistic US site matching elevation values
+    /// used elsewhere in the codebase.
+    #[test]
+    fn perez_sky_diffuse_elevation_invariant_tolerates_nonzero_elevation() {
+        let result = perez_sky_diffuse(100.0, 700.0, 30.0, 0.0, 30.0, 1367.0, 1609.0);
+        assert!(
+            result > 0.0,
+            "perez_sky_diffuse must return positive irradiance at non-zero elevation"
         );
     }
 
@@ -2279,6 +2516,7 @@ mod tests {
                 *azimuth,
                 day_of_year,
                 DEFAULT_GROUND_ALBEDO,
+                0.0,
             );
 
             let total_poa_window = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
@@ -2346,6 +2584,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             12,
+            0.0,
         );
 
         // Analytical: DNI × sin(zenith) / π = 700 × 0.8660 / π ≈ 193.0
@@ -2376,6 +2615,7 @@ mod tests {
             180.0,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         assert!(
             irr.direct_w_m2 < south_irr.direct_w_m2,
@@ -2408,6 +2648,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             4,
+            0.0,
         );
         let irr_n12 = omni_directional_irradiance(
             0,
@@ -2420,6 +2661,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             12,
+            0.0,
         );
         let irr_n36 = omni_directional_irradiance(
             0,
@@ -2432,6 +2674,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             36,
+            0.0,
         );
 
         // All sample counts must give identical results for tilt=0.
@@ -2480,6 +2723,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             4,
+            0.0,
         );
         let irr_n12 = omni_directional_irradiance(
             0,
@@ -2492,6 +2736,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             12,
+            0.0,
         );
         let irr_n36 = omni_directional_irradiance(
             0,
@@ -2504,6 +2749,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             36,
+            0.0,
         );
 
         // N=12 and N=36 direct beam should be within 5% of each other.
@@ -2572,6 +2818,7 @@ mod tests {
             surf_az,
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
 
         // N=12 omnidirectional must be different from south-facing single-azimuth
@@ -2587,6 +2834,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             12,
+            0.0,
         );
 
         // Verify south-facing single-azimuth has higher direct than omni average.
@@ -2634,6 +2882,7 @@ mod tests {
                 az,
                 doy,
                 DEFAULT_GROUND_ALBEDO,
+                0.0,
             );
             max_direct = max_direct.max(irr.direct_w_m2);
             min_direct = min_direct.min(irr.direct_w_m2);
@@ -2651,6 +2900,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             12,
+            0.0,
         );
 
         assert!(
@@ -2691,6 +2941,7 @@ mod tests {
             0.0, // azimuth 0°
             doy,
             DEFAULT_GROUND_ALBEDO,
+            0.0,
         );
         let omni = omni_directional_irradiance(
             0,
@@ -2703,6 +2954,7 @@ mod tests {
             doy,
             DEFAULT_GROUND_ALBEDO,
             1,
+            0.0,
         );
 
         assert!(

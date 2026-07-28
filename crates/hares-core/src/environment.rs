@@ -643,6 +643,7 @@ impl EnvironmentManager {
                             day_of_year,
                             ground_albedo,
                             OMNI_AZIMUTH_SAMPLES,
+                            self.weather_meta.elevation_m,
                         )
                     } else {
                         perez_tilted_irradiance(
@@ -656,6 +657,7 @@ impl EnvironmentManager {
                             surface.azimuth_deg,
                             day_of_year,
                             ground_albedo,
+                            self.weather_meta.elevation_m,
                         )
                     }
                 }));

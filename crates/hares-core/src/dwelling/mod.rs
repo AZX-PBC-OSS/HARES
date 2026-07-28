@@ -1967,6 +1967,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             design_conditions: bp.design_conditions,
             weather_lat: site_location.latitude_deg,
             weather_lon: site_location.longitude_deg,
+            weather_elevation_m: site_location.elevation_m,
             duct_params,
             internal_gains_w: 0.0,
             internal_gains_latent_w: 0.0,

@@ -134,7 +134,7 @@ fn perez_diffuse_south_facing_30_tilt_day80_reasonable_range() {
     );
 
     let dni_extra = extraterrestrial_irradiance(day_of_year);
-    let diffuse_w_m2 = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+    let diffuse_w_m2 = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
 
     // Perez diffuse for this geometry should be in [90, 140] W/m².
     // pvlib-python 0.10.x gives ~100–130 W/m² for this case.
@@ -155,8 +155,8 @@ fn perez_diffuse_increases_with_dhi() {
 
     let dni_extra = extraterrestrial_irradiance(day_of_year);
 
-    let diffuse_low = perez_sky_diffuse(50.0, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
-    let diffuse_high = perez_sky_diffuse(200.0, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
+    let diffuse_low = perez_sky_diffuse(50.0, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
+    let diffuse_high = perez_sky_diffuse(200.0, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra, 0.0);
 
     assert!(
         diffuse_high > diffuse_low,
@@ -167,7 +167,7 @@ fn perez_diffuse_increases_with_dhi() {
 #[test]
 fn perez_diffuse_returns_zero_when_dhi_below_threshold() {
     // HARES skips Perez model when DHI < 1.0 W/m² (PEREZ_MIN_DHI constant).
-    let result = perez_sky_diffuse(0.5, 800.0, 30.0, 10.0, 30.0, 1400.0);
+    let result = perez_sky_diffuse(0.5, 800.0, 30.0, 10.0, 30.0, 1400.0, 0.0);
     assert_eq!(
         result, 0.0,
         "Perez sky diffuse must be 0.0 when DHI < 1 W/m², got {result}"
@@ -211,6 +211,7 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
         surface_azimuth_deg,
         day_of_year,
         0.2,
+        0.0,
     );
 
     let poa_total = result.direct_w_m2 + result.diffuse_w_m2 + result.reflected_w_m2;
@@ -244,7 +245,7 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
 #[test]
 fn poa_total_zero_at_night() {
     // Nighttime: all irradiance inputs zero. All POA components must be zero.
-    let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 30.0, 180.0, 172, 0.2);
+    let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 30.0, 180.0, 172, 0.2, 0.0);
     assert_eq!(result.direct_w_m2, 0.0, "nighttime beam must be 0");
     assert_eq!(result.diffuse_w_m2, 0.0, "nighttime diffuse must be 0");
     assert_eq!(result.reflected_w_m2, 0.0, "nighttime reflected must be 0");
@@ -282,6 +283,7 @@ fn poa_total_matches_pvlib_reference() {
         180.0, // surface_azimuth_deg
         80,    // day_of_year (March equinox)
         0.2,   // ground_albedo
+        0.0,   // elevation_m
     );
     let hares_poa = result.direct_w_m2 + result.diffuse_w_m2 + result.reflected_w_m2;
     let pvlib_poa = 925.4807_f64;

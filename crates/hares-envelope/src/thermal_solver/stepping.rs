@@ -187,6 +187,9 @@ impl ThermalSolver {
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
     /// or `last_coupled_state`).
+    ///
+    /// * `site_elevation_m` — site elevation in meters
+    #[allow(clippy::too_many_arguments)]
     pub fn autosize_capacity_cooling(
         &self,
         zone: ZoneId,
@@ -194,6 +197,7 @@ impl ThermalSolver {
         design_outdoor_c: f64,
         site_lat_deg: f64,
         site_lon_deg: f64,
+        site_elevation_m: f64,
         internal_gains_w: f64,
     ) -> f64 {
         use chrono::{Datelike, FixedOffset, TimeZone};
@@ -263,6 +267,7 @@ impl ThermalSolver {
                 win_props.azimuth_deg,
                 doy,
                 DEFAULT_GROUND_ALBEDO,
+                site_elevation_m,
             );
 
             // Design-day approximation: total window solar gain = POA × SHGC × area.
@@ -294,6 +299,7 @@ impl ThermalSolver {
                 info.azimuth_deg,
                 doy,
                 DEFAULT_GROUND_ALBEDO,
+                site_elevation_m,
             );
 
             let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
@@ -1181,7 +1187,7 @@ impl ThermalSolver {
         target_c: f64,
         design_outdoor_c: f64,
     ) -> f64 {
-        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0)
+        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0, 0.0)
     }
 
     /// Run a design-day simulation for cooling equipment sizing.
@@ -1198,9 +1204,12 @@ impl ThermalSolver {
     /// Internal gains (`internal_gains_w` sensible) are included per ACCA
     /// Manual J-2016 §7.
     ///
+    /// * `site_elevation_m` — site elevation in meters
+    ///
     /// Returns the peak HVAC input (positive) across the recording day
     /// timesteps as the sizing capacity, or 0.0 if the zone is unknown or
     /// solving fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn autosize_design_day_cooling(
         &self,
         zone: ZoneId,
@@ -1208,6 +1217,7 @@ impl ThermalSolver {
         design_outdoor_c: f64,
         site_lat_deg: f64,
         site_lon_deg: f64,
+        site_elevation_m: f64,
         internal_gains_w: f64,
     ) -> f64 {
         let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
@@ -1218,6 +1228,7 @@ impl ThermalSolver {
             COOLING_DESIGN_DAY_RANGE_C,
             Some(&solar),
             internal_gains_w,
+            site_elevation_m,
         )
     }
 
@@ -1231,6 +1242,8 @@ impl ThermalSolver {
     /// - `internal_gains_w`: sensible internal gains [W]; added to the
     ///   HVAC load for cooling design days (solar_data is `Some`).
     ///   Zero for heating design days (conservative per Manual J).
+    /// - `site_elevation_m`: site elevation in meters
+    #[allow(clippy::too_many_arguments)]
     fn run_design_day(
         &self,
         zone: ZoneId,
@@ -1239,6 +1252,7 @@ impl ThermalSolver {
         daily_range_c: f64,
         solar_data: Option<&[Option<HourlySolar>]>,
         internal_gains_w: f64,
+        site_elevation_m: f64,
     ) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -1325,6 +1339,7 @@ impl ThermalSolver {
                                 win_props.azimuth_deg,
                                 doy,
                                 DEFAULT_GROUND_ALBEDO,
+                                site_elevation_m,
                             );
                             let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
                             u[solar_idx] += poa_w_m2 * win_props.shgc * win_props.area_m2;
@@ -1348,6 +1363,7 @@ impl ThermalSolver {
                                 info.azimuth_deg,
                                 doy,
                                 DEFAULT_GROUND_ALBEDO,
+                                site_elevation_m,
                             );
                             let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
                             u[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
