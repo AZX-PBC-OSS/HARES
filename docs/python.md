@@ -15,7 +15,7 @@ and [Maturin](https://www.maturin.rs/). The resulting package is called `ochre_n
 
 ```bash
 # Clone and initialise submodules
-git clone https://github.com/NREL/HARES.git
+git clone https://github.com/AZX-PBC-OSS/HARES.git
 cd HARES
 git submodule update --init --recursive
 

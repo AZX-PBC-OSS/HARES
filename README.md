@@ -1,6 +1,6 @@
 # HARES
 
-[![CI](https://github.com/NREL/HARES/actions/workflows/ci.yml/badge.svg)](https://github.com/NREL/HARES/actions/workflows/ci.yml)
+[![CI](https://github.com/AZX-PBC-OSS/HARES/actions/workflows/ci.yml/badge.svg)](https://github.com/AZX-PBC-OSS/HARES/actions/workflows/ci.yml)
 
 HARES — High-performance Agent-based Residential Energy Simulation
 
@@ -10,7 +10,7 @@ via PyO3 / Maturin, published as the `ochre_next` Python package.
 ## Repository setup
 
 ```bash
-git clone https://github.com/NREL/HARES.git
+git clone https://github.com/AZX-PBC-OSS/HARES.git
 cd HARES
 git submodule update --init --recursive
 ```

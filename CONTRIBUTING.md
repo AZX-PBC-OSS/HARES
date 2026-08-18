@@ -9,7 +9,7 @@ crate layout. See [docs/development.md](docs/development.md) for build profiles,
 feature flags, and benchmarking guidance. The short version:
 
 ```bash
-git clone https://github.com/NREL/HARES.git && cd HARES
+git clone https://github.com/AZX-PBC-OSS/HARES.git && cd HARES
 git submodule update --init --recursive
 uv venv --python 3.13 && uv sync
 ```

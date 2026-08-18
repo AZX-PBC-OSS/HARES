@@ -28,7 +28,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.87"
 license = "BSD-3-Clause"
-repository = "https://github.com/NREL/HARES"
+repository = "https://github.com/AZX-PBC-OSS/HARES"
 
 [workspace.dependencies]
 # Internal crates
