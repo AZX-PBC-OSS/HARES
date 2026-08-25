@@ -52,7 +52,15 @@ pub fn parallel_resistance(r1: f64, r2: f64) -> f64 {
 pub struct RCNetwork {
     pub capacitances: HashMap<NodeId, f64>,
     pub resistances: HashMap<(NodeId, NodeId), f64>,
-    pub external_nodes: Vec<NodeId>,
+    /// External boundary nodes, stored sorted ascending by `NodeId` by
+    /// [`from_elements`](Self::from_elements). Callers resolve column indices
+    /// against this ordering via [`external_nodes`](Self::external_nodes);
+    /// [`build_matrices`](Self::build_matrices) independently re-sorts to lay
+    /// out `B_ext`, and the two must agree (guarded by
+    /// `from_elements_external_node_positions_match_build_matrices_columns`).
+    /// Private so the ordering invariant cannot be broken by external mutation
+    /// after construction.
+    external_nodes: Vec<NodeId>,
 }
 
 impl RCNetwork {
@@ -129,6 +137,17 @@ impl RCNetwork {
             }
         }
 
+        // Store external_nodes in the same ascending order `build_matrices`
+        // uses to lay out B_ext. Callers resolve column indices via
+        // `self.external_nodes.iter().position()` (see `boundary_rc`), so the
+        // stored Vec must be the sorted single source of truth — otherwise a
+        // caller-resolved column disagrees with the assembled matrix and the
+        // temperature for one external node is written into another's column.
+        // The input order is unspecified when built from a `HashMap`, so we
+        // sort here rather than rely on the caller.
+        let mut external_nodes = external_nodes;
+        external_nodes.sort_unstable();
+
         Ok(Self {
             capacitances,
             resistances: reduced,
@@ -136,8 +155,27 @@ impl RCNetwork {
         })
     }
 
+    /// External boundary nodes in the ascending `NodeId` order `build_matrices`
+    /// uses to lay out `B_ext` columns. Callers resolving a column index for a
+    /// given external node must index into this slice (e.g. `.iter().position()`)
+    /// so the resolved index agrees with the assembled matrix.
+    #[must_use]
+    pub fn external_nodes(&self) -> &[NodeId] {
+        &self.external_nodes
+    }
+
     pub fn build_matrices(&self) -> Result<(DMatrix<f64>, DMatrix<f64>, Vec<NodeId>)> {
         let internal_nodes = sorted_internal_nodes(&self.capacitances, &self.external_nodes);
+        // Why: deliberately re-derive the column ordering here from the stored
+        // `external_nodes` rather than trust `from_elements`'s sort, so that
+        // `from_elements_external_node_positions_match_build_matrices_columns`
+        // has teeth. That regression test compares a caller-resolved column
+        // (`position()` against the stored Vec) to the column `B_ext` actually
+        // uses; if `build_matrices` borrowed the stored Vec directly the two
+        // would read the same data and the assertion could never fail, even if
+        // a future change dropped the `from_elements` sort (the original I-01
+        // defect). The clone+sort is one-time per building on a Vec of a few
+        // nodes — not in the timestep hot loop — so the oracle costs nothing.
         let mut external_nodes = self.external_nodes.clone();
         external_nodes.sort_unstable();
 
@@ -919,7 +957,7 @@ mod tests {
         let net = RCNetwork::from_elements(caps, res, vec![n(10), n(11)]).unwrap();
         let (a_c, b_c, nodes) = net.build_matrices().unwrap();
 
-        let expected = super::sorted_internal_nodes(&net.capacitances, &net.external_nodes);
+        let expected = super::sorted_internal_nodes(&net.capacitances, net.external_nodes());
         assert_eq!(
             nodes, expected,
             "returned node list must match sorted_internal_nodes"
@@ -977,5 +1015,86 @@ mod tests {
             .map(|(idx, &nid)| (nid, idx))
             .collect();
         assert_eq!(old_index, unified_index);
+    }
+
+    /// Regression for I-01: `from_elements` must store `external_nodes` in the
+    /// same order `build_matrices` uses to assemble `B_ext` (sorted ascending
+    /// by `NodeId`), so callers resolving column indices via
+    /// `RCNetwork::external_nodes().iter().position()` agree with the assembled
+    /// matrix.
+    ///
+    /// `boundary_rc::assemble_building_rc` builds `external_nodes` by iterating
+    /// a `HashMap<u64, NodeId>` whose order is unspecified and reseeds per
+    /// process. It then resolves `ground_cols` via `position()` against the
+    /// *stored* Vec. `build_matrices` separately clones and sorts that Vec to
+    /// lay out `B_ext`. When the stored Vec is unsorted, the recorded columns
+    /// disagree with the matrix and the Kusuda–Achenbach temperature for depth
+    /// `d` is written into another depth's column — nondeterministically.
+    ///
+    /// This test feeds the external nodes out of sorted order (an arrangement
+    /// the HashMap can yield) and asserts the caller-resolved column for each
+    /// external node equals the column `build_matrices` actually assigns it.
+    #[test]
+    fn from_elements_external_node_positions_match_build_matrices_columns() {
+        // Three internal nodes, each connected to exactly one external node,
+        // plus an internal chain so the graph is connected. Each external's
+        // B_ext entry is therefore the single nonzero in its internal's row,
+        // making its real column unambiguous.
+        let caps = HashMap::from([(n(1), 2.0), (n(2), 3.0), (n(3), 4.0)]);
+        let res = HashMap::from([
+            ((n(1), n(2)), 1.0),
+            ((n(2), n(3)), 1.0),
+            ((n(1), n(50)), 5.0),
+            ((n(2), n(10)), 7.0),
+            ((n(3), n(30)), 11.0),
+        ]);
+        // Deliberately unsorted — the order a HashMap iteration can yield.
+        let external_nodes = vec![n(50), n(10), n(30)];
+
+        let net = RCNetwork::from_elements(caps, res, external_nodes).unwrap();
+        let (a_c, b_ext, internal_order) = net.build_matrices().unwrap();
+
+        // build_matrices returns internal nodes sorted ascending; map node -> row.
+        let row_of: HashMap<NodeId, usize> = internal_order
+            .iter()
+            .enumerate()
+            .map(|(r, &nid)| (nid, r))
+            .collect();
+
+        let connections = [(n(1), n(50)), (n(2), n(10)), (n(3), n(30))];
+        for (internal, external) in connections {
+            let row = row_of[&internal];
+            let mut actual_col: Option<usize> = None;
+            for col in 0..b_ext.ncols() {
+                if b_ext[(row, col)].abs() > 0.0 {
+                    assert!(
+                        actual_col.is_none(),
+                        "internal {internal:?} row has multiple B_ext nonzeros; \
+                         test wiring is ambiguous"
+                    );
+                    actual_col = Some(col);
+                }
+            }
+            let actual_col =
+                actual_col.expect("internal row has no B_ext nonzero; external node lost");
+
+            // This is exactly how boundary_rc resolves ground_cols: via the
+            // public accessor, against the stored (sorted) ordering.
+            let caller_col = net
+                .external_nodes()
+                .iter()
+                .position(|&x| x == external)
+                .expect("external node missing from stored external_nodes");
+
+            assert_eq!(
+                caller_col, actual_col,
+                "caller-resolved column for external {external:?} disagrees with the \
+                 build_matrices B_ext column; from_elements must store external_nodes \
+                 sorted so position() agrees with the assembled matrix"
+            );
+        }
+
+        assert_eq!(a_c.nrows(), internal_order.len());
+        assert_eq!(b_ext.ncols(), net.external_nodes().len());
     }
 }

@@ -9,6 +9,7 @@ use nalgebra::DMatrix;
 use thiserror::Error;
 
 use hares_physics::air_properties::dry_air_density_kg_m3;
+use hares_physics::units::length_m_to_mm;
 
 use crate::NodeId;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -48,6 +49,33 @@ pub const GROUND_NODE_ID: u32 = u32::MAX;
 pub const GROUND_NODE_BASE: u32 = u32::MAX - 100;
 /// First NodeId used for material-layer nodes (above zone air node range).
 const LAYER_NODE_BASE: u32 = 1_000;
+
+// --- Depth encoding (metres → integer-millimetre key) ---
+//
+// Foundation depths arrive as `f64` metres and are keyed by rounding to the
+// nearest integer millimetre, both to dedupe near-equal depths and to avoid
+// `f64` hashing in `depth_to_node`. Every site that derives such a key — or a
+// mm-rounded depth value — must go through these helpers so the rounding and
+// the conversion factor have one home. The conversion itself lives in
+// `hares_physics::units::length_m_to_mm` (uom-backed, exact SI).
+
+/// Round a foundation depth [m] to the nearest integer millimetre and return
+/// it as a `u64` key for `depth_to_node`. Use this at every site that builds a
+/// `HashMap` key or looks one up from a depth in metres.
+#[inline]
+pub(crate) fn depth_mm_key(depth_m: f64) -> u64 {
+    length_m_to_mm(depth_m).round() as u64
+}
+
+/// Round a foundation depth [m] to millimetre precision as an `f64` (still in
+/// metres). Used to build the deduped `unique_depths` list so two depths that
+/// differ only by sub-millimetre noise collapse to one entry. Idempotent with
+/// [`depth_mm_key`]: round-tripping `depth_rounded_to_mm` through
+/// [`depth_mm_key`] recovers the same integer.
+#[inline]
+fn depth_rounded_to_mm(depth_m: f64) -> f64 {
+    length_m_to_mm(depth_m).round() / length_m_to_mm(1.0)
+}
 
 /// Minimum density [kg/m³] to qualify a layer for automatic splitting.
 /// Insulation and air gaps are excluded.
@@ -542,7 +570,7 @@ pub fn assemble_building_rc(
     let mut unique_depths: Vec<f64> = boundaries
         .iter()
         .filter(|b| b.exterior == ExteriorTarget::Ground && b.area_m2 > 0.0)
-        .map(|b| (b.foundation_depth_m * 1000.0).round() / 1000.0) // round to mm
+        .map(|b| depth_rounded_to_mm(b.foundation_depth_m)) // round to mm precision
         .collect();
     unique_depths.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     unique_depths.dedup();
@@ -551,7 +579,7 @@ pub fn assemble_building_rc(
         .enumerate()
         .map(|(i, &d)| {
             // Round to integer millimetres for the HashMap key (avoids f64 hashing).
-            let key = (d * 1000.0).round() as u64;
+            let key = depth_mm_key(d);
             (key, NodeId(GROUND_NODE_BASE + i as u32))
         })
         .collect();
@@ -593,7 +621,7 @@ pub fn assemble_building_rc(
             ExteriorTarget::Zone(idx) => NodeId((idx + 1) as u32),
             ExteriorTarget::Outdoor => outdoor_node,
             ExteriorTarget::Ground => {
-                let key = (bd.foundation_depth_m * 1000.0).round() as u64;
+                let key = depth_mm_key(bd.foundation_depth_m);
                 depth_to_node.get(&key).copied().ok_or_else(|| {
                     format!(
                         "boundary {bd_idx}: foundation_depth_m={} has no ground node; \
@@ -1152,15 +1180,25 @@ pub fn assemble_building_rc(
         .map_err(|err| format!("RC network build failed: {err}"))?;
 
     // Look up outdoor column by node ID in the sorted external_nodes list.
-    let outdoor_col = rc.external_nodes.iter().position(|&n| n == outdoor_node);
-    // Build (depth_m, col_index) pairs in ascending depth order.
-    // unique_depths is sorted, and NodeIds are GROUND_NODE_BASE + depth_index,
-    // so column positions match depth order.
-    let mut ground_cols = Vec::with_capacity(depth_to_node.len());
-    for (&key, &node) in &depth_to_node {
-        let depth_m = key as f64 / 1000.0;
+    let outdoor_col = rc.external_nodes().iter().position(|&n| n == outdoor_node);
+    // Build (depth_m, col_index) pairs in ascending depth order, deterministically.
+    // `unique_depths` is already sorted ascending and deduped (see above), and
+    // `depth_to_node` maps each depth's mm-key to its ground node. Iterating the
+    // sorted source — not the `depth_to_node` `HashMap`, whose iteration order
+    // is per-process-randomised — makes `ground_cols` ascending-by-depth *by
+    // construction*, so the documented "sorted by ascending depth" contract
+    // (see `BuildingRC::ground_cols`) holds without a post-hoc sort. This
+    // closes the I-01 class at this site: a `HashMap`-iteration order can no
+    // longer leak into a field whose positions are resolved against a
+    // separately-sorted ordering, and there is no untestable sort seam to guard.
+    let mut ground_cols = Vec::with_capacity(unique_depths.len());
+    for &depth_m in &unique_depths {
+        let key = depth_mm_key(depth_m);
+        let node = depth_to_node.get(&key).copied().ok_or_else(|| {
+            format!("ground node for depth={depth_m} missing from depth_to_node map")
+        })?;
         let col = rc
-            .external_nodes
+            .external_nodes()
             .iter()
             .position(|&n| n == node)
             .ok_or_else(|| {
@@ -1197,7 +1235,7 @@ pub fn assemble_building_rc(
 
         // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
         // must agree element-for-element with the node_index keys in order.
-        let cross: Vec<NodeId> = sorted_internal_nodes(&rc.capacitances, &rc.external_nodes);
+        let cross: Vec<NodeId> = sorted_internal_nodes(&rc.capacitances, rc.external_nodes());
         let node_index_sorted: Vec<NodeId> = {
             let mut keys: Vec<_> = node_index.keys().copied().collect();
             keys.sort_unstable();
@@ -1923,6 +1961,109 @@ mod tests {
         }
     }
 
+    /// Like `make_boundary` but sets a below-grade `foundation_depth_m`.
+    /// Used to exercise multi-depth ground-contact scenarios (I-01): the
+    /// pre-fix bug permuted ground temperatures across depths whenever
+    /// two or more distinct resolved depths shared a dwelling, because
+    /// `external_nodes` was built from a `HashMap` and stored unsorted.
+    fn make_ground_boundary(
+        area: f64,
+        interior_zone_idx: usize,
+        depth_m: f64,
+        layers: Vec<LayerInput>,
+        fallback_r: f64,
+    ) -> BoundaryInput {
+        let mut b = make_boundary(
+            area,
+            interior_zone_idx,
+            ExteriorTarget::Ground,
+            layers,
+            fallback_r,
+        );
+        b.foundation_depth_m = depth_m;
+        b
+    }
+
+    // ── Depth encoding helpers ─────────────────────────────────────────
+    //
+    // The metres→integer-millimetre key is the shared encoding that links
+    // `unique_depths`, `depth_to_node`, the boundary ground-node lookup, the
+    // `ground_cols` loop, and the `SteadyState` diagnostic's cached-temperature
+    // lookup in `thermal_solver::stepping`. The consolidation (I-01 review
+    // Finding 1) put the conversion in `hares_physics::units::length_m_to_mm`
+    // and the rounding policy in `depth_mm_key` / `depth_rounded_to_mm`. These
+    // tests pin the contract that keeps all six sites in agreement: one key per
+    // millimetre, half-up rounding, and idempotency between the two helpers —
+    // the exact invariant whose silent breakage would re-introduce the depth-
+    // encoding drift the DRY finding warned about.
+    #[test]
+    fn depth_mm_key_rounds_to_nearest_millimetre() {
+        // Exact millimetre values map straight through.
+        assert_eq!(depth_mm_key(0.0), 0);
+        assert_eq!(depth_mm_key(0.001), 1);
+        assert_eq!(depth_mm_key(0.300), 300);
+        assert_eq!(depth_mm_key(2.0), 2_000);
+        // Sub-millimetre noise rounds to the nearest mm (half-up).
+        assert_eq!(depth_mm_key(0.1234), 123);
+        assert_eq!(depth_mm_key(0.1236), 124);
+        // A depth differing only by sub-mm noise collapses to the same key as
+        // its mm-rounded neighbour — the dedup contract `unique_depths` relies on.
+        assert_eq!(depth_mm_key(0.3000004), depth_mm_key(0.300));
+        assert_eq!(depth_mm_key(0.2999996), depth_mm_key(0.300));
+    }
+
+    #[test]
+    fn depth_mm_key_rounds_exact_half_millimetre_away_from_zero() {
+        // The conversion factor has one home (`length_m_to_mm`, uom-backed) and
+        // the rounding policy one home (`f64::round`, ties away from zero). At
+        // an exact half-millimetre (4.5 mm = 0.0045 m) that composite must
+        // therefore key to 5 mm — and 6.5 mm to 7 mm — no matter how the
+        // underlying conversion is spelled. This pins the documented "nearest
+        // millimetre" contract at the tie boundary, the one input where a
+        // future arithmetic change would first diverge.
+        assert_eq!(
+            depth_mm_key(0.0045),
+            5,
+            "4.5 mm must round to 5 mm (ties away from zero)"
+        );
+        assert_eq!(
+            depth_mm_key(0.0065),
+            7,
+            "6.5 mm must round to 7 mm (ties away from zero)"
+        );
+    }
+
+    #[test]
+    fn depth_rounded_to_mm_collapses_submillimetre_noise() {
+        // Rounding to mm precision in metres.
+        assert!((depth_rounded_to_mm(0.1234) - 0.123).abs() < 1e-12);
+        assert!((depth_rounded_to_mm(0.1236) - 0.124).abs() < 1e-12);
+        // Idempotency: rounding an already-mm-rounded value is a no-op.
+        let r = depth_rounded_to_mm(1.2345);
+        assert!((depth_rounded_to_mm(r) - r).abs() < 1e-12);
+    }
+
+    #[test]
+    fn depth_mm_key_and_depth_rounded_to_mm_are_idempotent_together() {
+        // The documented contract: round-tripping `depth_rounded_to_mm`
+        // through `depth_mm_key` recovers the same integer. This is the
+        // invariant that lets `unique_depths` (built with
+        // `depth_rounded_to_mm`) and `depth_to_node` / boundary lookups /
+        // `ground_cols` / the `SteadyState` lookup (all built with
+        // `depth_mm_key`) agree on the same key. If either helper's rounding
+        // drifts, this fails — which is the whole point of consolidating them.
+        for &depth_m in &[0.0, 0.1, 0.3, 1.2, 2.0, 0.1234, 0.9996, 1.5005] {
+            assert_eq!(
+                depth_mm_key(depth_m),
+                depth_mm_key(depth_rounded_to_mm(depth_m)),
+                "depth_mm_key({depth_m}) != depth_mm_key(depth_rounded_to_mm({depth_m})); \
+                 the two depth-encoding helpers disagree, which would silently \
+                 desync `unique_depths` from the depth_to_node / ground_cols / \
+                 SteadyState lookups"
+            );
+        }
+    }
+
     // ── derive_zone_capacitances ────────────────────────────────────────
 
     #[test]
@@ -2163,6 +2304,237 @@ mod tests {
         assert_eq!(rc.outdoor_col, None);
         assert_eq!(rc.n_ext, 1);
         assert_eq!(rc.ground_cols, vec![(0.0, 0)]);
+    }
+
+    // ── Multi-depth ground: columns must track depths, not HashMap order ─
+    //
+    // I-01 regression coverage. The pre-fix defect permuted the ground
+    // temperature columns among depths whenever a dwelling had two or more
+    // distinct resolved ground depths, because `external_nodes` was built
+    // from a `HashMap<u64, NodeId>` (per-process-randomised iteration order)
+    // and `RCNetwork::from_elements` stored it verbatim while
+    // `build_matrices` assembled `B_ext` against a sorted clone. No existing
+    // test exercised more than one ground depth, so the suite was green
+    // despite the defect.
+    //
+    // `RCNetwork::from_elements` now sorts `external_nodes` before storing,
+    // so `ground_cols` (resolved via `position()` against the stored Vec)
+    // agrees with the assembled `B_ext` regardless of `HashMap` order. These
+    // tests exercise the multi-depth path and pin that contract at the
+    // integration seam. The deterministic failure for a regressed `from_elements`
+    // is owned by
+    // `rc_network::tests::from_elements_external_node_positions_match_build_matrices_columns`.
+    #[test]
+    fn multi_depth_ground_cols_match_assembled_matrix() {
+        // Two zones, each with a ground-contact boundary at a distinct depth,
+        // plus an above-grade outdoor boundary. This is the basement-floor /
+        // crawlspace-wall arrangement from the I-01 RCA: depth 0.3 m and 2.0 m
+        // bound to separate internal nodes.
+        let zones = vec![
+            ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: None,
+                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            },
+            ZoneInput {
+                floor_area_m2: Some(80.0),
+                volume_m3: None,
+                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            },
+        ];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let boundaries = vec![
+            // Above-grade wall venting to outdoor.
+            make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5),
+            // Shallow ground contact (slab / crawlspace floor).
+            make_ground_boundary(30.0, 0, 0.3, vec![], 3.0),
+            // Deep ground contact (basement wall).
+            make_ground_boundary(40.0, 1, 2.0, vec![], 4.0),
+        ];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Two distinct ground depths + outdoor => three external columns.
+        assert_eq!(rc.n_ext, 3);
+        assert_eq!(rc.b_ext.ncols(), 3);
+
+        // ground_cols sorted ascending by depth, one entry per depth.
+        assert_eq!(rc.ground_cols.len(), 2);
+        let depths: Vec<f64> = rc.ground_cols.iter().map(|&(d, _)| d).collect();
+        let sorted_depths = {
+            let mut s = depths.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s
+        };
+        assert_eq!(depths, sorted_depths, "ground_cols must be sorted by depth");
+        assert_eq!(depths, vec![0.3, 2.0]);
+
+        // The contract the I-01 fix enforces: the stored external_nodes Vec is
+        // the sorted single source of truth, so the column for each ground
+        // depth equals its position in ascending NodeId order. Ground nodes
+        // are GROUND_NODE_BASE + depth_index (depth_index rises with depth),
+        // and all are < OUTDOOR_NODE_ID, so the columns are 0, 1, ... and
+        // outdoor sits last. A regressed `from_elements` (unsorted storage)
+        // permutes these columns among depths.
+        let cols: Vec<usize> = rc.ground_cols.iter().map(|&(_, c)| c).collect();
+        assert_eq!(cols, vec![0, 1], "ground columns must ascend with depth");
+        assert_eq!(
+            rc.outdoor_col,
+            Some(2),
+            "outdoor must occupy the final column"
+        );
+
+        // Cross-validate against the assembled B_ext, the real source of
+        // truth: every external column must drive at least one internal node,
+        // and the ground / outdoor columns must be exactly the distinct set
+        // {0, 1, 2}. This catches any future drift between `ground_cols` /
+        // `outdoor_col` and the matrix the solver actually consumes.
+        let mut driven_cols: Vec<usize> = (0..rc.b_ext.ncols())
+            .filter(|&c| rc.b_ext.column(c).iter().any(|v| v.abs() > 0.0))
+            .collect();
+        driven_cols.sort_unstable();
+        driven_cols.dedup();
+        assert_eq!(
+            driven_cols,
+            vec![0, 1, 2],
+            "every external column must be driven"
+        );
+        for &c in &cols {
+            assert!(
+                rc.b_ext.column(c).iter().any(|v| v.abs() > 0.0),
+                "ground column {c} has no nonzero in B_ext; ground node is disconnected"
+            );
+        }
+        let outdoor_col = rc.outdoor_col.expect("outdoor present");
+        assert!(
+            rc.b_ext.column(outdoor_col).iter().any(|v| v.abs() > 0.0),
+            "outdoor column {outdoor_col} has no nonzero in B_ext"
+        );
+
+        // End-to-end wiring check — the physical contract the I-01 fix protects:
+        // the Kusuda-Achenbach temperature for depth `d` is written into
+        // `ground_cols[d].col` (see `solver_builder.rs` / `thermal_solver`), so
+        // that B_ext column must actually drive the interior zone node whose
+        // boundary sits at depth `d`. With a regressed `from_elements` (unsorted
+        // `external_nodes`), `ground_cols` maps a depth to the column of a
+        // *different* depth's ground node, so the correct zone's row has a zero
+        // at that column. This catches the defect in any process where the
+        // `HashMap` yields a non-sorted iteration order; the deterministic
+        // catch across all processes is owned by the unit test
+        // `rc_network::tests::from_elements_external_node_positions_match_build_matrices_columns`.
+        let zone0_row = rc.node_index[&NodeId(1)]; // zone 0 air node
+        let zone1_row = rc.node_index[&NodeId(2)]; // zone 1 air node
+        let (d0, c0) = rc.ground_cols[0];
+        let (d1, c1) = rc.ground_cols[1];
+        assert_eq!(d0, 0.3, "ground_cols[0] must be the shallower depth");
+        assert_eq!(d1, 2.0, "ground_cols[1] must be the deeper depth");
+        assert!(
+            rc.b_ext[(zone0_row, c0)].abs() > 0.0,
+            "zone 0 (ground at 0.3 m) is not driven at ground_cols column {c0}; \
+             the column was permuted to another depth's ground node (I-01 defect)"
+        );
+        assert!(
+            rc.b_ext[(zone1_row, c1)].abs() > 0.0,
+            "zone 1 (ground at 2.0 m) is not driven at ground_cols column {c1}; \
+             the column was permuted to another depth's ground node (I-01 defect)"
+        );
+        // The two ground columns must be distinct (no depth collapsed onto another).
+        assert_ne!(c0, c1, "the two ground depths must map to distinct columns");
+    }
+
+    // ── Multi-depth ground without outdoor: no outdoor column, ground only ─
+    #[test]
+    fn ground_only_multi_depth_has_no_outdoor_col() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // Two ground boundaries at distinct depths on the same zone — a
+        // slab-on-grade floor (0.1 m) and a short basement wall stem (1.2 m).
+        let boundaries = vec![
+            make_ground_boundary(50.0, 0, 0.1, vec![], 2.5),
+            make_ground_boundary(30.0, 0, 1.2, vec![], 3.0),
+        ];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        assert_eq!(rc.outdoor_col, None);
+        assert_eq!(rc.n_ext, 2);
+        assert_eq!(rc.b_ext.ncols(), 2);
+
+        // Sorted by depth; columns ascend with depth (0, 1).
+        assert_eq!(rc.ground_cols.len(), 2);
+        assert_eq!(
+            rc.ground_cols.iter().map(|&(d, _)| d).collect::<Vec<_>>(),
+            vec![0.1, 1.2]
+        );
+        assert_eq!(
+            rc.ground_cols.iter().map(|&(_, c)| c).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        // Both ground columns drive the network; no phantom outdoor column.
+        let mut driven: Vec<usize> = (0..rc.b_ext.ncols())
+            .filter(|&c| rc.b_ext.column(c).iter().any(|v| v.abs() > 0.0))
+            .collect();
+        driven.sort_unstable();
+        driven.dedup();
+        assert_eq!(driven, vec![0, 1]);
+    }
+
+    // ── `ground_cols` ordering is deterministic by construction ──────
+    //
+    // Regression guard for the I-01 class at the `boundary_rc` seam:
+    // `BuildingRC::ground_cols` is documented "sorted by ascending depth". The
+    // construction iterates the sorted `unique_depths` source, NOT the
+    // `depth_to_node` `HashMap` (whose order reseeds per process), so the
+    // ascending-depth order must hold deterministically in every process.
+    //
+    // This test provides boundaries in *descending* depth order so that the
+    // `unique_depths.sort_unstable_by` at the top of `assemble_building_rc` is
+    // the only thing producing ascending order — if that sort is removed, or
+    // if the `ground_cols` construction is reverted to `HashMap` iteration,
+    // the depths assertion fails (deterministically for the removed
+    // `unique_depths` sort; ~50% of processes for a `HashMap`-iteration revert,
+    // which is the untestable seam this shape exists to remove).
+    #[test]
+    fn ground_cols_sorted_by_depth_when_boundaries_given_out_of_order() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // Deliberately out-of-order: deeper boundary first, shallower second.
+        // `unique_depths` would be [1.2, 0.1] without its sort; the sort must
+        // produce [0.1, 1.2], and `ground_cols` must inherit that order.
+        let boundaries = vec![
+            make_ground_boundary(30.0, 0, 1.2, vec![], 3.0),
+            make_ground_boundary(50.0, 0, 0.1, vec![], 2.5),
+        ];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        assert_eq!(rc.ground_cols.len(), 2);
+        assert_eq!(
+            rc.ground_cols.iter().map(|&(d, _)| d).collect::<Vec<_>>(),
+            vec![0.1, 1.2],
+            "ground_cols must be ascending by depth even when boundaries are given out of order"
+        );
+        // Columns ascend with depth (ground nodes are GROUND_NODE_BASE +
+        // depth_index in the sorted `unique_depths` order, all < OUTDOOR_NODE_ID).
+        assert_eq!(
+            rc.ground_cols.iter().map(|&(_, c)| c).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     // ── Same-zone boundary without layers is a no-op ───────────────────

@@ -17,7 +17,7 @@ use uom::si::f64::{
 use uom::si::heat_transfer::{
     btu_it_per_hour_square_foot_degree_fahrenheit, watt_per_square_meter_kelvin,
 };
-use uom::si::length::{centimeter, foot, inch, meter};
+use uom::si::length::{centimeter, foot, inch, meter, millimeter};
 use uom::si::mass_density::{kilogram_per_cubic_meter, pound_per_cubic_foot};
 use uom::si::pressure::pascal;
 use uom::si::specific_heat_capacity::{
@@ -98,6 +98,17 @@ pub fn length_in_to_m(inches: f64) -> f64 {
 #[inline]
 pub fn length_cm_to_m(cm: f64) -> f64 {
     UomLength::new::<centimeter>(cm).get::<meter>()
+}
+
+/// Convert a length in metres to millimetres via `uom` (exact SI: 1 m = 1000 mm).
+///
+/// Used for the depth-encoding scheme that rounds foundation depths to the
+/// nearest millimetre (see `hares-envelope::boundary_rc`). Prefer this over a
+/// bare `* 1000.0` so the conversion factor has one home and the magnitude is
+/// checked by the type system.
+#[inline]
+pub fn length_m_to_mm(m: f64) -> f64 {
+    UomLength::new::<meter>(m).get::<millimeter>()
 }
 
 // --- Power (BTU/h ↔ W) ---
@@ -332,6 +343,14 @@ mod tests {
     fn length_in_to_m_matches() {
         // 1 in = 0.0254 m exactly
         approx_eq(length_in_to_m(1.0), 0.0254, 1e-12);
+    }
+
+    #[test]
+    fn length_m_to_mm_matches() {
+        // 1 m = 1000 mm exactly (SI milli- prefix).
+        approx_eq(length_m_to_mm(1.0), 1000.0, 1e-12);
+        // 2.0 m = 2000 mm; sanity-check a non-unit magnitude.
+        approx_eq(length_m_to_mm(2.0), 2000.0, 1e-12);
     }
 
     #[test]

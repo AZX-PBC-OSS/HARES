@@ -39,6 +39,14 @@ Use Rust's type system to make illegal states unrepresentable:
 - SI units internally, always. Unit conversions happen only at I/O boundaries (`hares-io`). Label every conversion with the source and target unit.
 - The direct HARES API surface — constructors, crate public interfaces, type fields — accepts and returns only SI quantities. No caller should need to know or guess which unit system a value is in.
 
+### Deterministic ordering
+
+A positional ordering — any index, column position, or sequence a consumer resolves against — must never be derived from `std::collections::HashMap` or `HashSet` iteration order. `RandomState` reseeds per process, so the same input yields a different order in every process: the same model with the same seed produces nondeterministic output (I-01: ground temperatures permuted among the depth columns of the input matrix).
+
+- **Sort at the source, and make the sorted form the single source of truth.** Store it behind a private field exposed through a sorted accessor, so the unsorted form is unrepresentable after construction (see `RCNetwork::external_nodes`). Then every positional lookup resolves against that one ordering.
+- **Iterate an already-sorted source** (a sorted `Vec`, a `BTreeMap`), rather than sorting a `HashMap`'s output after the fact. A post-hoc sort of `HashMap` output still has the map's per-process-random order as its input, so the sort has no deterministic test seam.
+- **Resolve positions against the ordering the consuming structure was assembled with.** `.position()`, `[i]`, and matrix-column lookups must agree with the layout they index into. Two views of one sequence that disagree is the bug; one source of truth is the fix.
+
 ### Idiomatic Rust
 
 Match the conventions of the surrounding crate:

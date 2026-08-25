@@ -19,6 +19,7 @@ use nalgebra::DVector;
 use super::CoupledState;
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring};
+use crate::boundary_rc::depth_mm_key;
 
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
@@ -797,12 +798,13 @@ impl ThermalSolver {
                                 // Look up the cached Kusuda temperature for this depth.
                                 // The cached_ground_temps_c vec is parallel to
                                 // wiring.ground_temp_input_depths_m; depths are
-                                // matched by rounding to millimetre precision.
-                                let key = (depth_m * 1000.0).round() as i64;
+                                // matched by the same millimetre key used to build
+                                // `ground_cols` in `boundary_rc::assemble_building_rc`.
+                                let key = depth_mm_key(*depth_m);
                                 self.cached_ground_temps_c
                                     .iter()
                                     .zip(self.wiring.ground_temp_input_depths_m.iter())
-                                    .find(|(_, d)| (*d * 1000.0).round() as i64 == key)
+                                    .find(|(_, d)| depth_mm_key(**d) == key)
                                     .map(|(t, _)| *t)
                                     .unwrap_or(0.0)
                             }
