@@ -173,6 +173,109 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
 }
 
 #[test]
+fn run_without_retained_batches_reports_retention_not_zero_step() {
+    // `retain_batches: false` (the default) drops flushed batches after
+    // writing them to disk, so `flushed_batches` is empty even though the
+    // simulation ran and the output file is complete. The run must not be
+    // misreported as "zero-step" — the status names the real reason
+    // metrics are unavailable.
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    let output_path = unique_temp_path("csv");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let mut sim_config = simulation_config(output_path.clone());
+    sim_config.retain_batches = false;
+
+    let config = DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config,
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let result = engine.run(config).expect("engine run should succeed");
+
+    match &result.status {
+        SimStatus::Flagged(reason) => {
+            assert!(
+                reason.contains("no batches retained"),
+                "default-config run must flag batch retention, got: {reason}"
+            );
+            assert!(
+                !reason.contains("zero-step"),
+                "a run that produced output must never be reported as zero-step: {reason}"
+            );
+        }
+        other => panic!("expected Flagged status, got: {other:?}"),
+    }
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("batches not retained")),
+        "the empty metrics must carry a warning naming the reason"
+    );
+    // The output file was written to disk despite no retained batches.
+    assert!(output_path.exists());
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn run_with_zero_duration_reports_zero_step() {
+    // The genuine zero-step edge case (duration == 0) stays distinguishable
+    // from the not-retained case.
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    let output_path = unique_temp_path("csv");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let mut sim_config = simulation_config(output_path.clone());
+    sim_config.duration = Duration::zero();
+    sim_config.retain_batches = true;
+
+    let config = DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config,
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let result = engine.run(config).expect("engine run should succeed");
+
+    match &result.status {
+        SimStatus::Flagged(reason) => assert!(
+            reason.contains("zero-step"),
+            "duration == 0 must be reported as zero-step, got: {reason}"
+        ),
+        other => panic!("expected Flagged status, got: {other:?}"),
+    }
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn run_returns_err_for_missing_hpxml_path() {
     let config = DwellingConfig {
         hpxml_path: PathBuf::from("/tmp/does-not-exist-hpxml.xml"),

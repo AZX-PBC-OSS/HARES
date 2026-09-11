@@ -100,7 +100,7 @@ pub struct ResistanceWH {
     mains_temp_c_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// real power stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
     setpoint_ramp_rate_c_per_s: Option<f64>,
@@ -203,7 +203,9 @@ impl ResistanceWH {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             target_setpoint_c: DEFAULT_SETPOINT_C,
             setpoint_ramp_rate_c_per_s: None,
             fixture_delivery_temp_c: 40.6,
@@ -742,7 +744,7 @@ impl Equipment for ResistanceWH {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

@@ -458,9 +458,21 @@ impl DefaultsStore {
     ///   water_heating/
     /// ```
     pub fn load(defaults_dir: &Path) -> Result<Self, DefaultsError> {
-        let mut store = Self::default();
-
         let strict_defaults = std::env::var("HARES_STRICT_DEFAULTS").is_ok();
+        Self::load_with_strict_defaults(defaults_dir, strict_defaults)
+    }
+
+    /// [`DefaultsStore::load`] with the `HARES_STRICT_DEFAULTS` escalation
+    /// decided by the caller instead of the process environment. Tests use
+    /// this directly: mutating the env var from one test is process-global
+    /// state under `cargo test`'s shared-process runner, poisoning concurrent
+    /// `load` calls in other tests (a missing-multispeed-CSV dir would hard
+    /// fail there while the mutating test holds the var set).
+    fn load_with_strict_defaults(
+        defaults_dir: &Path,
+        strict_defaults: bool,
+    ) -> Result<Self, DefaultsError> {
+        let mut store = Self::default();
 
         let zip_path = defaults_dir.join("zip_parameters.toml");
         if !zip_path.exists() {
@@ -725,6 +737,35 @@ fn load_zip_parameters(path: &Path) -> Result<HashMap<String, ZipLoad>, Defaults
             path: path.to_path_buf(),
             reason: e.to_string(),
         })?;
+
+    // TOML parses `nan`/`inf` natively, and a non-finite coefficient is
+    // silently absorbed downstream (NaN defeats the sum-based init checks
+    // and every comparison it meets; an infinite `pf` clamps to 1, zeroing
+    // Q; an infinite `v0` rescales real power to `pp`). Reject at the
+    // boundary, naming the file, the equipment row, and the field.
+    for (row_name, params) in &table {
+        let fields = [
+            ("zp", params.zp),
+            ("ip", params.ip),
+            ("pp", params.pp),
+            ("zq", params.zq),
+            ("iq", params.iq),
+            ("pq", params.pq),
+            ("pf", params.pf),
+            ("v0", params.v0),
+        ];
+        for (field, value) in fields {
+            if !value.is_finite() {
+                return Err(DefaultsError::MalformedToml {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "row [{row_name}] field {field} is non-finite ({value}); \
+                         ZIP coefficients must be finite"
+                    ),
+                });
+            }
+        }
+    }
 
     Ok(table
         .into_iter()
@@ -2543,7 +2584,10 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
         // No "HVAC Multispeed Parameters.csv" file — simulate missing file.
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        // Strictness pinned to false so an ambient HARES_STRICT_DEFAULTS
+        // (e.g. a CI environment) cannot flip this warning-path test.
+        let store =
+            DefaultsStore::load_with_strict_defaults(dir.path(), false).expect("load defaults");
         assert!(
             store.hvac_multispeed.is_empty(),
             "multispeed vec should be empty when CSV is missing"
@@ -2559,15 +2603,14 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     fn strict_missing_multispeed_csv_returns_missing_file_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
-        // No CSV file created — with HARES_STRICT_DEFAULTS set, this should error.
-        // SAFETY: nextest runs each test in its own process, so env var mutation
-        // is isolated.
-        unsafe { std::env::set_var("HARES_STRICT_DEFAULTS", "1") };
-        let result = DefaultsStore::load(dir.path());
-        unsafe { std::env::remove_var("HARES_STRICT_DEFAULTS") };
+        // No CSV file created — with strict defaults, this should error. The
+        // strictness is injected via the internal seam, not the process env:
+        // `set_var` is process-global state under `cargo test`'s shared-process
+        // runner and would poison concurrent `load` calls in other tests.
+        let result = DefaultsStore::load_with_strict_defaults(dir.path(), true);
         assert!(
             matches!(result, Err(DefaultsError::MissingFile(_))),
-            "expected MissingFile error with HARES_STRICT_DEFAULTS, got: {result:?}"
+            "expected MissingFile error with strict defaults, got: {result:?}"
         );
     }
 
@@ -4222,6 +4265,98 @@ Setpoint,T_set,60.0,degC
 
         let store = DefaultsStore::load(dir.path()).expect("load defaults");
         // 2 malformed rows skipped → 48 valid entries → fewer than 50 → None.
+        assert!(store.ev_mapping().is_none());
+    }
+
+    #[test]
+    fn water_heating_csv_non_finite_values_are_skipped() {
+        // `str::parse::<f64>()` accepts "nan"/"inf": without the finiteness
+        // arm, a corrupt value would be stored and silently absorbed by
+        // every downstream comparison. It must be skipped like any other
+        // malformed row.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let wh_dir = dir.path().join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            r#"Description,Name,Value,Units
+Good_Row,GoodKey,42.0,units
+Nan_Row,NanKey,nan,units
+Inf_Row,InfKey,inf,units
+"#,
+        )
+        .unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let wh = store.water_heating_defaults().unwrap();
+        assert!(wh.get("GoodKey").is_some(), "finite row must load");
+        assert!(wh.get("NanKey").is_none(), "NaN row must be skipped");
+        assert!(wh.get("InfKey").is_none(), "infinite row must be skipped");
+    }
+
+    #[test]
+    fn vehicle_mapping_csv_non_finite_values_are_skipped() {
+        // Same finiteness arm on the EV mapping numeric fields: "nan"
+        // parses as f64, so a corrupt capacity/charger/efficiency must be
+        // rejected explicitly rather than stored.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+        let ev_dir = dir.path().join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+
+        let mut csv_content = String::from(
+            "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+        );
+        for i in 1..=50 {
+            if i == 25 {
+                csv_content.push_str("Vehicle 25,MY2030_BEV_SUV,pdf_Veh1,nan,10.26,0.9\n");
+            } else if i == 26 {
+                csv_content.push_str("Vehicle 26,MY2030_BEV_SUV,pdf_Veh2,117.6,10.26,inf\n");
+            } else {
+                let vtype = if i >= 36 {
+                    "MY2030_PHEV_SUV"
+                } else {
+                    "MY2030_BEV_SUV"
+                };
+                let cap = if i >= 36 { "14.8" } else { "117.6" };
+                let chg = if i >= 36 { "7.2" } else { "10.26" };
+                csv_content.push_str(&format!(
+                    "Vehicle {i},{vtype},pdf_Veh{},{cap},{chg},0.9\n",
+                    ((i - 1) % 4) + 1
+                ));
+            }
+        }
+        std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        // 2 non-finite rows skipped → 48 valid entries → fewer than 50 → None.
         assert!(store.ev_mapping().is_none());
     }
 

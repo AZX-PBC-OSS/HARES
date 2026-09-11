@@ -55,7 +55,7 @@ pub struct ElectricFurnace {
     /// Rule R1 reactive-only ZIP for the resistance element (class default
     /// pf 1.0 → Q exactly zero, or a user `"zip"` override). Real power
     /// stays bit-identical.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     /// Blower fan motor component ZIP (pf 0.87), derived at init via
     /// `hvac::reactive::secondary_motor_zip`.
     fan_zip: hares_types::zip::ZipLoad,
@@ -84,7 +84,7 @@ pub struct GasFurnace {
     dr_level: DRLevel,
     /// Rule R1 reactive-only ZIP: blower fan motor pf 0.87;
     /// Q comes from ZipLoad::reactive_kvar.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -150,7 +150,9 @@ impl ElectricFurnace {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             fan_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }
@@ -395,7 +397,7 @@ impl Equipment for ElectricFurnace {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -526,7 +528,9 @@ impl GasFurnace {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
         }
     }
 }
@@ -786,7 +790,7 @@ impl Equipment for GasFurnace {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

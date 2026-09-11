@@ -24,7 +24,7 @@ use crate::schedule_helpers::{
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-use hares_types::zip::ZipLoad;
+use hares_types::zip::{ResolvedZip, ZipLoad};
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
@@ -79,6 +79,58 @@ fn extract_events_from_kw_series(kw_series: &[f64]) -> Vec<ExtractedEvent> {
         }
     }
     events
+}
+
+/// Expected mean power [kW] of a deterministic event-replay load: total
+/// event energy divided by the schedule length. `None` when no kW series
+/// was extracted (stochastic event scheduling has no static expectation).
+///
+/// `month_multipliers` is the runtime channel `update_outputs` applies on
+/// top of every replay draw. It changes what is computable without
+/// timestamps: a uniform scale (all twelve equal, including the all-zero
+/// and all-identity cases) scales the series mean exactly, but a *partial*
+/// scale (multipliers differing by month) makes the honest expectation
+/// depend on which month each replay step falls in — unknowable from the
+/// series alone — so the expectation is `None` ("not computable without
+/// simulation") rather than the unscaled mean the premise aggregation
+/// would use as this equipment's weight.
+fn expected_event_mean_power_kw(
+    events: &[ExtractedEvent],
+    schedule_len: usize,
+    month_multipliers: Option<[f64; 12]>,
+) -> Option<crate::ExpectedMeanPower> {
+    if schedule_len == 0 {
+        return None;
+    }
+    let energy_over_schedule = events
+        .iter()
+        .map(|e| e.power_kw * (e.end_step - e.start_step) as f64)
+        .sum::<f64>();
+    let unscaled = energy_over_schedule / schedule_len as f64;
+    let scaled = match month_multipliers {
+        None => unscaled,
+        Some(m) => {
+            let (min, max) = m
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(*v), hi.max(*v))
+                });
+            if (max - min).abs() < 1e-12 {
+                // Uniform across months: the scale applies to every replay
+                // step equally, so the mean scales exactly (all-zero → 0).
+                unscaled * min
+            } else {
+                // Partial seasonal scaling: which month each replay step
+                // falls in is not derivable from the series.
+                return None;
+            }
+        }
+    };
+    if scaled.is_finite() {
+        Some(crate::ExpectedMeanPower::Kw(scaled))
+    } else {
+        None
+    }
 }
 
 const PHASE_POWER_PREFIX_A: &str = "phase_";
@@ -200,9 +252,10 @@ pub struct EventBasedLoad {
     schedule_len: usize,
 
     /// Full ZIP model (real + reactive) resolved via
-    /// [`crate::config::resolve_zip`]. `ZipLoad::constant_power()` (the
-    /// pf = 0 sentinel) when the class has no ZIP configured.
-    zip: ZipLoad,
+    /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
+    /// scales the event draw at the bus voltage). `ZipLoad::constant_power()`
+    /// (the pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ResolvedZip,
 }
 
 /// Multi-phase wet appliance cycle with stochastic starts.
@@ -247,9 +300,10 @@ pub struct WetAppliance {
     schedule_len: usize,
 
     /// Full ZIP model (real + reactive) resolved via
-    /// [`crate::config::resolve_zip`]. `ZipLoad::constant_power()` (the
-    /// pf = 0 sentinel) when the class has no ZIP configured.
-    zip: ZipLoad,
+    /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
+    /// scales the event draw at the bus voltage). `ZipLoad::constant_power()`
+    /// (the pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ResolvedZip,
 }
 
 impl EventBasedLoad {
@@ -301,7 +355,7 @@ impl EventBasedLoad {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
-            zip: ZipLoad::constant_power(),
+            zip: ResolvedZip::governing(ZipLoad::constant_power()),
         }
     }
 
@@ -600,7 +654,7 @@ impl Equipment for EventBasedLoad {
             "resolved ZIP coefficients",
         );
 
-        self.month_multipliers = parse_month_multipliers(config);
+        self.month_multipliers = parse_month_multipliers(config)?;
 
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
@@ -741,8 +795,16 @@ impl Equipment for EventBasedLoad {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+        expected_event_mean_power_kw(
+            &self.extracted_events,
+            self.schedule_len,
+            self.month_multipliers,
+        )
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -909,7 +971,7 @@ impl WetAppliance {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
-            zip: ZipLoad::constant_power(),
+            zip: ResolvedZip::governing(ZipLoad::constant_power()),
         }
     }
 
@@ -1260,7 +1322,7 @@ impl Equipment for WetAppliance {
             "resolved ZIP coefficients",
         );
 
-        self.month_multipliers = parse_month_multipliers(config);
+        self.month_multipliers = parse_month_multipliers(config)?;
 
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
@@ -1429,8 +1491,16 @@ impl Equipment for WetAppliance {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+        expected_event_mean_power_kw(
+            &self.extracted_events,
+            self.schedule_len,
+            self.month_multipliers,
+        )
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1965,7 +2035,9 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use super::{EventBasedLoad, WetAppliance, ZipLoad, map_ochre_pdf_to_cycle_schedule};
+    use super::{
+        EventBasedLoad, ResolvedZip, WetAppliance, ZipLoad, map_ochre_pdf_to_cycle_schedule,
+    };
 
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
@@ -2917,6 +2989,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expected_mean_power_is_zero_when_every_month_is_zeroed() {
+        // Deterministic replay of a kW series plus month multipliers that
+        // zero every month: the equipment's step-time draw is
+        // `base_kw * load_fraction * month_scale` with month_scale = 0 in
+        // all twelve months, so it draws nothing year-round (the step-side
+        // zeroing is pinned by month_multiplier_zero_suppresses_event_output
+        // and wet_appliance_month_multiplier_zero_suppresses_output above).
+        // The published expectation must describe that same load: zero, or
+        // an explicit "not computable". The unscaled series mean (event
+        // energy / schedule length) is a positive draw the equipment can
+        // never take, and the premise aggregation would use it as this
+        // equipment's weight. All-zero multipliers are chosen because the
+        // honest value is computable without timestamps; with partial
+        // multipliers the expectation depends on which month each replay
+        // step falls in, which the equipment cannot know.
+        let mut config = event_config("Zeroed Season Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            extras.insert(format!("month_multiplier_{month}"), 0.0.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        match eq.expected_mean_power_kw() {
+            None => {}
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                kw.abs() < 1e-12,
+                "a load zeroed in every month has zero expected draw, got {kw}"
+            ),
+            other => panic!("unexpected expected-mean shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uniform_month_multipliers_scale_the_published_expectation_exactly() {
+        // A uniform multiplier applies to every replay step equally, so the
+        // expected mean scales exactly: series [0, 2, 4, 0] kW has mean 1.5
+        // kW, and a uniform 0.5 month scale halves every step's draw, so
+        // the honest expectation is 0.75 kW — not the unscaled 1.5 kW the
+        // premise aggregate would otherwise use as this equipment's weight.
+        let mut config = event_config("Half Year Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            extras.insert(format!("month_multiplier_{month}"), 0.5.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                (kw - 0.75).abs() < 1e-12,
+                "uniform 0.5 month scale must halve the expected mean, got {kw}"
+            ),
+            other => panic!("a uniformly scaled load has a computable expectation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_month_multipliers_are_honestly_not_computable() {
+        // With multipliers that vary by month, the expected mean depends on
+        // which month each replay step falls in — not derivable from the kW
+        // series alone. The honest answer is "not computable" (`None`),
+        // never an unscaled or naively scaled mean presented as a weight.
+        let mut config = event_config("Shoulder Season Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            let multiplier = if month == 11 { 1.0 } else { 0.0 };
+            extras.insert(format!("month_multiplier_{month}"), multiplier.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq.expected_mean_power_kw(),
+            None,
+            "partial month multipliers make the expectation unknowable \
+             without simulation; it must be None, not a guessed weight"
+        );
+    }
+
     // =======================================================================
     // EventDelay control signal tests
     // =======================================================================
@@ -3784,7 +3952,7 @@ mod tests {
 
         assert_eq!(
             eq.zip,
-            ZipLoad::constant_power(),
+            ResolvedZip::governing(ZipLoad::constant_power()),
             "EventBasedLoad 'EventBasedLoad' should have no type-specific ZIP coefficients"
         );
 

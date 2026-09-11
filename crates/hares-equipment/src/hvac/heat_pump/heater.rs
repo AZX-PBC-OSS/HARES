@@ -198,7 +198,7 @@ struct HeatPumpHeaterCore {
     /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`). ER
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     /// Indoor blower / outdoor fan motor component ZIP (pf 0.87), derived at
     /// init via `hvac::reactive::secondary_motor_zip`.
     fan_zip: hares_types::zip::ZipLoad,
@@ -436,7 +436,7 @@ impl Equipment for HeatPumpHeaterCore {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the heat-pump compressor (class default pf 0.84,
         // or a user "zip" override). Fan/loop-pump component ZIPs are
         // secondary; ER backup/defrost elements are resistive (Q ≡ 0).
@@ -665,7 +665,9 @@ impl HeatPumpHeaterCore {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             zone_id_explicit,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             fan_zip: hares_types::zip::ZipLoad::constant_power(),
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
         }
