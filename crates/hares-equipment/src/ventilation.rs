@@ -18,7 +18,7 @@ use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
 use hares_physics::units::power_w_to_kw;
-use hares_types::zip::ZipLoad;
+use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -309,7 +309,7 @@ pub struct Ventilation {
     core_output: CoreOutput,
     /// Rule R1 reactive-only ZIP: real power stays bit-identical;
     /// Q comes from ZipLoad::reactive_kvar. Ventilation fan pf 0.87.
-    zip: ZipLoad,
+    zip: ResolvedZip,
 
     ventilation_type: VentilationType,
     zone_id: ZoneId,
@@ -408,7 +408,7 @@ impl Ventilation {
             ports,
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
-            zip: ZipLoad::constant_power(),
+            zip: ResolvedZip::reactive_only(ZipLoad::constant_power()),
             ventilation_type,
             zone_id,
             // Default type is HRV (balanced): pre-init split is 25 W / 25 W.
@@ -895,7 +895,7 @@ impl Equipment for Ventilation {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         Some(self.zip)
     }
 

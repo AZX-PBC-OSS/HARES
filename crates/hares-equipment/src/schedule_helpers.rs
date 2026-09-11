@@ -173,15 +173,75 @@ fn typed_f64(config: &EquipmentConfig, key: &str) -> Option<f64> {
 
 /// Parse per-month scale factors from config keys `month_multiplier_0` through
 /// `month_multiplier_11`. Returns `None` when no multiplier keys are present.
-pub(crate) fn parse_month_multipliers(config: &EquipmentConfig) -> Option<[f64; 12]> {
+/// Non-finite values are rejected: `f64::max` would silently drop a NaN
+/// operand and zero the month (a load quietly off for that month), the
+/// same silent-absorption class every other schedule-data channel rejects
+/// at its boundary.
+pub(crate) fn parse_month_multipliers(
+    config: &EquipmentConfig,
+) -> Result<Option<[f64; 12]>, HaresError> {
     let mut found_any = false;
     let mut multipliers = [1.0_f64; 12];
     for (month, slot) in multipliers.iter_mut().enumerate() {
         let key = format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}");
         if let Some(val) = config.get_f64(&key) {
+            if !val.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "month multiplier {key} is non-finite ({val}); \
+                     month multipliers must be finite"
+                )));
+            }
             *slot = val.max(0.0);
             found_any = true;
         }
     }
-    found_any.then_some(multipliers)
+    Ok(found_any.then_some(multipliers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config_with_month_multiplier(month: usize, value: f64) -> EquipmentConfig {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert(
+            format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}"),
+            value.into(),
+        );
+        EquipmentConfig::raw("test".to_string(), "Test".to_string(), raw)
+    }
+
+    #[test]
+    fn non_finite_month_multipliers_are_rejected_naming_the_key() {
+        // `val.max(0.0)` would silently drop a NaN operand and zero the
+        // month — a load quietly off for that month with no signal, the
+        // same silent-absorption class every other schedule-data channel
+        // rejects at its boundary. Both NaN and ±inf must fail, and the
+        // error must name the offending key.
+        for (month, value) in [(3, f64::NAN), (0, f64::INFINITY), (11, f64::NEG_INFINITY)] {
+            let config = config_with_month_multiplier(month, value);
+            let err = parse_month_multipliers(&config)
+                .expect_err("non-finite month multiplier must be rejected");
+            let key = format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}");
+            assert!(
+                err.to_string().contains(&key),
+                "error must name the offending key {key:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_month_multipliers_are_none_and_finite_ones_parse() {
+        let empty = EquipmentConfig::raw("test".to_string(), "Test".to_string(), HashMap::new());
+        assert_eq!(parse_month_multipliers(&empty).unwrap(), None);
+
+        let config = config_with_month_multiplier(6, 0.5);
+        let parsed = parse_month_multipliers(&config)
+            .unwrap()
+            .expect("one key present → Some");
+        assert_eq!(parsed[6], 0.5);
+        assert!(parsed[..6].iter().all(|v| *v == 1.0));
+        assert!(parsed[7..].iter().all(|v| *v == 1.0));
+    }
 }

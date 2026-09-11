@@ -108,10 +108,10 @@ impl ParityFixture {
     }
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Time-axis alignment against the OCHRE reference. Reference parquets are
+/// optional parity data: the test skips when a fixture's reference has not
+/// been checked in, and compares for real when it has.
 #[test]
-#[should_panic(expected = "reference parquet time axis must be readable")]
 fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
     let dwelling_config = build_dwelling_config(&fixture);
@@ -119,9 +119,12 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let expected_start_time = dwelling_config.sim_config.start_time;
 
     let actual_time = simulate_fixture_timestamps(dwelling_config);
-    let reference_time =
-        read_reference_time_axis_local(&fixture.reference_output_parquet(), local_offset)
-            .expect("reference parquet time axis must be readable");
+    let Some(reference_time) = reference_or_skip(
+        &fixture,
+        read_reference_time_axis_local(&fixture.reference_output_parquet(), local_offset),
+    ) else {
+        return;
+    };
     assert_eq!(
         actual_time.len(),
         reference_time.len(),
@@ -150,10 +153,9 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     }
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Peak HVAC power against the OCHRE reference (skips when the fixture's
+/// reference parquet has not been checked in).
 #[test]
-#[should_panic(expected = "reference parquet must be readable")]
 fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     // HARES implements simultaneous HP+ER (dual-fuel) operation per EnergyPlus
     // physics. At extreme cold (≈ -16.6°C OAT in this fixture) the backup ER
@@ -169,8 +171,12 @@ fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     // Full HP+ER upper bound (at worst COP ≈ 1): 11.8 + 37.6 ≈ 49.4 kW.
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
     let actual = run_fixture_to_columns(&fixture);
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
+    let Some(reference) = reference_or_skip(
+        &fixture,
+        read_parquet_columns(&fixture.reference_output_parquet()),
+    ) else {
+        return;
+    };
 
     let actual_peak = peak_hvac_power(&actual).expect("actual HVAC peak power missing");
     let reference_peak = peak_hvac_power(&reference).expect("reference HVAC peak power missing");
@@ -245,15 +251,18 @@ fn ochre_ashp_fixture_runtime_state_columns_are_populated() {
     // No assertion failure when COP is zero -- ER-only mode is valid.
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Envelope routing and boundary observability against the OCHRE reference
+/// (skips when the fixture's reference parquet has not been checked in).
 #[test]
-#[should_panic(expected = "reference parquet must be readable")]
 fn ochre_ashp_fixture_envelope_routes_and_boundary_observability_align() {
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
     let actual = run_fixture_to_columns_with_verbosity(&fixture, Some(7));
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
+    let Some(reference) = reference_or_skip(
+        &fixture,
+        read_parquet_columns(&fixture.reference_output_parquet()),
+    ) else {
+        return;
+    };
 
     for column in [
         "Temperature - Ground (C)",
@@ -1052,6 +1061,23 @@ fn parse_simulation_config(
     }
 
     SimulationConfig::from_toml(contents).map_err(|err| format!("simulation config invalid: {err}"))
+}
+
+/// Unwrap a reference-parquet read, skipping the calling test (with a
+/// logged reason) when the fixture's reference has not been checked in.
+/// Reference parquets are optional parity data: an absent reference is a
+/// skip, a present one is compared for real.
+fn reference_or_skip<T>(fixture: &ParityFixture, result: Result<T, String>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(err) => {
+            eprintln!(
+                "[alignment-oracle] skipping {}: reference parquet unreadable: {err}",
+                fixture.id
+            );
+            None
+        }
+    }
 }
 
 fn read_parquet_columns(path: &Path) -> Result<BTreeMap<String, Vec<f64>>, String> {

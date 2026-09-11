@@ -1576,14 +1576,12 @@ mod tests {
     where
         F: for<'py> FnOnce(Python<'py>),
     {
-        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
-        // guards against double-initialisation race conditions.
-        unsafe {
-            pyo3::ffi::Py_Initialize();
-        }
-        // SAFETY: interpreter is now initialised.
-        let py = unsafe { Python::assume_attached() };
-        f(py);
+        // Python::attach initialises the interpreter exactly once,
+        // thread-safely (auto-initialize feature) — the crate's production
+        // pattern. Raw Py_Initialize() is fatal when two parallel test
+        // threads initialise concurrently (CPython 3.13: "_PyImport_Init:
+        // global import state already initialized").
+        Python::attach(f);
     }
 
     #[test]

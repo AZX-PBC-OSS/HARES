@@ -50,7 +50,7 @@ pub struct ElectricBaseboard {
     dr_level: DRLevel,
     /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
     /// Q exactly zero, real power stays bit-identical.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,7 +110,9 @@ impl ElectricBaseboard {
             zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
         }
     }
 }
@@ -263,7 +265,7 @@ impl Equipment for ElectricBaseboard {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

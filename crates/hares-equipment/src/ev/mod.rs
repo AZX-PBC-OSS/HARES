@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset, Timelike};
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
-use hares_types::zip::ZipLoad;
+use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingPriority, ChargingStrategy, ControlCapabilities,
     ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel,
@@ -1359,11 +1359,18 @@ impl Equipment for Ev {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         // Live runtime state: constant-power reactive-only ZIP carrying the
         // current effective power factor (config baseline, later mutated by
         // PowerFactorSetpoint) — mirrors `compute_reactive_kvar`'s baseline.
-        Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor))
+        // Real power is charging-strategy-controlled, never ZIP-scaled, so
+        // the resolved regime is reactive-only.
+        Some(ResolvedZip::reactive_only(ZipLoad::reactive_only(
+            0.0,
+            0.0,
+            1.0,
+            self.power_factor,
+        )))
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {

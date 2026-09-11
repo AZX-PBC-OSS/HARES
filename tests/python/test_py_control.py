@@ -25,9 +25,14 @@ class TestControlSignalConstructors:
         assert sig.to_dict()["active_power_kw"] == 1.5
         assert "PowerSetpoint" in repr(sig)
 
-    def test_power_setpoint_rejects_negative_kw(self):
+    def test_power_setpoint_accepts_negative_discharge(self):
+        # Signed per the core contract: negative = discharge (V2G/V2H).
+        sig = ControlSignal.power_setpoint(-1.0)
+        assert sig.to_dict()["active_power_kw"] == -1.0
+
+    def test_power_setpoint_rejects_nan(self):
         with pytest.raises(ValueError):
-            ControlSignal.power_setpoint(-1.0)
+            ControlSignal.power_setpoint(float("nan"))
 
     def test_power_setpoint_accepts_zero_and_positive(self):
         sig = ControlSignal.power_setpoint(0.0)
@@ -546,7 +551,8 @@ class TestControlSignalFromDict:
     def test_from_dict_rejects_invalid_values(self):
         """from_dict raises ValueError for out-of-range numeric fields."""
         invalid_cases = [
-            {"type": "PowerSetpoint", "active_power_kw": -1.0},
+            # PowerSetpoint is signed (negative = discharge) and therefore
+            # not an invalid case.
             {"type": "PowerLimit", "max_power_kw": -1.0},
             {"type": "SOCTarget", "target_soc": 1.5},
             {"type": "SOCTarget", "target_soc": -0.1},

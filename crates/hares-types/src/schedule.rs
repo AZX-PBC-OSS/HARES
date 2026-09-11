@@ -582,7 +582,26 @@ impl PartialEq for ScheduleSource {
 
 impl ScheduleSource {
     /// Resolve the current value from this source.
+    ///
+    /// Non-finite values (NaN/±inf) are rejected: every consumer of
+    /// schedule data compares or accumulates the value, and a NaN silently
+    /// falls out of `> 0.0` comparisons as "no load" — corrupted input
+    /// under-reporting consumption with no signal. Rejecting here closes
+    /// the class for every source kind and every consumer at once.
     pub fn value_at(&mut self, env: &EnvironmentState) -> Result<f64, HaresError> {
+        let value = self.value_at_raw(env)?;
+        if !value.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "schedule source produced a non-finite value ({value}); \
+                 schedule data is corrupt"
+            )));
+        }
+        Ok(value)
+    }
+
+    /// Per-source-kind resolution, before the finiteness guard in
+    /// [`ScheduleSource::value_at`].
+    fn value_at_raw(&mut self, env: &EnvironmentState) -> Result<f64, HaresError> {
         match self {
             Self::Constant(v) => Ok(*v),
             Self::DailyProfile {
@@ -1174,6 +1193,25 @@ mod tests {
             source.value_at(&env).expect("constant should resolve"),
             7.25
         );
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected_not_silently_absorbed() {
+        // Every consumer compares or accumulates the resolved value; NaN
+        // falls out of `> 0.0` comparisons as "no load", silently
+        // under-reporting consumption. The guard must reject NaN and ±inf
+        // for every source kind at the shared funnel.
+        let env = default_env();
+        for corrupt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut source = ScheduleSource::Constant(corrupt);
+            let err = source
+                .value_at(&env)
+                .expect_err("non-finite schedule value must be rejected");
+            assert!(
+                err.to_string().contains("non-finite"),
+                "error must name the defect, got: {err}"
+            );
+        }
     }
 
     #[test]

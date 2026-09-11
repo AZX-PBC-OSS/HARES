@@ -619,7 +619,8 @@ mod tests {
         // (pf = 0 sentinel, zero reactive).
         let cfg = base_config();
         let zip = resolve_reactive_zip(&cfg).expect("constant power fallback");
-        assert_eq!(zip, hares_types::zip::ZipLoad::constant_power());
+        assert_eq!(zip.zip, hares_types::zip::ZipLoad::constant_power());
+        assert!(!zip.real_power_zip_applies);
 
         // A production class name resolves the literature row.
         let mut cfg = base_config();
@@ -627,6 +628,7 @@ mod tests {
         let zip = resolve_reactive_zip(&cfg).expect("HPWH class row");
         assert_eq!(zip.pf, 0.97);
         assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+        assert!(!zip.real_power_zip_applies);
         let class_row =
             hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
         assert_eq!(

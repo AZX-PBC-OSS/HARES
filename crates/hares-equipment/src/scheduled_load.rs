@@ -96,8 +96,9 @@ pub struct ScheduledLoad {
     latent_gain_fraction: f64,
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`]; scheduled loads keep the full
-    /// voltage-dependent real-power polynomial (OCHRE parity).
-    zip: hares_types::zip::ZipLoad,
+    /// voltage-dependent real-power polynomial (OCHRE parity), so the
+    /// resolved regime is governing.
+    zip: hares_types::zip::ResolvedZip,
     /// Per-month scale factors [0..11] applied after load_fraction.
     // OCHRE ScheduledLoad.py:38-41: month_multipliers zeros schedule in specified months.
     // Used for seasonal equipment like ceiling fans (zero in winter months).
@@ -198,8 +199,10 @@ impl ScheduledLoad {
             sensible_gain_fraction: 0.0,
             radiant_gain_fraction: 0.0,
             latent_gain_fraction: 0.0,
-            zip: hares_types::zip::zip_defaults_for_class(equipment_type)
-                .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
+            zip: hares_types::zip::ResolvedZip::governing(
+                hares_types::zip::zip_defaults_for_class(equipment_type)
+                    .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
+            ),
             month_multipliers: None,
             last_non_zero_power_kw: 0.0,
             last_non_zero_gas_w: 0.0,
@@ -377,7 +380,7 @@ impl ScheduledLoad {
             pf = self.zip.pf,
             "resolved ZIP coefficients",
         );
-        self.month_multipliers = parse_month_multipliers(config);
+        self.month_multipliers = parse_month_multipliers(config)?;
         if matches!(self.power_source, ScheduleSource::DailyProfile { .. }) {
             // Month multipliers are already baked into the DailyProfile evaluation,
             // so clear runtime month multipliers to avoid double-scaling.
@@ -695,8 +698,73 @@ impl Equipment for ScheduledLoad {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+        // Gas-only loads draw no real electric power (the electric schedule
+        // is all zeros), so their expected electric draw is exactly zero
+        // rather than schedule-deferred.
+        if self.descriptor.fuel == FuelType::Gas {
+            return Some(crate::ExpectedMeanPower::Kw(0.0));
+        }
+        match &self.power_source {
+            ScheduleSource::ColumnRef { col_idx, .. } => {
+                // `step()` applies the runtime month multipliers to column
+                // draws identically to constant draws, so the published
+                // expectation must not contradict them. Production column
+                // sources carry no runtime multipliers — the resolve layer
+                // bakes monthly scaling into the generated column values
+                // — so the deferral is correct as-is. With runtime
+                // multipliers present: all-zeroed draws nothing year-round
+                // (zero); identity scaling changes nothing (deferral); any
+                // other configuration (uniform non-identity, partial,
+                // non-uniform) is honest over-degradation to `None` — the
+                // exact value (column mean × scale, or month-weighted for
+                // partial) is computable but not expressible in
+                // `ExpectedMeanPower`, and an unscaled deferral would
+                // weight the premise aggregate by a draw the equipment
+                // cannot take.
+                match self.month_multipliers {
+                    None => Some(crate::ExpectedMeanPower::ScheduleColumn(*col_idx)),
+                    Some(m) => {
+                        let all_zero = m.iter().all(|v| *v == 0.0);
+                        let all_one = m.iter().all(|v| *v == 1.0);
+                        if all_zero {
+                            Some(crate::ExpectedMeanPower::Kw(0.0))
+                        } else if all_one {
+                            Some(crate::ExpectedMeanPower::ScheduleColumn(*col_idx))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            source => {
+                let mean = source.mean();
+                // `step()` scales every draw by the runtime month
+                // multipliers (`raw * load_fraction * month_scale`), so the
+                // published expectation must describe the same load: the
+                // unscaled source mean would overstate a seasonal load's
+                // premise weight by the inverse of the mean multiplier.
+                // Equal-weight month averaging is the same convention
+                // `ScheduleSource::mean()` uses for DailyProfile months.
+                let month_scale_mean = self
+                    .month_multipliers
+                    .map(|m| m.iter().sum::<f64>() / 12.0)
+                    .unwrap_or(1.0);
+                let mean = mean * month_scale_mean;
+                // `ScheduleSource::mean()` has no finiteness guard (it is
+                // used for planning hints, not stepping); a non-finite mean
+                // must not be published as a weight-looking `Some` value.
+                if mean.is_finite() {
+                    Some(crate::ExpectedMeanPower::Kw(mean))
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1269,7 +1337,7 @@ mod tests {
 
     use hares_types::telemetry_keys as tk;
 
-    use hares_types::zip::ZipLoad;
+    use hares_types::zip::{ResolvedZip, ZipLoad};
 
     use super::{
         GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
@@ -2735,6 +2803,161 @@ mod tests {
     }
 
     #[test]
+    fn nan_schedule_value_must_not_degrade_to_silent_zero_draw() {
+        // A NaN schedule value is concretely reachable: the CSV loader
+        // (`hares-io/src/schedule.rs`) parses with `str::parse::<f64>()`,
+        // which accepts "nan", with no is_nan/is_finite check at that
+        // boundary. At the consumption site below, `raw_schedule_kw > 0.0`
+        // is false for NaN, so corrupted data silently becomes "no load" —
+        // the dwelling under-reports consumption with no signal to the
+        // caller, the same failure class the premise-ZIP NaN guard was
+        // added to eliminate. The honest degradation is an error or an
+        // explicit signal, not 0.0 kW indistinguishable from a real zero.
+        let config = config_with_schedule("s", "Lighting", &[f64::NAN]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let result = eq.step(&env, Duration::from_secs(900), &mut ports);
+        assert!(
+            result.is_err(),
+            "a NaN schedule value must surface as an error, not a silent 0.0 kW draw"
+        );
+    }
+
+    #[test]
+    fn column_sourced_load_with_zeroed_months_must_not_publish_unscaled_column_weight() {
+        // `step()` scales every draw by the runtime month multipliers
+        // (`raw * load_fraction * month_scale`) regardless of whether the
+        // power source is a constant or a schedule column. The constant
+        // arm of `expected_mean_power_kw` scales its published expectation
+        // by the mean multiplier; the column arm defers to
+        // `ExpectedMeanPower::ScheduleColumn`, whose premise weight is the
+        // *unscaled* column mean — the same published-expectation vs step
+        // contradiction on the other arm of the same method. With all
+        // twelve months zeroed the equipment draws nothing year-round, so
+        // the honest publication is zero or an explicit "not computable",
+        // never a deferral the premise aggregation weights by a draw the
+        // equipment can never take.
+        let mut extras: Vec<(String, crate::config::ConfigValue)> = vec![
+            (KEY_POWER_SCHEDULE_SOURCE.to_string(), "column".into()),
+            (KEY_POWER_SCHEDULE_COL.to_string(), 1.0.into()),
+            (KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into()),
+        ];
+        for month in 0..12 {
+            extras.push((format!("month_multiplier_{month}"), 0.0.into()));
+        }
+        let extras_ref: Vec<(&str, crate::config::ConfigValue)> = extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let config = config_with_extras("Seasonal Pump", "Seasonal Pump", &[0.0], &extras_ref);
+        let mut eq =
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Seasonal Pump");
+        let mut env = base_env();
+        env.custom_domains.push(DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: vec![],
+            custom_payload: Some(vec![2.5, 7.25]),
+        });
+        eq.init(&config, &env).unwrap();
+
+        // Ground the equipment's own model: month zeroing applies to the
+        // column draw exactly as it does to a constant.
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "every month is zeroed; the column draw must be suppressed"
+        );
+
+        match eq.expected_mean_power_kw() {
+            None => {}
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                kw.abs() < 1e-12,
+                "a load zeroed in every month has zero expected draw, got {kw}"
+            ),
+            other => panic!(
+                "a zeroed column-sourced load must not defer its unscaled \
+                 column mean to the premise aggregate, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn column_sourced_load_with_identity_month_multipliers_keeps_column_deferral() {
+        // Identity multipliers change nothing at step, so the column
+        // deferral remains the honest expectation — the premise aggregate
+        // weights the load by the column mean, which is what it draws.
+        let mut extras: Vec<(String, crate::config::ConfigValue)> = vec![
+            (KEY_POWER_SCHEDULE_SOURCE.to_string(), "column".into()),
+            (KEY_POWER_SCHEDULE_COL.to_string(), 1.0.into()),
+            (KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into()),
+        ];
+        for month in 0..12 {
+            extras.push((format!("month_multiplier_{month}"), 1.0.into()));
+        }
+        let extras_ref: Vec<(&str, crate::config::ConfigValue)> = extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let config = config_with_extras("Lighting", "Lighting", &[0.0], &extras_ref);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::ScheduleColumn(1)) => {}
+            other => panic!(
+                "identity multipliers change no draw; the column deferral \
+                 must be preserved, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn column_sourced_load_with_partial_month_multipliers_is_not_computable() {
+        // With multipliers that vary by month, the expected mean depends on
+        // which month each column step falls in — not derivable without
+        // simulation. The honest answer is `None`, never an unscaled
+        // deferral the premise aggregate would weight by a draw the
+        // equipment does not take at that weight.
+        let mut extras: Vec<(String, crate::config::ConfigValue)> = vec![
+            (KEY_POWER_SCHEDULE_SOURCE.to_string(), "column".into()),
+            (KEY_POWER_SCHEDULE_COL.to_string(), 1.0.into()),
+            (KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into()),
+        ];
+        for month in 0..12 {
+            let multiplier = if month == 11 { 1.0 } else { 0.0 };
+            extras.push((format!("month_multiplier_{month}"), multiplier.into()));
+        }
+        let extras_ref: Vec<(&str, crate::config::ConfigValue)> = extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let config = config_with_extras("Shoulder Pump", "Seasonal Pump", &[0.0], &extras_ref);
+        let mut eq =
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Shoulder Pump");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq.expected_mean_power_kw(),
+            None,
+            "partial month multipliers make a column load's expectation \
+             unknowable without simulation; it must be None"
+        );
+    }
+
+    #[test]
     fn load_fraction_negative_is_clamped_to_zero() {
         let config = config_with_schedule("s", "Lighting", &[2.0]);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -2751,6 +2974,109 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(ports.electrical.net_active_w(), 0.0);
+    }
+
+    #[test]
+    fn non_finite_month_multiplier_fails_loudly_at_init() {
+        // `parse_month_multipliers` previously clamped with `val.max(0.0)`,
+        // which drops a NaN operand: a `nan` month multiplier silently
+        // zeroed that month's draw — the load quietly off for a month with
+        // no signal, the same silent-absorption class every other
+        // schedule-data channel rejects at its boundary. The shared parse
+        // site (scheduled + event loads) must error at init, naming the key.
+        let mut extras: Vec<(String, crate::config::ConfigValue)> =
+            vec![(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into())];
+        extras.push((
+            "month_multiplier_3".to_string(),
+            crate::config::ConfigValue::Float(f64::NAN),
+        ));
+        let extras_ref: Vec<(&str, crate::config::ConfigValue)> = extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let config = config_with_extras("Seasonal Pump", "Seasonal Pump", &[2.0], &extras_ref);
+        let mut eq =
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Seasonal Pump");
+        let env = base_env();
+        let err = eq
+            .init(&config, &env)
+            .expect_err("a non-finite month multiplier must fail at init");
+        let message = err.to_string();
+        assert!(
+            message.contains("non-finite"),
+            "the rejection must name the defect, got: {message}"
+        );
+        assert!(
+            message.contains("month_multiplier_3"),
+            "the rejection must name the offending key, got: {message}"
+        );
+    }
+
+    #[test]
+    fn expected_mean_power_accounts_for_month_multipliers() {
+        // A load configured with runtime month multipliers draws
+        // `constant_kw * load_fraction * month_scale` each step (the
+        // scaling applied in `step()`), so its expected mean draw over a
+        // uniform year is the constant scaled by the mean of the twelve
+        // multipliers — the same convention `ScheduleSource::mean()` uses
+        // for DailyProfile month averaging. The premise-level aggregation
+        // weights equipment by `expected_mean_power_kw()`: publishing the
+        // unscaled constant overstates a seasonal load's weight by the
+        // inverse of the mean multiplier (12x here), silently skewing the
+        // published premise ZIP toward that equipment's coefficients.
+        let mut extras: Vec<(String, crate::config::ConfigValue)> =
+            vec![(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into())];
+        for month in 0..12 {
+            let multiplier = if month == 11 { 1.0 } else { 0.0 };
+            extras.push((format!("month_multiplier_{month}"), multiplier.into()));
+        }
+        let extras_ref: Vec<(&str, crate::config::ConfigValue)> = extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let config = config_with_extras("Seasonal Pump", "Seasonal Pump", &[2.0], &extras_ref);
+        let mut eq =
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Seasonal Pump");
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        // Ground the equipment's own model: the same 2 kW constant load
+        // draws nothing in March (month_multiplier_2 = 0) and 2 kW in
+        // December (month_multiplier_11 = 1).
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "March is zeroed by month_multiplier_2 = 0"
+        );
+        env.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 12, 18, 0, 0, 0)
+            .single()
+            .expect("valid UTC timestamp");
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(ports.electrical.net_active_w(), 2000.0);
+
+        // The published expectation must describe that same load: 2 kW in
+        // one month of twelve is 2/12 kW on average, not 2 kW.
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                (kw - 2.0 / 12.0).abs() < 1e-12,
+                "expected mean must be the month-scaled average 2/12 kW, got {kw}"
+            ),
+            other => panic!(
+                "a month-scaled constant load has a computable expected draw, \
+                 got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -2831,7 +3157,7 @@ mod tests {
             hares_types::EndUse::PLUG_LOADS,
             "Custom Bench Load",
         );
-        assert_eq!(eq.zip, ZipLoad::constant_power());
+        assert_eq!(eq.zip, ResolvedZip::governing(ZipLoad::constant_power()));
     }
 
     #[test]

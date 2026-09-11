@@ -34,7 +34,7 @@ use hares_types::{
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
-    zip::ZipLoad,
+    zip::{ResolvedZip, ZipLoad},
 };
 use serde::{Deserialize, Serialize};
 
@@ -1370,11 +1370,13 @@ impl Equipment for PV {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         // Live runtime state: `zip_pf` carries the current effective
         // displacement power factor (config baseline, later mutated by
         // PowerFactorSetpoint) — exactly the ZIP the baseline Q path uses.
-        Some(self.zip_pf)
+        // Real power is the PV model's DC/AC conversion, never ZIP-scaled,
+        // so the resolved regime is reactive-only.
+        Some(ResolvedZip::reactive_only(self.zip_pf))
     }
 
     fn checkpoint_version() -> u32 {
@@ -1662,8 +1664,8 @@ mod tests {
         ArrayType, DEFAULT_GAMMA_PER_C, DEFAULT_INVERTER_EFFICIENCY, DEFAULT_NOCT_C,
         DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment, EquipmentConfig,
         ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV,
-        PVWATTS_SOILING_COMPONENT, PvArray, PvArraySpec, PvConfig, cell_temperature_noct_wind,
-        surface_id_for_orientation,
+        PVWATTS_SOILING_COMPONENT, PvArray, PvArraySpec, PvConfig, ResolvedZip,
+        cell_temperature_noct_wind, surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -2242,7 +2244,10 @@ mod tests {
             hares_types::zip::ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.9)
         );
         // The inspection surface agrees with the live Q path.
-        assert_eq!(restored.resolved_zip(), Some(restored.zip_pf));
+        assert_eq!(
+            restored.resolved_zip(),
+            Some(ResolvedZip::reactive_only(restored.zip_pf))
+        );
     }
 
     #[test]

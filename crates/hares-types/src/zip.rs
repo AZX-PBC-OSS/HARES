@@ -52,6 +52,141 @@ fn default_v0() -> f64 {
     1.0
 }
 
+/// A [`ZipLoad`] plus the regime it was resolved under: whether the
+/// real-power coefficients govern the equipment's real power, or are the
+/// Rule R1 structural pin with real power coming from elsewhere.
+///
+/// A bare `ZipLoad` cannot express this distinction: a Rule-R1 physics
+/// model (HVAC, water heaters, ventilation) publishes `(zp, ip, pp) =
+/// (0, 0, 1)` because its real power is computed by its own physics and
+/// must stay voltage-invariant, while a scheduled load can legitimately
+/// resolve to the *same* `(0, 0, 1)` as a real, governing model (unknown
+/// class → [`ZipLoad::constant_power`] fallback, or an explicit sidecar
+/// override). The coefficients alone are therefore ambiguous; the regime
+/// must travel with them.
+///
+/// Derefs to [`ZipLoad`] for field access and computation (`apply`,
+/// `reactive_kvar`), so equipment that stores a `ResolvedZip` reads exactly
+/// like one that stores a `ZipLoad`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedZip {
+    /// The ZIP coefficients.
+    pub zip: ZipLoad,
+    /// Whether `zip`'s real-power coefficients govern this equipment's real
+    /// power at the bus voltage. `false` means the real side is the Rule R1
+    /// pin: real power comes from the equipment's own physics (or a DER
+    /// controller) and only the reactive side of `zip` applies.
+    pub real_power_zip_applies: bool,
+}
+
+impl ResolvedZip {
+    /// A ZIP whose real-power coefficients govern the equipment's real
+    /// power (scheduled and event loads: the scheduled draw is scaled by
+    /// the real-power polynomial at the bus voltage each step).
+    #[must_use]
+    pub fn governing(zip: ZipLoad) -> Self {
+        Self {
+            zip,
+            real_power_zip_applies: true,
+        }
+    }
+
+    /// The Rule R1 regime: real power is computed by the equipment's own
+    /// physics (or a DER controller) and must stay voltage-invariant, so
+    /// only the reactive side of `zip` is used and the real side is pinned
+    /// to constant power `(0, 0, 1)` — the same pin
+    /// [`ZipLoad::reactive_only`] applies.
+    #[must_use]
+    pub fn reactive_only(zip: ZipLoad) -> Self {
+        Self {
+            zip: ZipLoad {
+                zp: 0.0,
+                ip: 0.0,
+                pp: 1.0,
+                ..zip
+            },
+            real_power_zip_applies: false,
+        }
+    }
+}
+
+/// Largest plausible ZIP coefficient magnitude. The literature table
+/// (`zip_defaults_for_class`) tops out near 28.6 (Refrigerator `iq`);
+/// 100 gives an order of magnitude of headroom while staying far below
+/// any overflow territory — a row whose products could overflow
+/// `f64::MAX` needs coefficients near 1e308, six orders past physics.
+pub const ZIP_COEFFICIENT_MAGNITUDE_MAX: f64 = 100.0;
+
+/// Plausible per-unit reference-voltage range. `v0` is the per-unit base
+/// the measured voltage is normalized against (`v / v0`); every literature
+/// row uses 1.0. [0.1, 10] admits references an order of magnitude off
+/// base while keeping the normalized band voltage (±5 % service band over
+/// `1 / v0`) bounded well away from overflow.
+pub const ZIP_V0_MIN: f64 = 0.1;
+pub const ZIP_V0_MAX: f64 = 10.0;
+
+/// Reject ZIP rows whose magnitudes cannot be physically meaningful,
+/// naming the offending field.
+///
+/// Coefficient sums and point probes cannot bound band behaviour: a row
+/// like `zp = 1.79e308, ip = -1.79e308, pp = 1.0` cancels to exactly 1.0
+/// at nominal voltage (passing sum checks and any single-voltage probe)
+/// yet produces `inf - inf = NaN` real power at 1.05 pu. Magnitude bounds
+/// make the overflow class unrepresentable instead of sampling it: with
+/// every coefficient within [`ZIP_COEFFICIENT_MAGNITUDE_MAX`] and `v0`
+/// within [`ZIP_V0_MIN`, `ZIP_V0_MAX`], the largest product across the ±5 %
+/// service band is ~1.2e21 (including the `tan(acos(pf))` bound just
+/// above the `1e-9` sentinel), far below `f64::MAX`.
+///
+/// `pf` is cos(phi) and lies in [-1, 1]: 0.0 stays the "no reactive"
+/// sentinel and negative values the capacitive sign convention. A finite
+/// pf outside the range passes every numeric guard yet clamps silently at
+/// every use (`tan(acos(clamp(pf)))` zeroes or sign-flips Q) while being
+/// published verbatim — a wrong config accepted without a signal.
+pub fn validate_plausible_magnitudes(zip: &ZipLoad) -> Result<(), String> {
+    let coefficients = [
+        ("zp", zip.zp),
+        ("ip", zip.ip),
+        ("pp", zip.pp),
+        ("zq", zip.zq),
+        ("iq", zip.iq),
+        ("pq", zip.pq),
+    ];
+    for (field, value) in coefficients {
+        if value.abs() > ZIP_COEFFICIENT_MAGNITUDE_MAX {
+            return Err(format!(
+                "ZIP coefficient {field} = {value} exceeds the plausible \
+                 magnitude {ZIP_COEFFICIENT_MAGNITUDE_MAX} (literature rows \
+                 top out near 28.6)"
+            ));
+        }
+    }
+    if zip.pf.abs() > 1.0 {
+        return Err(format!(
+            "ZIP power factor pf = {} is outside the physical [-1, 1] range \
+             (cos(phi); 0.0 is the no-reactive sentinel, negative values the \
+             capacitive sign convention)",
+            zip.pf
+        ));
+    }
+    if !(ZIP_V0_MIN..=ZIP_V0_MAX).contains(&zip.v0) {
+        return Err(format!(
+            "ZIP reference voltage v0 = {} is outside the plausible \
+             per-unit range [{ZIP_V0_MIN}, {ZIP_V0_MAX}] (literature rows \
+             use 1.0)",
+            zip.v0
+        ));
+    }
+    Ok(())
+}
+
+impl std::ops::Deref for ResolvedZip {
+    type Target = ZipLoad;
+    fn deref(&self) -> &ZipLoad {
+        &self.zip
+    }
+}
+
 impl Default for ZipLoad {
     fn default() -> Self {
         Self::constant_power()
@@ -607,6 +742,92 @@ mod tests {
             assert_eq!(real.to_bits(), 1.5_f64.to_bits());
             assert_eq!(reactive, 0.0);
         }
+    }
+
+    #[test]
+    fn governing_keeps_zip_and_declares_real_side_applicable() {
+        let zip = zip_defaults_for_class("Lighting").expect("row");
+        let resolved = super::ResolvedZip::governing(zip);
+        assert_eq!(resolved.zip, zip);
+        assert!(resolved.real_power_zip_applies);
+        // Deref: field and method access pass through to the coefficients.
+        assert_eq!(resolved.pf, zip.pf);
+        assert_eq!(resolved.apply(2.0, 1.0), zip.apply(2.0, 1.0));
+    }
+
+    #[test]
+    fn reactive_only_pins_real_side_and_declares_it_inapplicable() {
+        // Whatever the source ZIP says about the real side, the Rule R1
+        // constructor pins it to constant power.
+        let source = zip_defaults_for_class("Heat Pump Water Heater").expect("row");
+        let resolved = super::ResolvedZip::reactive_only(source);
+        assert!(!resolved.real_power_zip_applies);
+        assert_eq!((resolved.zp, resolved.ip, resolved.pp), (0.0, 0.0, 1.0));
+        // The reactive side survives unchanged.
+        assert_eq!(
+            (resolved.zq, resolved.iq, resolved.pq),
+            (source.zq, source.iq, source.pq)
+        );
+        assert_eq!(resolved.pf, source.pf);
+        // Real power is untouched at every voltage.
+        for &v in &[0.9, 1.0, 1.1] {
+            assert_eq!(resolved.apply(2.4, v).0.to_bits(), 2.4_f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn magnitude_bounds_reject_overflow_class_rows() {
+        use super::validate_plausible_magnitudes as validate;
+        // Near-maximum cancellation row: sums and point probes pass (the
+        // products cancel to exactly 1.0 at nominal) but `inf - inf` NaNs
+        // at 1.05 pu — the class the bounds exist to make unrepresentable.
+        let cancellation = ZipLoad {
+            zp: 1.79e308,
+            ip: -1.79e308,
+            pp: 1.0,
+            ..ZipLoad::constant_power()
+        };
+        let err = validate(&cancellation).expect_err("cancellation row must be rejected");
+        assert!(err.contains("zp"), "error must name the field, got: {err}");
+        // Tiny-v0 window (passes a nominal probe, overflows v_norm^2 at
+        // 1.05 pu) is closed by the v0 range.
+        for v0 in [1e-320_f64, 7.6e-155, 1e200] {
+            let zip = ZipLoad {
+                v0,
+                ..ZipLoad::constant_power()
+            };
+            let err = validate(&zip).expect_err("out-of-range v0 must be rejected");
+            assert!(err.contains("v0"), "error must name v0, got: {err}");
+        }
+    }
+
+    #[test]
+    fn magnitude_bounds_accept_every_literature_row() {
+        use super::validate_plausible_magnitudes as validate;
+        for name in ALL_CLASS_NAMES {
+            let zip = zip_defaults_for_class(name).expect("row");
+            validate(&zip).unwrap_or_else(|err| {
+                panic!("literature row {name} must pass the magnitude bounds: {err}")
+            });
+        }
+        // Sane non-default references stay accepted.
+        validate(&ZipLoad {
+            v0: 0.98,
+            ..zip_defaults_for_class("ASHP Heater").expect("row")
+        })
+        .expect("sane v0 must pass");
+    }
+
+    #[test]
+    fn regime_flag_is_not_derivable_from_coefficients() {
+        // The same (0, 0, 1) real side is a legitimate governing model (a
+        // scheduled load of unknown class falls back to constant power) and
+        // a Rule R1 pin — the flag, not the coefficients, carries which.
+        let governing = super::ResolvedZip::governing(ZipLoad::constant_power());
+        let pinned = super::ResolvedZip::reactive_only(ZipLoad::constant_power());
+        assert_eq!(governing.zip, pinned.zip);
+        assert!(governing.real_power_zip_applies);
+        assert!(!pinned.real_power_zip_applies);
     }
 
     #[test]

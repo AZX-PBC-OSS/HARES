@@ -181,7 +181,7 @@ pub struct HeatPumpWH {
     /// blended pf 0.97 (OCHRE lab value) applied to the total electric draw
     /// (compressor + backup element + fan/parasitic). Real power stays
     /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -316,7 +316,9 @@ impl HeatPumpWH {
             fluid_type: FluidType::Water,
             mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -1190,7 +1192,7 @@ impl Equipment for HeatPumpWH {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

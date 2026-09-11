@@ -753,6 +753,20 @@ fn merge_zip_override(
             }
         }
     }
+    // Magnitude bounds, not a point probe, at the override channel's
+    // earliest stage: a cancelling row (e.g. zp = 1.79e308, ip = -1.79e308)
+    // passes finiteness, the sum checks, and any single-voltage probe, but
+    // NaNs real power across the service band — and downstream, equipment
+    // init rejections for non-critical loads are deliberately
+    // skip-and-warn, so this boundary is where the typo must fail the
+    // build. Shared bounds live in `hares_types::zip` (single source of
+    // truth with the init backstop).
+    hares_types::zip::validate_plausible_magnitudes(&zip).map_err(|err| {
+        HaresError::Equipment(format!(
+            "equipment '{equipment_name}': \"zip\" \
+         override produced an implausible row: {err}"
+        ))
+    })?;
     Ok(Some(zip))
 }
 
@@ -1603,7 +1617,7 @@ mod tests {
         let cfg = equipment_config_from_spec(&spec);
         // The sidecar is the single ZIP channel.
         assert_eq!(cfg.zip, Some(base));
-        assert_eq!(hares_equipment::resolve_zip(&cfg), base);
+        assert_eq!(hares_equipment::resolve_zip(&cfg).zip, base);
         // No legacy zip_* keys anywhere in the raw payload.
         let raw = cfg.raw_data().expect("raw payload");
         assert!(

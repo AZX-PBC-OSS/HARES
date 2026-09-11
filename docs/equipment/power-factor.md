@@ -138,7 +138,7 @@ Resolved in `resolve_zip()` at `crates/hares-equipment/src/config.rs:411-416`:
 2. Class-table defaults via `zip_defaults_for_class(&config.ochre_class)`
 3. `ZipLoad::constant_power()` (no reactive, P untouched)
 
-For typed equipment, `resolve_reactive_zip()` additionally forces real-power coefficients to `(0, 0, 1)` (Rule R1) and validates coefficient sums.
+For typed equipment, `resolve_reactive_zip()` additionally forces real-power coefficients to `(0, 0, 1)` (Rule R1) and validates coefficient sums. Both resolvers return a `ResolvedZip`, which carries the regime alongside the coefficients: `resolve_zip()` is governing (the real polynomial scales the scheduled draw), `resolve_reactive_zip()` is reactive-only (`real_power_zip_applies = false`).
 
 ### Rust TOML Example
 
@@ -254,8 +254,12 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 
 The resolved ZIP is inspectable (read-only; never influences stepping or Q):
 
-- **Rust**: `Equipment::resolved_zip() -> Option<ZipLoad>` (`crates/hares-equipment/src/lib.rs`) returns the *primary* resolved ZIP — the one a user `"zip"` override retargets. Typed equipment returns the init-resolved ZIP (Rule R1 projected); battery/EV/PV synthesize a constant-power reactive-only ZIP carrying the *current* effective pf (config baseline, later mutated by `PowerFactorSetpoint`); `None` means no electrical ZIP concept (generator, protocol bridge, indirect tank). HVAC secondary component ZIPs (fan/loop pump) are not exposed.
-- **Python**: `Equipment.resolved_zip` property and `Dwelling.equipment_zip(name)` both return a dict with keys `zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0` (or `None`); `equipment_zip` raises `ValueError` for an unknown name.
+- **Rust**: `Equipment::resolved_zip() -> Option<ResolvedZip>` (`crates/hares-equipment/src/lib.rs`) returns the *primary* resolved ZIP plus its regime — the one a user `"zip"` override retargets. Typed equipment returns the init-resolved ZIP (Rule R1 projected, `real_power_zip_applies = false`); scheduled and event loads return a governing ZIP (`real_power_zip_applies = true` — their scheduled draw is scaled by the real-power polynomial at the bus voltage); battery/EV/PV synthesize a constant-power reactive-only ZIP carrying the *current* effective pf (config baseline, later mutated by `PowerFactorSetpoint`, `real_power_zip_applies = false`); `None` means no electrical ZIP concept (generator, protocol bridge, indirect tank). HVAC secondary component ZIPs (fan/loop pump) are not exposed.
+- **Python**: `Equipment.resolved_zip` property and `Dwelling.equipment_zip(name)` both return a dict with keys `zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0`/`real_power_zip_applies` (or `None`); `equipment_zip` raises `ValueError` for an unknown name. `real_power_zip_applies` distinguishes a genuine constant-power model (`True`, e.g. a scheduled load of unknown class falling back to `constant_power()`) from the Rule R1 structural pin (`False` — real power comes from the equipment's own physics or a DER controller and only the reactive coefficients apply). Anything computing voltage sensitivity from the published real coefficients must check the flag first.
+
+### Premise-level ZIP
+
+Per-equipment `resolved_zip` cannot answer "how voltage-sensitive is this dwelling": Rule R1 equipment contributes zero real-power sensitivity by construction, and no sum of the published per-equipment coefficients recovers the dwelling's measured response, which originates from the ZIP-governed (scheduled/event) load mix. `Dwelling.premise_zip()` (Python) / `Dwelling::premise_zip()` (Rust, `crates/hares-core/src/dwelling/premise_zip.rs`) is the supported no-simulation route: the power-weighted mean ZIP over the ZIP-governed equipment, weights = each equipment's expected mean draw over the loaded schedule data (schedule column mean, analytic source mean, or pre-extracted event-series energy), plus a roster (`governing_equipment` with per-equipment weights, `constant_power_equipment`) of what the aggregate does and does not cover. The aggregate covers the ZIP-governed mix only — physics-driven equipment's share of total draw is knowable only by simulation, so a whole-premise %P/%V combines the aggregate with those shares. `None` when no ZIP-governed equipment has a computable positive expected draw.
 
 ## OCHRE Divergences
 
@@ -284,7 +288,7 @@ These are documented as potential enhancements, not currently implemented:
 
 | File | Purpose |
 |------|---------|
-| `crates/hares-types/src/zip.rs` | `ZipLoad` struct, `zip_defaults_for_class()` table, `reactive_only()` constructor |
+| `crates/hares-types/src/zip.rs` | `ZipLoad` struct, `ResolvedZip` (regime-carrying wrapper), `zip_defaults_for_class()` table, `reactive_only()` constructor |
 | `crates/hares-equipment/src/config.rs` | `resolve_zip()`, `resolve_reactive_zip()`, `validate_zip_sums()`, `EquipmentConfig.zip` sidecar |
 | `crates/hares-equipment/src/hvac/reactive.rs` | Per-component HVAC reactive: `FAN_MOTOR_ZIP`, `LOOP_PUMP_ZIP`, `secondary_motor_zip()` |
 | `crates/hares-equipment/src/battery/config.rs` | `BatteryConfig.power_factor`, `BatteryConfig.inverter_capacity_kva` |

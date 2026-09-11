@@ -132,12 +132,16 @@ impl SimulationEngine {
         let output_path = resolved_output_path(&config);
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
-            Ok(Ok(_dwelling_results)) => {
+            Ok(Ok(dwelling_results)) => {
                 let batches = dwelling.flushed_batches().to_vec();
                 #[cfg(feature = "profiling")]
                 emit_dwelling_profiling_summary(&dwelling.profiling_summary());
 
-                if batches.is_empty() {
+                // `flushed_batches` is empty whenever `retain_batches` is
+                // disabled (the default) — flushed batches are written to
+                // disk and dropped — so it cannot signal whether the
+                // simulation ran. The step count can.
+                if dwelling_results.steps.is_empty() {
                     // Zero-step edge case: duration == 0 or duration == initialization_duration.
                     // No data was produced, so flag rather than return bogus metrics.
                     warnings.push(
@@ -150,6 +154,25 @@ impl SimulationEngine {
                         warnings,
                         status: SimStatus::Flagged(
                             "zero-step simulation: no metrics computed".to_string(),
+                        ),
+                        elapsed,
+                    }
+                } else if batches.is_empty() {
+                    // The simulation ran and its output was written to disk,
+                    // but no batches are retained in memory (retain_batches
+                    // disabled), so in-memory metrics cannot be computed.
+                    // Flag with the reason instead of misreporting a
+                    // successful run as zero-step.
+                    warnings.push(
+                        "batches not retained (retain_batches disabled); metrics not computed — read the timeseries file or enable retain_batches".to_string(),
+                    );
+                    SimulationResults {
+                        timeseries_path: output_path.clone(),
+                        timeseries: Some(Vec::new()),
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Flagged(
+                            "metrics not computed: no batches retained".to_string(),
                         ),
                         elapsed,
                     }
@@ -284,9 +307,11 @@ impl SimulationEngine {
 
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
-            Ok(Ok(_)) => {
+            Ok(Ok(dwelling_results)) => {
                 let batches = dwelling.flushed_batches().to_vec();
-                if batches.is_empty() {
+                // Step count, not batch retention, signals whether the run
+                // produced data (see `run` for the retention caveat).
+                if dwelling_results.steps.is_empty() {
                     warnings.push(
                         "simulation produced zero output batches (zero-step run)".to_string(),
                     );
@@ -297,6 +322,20 @@ impl SimulationEngine {
                         warnings,
                         status: SimStatus::Flagged(
                             "zero-step simulation: no metrics computed".to_string(),
+                        ),
+                        elapsed,
+                    }
+                } else if batches.is_empty() {
+                    warnings.push(
+                        "batches not retained (retain_batches disabled); metrics not computed — read the timeseries file or enable retain_batches".to_string(),
+                    );
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: Some(Vec::new()),
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Flagged(
+                            "metrics not computed: no batches retained".to_string(),
                         ),
                         elapsed,
                     }

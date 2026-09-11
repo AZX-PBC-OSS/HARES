@@ -133,7 +133,7 @@ pub struct IdealHvac {
     /// Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly zero, real power
     /// stays bit-identical. Wired uniformly with the rest of the fleet so the
     /// §4 cross-equipment consistency check stays uniform.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
 }
 
 /// Serializable snapshot of [`IdealHvac`] mutable fields.
@@ -212,7 +212,9 @@ impl IdealHvac {
             capacity_min_w: 0.0,
             curves: BiquadraticCurveSet::identity(),
             zone_id_explicit,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
         }
     }
 
@@ -866,7 +868,7 @@ impl Equipment for IdealHvac {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 
