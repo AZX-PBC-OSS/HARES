@@ -345,11 +345,18 @@ pub struct InteriorSurfaceInfo {
     pub solar_absorptance: f64,
     /// Whether this surface is a floor (receives beam solar preferentially).
     ///
-    /// Beam solar is split between floors and non-floors via [`beam_floor_fraction`]
-    /// (a `sin(altitude)` heuristic); within each group, absorbed energy is
-    /// weighted by `area × solar_absorptance`. Floors receive more beam at
-    /// high solar altitudes, walls/ceiling more at low altitudes.
+    /// Whether this surface is a floor. Beam solar is distributed by the
+    /// cosine model (`beam_cosine_factor`): each face's weight is
+    /// area × absorptance × max(0, cos-of-incidence) against the sun
+    /// position — floors dominate near noon, the wall opposite the sun
+    /// dominates at low altitude; `is_floor` is retained for reporting and
+    /// legacy call paths only.
     pub is_floor: bool,
+    /// Boundary tilt [°] (0 = ceiling, 90 = wall, 180 = floor) — used by the
+    /// cosine beam-solar distribution.
+    pub tilt_deg: f64,
+    /// Boundary outward azimuth [°] clockwise from north (180 = south).
+    pub azimuth_deg: f64,
     /// Optional driving temperature for surface temperature computation.
     ///
     /// For window surfaces without RC nodes, the interior surface temperature is
@@ -395,6 +402,16 @@ pub struct InteriorSolarSurfaceInfo {
     pub radiation_frac: f64,
     /// Whether this surface is a floor (receives beam solar preferentially).
     pub is_floor: bool,
+    /// Boundary tilt [°] (0 = horizontal facing up / ceiling, 90 = vertical
+    /// wall, 180 = horizontal facing down / floor) — the HPXML convention
+    /// shared with `ExteriorSurfaceInfo::tilt_deg`. Used by the cosine
+    /// beam-solar distribution: the beam illuminates the interior face
+    /// in proportion to `max(0, u_sun · n_in)` with `n_in` the into-room
+    /// normal derived from tilt/azimuth.
+    pub tilt_deg: f64,
+    /// Boundary outward azimuth [°] clockwise from north (180 = south).
+    /// See `tilt_deg` for the distribution role.
+    pub azimuth_deg: f64,
 }
 
 /// Interior longwave radiation configuration for one zone.
@@ -464,10 +481,21 @@ pub struct ExteriorSurfaceInfo {
     /// temperature. A value of 0.0 means use the node temperature directly (no
     /// exterior film resistance in the conduction path).
     pub rad_frac: f64,
-    /// Radiation resistance: `R_film / area_m2` -- K/W.
+    /// Radiation resistance [K/W]: the exact eliminated-skin (Thévenin)
+    /// resistance `R_film·R_half/(R_film + R_half) / area_m2`, where `R_half`
+    /// is the adjacent material half-layer resistance. Identity (pinned by
+    /// `skin_rad_coupling_uses_parallel_resistance`):
+    /// `rad_res_k_w == rad_frac · R_half / area_m2`.
     ///
-    /// Converts net surface heat flux [W] to a temperature perturbation on the
-    /// exterior surface.
+    /// Deliberately divergent from OCHRE, whose `radiation_res` is the bare
+    /// film `R_film/area` with the exact parallel form commented out in its
+    /// own source (Envelope.py:258) under a `res_material >> res_film`
+    /// assumption. The bare form over-drives the skin temperature whenever
+    /// the half-layer conducts comparably to the film (thin siding, stucco,
+    /// metal). See docs/alignment/DIVERGENCES.md.
+    ///
+    /// Converts net surface heat flux [W] to a temperature perturbation on
+    /// the exterior surface.
     pub rad_res_k_w: f64,
     /// Number of sub-iterations per timestep: `floor(dt_s / 300.0) + 1`.
     pub n_iter: u32,
@@ -640,6 +668,89 @@ pub struct ThermalSolverConfig {
     pub ideal_capacity_degraded_threshold: usize,
 }
 
+impl ThermalSolverConfig {
+    /// Validates structural invariants that are otherwise only discoverable
+    /// by reading two files side by side. Called by [`ThermalSolver::new`]
+    /// with the assembled model's dimensions so mis-wiring fails fast with
+    /// the offending surface named, instead of silently double-injecting or
+    /// dropping a surface's flux.
+    ///
+    /// Checks, per exterior surface: finite non-negative area (zero is the
+    /// inert-surface marker used by synthetic test buildings — every flux
+    /// term scales with area and vanishes), emissivity in
+    /// (0, 1], absorptance in [0, 1], `n_iter >= 1`, `rad_frac` in [0, 1]
+    /// with a finite non-negative `rad_res_k_w`, and state/input indices
+    /// within the model dimensions. Across surfaces: `surface_id` uniqueness
+    /// (a duplicate breaks irradiance lookup). `input_index` and
+    /// `state_index` are NOT checked for uniqueness here: multiple exterior
+    /// faces of one assembly legitimately share a mass node, and surfaces
+    /// without their own injection column (windows, fallback-R walls)
+    /// legitimately share a zone's sensible-heat column, which is additive.
+    /// True double-registration of a dedicated injection column is checked
+    /// against the wiring in [`ThermalSolver::new`].
+    pub fn validate(&self, n_states: usize, n_inputs: usize) -> std::result::Result<(), String> {
+        let mut seen_surface_ids = std::collections::HashSet::new();
+        for info in &self.exterior_surfaces {
+            let surface = format!("exterior surface {}", info.surface_id);
+            // Area 0 is the legitimate "inert surface" marker used by
+            // synthetic test buildings (all flux terms scale with area and
+            // vanish); negative or non-finite area is a wiring error.
+            if !info.area_m2.is_finite() || info.area_m2 < 0.0 {
+                return Err(format!(
+                    "{surface}: area must be finite and non-negative, got {}",
+                    info.area_m2
+                ));
+            }
+            if !(info.emissivity.is_finite() && 0.0 < info.emissivity && info.emissivity <= 1.0) {
+                return Err(format!(
+                    "{surface}: emissivity must be in (0, 1], got {}",
+                    info.emissivity
+                ));
+            }
+            if !info.absorptance.is_finite() || !(0.0..=1.0).contains(&info.absorptance) {
+                return Err(format!(
+                    "{surface}: solar absorptance must be in [0, 1], got {}",
+                    info.absorptance
+                ));
+            }
+            if info.n_iter == 0 {
+                return Err(format!("{surface}: n_iter must be >= 1"));
+            }
+            if !info.rad_frac.is_finite() || !(0.0..=1.0).contains(&info.rad_frac) {
+                return Err(format!(
+                    "{surface}: rad_frac must be in [0, 1], got {}",
+                    info.rad_frac
+                ));
+            }
+            if !info.rad_res_k_w.is_finite() || info.rad_res_k_w < 0.0 {
+                return Err(format!(
+                    "{surface}: rad_res_k_w must be finite and non-negative, got {}",
+                    info.rad_res_k_w
+                ));
+            }
+            if info.state_index >= n_states {
+                return Err(format!(
+                    "{surface}: state_index {} out of range (model has {n_states} states)",
+                    info.state_index
+                ));
+            }
+            if info.input_index >= n_inputs {
+                return Err(format!(
+                    "{surface}: input_index {} out of range (model has {n_inputs} inputs)",
+                    info.input_index
+                ));
+            }
+            if !seen_surface_ids.insert(info.surface_id) {
+                return Err(format!(
+                    "{surface}: duplicate surface_id in exterior_surfaces \
+                     (double registration)"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for ThermalSolverConfig {
     fn default() -> Self {
         Self {
@@ -706,14 +817,30 @@ pub type Result<T> = std::result::Result<T, ThermalSolverError>;
 
 /// Per-timestep envelope component gains [W] for output/diagnostics.
 ///
-/// All values are signed: positive = heat flowing INTO the indoor zone.
+/// Values are signed: positive = heat flowing INTO the indoor zone — with two
+/// documented exceptions: `opaque_solar_lwr_w`, `opaque_solar_w`, and
+/// `exterior_lwr_w` are *gross exterior-skin* fluxes (outside-face balance
+/// drivers, OCHRE "Ext. Solar/LWR Gain"), and `interior_lwr_w` is a gross
+/// exchange activity metric. None of those are net zone loads; see their
+/// field docs.
 /// Populated after each `resolve()` call; read via [`ThermalSolver::component_gains`].
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeComponentGains {
     /// Window transmitted solar (SHGC × IAM × area × POA) [W].
     pub window_solar_w: f64,
-    /// Opaque exterior surface solar + LWR combined injection [W].
-    /// Includes surfaces routed through both iterative and non-iterative paths.
+    /// Opaque exterior surface solar + LWR combined — the absorbed gross
+    /// at the exterior skins, summed over both application paths
+    /// (iterative and non-iterative).
+    /// This is the *gross* radiant flux absorbed at the exterior skin — the
+    /// outside-face heat balance driver (EnergyPlus ERM 26.1 — "Outside
+    /// Surface Heat Balance"; reported by OCHRE as "{boundary} Ext.
+    /// Solar/LWR Gain") — applied as a boundary condition on each surface's
+    /// own exterior RC node. It is not a load on the conditioned zone: most
+    /// of it re-leaves via exterior convection and sky longwave exchange,
+    /// and only a small, time-lagged fraction conducts through to zone air.
+    /// For the net delivered heat (the inside-face balance, EnergyPlus ERM
+    /// 26.1 — "Inside Heat Balance": Interior Convection) see
+    /// `wall_heat_gain_w`, `floor_heat_gain_w`, and `roof_heat_gain_w`.
     pub opaque_solar_lwr_w: f64,
     /// Total interior longwave radiation exchange activity [W].
     /// Computed as Σ|q_i|/2 over all surfaces in the zone, where q_i is the
@@ -773,19 +900,55 @@ pub struct EnvelopeComponentGains {
     /// Per-zone interior LWR total exchange activity [W] (Σ|q_i|/2 per zone).
     /// See [`interior_lwr_w`] for the physical meaning.
     pub interior_lwr_by_zone: Vec<(ZoneId, f64)>,
-    /// Heat gain through wall boundaries (conduction + solar + LWR) [W].
+    /// Net sensible heat delivered from wall-boundary interior surfaces to
+    /// zone air [W] — the inside-face convection term (EnergyPlus ERM 26.1 —
+    /// "Inside Heat Balance": Interior Convection; TARP per Walton 1983),
+    /// i.e. the time-lagged result of exterior solar, LWR, and ΔT conduction
+    /// drivers (OCHRE's "Wall Heat Gain - Indoor").
     pub wall_heat_gain_w: f64,
-    /// Heat gain through floor boundaries [W].
+    /// Net sensible heat delivered from floor-boundary interior surfaces to
+    /// zone air [W] (OCHRE's "Floor Heat Gain - Indoor").
     pub floor_heat_gain_w: f64,
-    /// Heat gain through roof boundaries [W].
+    /// Net sensible heat delivered from roof-boundary interior surfaces to
+    /// zone air [W] (OCHRE's "Roof Heat Gain - Indoor").
     pub roof_heat_gain_w: f64,
-    /// Heat gain through window boundaries (transmitted + absorbed) [W].
+    /// Net sensible heat delivered from window interior surfaces to zone
+    /// air [W] (convection; transmitted solar is reported separately as
+    /// `window_solar_w`).
     pub window_heat_gain_w: f64,
-    /// Heat gain from internal mass surfaces [W].
+    /// Net sensible heat delivered from internal-mass surfaces to zone air [W].
     pub internal_mass_heat_gain_w: f64,
-    /// Opaque exterior surface solar absorptance gain only [W].
+    /// Zone air heat-balance residual [W] for the indoor zone, the
+    /// difference between stored energy and every accounted term:
+    /// `C_zone·ΔT/dt − u[zone] injections − matrix exchange − airflow
+    /// terms`. The matrix exchange is computed from
+    /// the discrete state equation (A_d−I row + environmental B_d
+    /// columns), so it includes interior LWR and steady-state boundary
+    /// conduction exactly as the solver moves them. The remaining residual
+    /// is the semi-implicit coupling split — at hourly timesteps on a light
+    /// air node (d = h·dt/C_zone ≈ 7), the implicit-vs-explicit difference
+    /// is legitimately O(100–900 W) on freefloat-class swings. O(kW)
+    /// sustained values beyond that envelope indicate mis-wired gains —
+    /// the I-02 defect class. Diagnostic only.
+    pub zone_air_balance_residual_w: f64,
+    /// Absorbed opaque exterior solar [W] — the full skin-absorbed flux
+    /// `α·A·POA`, summed over both application paths. The non-iterative
+    /// path (rad_frac == 0) injects the full absorbed flux directly
+    /// (solar.rs); the iterative path (rad_frac > 0) accumulates its
+    /// absorbed solar per surface during the exterior-radiation solve
+    /// (longwave.rs), separate from the rad_frac-scaled share injected into
+    /// the RC node. OCHRE parity: "{boundary} Ext. Solar Gain (W)". For the
+    /// per-surface split see `ExtSurfaceDiag::solar_absorbed_w`
+    /// (`observe_detailed`).
     pub opaque_solar_w: f64,
-    /// Exterior longwave radiation exchange only [W].
+    /// Net exterior longwave radiation exchange at the opaque skins [W],
+    /// summed over both application paths: positive when the environment
+    /// (air + sky) radiates more into the surface than the surface emits —
+    /// typically negative on clear nights. OCHRE parity: "{boundary} Ext.
+    /// LWR Gain (W)". A gross exterior-skin quantity (EnergyPlus ERM 26.1 —
+    /// "Outside Surface Heat Balance"), not a net load on the conditioned
+    /// zone. For the per-surface split see `ExtSurfaceDiag`
+    /// (`observe_detailed` feature).
     pub exterior_lwr_w: f64,
     /// Window exterior LWR beyond U-factor assumption [W].
     /// When T_sky < T_air (clear night), windows radiate more to sky than the
@@ -898,6 +1061,131 @@ pub struct WindowSolarDiag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_exterior_surface(
+        surface_id: u32,
+        state_index: usize,
+        input_index: usize,
+    ) -> ExteriorSurfaceInfo {
+        ExteriorSurfaceInfo {
+            surface_id,
+            state_index,
+            input_index,
+            area_m2: 20.0,
+            emissivity: 0.9,
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+            rad_frac: 0.375,
+            rad_res_k_w: 9.375e-4,
+            n_iter: 3,
+            absorptance: 0.7,
+            boundary_category: Some(BoundaryCategory::Wall),
+            u_factor_w_m2_k: 0.0,
+            h_out_w_m2_k: 33.0,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_exterior_surfaces() {
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![
+                valid_exterior_surface(1, 0, 1),
+                valid_exterior_surface(2, 2, 3),
+            ],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(config.validate(4, 6).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_surface_registration_with_surface_named() {
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![
+                valid_exterior_surface(7, 0, 1),
+                valid_exterior_surface(7, 2, 3),
+            ],
+            ..ThermalSolverConfig::default()
+        };
+        let err = config.validate(4, 6).unwrap_err();
+        assert!(
+            err.contains("exterior surface 7") && err.contains("duplicate surface_id"),
+            "error must name the offending surface, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_input_and_state_indices() {
+        // Duplicate input_index is NOT rejected here by design: surfaces
+        // without a dedicated injection column (windows, fallback-R walls)
+        // legitimately share a zone's additive sensible-heat column. The
+        // true double-registration check — sharing a DEDICATED column — is
+        // wiring-aware and lives in `ThermalSolver::new`.
+        let dup_input = ThermalSolverConfig {
+            exterior_surfaces: vec![
+                valid_exterior_surface(1, 0, 2),
+                valid_exterior_surface(2, 3, 2),
+            ],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(
+            dup_input.validate(6, 6).is_ok(),
+            "shared input_index is a wiring-level concern (zone columns are \
+             additive); validate must not reject it without the wiring"
+        );
+
+        let dup_state = ThermalSolverConfig {
+            exterior_surfaces: vec![
+                valid_exterior_surface(1, 4, 1),
+                valid_exterior_surface(2, 4, 3),
+            ],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(
+            dup_state.validate(6, 6).is_ok(),
+            "shared state_index is a legitimate pattern (multiple faces of one \
+             assembly share a mass node) and must not be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_indices_with_dimensions_named() {
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![valid_exterior_surface(9, 0, 5)],
+            ..ThermalSolverConfig::default()
+        };
+        let err = config.validate(4, 4).unwrap_err();
+        assert!(
+            err.contains("exterior surface 9") && err.contains("input_index 5 out of range"),
+            "error must name the surface and the range, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_physical_coupling_parameters() {
+        let mut surface = valid_exterior_surface(3, 0, 1);
+        surface.rad_frac = 1.5;
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![surface],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(config.validate(4, 4).unwrap_err().contains("rad_frac"));
+
+        let mut surface = valid_exterior_surface(3, 0, 1);
+        surface.area_m2 = -1.0;
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![surface],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(config.validate(4, 4).unwrap_err().contains("area"));
+
+        let mut surface = valid_exterior_surface(3, 0, 1);
+        surface.rad_res_k_w = f64::NAN;
+        let config = ThermalSolverConfig {
+            exterior_surfaces: vec![surface],
+            ..ThermalSolverConfig::default()
+        };
+        assert!(config.validate(4, 4).unwrap_err().contains("rad_res_k_w"));
+    }
 
     #[test]
     fn mechanical_ventilation_params_fields_accessible() {

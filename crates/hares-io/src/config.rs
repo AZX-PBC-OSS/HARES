@@ -130,6 +130,17 @@ pub struct SimulationConfig {
 }
 
 impl SimulationConfig {
+    /// Time resolution in seconds as `u32`, for consumers that require a
+    /// bounded seconds count (metrics calculators). Seconds counts outside
+    /// the `u32` range (negative, or beyond `u32::MAX`) fall back to 3600 —
+    /// the hourly default. Unreachable in practice for parsed configs:
+    /// `from_toml` validation rejects non-positive resolutions and
+    /// simulations never span centuries.
+    #[must_use]
+    pub fn time_res_secs_u32(&self) -> u32 {
+        u32::try_from(self.time_res.num_seconds()).unwrap_or(3600)
+    }
+
     /// Parse and validate a `SimulationConfig` from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
         let cfg: SimulationConfig = toml::from_str(s)?;

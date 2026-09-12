@@ -2599,11 +2599,23 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         );
     }
 
+    /// Strict-mode behavior of the multispeed loader, tested by calling the
+    /// loader directly with `strict: true`.
+    ///
+    /// This test must NOT set the `HARES_STRICT_DEFAULTS` env var: under the
+    /// default parallel harness (not nextest's process-per-test) the mutation
+    /// races every other test that loads a tempdir defaults store — the
+    /// observed flake class where `missing_generator_efficiency_curve_returns_none`
+    /// / `loads_hvac_curve_set_from_toml` failed with `MissingFile("…/HVAC
+    /// Multispeed Parameters.csv")` only under parallel load. The env-var
+    /// path in `DefaultsStore::load` is
+    /// exercised by the workspace-level integration runs, which run with the
+    /// variable set in the environment.
     #[test]
     fn strict_missing_multispeed_csv_returns_missing_file_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
-        // No CSV file created — with strict defaults, this should error. The
+        // No CSV file created — with strict defaults, this must error. The
         // strictness is injected via the internal seam, not the process env:
         // `set_var` is process-global state under `cargo test`'s shared-process
         // runner and would poison concurrent `load` calls in other tests.
@@ -2611,6 +2623,19 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         assert!(
             matches!(result, Err(DefaultsError::MissingFile(_))),
             "expected MissingFile error with strict defaults, got: {result:?}"
+        );
+        // The loader itself: strict must error, non-strict must degrade to
+        // empty with a warning.
+        let missing = dir.path().join("HVAC Multispeed Parameters.csv");
+        let result = load_hvac_multispeed_csv(&missing, true);
+        assert!(
+            matches!(result, Err(DefaultsError::MissingFile(_))),
+            "strict mode must error on a missing multispeed CSV, got: {result:?}"
+        );
+        let relaxed = load_hvac_multispeed_csv(&missing, false);
+        assert!(
+            matches!(relaxed, Ok(ref v) if v.is_empty()),
+            "non-strict mode must return an empty vec on a missing CSV, got: {relaxed:?}"
         );
     }
 

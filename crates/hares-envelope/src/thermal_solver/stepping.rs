@@ -743,14 +743,25 @@ impl ThermalSolver {
 
         let y_next = self.model.output(&self.x, &u);
 
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        // Net interior-face convection per boundary category. This feeds the
+        // "Wall/Floor/Roof/Window/Internal Mass Heat Gain - Indoor (W)"
+        // output columns and the zone-load budget metric
+        // (`EnvelopeComponentLoadsKwh::opaque_conduction_kwh`), so it is
+        // computed in every build configuration — gating it behind
+        // debug/observe_detailed would silently report 0 W zone loads in
+        // release builds. The cost is one pass over the boundary list per
+        // timestep (a cbrt per surface), negligible next to the coupled
+        // solve above.
         if !self.config.boundary_diagnostics.is_empty() {
             let zone_output_idx = self
                 .wiring
                 .zone_output_indices
                 .get(&self.config.indoor_zone_id)
                 .copied()
-                .unwrap_or(0);
+                .expect(
+                    "indoor zone output index must exist in the wiring — \
+                         validated at ThermalSolver construction",
+                );
             let t_zone = y_next[zone_output_idx];
             for diag in &self.config.boundary_diagnostics {
                 use super::config::{BoundaryDiagnosticInfo, DrivingTemp};
@@ -806,7 +817,11 @@ impl ThermalSolver {
                                     .zip(self.wiring.ground_temp_input_depths_m.iter())
                                     .find(|(_, d)| depth_mm_key(**d) == key)
                                     .map(|(t, _)| *t)
-                                    .unwrap_or(0.0)
+                                    .expect(
+                                        "ground depth key must exist in the \
+                                             parallel depth cache — both are built \
+                                             in the same loop in apply_outdoor_inputs",
+                                    )
                             }
                         };
                         (ua_w_k * (t_driving - t_zone), *category)
@@ -829,6 +844,65 @@ impl ThermalSolver {
                         self.component_gains.internal_mass_heat_gain_w += q
                     }
                 }
+            }
+        }
+
+        // ── Complete zone air heat-balance residual ───────────────────
+        //
+        // residual = C_zone·ΔT/dt − (direct air injections + exact matrix
+        // exchange + airflow sensible terms).
+        //
+        // The matrix-exchange term is read from the state
+        // equation itself — C/dt·(A_d−I)[zone]·x_prev + C/dt·B_d[zone, env]
+        // — which captures inside-face convection AND StarMesh interior LWR
+        // AND steady-state boundary conduction exactly as the solver moves
+        // them, immune to the reporting gap that made the column-field sum
+        // show a spurious 1 kW mean on 600FF (the per-boundary columns are
+        // convection-only and per-step TARP by E+/OCHRE convention — they
+        // stay as attribution reporting; the residual is computed from the
+        // quantities that actually moved the state).
+        //
+        // What remains in the residual by construction: the semi-implicit
+        // coupling split (infiltration/LWR forcing applied at the diagonal
+        // vs. measured at the committed state) and the per-step TARP
+        // convection forcing when PerStepTarp is active — both small. A
+        // persistent O(kW) residual means mis-wired gains.
+        if let (Some(&zone_state_idx), Some(&c_zone), Some(&zone_input_idx)) = (
+            self.wiring
+                .zone_state_indices
+                .get(&self.config.indoor_zone_id),
+            self.wiring.c_zone_j_k.get(&self.config.indoor_zone_id),
+            self.wiring
+                .zone_sensible_input_indices
+                .get(&self.config.indoor_zone_id),
+        ) {
+            if !self.zone_exchange_row_w.is_empty()
+                && zone_state_idx < self.x.len()
+                && zone_state_idx < self.rhs_buf.len()
+                && zone_input_idx < u.len()
+            {
+                // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+                let stored_w =
+                    c_zone * (self.x[zone_state_idx] - self.rhs_buf[zone_state_idx]) / self.dt_s;
+                // Exact RC exchange into zone air (all matrix paths).
+                let mut exchange_w: f64 = self
+                    .zone_exchange_row_w
+                    .iter()
+                    .zip(self.rhs_buf.iter())
+                    .map(|(c, t)| c * t)
+                    .sum();
+                for &(col, coeff) in &self.zone_env_col_coeffs {
+                    if col < u.len() {
+                        exchange_w += coeff * u[col];
+                    }
+                }
+                let g = &self.component_gains;
+                let terms_w = u[zone_input_idx]
+                    + exchange_w
+                    + g.infiltration_w
+                    + g.ventilation_w
+                    + g.natural_ventilation_w;
+                self.component_gains.zone_air_balance_residual_w = stored_w - terms_w;
             }
         }
 

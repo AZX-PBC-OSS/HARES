@@ -954,7 +954,9 @@ mod tests {
         );
 
         // Per-boundary heat gains (conduction + interior LWR per category).
-        // These are 0.0 until per-boundary conduction tracking is implemented.
+        // Per-boundary net convection into the indoor zone (interior-face
+        // TARP convection), accumulated every timestep and compared below
+        // against OCHRE's per-category "Heat Gain - Indoor" values.
         let ochre_wall_heat = ochre
             .get("Wall Heat Gain - Indoor (W)")
             .cloned()

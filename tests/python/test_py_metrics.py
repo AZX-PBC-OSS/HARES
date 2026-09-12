@@ -146,7 +146,9 @@ class TestMetrics:
 
         assert env is not None
         assert math.isfinite(env.window_solar_kwh)
-        assert math.isfinite(env.opaque_solar_lwr_kwh)
+        assert math.isfinite(env.opaque_conduction_kwh)
+        assert math.isfinite(env.window_conduction_kwh)
+        assert math.isfinite(env.internal_mass_kwh)
         assert math.isfinite(env.interior_lwr_kwh)
         assert math.isfinite(env.infiltration_kwh)
         assert math.isfinite(env.ventilation_kwh)
@@ -154,6 +156,15 @@ class TestMetrics:
         assert math.isfinite(env.hvac_cooling_kwh)
         assert math.isfinite(env.internal_gains_kwh)
         assert math.isfinite(env.duct_loss_kwh)
+
+        # The gross exterior absorption was renamed when the value was
+        # rewired to net conduction; scripts using the old name must fail
+        # loudly rather than silently read a quantity whose meaning changed.
+        assert not hasattr(env, "opaque_solar_lwr_kwh"), (
+            "'opaque_solar_lwr_kwh' must not exist; the gross exterior "
+            "absorption is not a summable zone load — use "
+            "'opaque_conduction_kwh'"
+        )
 
     def test_gas_energy_available_when_fuel_type_present(self):
         dw = Dwelling.from_hpxml(
