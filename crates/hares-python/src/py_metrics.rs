@@ -155,8 +155,18 @@ impl PyEnvelopeComponentLoadsKwh {
     }
 
     #[getter]
-    fn opaque_solar_lwr_kwh(&self) -> f64 {
-        self.inner.opaque_solar_lwr_kwh
+    fn opaque_conduction_kwh(&self) -> f64 {
+        self.inner.opaque_conduction_kwh
+    }
+
+    #[getter]
+    fn window_conduction_kwh(&self) -> f64 {
+        self.inner.window_conduction_kwh
+    }
+
+    #[getter]
+    fn internal_mass_kwh(&self) -> f64 {
+        self.inner.internal_mass_kwh
     }
 
     #[getter]

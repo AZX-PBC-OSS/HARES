@@ -126,11 +126,44 @@ pub struct ThermalSolver {
     /// Accumulator for window exterior LWR beyond U-factor assumption [W].
     /// Set during `apply_exterior_longwave_inputs_iterative`.
     window_exterior_lwr_w: f64,
-    /// Total opaque exterior LWR flux [W] routed through the semi-implicit
-    /// coupling mechanism (rad_frac == 0 surfaces). This flux is NOT injected
-    /// into `u`, so the `u.iter().sum()` delta does not capture it. Tracked
-    /// separately for diagnostic reporting (`opaque_solar_lwr_w`).
+    /// Net exterior LWR at opaque exterior skins [W], both application
+    /// paths: the non-iterative path (rad_frac == 0, flux routed through the
+    /// semi-implicit coupling, not `u`) and the iterative path (rad_frac > 0,
+    /// accumulated per surface at the converged skin temperature). Tracked
+    /// separately for diagnostic reporting because neither path's `u` delta
+    /// isolates the LWR component.
     opaque_exterior_lwr_w: f64,
+    /// Exact discrete-time matrix exchange into the indoor zone air node
+    /// [W/K]: `C_zone/dt · (A_d − I)[zone_row, :]` — the zone air's RC
+    /// exchange per unit of state. Computed once at construction; dotted
+    /// with `x_prev` each step for the zone air heat-balance residual.
+    /// Captures ALL matrix-borne exchange — inside-face
+    /// convection, StarMesh interior LWR, and the window/steady-state UA
+    /// sink — exactly as the state equation moves it, which the
+    /// convection-only per-boundary reporting columns cannot.
+    zone_exchange_row_w: Vec<f64>,
+    /// Environmental-column coefficients [W per unit input]:
+    /// `C_zone/dt · B_d[zone_row, col]` over driving-temperature columns
+    /// (outdoor, ground, indoor-driving) — the inflow side of the
+    /// steady-state boundary conduction that the exchange row's diagonal
+    /// sinks. Paired with `zone_exchange_row_w`.
+    zone_env_col_coeffs: Vec<(usize, f64)>,
+    /// Per-step lookup: `surface_id` → slot in `env.weather.solar_irradiance`.
+    /// Rebuilt once per timestep by [`Self::refresh_solar_slot_map`] (called
+    /// from `build_input_vector` and the debug breakdown path) so the solar
+    /// and exterior-LWR apply passes index directly instead of rescanning
+    /// the irradiance vec per surface — O(S) per step total, not O(S²).
+    /// Capacity is retained across steps: no steady-state allocation.
+    /// Direct callers of the apply functions (tests, debug paths) must call
+    /// `refresh_solar_slot_map` first (or populate the map themselves).
+    solar_irr_slot_buf: HashMap<u32, usize>,
+    /// Absorbed opaque exterior solar [W] on iterative-path (rad_frac > 0)
+    /// surfaces — the full skin-absorbed flux `α·A·POA`, not the
+    /// rad_frac-scaled fraction injected into the RC node. Accumulated per
+    /// surface during the iterative LWR solve; the non-iterative path's
+    /// solar is measured directly by the `u` delta around
+    /// `apply_exterior_solar_inputs` (it injects the full absorbed flux).
+    opaque_exterior_solar_w: f64,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
@@ -256,13 +289,13 @@ pub struct ThermalSolver {
     /// a one-time warning. Guards against per-timestep log spam.
     lwr_linearised_warned_zones: HashSet<ZoneId>,
     /// Cached outdoor temperature [°C] from the most recent input vector.
-    /// Used by boundary diagnostics for non-RC boundaries.
-    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    /// Read by the per-boundary net convection accumulation (SteadyState
+    /// diagnostics) in every build configuration.
     cached_outdoor_temp_c: f64,
     /// Cached per-depth ground temperatures [°C] parallel to
     /// `wiring.ground_temp_input_depths_m`. Index `i` holds the Kusuda-Achenbach
-    /// temperature at depth `ground_temp_input_depths_m[i]`.
-    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    /// temperature at depth `ground_temp_input_depths_m[i]`. Read by the
+    /// per-boundary net convection accumulation in every build configuration.
     cached_ground_temps_c: Vec<f64>,
     /// Per-exterior-surface diagnostic buffer (compiled out in release).
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -554,6 +587,7 @@ impl ThermalSolver {
             return ZoneSensibleBreakdown::zeros();
         };
         self.apply_outdoor_inputs(&mut u, env);
+        self.refresh_solar_slot_map(env);
         let after_outdoor = u[z_idx];
         self.apply_solar_inputs(&mut u, env);
         let after_window_solar = u[z_idx];
@@ -603,6 +637,196 @@ impl ThermalSolver {
         env: &EnvironmentState,
         indoor_temp_c: f64,
     ) -> Result<Self> {
+        // Structural wiring contract: fails fast with the offending surface
+        // named (out-of-range indices, non-physical coupling parameters,
+        // duplicate surface registration) instead of silently mis-wiring.
+        config
+            .validate(model.state_dim(), model.input_dim())
+            .map_err(ThermalSolverError::Configuration)?;
+
+        // Silent plausible-value fallbacks become construction-time
+        // errors. Zone-map completeness checks live in the scoped block
+        // below; this block covers the per-depth ground-node invariant.
+        // Ground-driving diagnostics must resolve to a per-depth ground node.
+        for diag in &config.boundary_diagnostics {
+            if let config::BoundaryDiagnosticInfo::SteadyState {
+                driving_temp: config::DrivingTemp::Ground { depth_m },
+                ..
+            } = diag
+            {
+                let found = wiring.ground_temp_input_depths_m.iter().any(|d| {
+                    crate::boundary_rc::depth_mm_key(*d)
+                        == crate::boundary_rc::depth_mm_key(*depth_m)
+                });
+                if !found {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "ground-coupled boundary at depth {depth_m} m has no matching \
+                         per-depth ground node (available: {:?}); a miss would silently \
+                         drive it with 0 °C",
+                        wiring.ground_temp_input_depths_m
+                    )));
+                }
+            }
+        }
+        // Ground input wiring must be parallel and in range: the runtime
+        // builds `cached_ground_temps_c` by writing only the in-range
+        // columns, so an out-of-range index silently drops that depth from
+        // the cache and the per-boundary accumulation later hits an expect
+        // that claims construction validated it. Reject here, with the
+        // depth named.
+        if wiring.ground_temp_input_indices.len() != wiring.ground_temp_input_depths_m.len() {
+            return Err(ThermalSolverError::Configuration(format!(
+                "ground input wiring is not parallel: {} indices vs {} depths",
+                wiring.ground_temp_input_indices.len(),
+                wiring.ground_temp_input_depths_m.len()
+            )));
+        }
+        for (&idx, &depth_m) in wiring
+            .ground_temp_input_indices
+            .iter()
+            .zip(wiring.ground_temp_input_depths_m.iter())
+        {
+            if idx >= model.input_dim() {
+                return Err(ThermalSolverError::Configuration(format!(
+                    "ground input column {idx} for depth {depth_m} m is out of range \
+                     (model has {} inputs)",
+                    model.input_dim()
+                )));
+            }
+        }
+        // ── Wiring range validation (one pass over the whole struct) ─────
+        //
+        // Every index-bearing map in `StateSpaceWiring` is checked against
+        // the model dimensions. The failure modes this replaces, per map:
+        //   • zone_output_indices (out-of-range value): deferred panic in
+        //     the per-boundary accumulation (`y_next[zone_output_idx]`,
+        //     unguarded).
+        //   • outdoor_temp_input_indices: SILENT — every consumer
+        //     guard-and-skips, the outdoor column is never written, and the
+        //     building simulates against a phantom 0 °C outdoors.
+        //   • zone_state_indices: deferred panic in the state update.
+        //   • zone_sensible_input_indices: SILENT — all zone-air injections
+        //     (internal gains, HVAC, window solar) are discarded.
+        //   • indoor_temp_input_indices: SILENT — filtered from the
+        //     zone-air-balance residual, corrupting the diagnostic.
+        //   • solar_input_indices: SILENT — exterior solar never lands.
+        // Presence-only checks (does the indoor zone HAVE an entry?) are
+        // kept separately below; this pass is about VALUES.
+        {
+            let n_states = model.state_dim();
+            let n_inputs = model.input_dim();
+            let n_outputs = model.output_dim();
+            for (&zone, &idx) in &wiring.zone_state_indices {
+                if idx >= n_states {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "zone {:?}: state index {idx} is out of range \
+                         (model has {n_states} states)",
+                        zone.0
+                    )));
+                }
+            }
+            for (&zone, &idx) in &wiring.zone_output_indices {
+                if idx >= n_outputs {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "zone {:?}: output index {idx} is out of range \
+                         (model has {n_outputs} outputs)",
+                        zone.0
+                    )));
+                }
+            }
+            for (&zone, &idx) in &wiring.zone_sensible_input_indices {
+                if idx >= n_inputs {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "zone {:?}: sensible-heat input index {idx} is out of range \
+                         (model has {n_inputs} inputs) — every zone-air injection \
+                         (internal gains, HVAC, window solar) would be silently \
+                         discarded",
+                        zone.0
+                    )));
+                }
+            }
+            for &idx in &wiring.outdoor_temp_input_indices {
+                if idx >= n_inputs {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "outdoor temperature input index {idx} is out of range \
+                         (model has {n_inputs} inputs) — the outdoor driving \
+                         column would never be written and the building would \
+                         silently simulate against 0 °C outdoors",
+                    )));
+                }
+            }
+            for &idx in &wiring.indoor_temp_input_indices {
+                if idx >= n_inputs {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "indoor temperature input index {idx} is out of range \
+                         (model has {n_inputs} inputs) — it would be silently \
+                         filtered from the zone-air-balance residual",
+                    )));
+                }
+            }
+            for (&surface_id, &idx) in &wiring.solar_input_indices {
+                if idx >= n_inputs {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "exterior surface {surface_id}: solar input index {idx} is \
+                         out of range (model has {n_inputs} inputs) — its solar \
+                         gain would be silently discarded",
+                    )));
+                }
+            }
+        }
+        // True double-registration of a DEDICATED injection column: sharing
+        // is legitimate only on a zone's sensible-heat column (windows and
+        // fallback surfaces sum additively into it); any other shared
+        // input column means one surface's flux lands in another's column.
+        {
+            let zone_columns: std::collections::HashSet<usize> = wiring
+                .zone_sensible_input_indices
+                .values()
+                .copied()
+                .collect();
+            let mut seen_input_columns = std::collections::HashSet::new();
+            for info in &config.exterior_surfaces {
+                if zone_columns.contains(&info.input_index) {
+                    continue;
+                }
+                if !seen_input_columns.insert(info.input_index) {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "exterior surface {}: duplicate dedicated input_index {} \
+                         in exterior_surfaces (one surface's injection lands in \
+                         another's column)",
+                        info.surface_id, info.input_index
+                    )));
+                }
+            }
+        }
+        // Zone wiring completeness, scoped to the runtime paths that would
+        // otherwise silently substitute a plausible value: the boundary
+        // diagnostics consult the indoor zone's OUTPUT index (index-0
+        // fallback would attribute flux to the wrong zone), and interior-LWR
+        // zones consult their env temperature (20 °C substitution). Other
+        // zone maps (c_zone_j_k, state indices) are optional by design —
+        // their consumers skip gracefully when absent.
+        if !config.boundary_diagnostics.is_empty()
+            && !wiring
+                .zone_output_indices
+                .contains_key(&config.indoor_zone_id)
+        {
+            return Err(ThermalSolverError::Configuration(format!(
+                "indoor zone {}: boundary diagnostics are configured but the \
+                 zone has no zone_output_indices entry — flux would be \
+                 attributed to output 0 (the wrong zone)",
+                config.indoor_zone_id.0
+            )));
+        }
+        for zone_cfg in &config.interior_lwr_zones {
+            if !env.zones.iter().any(|z| z.id == zone_cfg.zone_id) {
+                return Err(ThermalSolverError::Configuration(format!(
+                    "interior LWR zone {} is not present in the environment — \
+                     its temperature would be silently substituted",
+                    zone_cfg.zone_id.0
+                )));
+            }
+        }
         for zone_cfg in &config.interior_lwr_zones {
             if zone_cfg.surfaces.len() >= 2 && zone_cfg.scriptf.is_none() {
                 return Err(ThermalSolverError::Configuration(format!(
@@ -709,8 +933,42 @@ impl ThermalSolver {
         let n_ext_surfaces = config.exterior_surfaces.len();
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_windows = config.window_properties.len();
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_ground_depths = wiring.ground_temp_input_depths_m.len();
+
+        // Precompute the exact discrete-time matrix exchange row for
+        // the indoor zone air node. Empty when the zone/capacitance is
+        // unresolvable — the residual then reads 0.0 (its absence is caught
+        // by the no-silent-zeros guard on the conditioned fixtures).
+        let (zone_exchange_row_w, zone_env_col_coeffs) = {
+            let zid = config.indoor_zone_id;
+            match (
+                wiring.zone_state_indices.get(&zid).copied(),
+                wiring.c_zone_j_k.get(&zid).copied(),
+            ) {
+                (Some(z_row), Some(c_zone)) if z_row < model.state_dim() => {
+                    let scale = c_zone / dt_s;
+                    let n = model.n_mat();
+                    let row: Vec<f64> = (0..model.state_dim())
+                        .map(|j| {
+                            let a = n[(z_row, j)] - if j == z_row { 1.0 } else { 0.0 };
+                            scale * a
+                        })
+                        .collect();
+                    let b = model.b_eff();
+                    let env_cols = wiring
+                        .outdoor_temp_input_indices
+                        .iter()
+                        .chain(wiring.ground_temp_input_indices.iter())
+                        .chain(wiring.indoor_temp_input_indices.iter())
+                        .copied()
+                        .filter(|&c| c < model.input_dim())
+                        .map(|c| (c, scale * b[(z_row, c)]))
+                        .collect();
+                    (row, env_cols)
+                }
+                _ => (Vec::new(), Vec::new()),
+            }
+        };
 
         Ok(Self {
             model,
@@ -749,6 +1007,10 @@ impl ThermalSolver {
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             window_exterior_lwr_w: 0.0,
             opaque_exterior_lwr_w: 0.0,
+            solar_irr_slot_buf: HashMap::with_capacity(n_ext_surfaces),
+            zone_exchange_row_w,
+            zone_env_col_coeffs,
+            opaque_exterior_solar_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
             convection_forcing,
@@ -791,9 +1053,7 @@ impl ThermalSolver {
             int_surface_diag_buf: Vec::with_capacity(max_interior_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             window_solar_diag_buf: Vec::with_capacity(n_windows),
-            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             cached_outdoor_temp_c: env.weather.outdoor_temp_c,
-            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             cached_ground_temps_c: Vec::with_capacity(n_ground_depths),
         })
     }
@@ -954,22 +1214,35 @@ impl ThermalSolver {
         }
 
         self.apply_outdoor_inputs(&mut u, env);
+        self.refresh_solar_slot_map(env);
 
-        let u_pre = u.iter().sum::<f64>();
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.window_solar_diag_buf.clear();
-        self.apply_solar_inputs(&mut u, env);
-        let window_solar_w = u.iter().sum::<f64>() - u_pre;
+        let window_solar_w = self.apply_solar_inputs(&mut u, env);
 
-        let u_pre = u.iter().sum::<f64>();
-        self.apply_exterior_solar_inputs(&mut u, env);
-        let opaque_solar_w = u.iter().sum::<f64>() - u_pre;
-        let u_pre = u.iter().sum::<f64>();
+        // Absorbed opaque exterior solar [W], both application paths. The
+        // non-iterative path injects the full absorbed flux (returned
+        // directly); the iterative path (rad_frac > 0) injects only the
+        // rad_frac-scaled share, so its full absorbed flux is accumulated
+        // per surface during the iterative solve below.
+        let opaque_solar_noniter_w = self.apply_exterior_solar_inputs(&mut u, env);
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.ext_surface_diag_buf.clear();
+        // Also accumulates `opaque_exterior_solar_w` (iterative-path absorbed
+        // solar) and `opaque_exterior_lwr_w` (net skin LWR, both paths).
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
-        let exterior_lwr_w = u.iter().sum::<f64>() - u_pre + self.opaque_exterior_lwr_w;
-        let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w - self.window_exterior_lwr_w;
+        let opaque_solar_w = opaque_solar_noniter_w + self.opaque_exterior_solar_w;
+        // Net exterior LWR at the opaque skins [W], both paths. Neither `u`
+        // delta isolates it: the iterative injection mixes solar and LWR at
+        // the rad_frac scale, and the non-iterative flux bypasses `u`
+        // entirely (semi-implicit coupling).
+        let exterior_lwr_w = self.opaque_exterior_lwr_w;
+        // Combined absorbed gross at the opaque exterior skins — OCHRE's
+        // "{boundary} Ext. Solar Gain (W)" + "{boundary} Ext. LWR Gain (W)"
+        // semantics (skin-absorbed flux, not the injected fraction). Windows
+        // are excluded: their solar is `window_solar_w` and their exterior
+        // LWR `window_exterior_lwr_w`.
+        let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.int_surface_diag_buf.clear();
@@ -1121,6 +1394,10 @@ impl ThermalSolver {
             roof_heat_gain_w: 0.0,
             window_heat_gain_w: 0.0,
             internal_mass_heat_gain_w: 0.0,
+            // Recomputed at the end of every integrate step from the fresh
+            // boundary gains and the zone state delta (stepping.rs); 0.0 here
+            // is only the pre-step placeholder.
+            zone_air_balance_residual_w: 0.0,
             driving_outdoor_temp_c: env.weather.outdoor_temp_c,
             driving_ground_temp_c: {
                 // Use the deepest below-grade boundary as the representative
@@ -1268,13 +1545,34 @@ impl ThermalSolver {
         }
     }
 
+    /// Rebuilds the per-step `surface_id` → irradiance-slot lookup used by
+    /// the solar and exterior-LWR apply passes. Called once per timestep from
+    /// `build_input_vector` before any of those passes run; capacity is
+    /// retained across steps so this performs no steady-state allocation.
+    ///
+    /// Duplicate `surface_id`s in the weather vector resolve FIRST-WINS —
+    /// the same resolution the pre-slot-map linear `.find()` gave, so this
+    /// lookup is a pure performance refactor with no semantic change. (A
+    /// plain `insert` loop would silently flip duplicates to last-wins.)
+    /// Config-side `validate()` already rejects duplicate surface_ids in
+    /// `exterior_surfaces`; a weather producer emitting duplicates is
+    /// malformed input, and first-wins keeps its handling deterministic.
+    fn refresh_solar_slot_map(&mut self, env: &EnvironmentState) {
+        self.solar_irr_slot_buf.clear();
+        for (slot, irr) in env.weather.solar_irradiance.iter().enumerate() {
+            // `or_insert` = first-wins: a key already mapped keeps its slot.
+            self.solar_irr_slot_buf
+                .entry(irr.surface_id)
+                .or_insert(slot);
+        }
+    }
+
     fn apply_outdoor_inputs(&mut self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for &idx in &self.wiring.outdoor_temp_input_indices {
             if idx < u.len() {
                 u[idx] = env.weather.outdoor_temp_c;
             }
         }
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         {
             self.cached_outdoor_temp_c = env.weather.outdoor_temp_c;
             self.cached_ground_temps_c.clear();
@@ -1303,7 +1601,6 @@ impl ThermalSolver {
                     hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
                 );
                 u[idx] = t_ground;
-                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.cached_ground_temps_c.push(t_ground);
             }
         }
@@ -1526,6 +1823,8 @@ mod tests {
                     state_index: 1,
                     input_index: 1,
                     area_m2: 12.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.90,
                     radiation_frac: 1.0,
                     rad_res_k_w: 250.0,
@@ -1537,6 +1836,8 @@ mod tests {
                     state_index: 2,
                     input_index: 2,
                     area_m2: 8.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.65,
                     radiation_frac: 1.0,
                     rad_res_k_w: 175.0,
@@ -4686,6 +4987,8 @@ mod tests {
                 state_index: 0,
                 input_index: 0,
                 area_m2: 40.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 90.0,
                 emissivity: 0.90,
                 radiation_frac: 0.7, // lightweight wall
                 rad_res_k_w: 0.003,
@@ -4697,6 +5000,8 @@ mod tests {
                 state_index: 1,
                 input_index: 1,
                 area_m2: 40.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 180.0,
                 emissivity: 0.90,
                 radiation_frac: 1.0, // massive floor (node ≈ surface)
                 rad_res_k_w: 0.003,
@@ -4708,6 +5013,8 @@ mod tests {
                 state_index: 2,
                 input_index: 2,
                 area_m2: 60.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 90.0,
                 emissivity: 0.90,
                 radiation_frac: 0.85,
                 rad_res_k_w: 0.003,
@@ -4759,6 +5066,8 @@ mod tests {
                     state_index: 0,
                     input_index: 1,
                     area_m2: 25.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.9,
                     radiation_frac: 1.0,
                     rad_res_k_w: 0.02,
@@ -4770,6 +5079,8 @@ mod tests {
                     state_index: 0,
                     input_index: 2,
                     area_m2: 25.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.84,
                     radiation_frac: 0.36,
                     rad_res_k_w: 0.020,
@@ -5511,6 +5822,8 @@ mod tests {
                     state_index: 1,
                     input_index: 1,
                     area_m2: 10.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.9,
                     radiation_frac: 0.02,
                     rad_res_k_w: 250.0,
@@ -5522,6 +5835,8 @@ mod tests {
                     state_index: 2,
                     input_index: 2,
                     area_m2: 20.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.9,
                     radiation_frac: 0.02,
                     rad_res_k_w: 250.0,
@@ -5533,6 +5848,8 @@ mod tests {
                     state_index: 3,
                     input_index: 3,
                     area_m2: 6.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.84,
                     radiation_frac: 1.0,
                     rad_res_k_w: 0.0,
@@ -5661,6 +5978,8 @@ mod tests {
                     state_index: 1,
                     input_index: 1,
                     area_m2: 40.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.9,
                     radiation_frac: rad_frac_opaque,
                     rad_res_k_w: 0.003,
@@ -5672,6 +5991,8 @@ mod tests {
                     state_index: 2,
                     input_index: 2,
                     area_m2: 6.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     emissivity: 0.84,
                     radiation_frac: rad_frac_window,
                     rad_res_k_w: 0.020,
@@ -5767,6 +6088,8 @@ mod tests {
                 state_index: 0,
                 input_index: 0,
                 area_m2: 50.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 90.0,
                 emissivity: 0.90,
                 radiation_frac: 0.7,
                 rad_res_k_w: 0.003,
@@ -5778,6 +6101,8 @@ mod tests {
                 state_index: 1,
                 input_index: 1,
                 area_m2: 30.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 90.0,
                 emissivity: 0.90,
                 radiation_frac: 0.85,
                 rad_res_k_w: 0.003,
@@ -5789,6 +6114,8 @@ mod tests {
                 state_index: 2,
                 input_index: 2,
                 area_m2: 40.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 180.0,
                 emissivity: 0.90,
                 radiation_frac: 0.6,
                 rad_res_k_w: 0.003,
@@ -5800,6 +6127,8 @@ mod tests {
                 state_index: 0,
                 input_index: 3,
                 area_m2: 6.0,
+                azimuth_deg: 0.0,
+                tilt_deg: 90.0,
                 emissivity: 0.84,
                 radiation_frac: 0.36,
                 rad_res_k_w: 0.020,
@@ -5926,6 +6255,8 @@ mod tests {
                 InteriorSolarSurfaceInfo {
                     input_index: Some(1),
                     area_m2: 20.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     solar_absorptance: 0.7,
                     radiation_frac: 0.5,
                     is_floor: false,
@@ -5934,6 +6265,8 @@ mod tests {
                 InteriorSolarSurfaceInfo {
                     input_index: Some(2),
                     area_m2: 5.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
                     solar_absorptance: 0.0,
                     radiation_frac: 0.1,
                     is_floor: false,
@@ -6697,6 +7030,66 @@ mod tests {
         assert_eq!(
             solver.x[0], original_x,
             "solver state must be unchanged after rejected restore (atomicity)"
+        );
+    }
+
+    /// The per-step irradiance slot map resolves duplicate `surface_id`s
+    /// FIRST-WINS — the resolution the pre-slot-map linear `.find()` gave.
+    /// A plain insert loop would silently flip duplicates to last-wins,
+    /// making the lookup a semantics change instead of a performance
+    /// refactor. Weather producers emitting duplicate ids are malformed
+    /// input; this pins that their handling stays deterministic and
+    /// backward-compatible.
+    #[test]
+    fn solar_slot_map_resolves_duplicate_surface_ids_first_wins() {
+        let mut env = env_for_temp(20.0, 10.0);
+        env.weather.solar_irradiance = vec![
+            SurfaceIrradiance {
+                surface_id: 7,
+                direct_w_m2: 111.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+            SurfaceIrradiance {
+                surface_id: 7,
+                direct_w_m2: 999.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+        ];
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model =
+            crate::state_space::StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+                .expect("model");
+        let wiring = crate::thermal_solver::StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            ..Default::default()
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
+        solver.refresh_solar_slot_map(&env);
+        assert_eq!(
+            solver.solar_irr_slot_buf.get(&7),
+            Some(&0),
+            "duplicate surface_id must resolve to the FIRST entry (slot 0, \
+             direct=111 W/m²), matching the pre-slot-map `.find()` — got \
+             {:?} (last-wins would be slot 1)",
+            solver.solar_irr_slot_buf.get(&7)
         );
     }
 }

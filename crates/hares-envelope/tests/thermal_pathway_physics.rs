@@ -493,6 +493,8 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         state_index: 0,
         input_index: 1,
         area_m2: 10.0,
+        azimuth_deg: 180.0,
+        tilt_deg: 90.0,
         emissivity: 0.9,
         radiation_frac: 0.5,
         rad_res_k_w: 0.0,
@@ -733,4 +735,114 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
         gains.driving_ground_temp_c,
         ground_temp_c,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Ground-coupled steady state — the isothermal invariant (closed form)
+// ---------------------------------------------------------------------------
+
+/// First-principles closure for the ground path on the REAL assembled RC
+/// network: any resistive-capacitive network driven by a single boundary
+/// temperature is exactly isothermal at steady state — conduction conserves
+/// energy, so with one driving node there is no steady gradient to sustain.
+///
+/// Closed form: x_ss solves A·x + B·u = 0 with u = [T_ground]; the exact
+/// answer is x_ss = T_ground·𝟏 for every node (zone air AND every slab
+/// layer). Any assembly bug — a dangling conductance, a sign flip, a
+/// mis-wired ground column, a capacitance in the wrong place — shows up as
+/// a deviation, with no free parameters to hide behind.
+///
+/// Uses the same 0.2 m concrete slab-on-grade assembly as
+/// `rc_network_exposes_ground_column` (layer-splitting active: multiple
+/// capacitance-bearing slab nodes), at a 2.4 m foundation depth so the
+/// per-depth ground-node path is exercised end to end.
+#[test]
+fn ground_coupled_rc_steady_state_is_isothermal_at_kusuda_temperature() {
+    use hares_envelope::boundary_rc::*;
+
+    let zones = vec![ZoneInput {
+        floor_area_m2: Some(48.0),
+        volume_m3: Some(129.6),
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+    }];
+    let zone_caps =
+        derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();
+
+    let boundaries = vec![BoundaryInput {
+        area_m2: 48.0,
+        interior_zone_idx: 0,
+        exterior: ExteriorTarget::Ground,
+        material_layers: vec![LayerInput {
+            thickness_m: 0.2,
+            conductivity_w_m_k: 1.7,
+            density_kg_m3: 2300.0,
+            specific_heat_j_kg_k: 880.0,
+            area_m2: 48.0,
+        }],
+        precomputed_rc: vec![],
+        fallback_r_m2_k_w: 0.5,
+        r_film_interior_m2_k_w: 0.17,
+        r_film_exterior_m2_k_w: 0.03,
+        framing_factor: None,
+        interior_emissivity: 0.9,
+        foundation_depth_m: 2.4,
+        #[cfg(feature = "observe")]
+        used_default_r: false,
+    }];
+
+    let (rc, _diag) =
+        assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
+    assert_eq!(rc.n_ext, 1, "single per-depth ground node expected");
+
+    // Exact steady state of the continuous system: x_ss = −A⁻¹·B·u.
+    let t_ground = 9.87; // deliberately non-round Kusuda stand-in [°C]
+    let n_states = rc.a_c.nrows();
+    let u = nalgebra::DVector::from_element(rc.b_ext.ncols(), t_ground);
+    let b_u = &rc.b_ext * &u;
+    let x_ss = rc
+        .a_c
+        .clone()
+        .lu()
+        .solve(&b_u)
+        .expect("A must be nonsingular for a grounded RC network");
+    // sign: A·x + B·u = 0 → x = −A⁻¹·(B·u); LU solve gives A⁻¹·(B·u).
+    let x_ss = -x_ss;
+
+    assert!(
+        n_states >= 3,
+        "zone + split slab layers expected, got {n_states}"
+    );
+    for (i, &t) in x_ss.iter().enumerate() {
+        assert!(
+            (t - t_ground).abs() < 1e-9,
+            "steady state must be exactly isothermal at the ground temperature: \
+             node {i} = {t:.12}°C vs T_ground = {t_ground:.12}°C (residual {:.3e} K) \
+             — a dangling conductance or mis-wired ground column would show here",
+            t - t_ground
+        );
+    }
+
+    // And dynamically: the discrete-time solver must converge to the same
+    // fixed point (not just satisfy the continuous algebra).
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(rc.zone_state_rows[0], 0, 1.0)],
+        input_to_output: vec![],
+    };
+    let model = StateSpaceModel::from_continuous(&rc.a_c, &rc.b_ext, DT_S, &mapping).unwrap();
+    // Constant ground temperature at the (single) driving input.
+    let mut x = nalgebra::DVector::from_element(n_states, 20.0);
+    for _ in 0..(240.0 * 3600.0 / DT_S) as usize {
+        // 10 days — many slab time constants (ρ·c·d²/k ≈ 5.5 h each)
+        let mut buf = nalgebra::DVector::zeros(n_states);
+        model.step_into(&x, &u, &mut buf);
+        x = buf;
+    }
+    for (i, &t) in x.iter().enumerate() {
+        assert!(
+            (t - t_ground).abs() < 1e-6,
+            "discrete-time steady state must converge to isothermal ground \
+             temperature: node {i} = {t:.9}°C vs {t_ground}°C"
+        );
+    }
 }

@@ -41,11 +41,11 @@ use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
-    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
-    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
-    MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, PAN_HEATER_POWER_SUFFIX,
-    POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX, PvPanelDefaults,
-    REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
+    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, FullSimulationMetrics,
+    GAS_POWER_SUFFIX, HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX,
+    MAIN_POWER_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX,
+    PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
+    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
@@ -1609,6 +1609,10 @@ pub struct Dwelling {
     write_output: bool,
     retain_batches: bool,
     output_rotation: hares_io::RotationPolicy,
+    /// Simulation config retained for output-schema rebuilds when equipment
+    /// changes: the incremental metrics calculator re-initializes against
+    /// the rebuilt schema.
+    sim_config: SimulationConfig,
     /// Diagnostic CSV writer, opened when `output_verbosity >= 4`.
     diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
@@ -2315,6 +2319,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // construction, no column index/maps, no recorder, no row scratch.
     // record_step is only called when write_output=true, so none of these
     // caches are ever consulted on the disabled path.
+    let mut streamed_metrics_init_warning: Option<String> = None;
     let (output_value_count, output_column_index, recorder) = if config.sim_config.write_output {
         let zone_types = environment.zone_types().to_vec();
         let indoor_zone = solvers.thermal.config().indoor_zone_id;
@@ -2338,7 +2343,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         let schema = enrich_schema_with_telemetry_units(schema, &equipment);
         let output_value_count = schema.fields().len() - 1; // exclude timestamp
         let output_column_index = build_output_column_index(&schema);
-        let recorder = StreamingRecorder::new(
+        let mut recorder = StreamingRecorder::new(
             schema,
             config.sim_config.output_chunk_size,
             config.sim_config.output_format,
@@ -2347,6 +2352,17 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             config.sim_config.rotation,
         )
         .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
+        // Streaming runs do not retain batches, so run metrics are collected
+        // incrementally at flush time; without this, `SimulationEngine::run`
+        // cannot report metrics for a default (non-retaining) configuration.
+        // Mirrors the post-hoc path's degradation: a calculator init failure
+        // zeroes metrics with a warning instead of failing construction.
+        if !config.sim_config.retain_batches {
+            streamed_metrics_init_warning = recorder
+                .enable_metrics(config.sim_config.time_res_secs_u32(), &config.sim_config)
+                .err()
+                .map(|err| format!("MetricsCalculator init failed: {err} -- metrics are zeroed"));
+        }
         (output_value_count, output_column_index, Some(recorder))
     } else {
         (0, HashMap::new(), None)
@@ -2515,6 +2531,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         write_output: config.sim_config.write_output,
         retain_batches: config.sim_config.retain_batches,
         output_rotation: config.sim_config.rotation,
+        sim_config: config.sim_config.clone(),
         diagnostic_writer: None,
         #[cfg(feature = "profiling")]
         profiling: DwellingProfilingSummary::default(),
@@ -2535,6 +2552,10 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics: solvers.envelope_diagnostics,
     };
+
+    if let Some(warning) = streamed_metrics_init_warning {
+        dwelling.push_warning(warning);
+    }
 
     dwelling.auto_register_actors();
 
@@ -3494,7 +3515,7 @@ impl Dwelling {
             self.record_scratch.resize(self.output_value_count, 0.0);
 
             // The enclosing block is gated on self.write_output.
-            if let Ok(recorder) = StreamingRecorder::new(
+            match StreamingRecorder::new(
                 schema,
                 self.output_chunk_size,
                 self.output_format,
@@ -3502,7 +3523,29 @@ impl Dwelling {
                 self.retain_batches,
                 self.output_rotation,
             ) {
-                self.recorder = Some(recorder);
+                Ok(mut recorder) => {
+                    // Mirrors construction: streaming runs collect run
+                    // metrics incrementally; an init failure degrades to
+                    // zeroed metrics with a warning, not a failed refresh.
+                    if !self.retain_batches {
+                        if let Err(err) = recorder
+                            .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
+                        {
+                            self.push_warning(format!(
+                                "MetricsCalculator init failed: {err} -- metrics are zeroed"
+                            ));
+                        }
+                    }
+                    self.recorder = Some(recorder);
+                }
+                Err(err) => {
+                    // A failed re-init would otherwise silently drop all
+                    // subsequent output; surface it in the run warnings,
+                    // which the engine reports and flags.
+                    self.push_warning(format!(
+                        "output recorder re-init failed: {err} -- subsequent output is dropped"
+                    ));
+                }
             }
         }
     }
@@ -3972,6 +4015,24 @@ impl Dwelling {
         self.recorder
             .as_ref()
             .map_or(&[], StreamingRecorder::flushed_batches)
+    }
+
+    /// Takes run metrics collected incrementally by the streaming recorder.
+    ///
+    /// `None` when the recorder was never constructed, when no metrics
+    /// calculator was attached (retained-batch runs compute metrics post-hoc
+    /// from [`Self::flushed_batches`] instead), or when an attached
+    /// calculator failed to initialize — [`Self::recorded_rows`] and the
+    /// dwelling warnings distinguish the cases.
+    pub fn take_streamed_metrics(&mut self) -> Option<FullSimulationMetrics> {
+        self.recorder.as_mut()?.take_metrics()
+    }
+
+    /// Rows written to the output recorder over the run; `None` when no
+    /// recorder was constructed (`write_output` disabled).
+    #[must_use]
+    pub fn recorded_rows(&self) -> Option<usize> {
+        self.recorder.as_ref().map(StreamingRecorder::total_rows)
     }
 
     /// Snapshot current simulation state to an in-memory checkpoint struct.
@@ -6090,6 +6151,14 @@ impl Dwelling {
 
         // Envelope, boundary, and HVAC thermal gains from the thermal solver.
         let gains = self.thermal_solver.component_gains();
+        // Net sensible = direct heat injections on zone air, matching OCHRE's
+        // "Net Sensible Heat Gain - {zone} (W)" (zone heat input: occupancy,
+        // HVAC, equipment, infiltration, ventilation, window solar). Opaque
+        // envelope conduction reaches the zone through the A-matrix surface
+        // coupling rather than a direct injection, so it is reported per
+        // boundary below instead of here. The gross exterior solar + LWR
+        // absorption (`opaque_solar_lwr_w`) is a boundary condition on the
+        // exterior RC nodes, not a zone input, and is excluded entirely.
         let net_sensible_indoor_w = gains.window_solar_w
             + gains.infiltration_w
             + gains.ventilation_w
@@ -6097,7 +6166,6 @@ impl Dwelling {
             + gains.internal_gain_w
             + gains.jacket_loss_w
             + gains.duct_loss_w
-            + gains.opaque_solar_lwr_w
             // interior_lwr_w is excluded: it reports Σ|q_i|/2 (gross exchange
             // activity), not a net gain. By conservation, Σ q_i ≈ 0, so the
             // net contribution was always ~0 anyway.
@@ -6136,9 +6204,18 @@ impl Dwelling {
             ("Net Sensible Heat Gain - Indoor (W)", net_sensible_indoor_w),
             ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
             ("Interior LWR Exchange - Indoor (W)", gains.interior_lwr_w),
+            // Net conduction from the opaque envelope into the zone (wall +
+            // floor + roof interior surfaces) — the inside-face convection
+            // term of the zone air heat balance (EnergyPlus ERM 26.1 —
+            // "Inside Heat Balance": Interior Convection), aggregated from
+            // the three per-boundary columns below. The gross exterior
+            // solar + LWR absorption is an outside-face balance driver
+            // (EnergyPlus ERM 26.1 — "Outside Surface Heat Balance"): most
+            // of it re-leaves via exterior convection and sky exchange, so
+            // it is not a load on the conditioned zone.
             (
                 "Opaque Surface Heat Gain - Indoor (W)",
-                gains.opaque_solar_lwr_w,
+                gains.wall_heat_gain_w + gains.floor_heat_gain_w + gains.roof_heat_gain_w,
             ),
             ("Duct Loss Heat Gain - Indoor (W)", gains.duct_loss_w),
             ("Roof Heat Gain - Indoor (W)", gains.roof_heat_gain_w),
@@ -6151,6 +6228,14 @@ impl Dwelling {
             ),
             ("HVAC Heating Delivered (W)", gains.hvac_heating_w),
             ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w.abs()),
+            // Complete zone air heat-balance residual (E+ Output:Diagnostics
+            // analogue): C_zone·ΔT/dt − Σ(all gain terms). Small in a correct
+            // model; O(kW) values mean a mis-wired or mislabeled gain — the
+            // I-02 defect class made visible in every output file.
+            (
+                "Zone Air Heat Balance Residual (W)",
+                gains.zone_air_balance_residual_w,
+            ),
         ];
         for &(col_name, value) in envelope_cols {
             if let Some(&idx) = self.output_column_index.get(col_name) {

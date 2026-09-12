@@ -47,6 +47,11 @@ build/
 dwelling_*.csv
 dwelling_*.parquet
 *.parquet
+# ...but NOT the parity reference corpus: those parquets are OCHRE-generated
+# ballpark references (see tests/fixtures/parity/README.md) and must be
+# committed so the parity suite actually runs in CI instead of vacuously
+# passing with all fixtures skipped.
+!tests/fixtures/parity/**/*.parquet
 
 # Worktrees
 .worktrees/

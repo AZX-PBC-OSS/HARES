@@ -1048,14 +1048,11 @@ mod tests {
     where
         F: for<'py> FnOnce(Python<'py>),
     {
-        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
-        // guards against double-initialisation race conditions.
-        unsafe {
-            pyo3::ffi::Py_Initialize();
-        }
-        // SAFETY: interpreter is now initialised.
-        let py = unsafe { Python::assume_attached() };
-        f(py);
+        // The `auto-initialize` feature performs guarded, idempotent
+        // interpreter startup on first attach. Calling `ffi::Py_Initialize()`
+        // directly races that guard ("global import state already
+        // initialized", then SIGSEGV from `assume_attached` without the GIL).
+        Python::attach(f);
     }
 
     #[test]

@@ -395,6 +395,8 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
             state_index: 1,
             input_index: 2,
             area_m2: 20.0,
+            azimuth_deg: 180.0,
+            tilt_deg: 90.0,
             emissivity: 0.90,
             radiation_frac: 1.0,
             rad_res_k_w: 0.0,
@@ -525,6 +527,8 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
         state_index: 0,
         input_index: 99, // deliberately out of bounds for a 2-input vector
         area_m2: 15.0,
+        azimuth_deg: 180.0,
+        tilt_deg: 90.0,
         emissivity: 0.90,
         radiation_frac: 1.0,
         rad_res_k_w: 0.0,

@@ -23,7 +23,10 @@ impl ThermalSolver {
     /// by coupling the RC node temperature with an iterative LWR balance, then
     /// injects the fraction of the net flux that reaches the RC node.
     ///
-    /// Matches OCHRE `_solve_exterior_radiation` with heavy-ball damping.
+    /// Structurally matches OCHRE `_solve_exterior_radiation` with heavy-ball
+    /// damping, with one deliberate divergence: `rad_res_k_w` is the exact
+    /// parallel (Thévenin) form, not OCHRE's bare film — see
+    /// docs/alignment/DIVERGENCES.md.
     pub(super) fn apply_exterior_longwave_inputs_iterative(
         &mut self,
         u: &mut DVector<f64>,
@@ -33,8 +36,19 @@ impl ThermalSolver {
         let t_sky_raw = env.weather.sky_temp_c;
         let t_sky_valid = !t_sky_raw.is_nan();
 
+        // Hoisted per-step constants (env-derived, surface-independent).
+        // When T_sky is invalid the effective sky temperature is T_air, which
+        // collapses the sky term onto the air term in every branch below.
+        let t_air_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
+        let t_sky_eff_k4 = if t_sky_valid {
+            (t_sky_raw + CELSIUS_TO_KELVIN).powi(4)
+        } else {
+            t_air_k4
+        };
+
         self.window_exterior_lwr_w = 0.0;
         self.opaque_exterior_lwr_w = 0.0;
+        self.opaque_exterior_solar_w = 0.0;
         self.lwr_coupling_buf.clear();
 
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
@@ -78,15 +92,9 @@ impl ThermalSolver {
 
                 let f_sky = sky_view_factor(info.tilt_deg);
                 let beta = beta_factor(info.tilt_deg);
-                let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
-                let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
-                let t_air_k = t_ext + CELSIUS_TO_KELVIN;
 
-                let delta_q_w_m2 = info.emissivity
-                    * STEFAN_BOLTZMANN
-                    * beta
-                    * f_sky
-                    * (t_sky_k.powi(4) - t_air_k.powi(4));
+                let delta_q_w_m2 =
+                    info.emissivity * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_eff_k4 - t_air_k4);
 
                 // Use actual h_out from boundary film resistance when at or above
                 // the natural convection floor of 1.0 W/(m²·K) (ASHRAE HoF 2021
@@ -206,7 +214,6 @@ impl ThermalSolver {
 
                 let f_sky = sky_view_factor(info.tilt_deg);
                 let beta = beta_factor(info.tilt_deg);
-                let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
 
                 // Full T⁴ flux for diagnostics.
                 let surface = ExteriorSurface {
@@ -220,12 +227,10 @@ impl ThermalSolver {
                 // Linearise the T⁴ exchange around the current surface temperature.
                 let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
                 let t_surf_k = t_node_c + CELSIUS_TO_KELVIN;
-                let t_air_k = t_ext + CELSIUS_TO_KELVIN;
-                let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
 
                 // Incoming radiative flux [W] (independent of T_surf).
-                let h_lwr_inj = e_factor
-                    * ((1.0 - beta * f_sky) * t_air_k.powi(4) + beta * f_sky * t_sky_k.powi(4));
+                let h_lwr_inj =
+                    e_factor * ((1.0 - beta * f_sky) * t_air_k4 + beta * f_sky * t_sky_eff_k4);
 
                 // Linearised radiation coefficient [W/K].
                 let h_rad = 4.0 * e_factor * t_surf_k.powi(3);
@@ -276,8 +281,10 @@ impl ThermalSolver {
             // node temperature with an iterative T⁴ LWR balance, then injects
             // the fraction of the net flux that reaches the RC node.
             //
-            // Matches OCHRE `_solve_exterior_radiation` (Envelope.py:125-163)
-            // with heavy-ball damping.
+            // Structurally matches OCHRE `_solve_exterior_radiation`
+            // (Envelope.py:125-163) with heavy-ball damping; rad_res is the
+            // exact parallel form, deliberately divergent from OCHRE's bare
+            // film (docs/alignment/DIVERGENCES.md).
             let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
             let f_sky = sky_view_factor(info.tilt_deg);
             let beta = beta_factor(info.tilt_deg);
@@ -288,11 +295,12 @@ impl ThermalSolver {
             }
 
             // Per-surface solar gain [W] for the iteration (no allocation).
-            let solar_w = env
-                .weather
-                .solar_irradiance
-                .iter()
-                .find(|s| s.surface_id == info.surface_id)
+            // Indexed through the per-step slot map rebuilt by
+            // `build_input_vector` — no per-surface rescan of the irradiance vec.
+            let solar_w = self
+                .solar_irr_slot_buf
+                .get(&info.surface_id)
+                .and_then(|&slot| env.weather.solar_irradiance.get(slot))
                 .map(|irr| {
                     info.absorptance
                         * info.area_m2
@@ -301,20 +309,26 @@ impl ThermalSolver {
                 .unwrap_or(0.0);
 
             // Incoming LWR (environment → surface), independent of surface temp.
-            let t_air_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
             let h_lwr_inj = if !t_sky_valid {
                 e_factor * t_air_k4
             } else {
-                let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
-                e_factor * ((1.0 - beta * f_sky) * t_air_k4 + beta * f_sky * t_sky_k4)
+                e_factor * ((1.0 - beta * f_sky) * t_air_k4 + beta * f_sky * t_sky_eff_k4)
             };
 
             // Initial surface temperature estimate from linear interpolation.
             let t_surf_init = info.rad_frac * t_node_c + (1.0 - info.rad_frac) * t_ext;
 
             // Iterative solve with heavy-ball damping (matches OCHRE).
+            // `converged` records whether the loop exited on its 0.01 K
+            // tolerance rather than the iteration cap: mid-transient, the
+            // ±2 K clamp and damping legitimately leave the skin short of
+            // its fixed point within one timestep's budget — convergence
+            // happens across timesteps via the warm start (OCHRE's designed
+            // behavior). The fixed-point invariant below is only asserted
+            // where convergence is claimed.
             let mut t_surf = self.exterior_surface_temps[i];
             let mut t_surf_prev = self.exterior_surface_temps[i];
+            let mut converged = false;
 
             for _ in 0..info.n_iter {
                 let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
@@ -327,6 +341,7 @@ impl ThermalSolver {
                 t_surf_prev = t_surf;
                 t_surf = t_next;
                 if (t_surf - t_surf_prev).abs() < 0.01 {
+                    converged = true;
                     break;
                 }
             }
@@ -336,6 +351,56 @@ impl ThermalSolver {
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
             let injected = (solar_w + q_lw) * info.rad_frac;
             u[info.input_index] += injected;
+
+            // Skin-balance closure invariant. Where the iteration CONVERGED
+            // (tolerance break, not
+            // the iteration cap), the skin must satisfy its own fixed point;
+            // the divider identity is exact regardless of convergence and
+            // checked unconditionally. Both are free to check and both hold
+            // exactly under the parallel (Thévenin) rad_res — the fixed-point
+            // check fails by ~3.9 K under the bare-film form in the
+            // thin-skin regime, i.e. it would have caught that defect the
+            // day it was written.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let q_total = solar_w + q_lw;
+                if converged {
+                    let fixed_point_residual =
+                        (t_surf - (t_surf_init + q_total * info.rad_res_k_w)).abs();
+                    // Tolerance 0.5 K — the derived bound, not a guess. At
+                    // the break, |0.5·(F − t_prev) + 0.1·Δ_prev| < 0.01 with
+                    // Δ_prev (the previous step) bounded by the ±2 K clamp,
+                    // so |t_prev − F| ≤ (0.01 + 0.2)/0.5 = 0.42 and the
+                    // residual |t_surf − F| = |0.5(t_prev − F) + 0.1·Δ_prev|
+                    // ≤ 0.41 K. Observed: 0.051 K (warmup reproducibility)
+                    // and 0.223 K (batch-step synthetic dwelling). The
+                    // defect class this guards is multi-kelvin (3.9 K under
+                    // the bare-film rad_res), so the bound-derived tolerance
+                    // keeps ≈8× sensitivity margin.
+                    debug_assert!(
+                        fixed_point_residual <= 0.5,
+                        "invariant violation: exterior skin {} off its fixed point by \
+                         {fixed_point_residual:.4} K (t_skin={t_surf:.3}, \
+                         t_init={t_surf_init:.3}, Q={q_total:.1} W, \
+                         rad_res={} K/W)",
+                        info.surface_id,
+                        info.rad_res_k_w
+                    );
+                }
+                let divider_residual = (injected - q_total * info.rad_frac).abs();
+                debug_assert!(
+                    divider_residual <= 1e-9 * q_total.abs().max(1.0),
+                    "invariant violation: exterior skin {} injection off the \
+                     divider identity by {divider_residual:.3e} W",
+                    info.surface_id
+                );
+            }
+
+            // Diagnostic split at skin-level semantics (OCHRE "Ext. Solar
+            // Gain" / "Ext. LWR Gain"): the absorbed solar and the net LWR
+            // at the skin, not the rad_frac-scaled injected share.
+            self.opaque_exterior_solar_w += solar_w;
+            self.opaque_exterior_lwr_w += q_lw;
 
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             self.ext_surface_diag_buf
@@ -375,10 +440,10 @@ impl ThermalSolver {
                 .iter()
                 .find(|z| z.id == zone_cfg.zone_id)
                 .map(|z| z.temperature_c)
-                .unwrap_or_else(|| {
-                    tracing::debug!(zone_id = ?zone_cfg.zone_id, "interior LWR: zone not found in env, using 20°C");
-                    20.0
-                });
+                .expect(
+                    "interior LWR zone must be present in env.zones — \
+                         validated at ThermalSolver construction",
+                );
 
             // Emit zone temperature change telemetry to make the LWR lag observable.
             // t_zone_c is the prior-step committed value from env.zones, which lags
@@ -1325,6 +1390,636 @@ mod tests {
             "x_next ({:.10}) must match semi-implicit closed form ({:.10})",
             buf[0],
             x_next_expected
+        );
+    }
+
+    /// First-principles closure test for the iterative exterior-radiation
+    /// solve (rad_frac > 0 path).
+    ///
+    /// The exterior skin is an eliminated (capacitance-free) node between the
+    /// convection-only exterior film R_f and the outermost material
+    /// half-layer R_h. Its exact steady balance is:
+    ///
+    ///   (T_s − T_air)/R_f + (T_s − T_node)/R_h = S + q_lwr(T_s)
+    ///
+    /// Expanding around the no-flux divider temperature
+    /// t_init = rad_frac·T_node + (1−rad_frac)·T_air gives the fixed point
+    ///
+    ///   T_s = t_init + (S + q_lwr)·R_par,   R_par = (R_f·R_h)/(R_f + R_h)
+    ///
+    /// — the *parallel* combination, not the bare film resistance. With the
+    /// parallel form, the current-divider injection (Q·rad_frac into the
+    /// outer RC node) is exactly consistent with the series conductance path
+    /// at every state, not just at steady state.
+    ///
+    /// Geometry chosen so R_h ≈ R_f (thin residential skin — wood siding,
+    /// stucco, metal; ASHRAE 140 case 600 wall construction), which is where
+    /// the bare-film approximation is worst.
+    #[test]
+    fn iterative_skin_temperature_satisfies_exact_skin_balance() {
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+        use std::collections::HashMap;
+
+        let area_m2 = 20.0;
+        let r_film = 0.03; // m²K/W (windy exterior film)
+        let r_half = 0.05; // m²K/W (outer half-layer: wood-siding-class skin)
+        let emissivity = 0.9;
+        let absorptance = 0.6;
+        let t_air = 35.0;
+        let t_sky = 15.0;
+        let t_node = 25.0;
+        let poa_w_m2 = 900.0;
+
+        let rad_frac = r_film / (r_film + r_half);
+        // The contract under test: `solver_builder` must emit the PARALLEL
+        // combination (R_f·R_h)/(R_f+R_h)/A — the exact eliminated-skin
+        // resistance. The bare-film form R_f/A over-drives the skin
+        // temperature (OCHRE's res_material >> res_film approximation breaks
+        // down precisely in the R_h ≈ R_f regime exercised here).
+        let rad_res_k_w = (r_film * r_half / (r_film + r_half)) / area_m2;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            exterior_surfaces: vec![ExteriorSurfaceInfo {
+                surface_id: 200,
+                state_index: 0,
+                input_index: 1,
+                area_m2,
+                emissivity,
+                tilt_deg: 0.0, // horizontal: sky_view_factor = 1, beta = 1
+                azimuth_deg: 180.0,
+                rad_frac,
+                rad_res_k_w,
+                n_iter: 100, // fully converge the fixed point
+                absorptance,
+                boundary_category: Some(BoundaryCategory::Roof),
+                u_factor_w_m2_k: 0.0,
+                h_out_w_m2_k: 1.0 / r_film,
+            }],
+            ..Default::default()
+        };
+
+        let mut env = window_lwr_env();
+        env.weather.outdoor_temp_c = t_air;
+        env.weather.ground_temp_c = t_air;
+        env.weather.sky_temp_c = t_sky;
+        env.weather.solar_irradiance = vec![hares_types::SurfaceIrradiance {
+            surface_id: 200,
+            direct_w_m2: 700.0,
+            diffuse_w_m2: 200.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.5,
+        }];
+
+        let mut solver =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 25.0)
+                .unwrap();
+        solver.x[0] = t_node;
+        // Direct callers of the apply functions must populate the per-step
+        // irradiance slot map themselves (production path rebuilds it in
+        // `build_input_vector`).
+        solver.solar_irr_slot_buf.insert(200, 0);
+
+        let mut u = DVector::zeros(2);
+        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        let t_skin_solver = solver.exterior_surface_temps[0];
+
+        // Exact skin balance by Newton iteration on
+        //   f(T) = (T−T_air)/R_f + (T−T_node)/R_h − S − q_lwr(T) = 0
+        // (horizontal roof: f_sky = 1, beta = 1, so q_lwr = εσA(T_sky⁴ − T⁴)).
+        let r_f = r_film / area_m2; // K/W
+        let r_h = r_half / area_m2; // K/W
+        let solar_w = absorptance * area_m2 * poa_w_m2;
+        let e_factor = emissivity * STEFAN_BOLTZMANN * area_m2;
+        let t_sky_k4 = (t_sky + CELSIUS_TO_KELVIN).powi(4);
+        let q_lwr = |t_c: f64| -> f64 { e_factor * (t_sky_k4 - (t_c + CELSIUS_TO_KELVIN).powi(4)) };
+        let balance =
+            |t_c: f64| -> f64 { (t_c - t_air) / r_f + (t_c - t_node) / r_h - solar_w - q_lwr(t_c) };
+        let mut t_exact = t_air;
+        for _ in 0..80 {
+            let f = balance(t_exact);
+            let df = 1.0 / r_f + 1.0 / r_h + 4.0 * e_factor * (t_exact + CELSIUS_TO_KELVIN).powi(3);
+            t_exact -= f / df;
+        }
+        assert!(
+            balance(t_exact).abs() < 1e-3,
+            "Newton solve of the exact skin balance did not converge: residual={:.2e} W",
+            balance(t_exact)
+        );
+
+        // (1) The converged skin temperature must match the exact balance.
+        assert!(
+            (t_skin_solver - t_exact).abs() < 0.05,
+            "iterative skin temp {t_skin_solver:.3}°C must match exact skin-balance \
+             solution {t_exact:.3}°C within 0.05 K (residual of exact balance at \
+             solver value: {:.2} W)",
+            balance(t_skin_solver)
+        );
+
+        // (2) The injection into the outer RC node must equal the exact
+        // divider share of the total skin flux: Q·rad_frac, evaluated at the
+        // exact skin temperature.
+        let q_total_exact = solar_w + q_lwr(t_exact);
+        let injected_expected = q_total_exact * rad_frac;
+        assert!(
+            (u[1] - injected_expected).abs() / injected_expected.abs() < 0.01,
+            "injected flux {:.1} W must match exact divider share {:.1} W",
+            u[1],
+            injected_expected
+        );
+    }
+
+    /// The runtime zone-wiring fallbacks (index-0 attribution,
+    /// 20 °C substitution) are gone — construction must reject the states
+    /// that used to engage them, with the zone named.
+    #[test]
+    fn construction_rejects_missing_indoor_zone_wiring_with_zone_named() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, StateSpaceWiring,
+            ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        // Indoor zone 1 with boundary diagnostics configured, but the
+        // wiring has NO zone_output_indices entry — the pre-fix runtime
+        // silently attributed diagnostics to output 0.
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            boundary_diagnostics: vec![BoundaryDiagnosticInfo::SteadyState {
+                ua_w_k: 20.0,
+                driving_temp: DrivingTemp::Outdoor,
+                category: BoundaryCategory::Wall,
+            }],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("diagnostics without a zone output index must be rejected");
+        assert!(
+            err.to_string().contains("indoor zone 1")
+                && err.to_string().contains("zone_output_indices"),
+            "error must name the zone and the missing map, got: {err}"
+        );
+    }
+
+    /// An interior-LWR zone absent from the environment used to be
+    /// silently substituted with 20 °C at runtime; construction must reject
+    /// it with the zone named.
+    #[test]
+    fn construction_rejects_interior_lwr_zone_absent_from_env() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{InteriorLwrZoneConfig, StateSpaceWiring, ThermalSolverConfig};
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            c_zone_j_k: HashMap::from([(ZoneId(1), 1e5)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        // Zone 9 has LWR surfaces configured but does not exist in env.
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            interior_lwr_zones: vec![InteriorLwrZoneConfig {
+                zone_id: ZoneId(9),
+                surfaces: vec![],
+                scriptf: None,
+            }],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("LWR zone absent from env must be rejected");
+        assert!(
+            err.to_string().contains("zone 9") && err.to_string().contains("not present"),
+            "error must name the absent zone, got: {err}"
+        );
+    }
+
+    /// The construction-time wiring contract ("out-of-range indices...
+    /// fails fast with the offending surface named, instead of silently
+    /// mis-wiring") must cover the ground-node wiring too. A
+    /// `ground_temp_input_indices` entry beyond the model's input dimension
+    /// passes the ground-depth presence check (the depth IS in
+    /// `ground_temp_input_depths_m`) but breaks the cache/depths
+    /// parallelism: `apply_outdoor_inputs` skips the out-of-range column
+    /// (`if idx < u.len()`), so `cached_ground_temps_c` never receives that
+    /// depth's entry, and the first step's per-boundary accumulation hits
+    /// the `expect` whose message claims the lookup was "validated at
+    /// ThermalSolver construction" — a mid-run panic on a wiring error the
+    /// construction validation exists to reject.
+    #[test]
+    fn construction_rejects_out_of_range_ground_input_index_with_depth_named() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, StateSpaceWiring,
+            ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]); // input_dim = 2
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            // Column 5 does not exist (input_dim = 2): the depth itself is
+            // registered, so the presence check alone cannot catch it.
+            ground_temp_input_indices: vec![5],
+            ground_temp_input_depths_m: vec![2.0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            boundary_diagnostics: vec![BoundaryDiagnosticInfo::SteadyState {
+                ua_w_k: 20.0,
+                driving_temp: DrivingTemp::Ground { depth_m: 2.0 },
+                category: BoundaryCategory::Wall,
+            }],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("out-of-range ground input index must be rejected at construction");
+        assert!(
+            err.to_string().contains("ground") && err.to_string().contains('5'),
+            "error must name the ground wiring and the offending index, got: {err}"
+        );
+    }
+
+    /// Ground input wiring must be parallel: `ground_temp_input_indices`
+    /// and `ground_temp_input_depths_m` in lockstep. A length mismatch
+    /// (e.g. one valid index registered against two depths) passes the
+    /// depth-presence check — the diagnostic's depth IS in the list — but
+    /// the runtime cache is built by zipping the two vecs, so the extra
+    /// depth has no cache entry and the per-boundary accumulation hits the
+    /// same "validated at ThermalSolver construction" `expect` mid-run.
+    /// Pins the construction parallelism check.
+    #[test]
+    fn construction_rejects_non_parallel_ground_input_wiring() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, StateSpaceWiring,
+            ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            // One VALID index registered against two depths: the diag's
+            // depth (8.0) is present in the depths list, so the presence
+            // check alone passes — only the parallelism check catches it.
+            ground_temp_input_indices: vec![0],
+            ground_temp_input_depths_m: vec![2.0, 8.0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            boundary_diagnostics: vec![BoundaryDiagnosticInfo::SteadyState {
+                ua_w_k: 20.0,
+                driving_temp: DrivingTemp::Ground { depth_m: 8.0 },
+                category: BoundaryCategory::Wall,
+            }],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("non-parallel ground input wiring must be rejected at construction");
+        assert!(
+            err.to_string().contains("parallel"),
+            "error must name the parallelism violation, got: {err}"
+        );
+    }
+
+    /// An out-of-range `outdoor_temp_input_indices` entry is the SILENT
+    /// sibling of the ground-index bomb: every consumer guards with
+    /// `if idx < u.len()` and skips (`apply_outdoor_inputs`,
+    /// `initialize_steady_state`), so no panic ever fires — the outdoor
+    /// driving column is simply never written and stays 0.0, and the
+    /// building silently simulates against a phantom 0 °C outdoor
+    /// boundary. The construction contract ("out-of-range indices... fail
+    /// fast... instead of silently mis-wiring") must cover it.
+    #[test]
+    fn construction_rejects_out_of_range_outdoor_input_index() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{StateSpaceWiring, ThermalSolverConfig};
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]); // input_dim = 2
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            // Column 9 does not exist (input_dim = 2): guarded skips in
+            // apply_outdoor_inputs and initialize_steady_state mean the
+            // outdoor column is silently never driven.
+            outdoor_temp_input_indices: vec![9],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("out-of-range outdoor input index must be rejected at construction");
+        assert!(
+            err.to_string().contains("outdoor") && err.to_string().contains('9'),
+            "error must name the outdoor wiring and the offending index, got: {err}"
+        );
+    }
+
+    /// An out-of-range `zone_output_indices` VALUE passes the construction
+    /// presence check (which only tests that the indoor zone has an entry)
+    /// and detonates mid-run: the per-boundary accumulation indexes
+    /// `y_next[zone_output_idx]` unguarded, so the first step panics with a
+    /// bare index-out-of-bounds instead of a construction error naming the
+    /// zone. Same class as the ground-index bomb: presence checked, range
+    /// not.
+    #[test]
+    fn construction_rejects_out_of_range_zone_output_index() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, StateSpaceWiring,
+            ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1, // the only valid output index is 0
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            // Entry exists (passes the presence check) but points beyond
+            // the single output.
+            zone_output_indices: HashMap::from([(ZoneId(1), 7)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        // Diagnostics non-empty so the presence check engages on the map.
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            boundary_diagnostics: vec![BoundaryDiagnosticInfo::SteadyState {
+                ua_w_k: 20.0,
+                driving_temp: DrivingTemp::Outdoor,
+                category: BoundaryCategory::Wall,
+            }],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("out-of-range zone output index must be rejected at construction");
+        assert!(
+            err.to_string().contains("output") && err.to_string().contains('7'),
+            "error must name the output wiring and the offending index, got: {err}"
+        );
+    }
+
+    /// The construction-time range pass over `StateSpaceWiring` rejects an
+    /// out-of-range VALUE in every index-bearing map — not just the two maps
+    /// (zone output, outdoor temperature) pinned by their own tests above.
+    /// The unpinned branches share the pass but fail through distinct modes
+    /// when absent: zone-state and solar indices arm a deferred panic /
+    /// silently dropped solar, and zone-sensible / indoor-temperature
+    /// indices are guard-and-skipped everywhere, so their injections vanish
+    /// silently (all zone-air gains discarded; the zone-air-balance
+    /// residual corrupted). One test over the shared pass, one case per
+    /// remaining branch; each error must name its wiring and index.
+    #[test]
+    fn construction_rejects_out_of_range_value_in_every_remaining_wiring_map() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{StateSpaceWiring, ThermalSolverConfig};
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let build_model = || {
+            let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+            let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]); // input_dim = 2
+            let mapping = OutputMapping {
+                output_count: 1,
+                node_to_output: vec![(0, 0, 1.0)],
+                input_to_output: vec![],
+            };
+            StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap()
+        };
+        let base_wiring = || StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+
+        let mut state_case = base_wiring();
+        state_case.zone_state_indices = HashMap::from([(ZoneId(1), 7)]); // state_dim = 1
+        let mut sensible_case = base_wiring();
+        sensible_case.zone_sensible_input_indices = HashMap::from([(ZoneId(1), 9)]);
+        let mut indoor_case = base_wiring();
+        indoor_case.indoor_temp_input_indices = vec![9];
+        let mut solar_case = base_wiring();
+        solar_case.solar_input_indices = HashMap::from([(42, 9)]);
+
+        let cases: [(&str, StateSpaceWiring); 4] = [
+            ("state index", state_case),
+            ("sensible-heat input index", sensible_case),
+            ("indoor temperature input index", indoor_case),
+            ("solar input index", solar_case),
+        ];
+        for (name_fragment, wiring) in cases {
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                ..Default::default()
+            };
+            let env = window_lwr_env();
+            let err = crate::thermal_solver::ThermalSolver::new(
+                build_model(),
+                wiring,
+                config,
+                60.0,
+                &env,
+                22.0,
+            )
+            .expect_err("out-of-range wiring value must be rejected at construction");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(name_fragment) && msg.contains("out of range"),
+                "error for the '{name_fragment}' branch must name the wiring and \
+                 say why, got: {msg}"
+            );
+        }
+    }
+
+    /// Two exterior surfaces sharing a DEDICATED injection column (not a
+    /// zone's additive sensible-heat column, where sharing is legitimate)
+    /// must be rejected at construction: one surface's flux would land in
+    /// the other's column. `ThermalSolverConfig::validate` deliberately
+    /// cannot see this (it is wiring-aware); the check lives in
+    /// `ThermalSolver::new` and had no pinning test.
+    #[test]
+    fn construction_rejects_duplicate_dedicated_exterior_input_column() {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let surface = |surface_id: u32| ExteriorSurfaceInfo {
+            surface_id,
+            state_index: 0,
+            input_index: 1, // both surfaces share dedicated column 1
+            area_m2: 20.0,
+            emissivity: 0.9,
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+            rad_frac: 0.0, // non-iterative path: no skin wiring needed
+            rad_res_k_w: 0.0,
+            n_iter: 1,
+            absorptance: 0.7,
+            boundary_category: Some(BoundaryCategory::Wall),
+            u_factor_w_m2_k: 0.0,
+            h_out_w_m2_k: 33.0,
+        };
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1e-4, 1e-5, 1e-6]); // input_dim = 3
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            exterior_surfaces: vec![surface(10), surface(11)],
+            ..Default::default()
+        };
+        let env = window_lwr_env();
+        let err =
+            crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, &env, 22.0)
+                .expect_err("duplicate dedicated exterior input column must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate") && msg.contains("input_index 1"),
+            "error must name the duplicated column, got: {msg}"
         );
     }
 }

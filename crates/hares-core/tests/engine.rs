@@ -102,6 +102,14 @@ fn fixture_hpxml_path() -> PathBuf {
 }
 
 fn simulation_config(output_path: PathBuf) -> SimulationConfig {
+    simulation_config_with_flags(output_path, true, true)
+}
+
+fn simulation_config_with_flags(
+    output_path: PathBuf,
+    retain_batches: bool,
+    write_output: bool,
+) -> SimulationConfig {
     SimulationConfig {
         start_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -111,14 +119,14 @@ fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         time_res: Duration::minutes(1),
         output_verbosity: 0,
         output_path: Some(output_path),
-        write_output: true,
+        write_output,
         output_format: OutputFormat::Csv,
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: true,
+        retain_batches,
         rotation: hares_io::RotationPolicy::None,
     }
 }
@@ -217,4 +225,211 @@ fn run_returns_err_for_missing_weather_path() {
     assert!(weather_err.to_string().contains("weather_path"));
 
     let _ = fs::remove_file(weather_missing.schedule_path);
+}
+
+/// A streaming run (retain_batches=false, the default configuration shape)
+/// must still produce real run metrics: they are collected incrementally at
+/// flush time. The previous behavior returned zeroed metrics with a false
+/// "zero-step" flag for every non-retaining run.
+#[test]
+fn run_with_streaming_output_computes_metrics() {
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let build_config = |output_path: PathBuf, retain: bool| DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config: simulation_config_with_flags(output_path, retain, true),
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let retained = engine
+        .run(build_config(unique_temp_path("csv"), true))
+        .expect("retained run should succeed");
+    let streamed = engine
+        .run(build_config(unique_temp_path("csv"), false))
+        .expect("streaming run should succeed");
+
+    // Nothing is retained in memory on the streaming run -- the honest
+    // timeseries is empty -- but the metrics must be fully computed.
+    assert!(
+        streamed.timeseries.as_ref().is_some_and(Vec::is_empty),
+        "streaming run must not retain batches"
+    );
+    assert_eq!(
+        streamed.metrics.simulation_duration_hours, 1.0,
+        "streaming run must compute metrics (zeroed metrics report 0 hours)"
+    );
+    assert!(
+        streamed.metrics.total_energy_kwh.net_energy_kwh > 0.0,
+        "streaming run must report real energy totals"
+    );
+    assert!(
+        !matches!(&streamed.status, SimStatus::Flagged(msg)
+            if msg.contains("zero-step") || msg.contains("metrics unavailable")),
+        "a fully-recorded streaming run must not be flagged as zero-step or \
+         metrics-unavailable, got: {:?}",
+        streamed.status
+    );
+
+    // The incremental calculator sees the same batches in the same order as
+    // a post-hoc pass over retained batches, so both paths must agree.
+    assert_eq!(
+        streamed.metrics, retained.metrics,
+        "streaming (incremental) metrics must equal retained-batch metrics"
+    );
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
+}
+
+/// Streaming (incremental recorder-fed) metrics must equal batch (retained-
+/// batches) metrics on a real fixture at a verbosity where the envelope-load
+/// columns exist -- field-for-field, including `envelope_loads_kwh`. The two
+/// paths share the calculator; this pins that no plumbing rework of either
+/// path can silently diverge them (the class of breakage the resstock
+/// energy identity exposed during I-02).
+#[test]
+fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let build_config = |retain: bool| DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config: {
+            let mut cfg = simulation_config_with_flags(unique_temp_path("csv"), retain, true);
+            cfg.output_verbosity = 6;
+            cfg
+        },
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let retained = engine
+        .run(build_config(true))
+        .expect("retained run should succeed");
+    let streamed = engine
+        .run(build_config(false))
+        .expect("streaming run should succeed");
+
+    // Envelope loads must be present and compared, not just energy totals.
+    assert!(
+        streamed.metrics.envelope_loads_kwh.is_some(),
+        "verbosity 6 must produce envelope-load columns"
+    );
+    assert_eq!(
+        streamed.metrics.envelope_loads_kwh, retained.metrics.envelope_loads_kwh,
+        "streaming and batch envelope loads must agree exactly"
+    );
+    assert_eq!(
+        streamed.metrics, retained.metrics,
+        "streaming (incremental) metrics must equal retained-batch metrics \
+         field-for-field, including energy totals"
+    );
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
+}
+
+/// A run with no timesteps must be flagged as a true zero-step run -- not
+/// reported as Ok with zeroed metrics.
+#[test]
+fn run_with_zero_duration_flags_zero_step() {
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let mut sim_config = simulation_config_with_flags(unique_temp_path("csv"), false, true);
+    sim_config.duration = Duration::zero();
+
+    let config = DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config,
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let result = engine
+        .run(config)
+        .expect("zero-duration run should succeed");
+
+    assert!(
+        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("zero-step")),
+        "zero-duration run must be flagged as zero-step, got: {:?}",
+        result.status
+    );
+    assert_eq!(
+        result.metrics.simulation_duration_hours, 0.0,
+        "zero-step run must report zero duration"
+    );
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
+}
+
+/// A run with output disabled has nothing to compute metrics from; the
+/// status must say so honestly instead of misreporting a zero-step run.
+#[test]
+fn run_without_output_recorder_reports_metrics_unavailable() {
+    let schedule_path = unique_temp_path("csv");
+    let weather_path = unique_temp_path("epw");
+    write_temp_file(&schedule_path, &build_schedule_csv());
+    write_temp_file(&weather_path, &build_epw_8760());
+
+    let config = DwellingConfig {
+        hpxml_path: fixture_hpxml_path(),
+        schedule_path: schedule_path.clone(),
+        weather_path: weather_path.clone(),
+        sim_config: simulation_config_with_flags(unique_temp_path("csv"), false, false),
+        defaults_path: None,
+        overrides: None,
+        bldg_id: 123,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    let engine = SimulationEngine::new();
+    let result = engine
+        .run(config)
+        .expect("output-disabled run should succeed");
+
+    assert!(
+        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("no output recorder")),
+        "output-disabled run must be flagged with the no-recorder reason, got: {:?}",
+        result.status
+    );
+    assert_eq!(
+        result.metrics.simulation_duration_hours, 0.0,
+        "output-disabled run has no metrics source"
+    );
+
+    let _ = fs::remove_file(schedule_path);
+    let _ = fs::remove_file(weather_path);
 }

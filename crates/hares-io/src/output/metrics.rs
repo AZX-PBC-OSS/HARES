@@ -41,9 +41,16 @@ pub enum MetricsError {
 /// Total accumulated electric energy over the simulation period.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TotalEnergyKwh {
-    /// Net electric energy accumulated — consumption minus generation (kWh).
+    /// Net electric energy at the meter — gross consumption minus gross PV
+    /// generation (kWh). Positive = import, negative = export. The identity
+    /// `net == gross_consumption − gross_pv` holds whenever PV is the only
+    /// export source; battery discharge to the grid breaks it by design
+    /// (the discharged energy is neither load nor PV).
     pub net_energy_kwh: f64,
-    /// Gross electric consumption — only positive (import) power values (kWh).
+    /// Gross electric consumption — the load behind the meter: the net
+    /// total plus self-consumed PV generation, which never appears in the
+    /// net column (kWh). Non-negative per row; a row where a non-PV source
+    /// exports harder than the load contributes zero.
     pub gross_consumption_kwh: f64,
     /// Gross PV generation — abs of negative PV power values (kWh).
     pub gross_pv_generation_kwh: f64,
@@ -95,14 +102,31 @@ pub struct GasEnergyMetrics {
 
 /// Envelope component loads [kWh] over the simulation period.
 ///
-/// These represent the thermal loads imposed on the conditioned zone by each
-/// envelope component. Positive = heat gain to zone, negative = heat loss.
+/// These represent the net thermal loads imposed on the conditioned zone by
+/// each envelope component: positive = heat gain to zone, negative = heat
+/// loss. Together with the direct-injection fields (infiltration,
+/// ventilation, HVAC, internal gains, duct loss) they approximate the zone
+/// air heat balance to within the semi-implicit/TARP coupling split, which
+/// is reported separately as the "Zone Air Heat Balance Residual (W)"
+/// column rather than in any of these fields. The exception is
+/// [`interior_lwr_kwh`], a gross exchange metric that is documented inline
+/// and must not be summed into a net balance.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnvelopeComponentLoadsKwh {
     /// Window transmitted + absorbed-inward solar gain.
     pub window_solar_kwh: f64,
-    /// Opaque surface solar + exterior LWR.
-    pub opaque_solar_lwr_kwh: f64,
+    /// Window conduction into the zone (interior-surface convection —
+    /// OCHRE's "Window" component-load category, which covers conduction
+    /// plus radiation from the window surface; the solar component is
+    /// `window_solar_kwh`).
+    pub window_conduction_kwh: f64,
+    /// Net conduction from the opaque envelope (wall + floor + roof interior
+    /// surfaces) into the conditioned zone. This is the time-lagged fraction
+    /// of exterior solar, longwave, and ΔT conduction that actually reaches
+    /// zone air — not the gross exterior absorption, which is a boundary
+    /// condition on the exterior RC nodes and is reported separately in
+    /// observer diagnostics (`EnvelopeComponentGains::opaque_solar_lwr_w`).
+    pub opaque_conduction_kwh: f64,
     /// Interior longwave radiation exchange activity (Σ|q_i|/2, see
     /// `EnvelopeComponentGains::interior_lwr_w`). This is a gross exchange
     /// metric, not a net energy gain; summing it into a net-sensible balance
@@ -120,6 +144,11 @@ pub struct EnvelopeComponentLoadsKwh {
     pub internal_gains_kwh: f64,
     /// Duct distribution losses to zone.
     pub duct_loss_kwh: f64,
+    /// Net convection from internal-mass surfaces to zone air — OCHRE's
+    /// "Internal Mass" component-load category. A zone air balance term
+    /// (heat redistributed between zone air and thermal mass), not an
+    /// exterior envelope load.
+    pub internal_mass_kwh: f64,
 }
 
 /// Per-equipment efficiency metrics.
@@ -178,6 +207,9 @@ pub struct SimulationMetrics {
     pub peak_power_kw: PeakPowerKw,
     pub comfort_hours: Option<f64>,
     pub unmet_load_hours: Option<f64>,
+    /// Fraction of the gross load (consumption behind the meter) covered by
+    /// PV generation. Can exceed 1.0 when generation exceeds load (net-positive
+    /// home); 0.0 when no consumption was recorded. `None` without a PV column.
     pub renewable_energy_fraction: Option<f64>,
     pub grid_interaction_metrics: GridInteractionMetrics,
     /// Envelope component loads. `None` if component gain columns not present.
@@ -341,7 +373,9 @@ pub struct MetricsCalculator {
     infiltration_w_idx: Option<usize>,
     interior_lwr_w_idx: Option<usize>,
     internal_gains_w_idx: Option<usize>,
-    opaque_solar_lwr_w_idx: Option<usize>,
+    opaque_conduction_w_idx: Option<usize>,
+    window_conduction_w_idx: Option<usize>,
+    internal_mass_w_idx: Option<usize>,
     forced_ventilation_w_idx: Option<usize>,
     natural_ventilation_w_idx: Option<usize>,
     duct_loss_w_idx: Option<usize>,
@@ -368,7 +402,9 @@ pub struct MetricsCalculator {
 
     // Envelope component load accumulators [W·h → kWh at finish]
     envelope_window_solar_wh: f64,
-    envelope_opaque_solar_lwr_wh: f64,
+    envelope_opaque_conduction_wh: f64,
+    envelope_window_conduction_wh: f64,
+    envelope_internal_mass_wh: f64,
     envelope_interior_lwr_wh: f64,
     envelope_infiltration_wh: f64,
     envelope_ventilation_wh: f64,
@@ -443,8 +479,12 @@ impl MetricsCalculator {
             optional_float64_column(schema, &["Interior LWR Exchange - Indoor (W)"])?;
         let internal_gains_w_idx =
             optional_float64_column(schema, &["Internal Heat Gain - Indoor (W)"])?;
-        let opaque_solar_lwr_w_idx =
+        let opaque_conduction_w_idx =
             optional_float64_column(schema, &["Opaque Surface Heat Gain - Indoor (W)"])?;
+        let window_conduction_w_idx =
+            optional_float64_column(schema, &["Window Heat Gain - Indoor (W)"])?;
+        let internal_mass_w_idx =
+            optional_float64_column(schema, &["Internal Mass Heat Gain - Indoor (W)"])?;
         let forced_ventilation_w_idx =
             optional_float64_column(schema, &["Forced Ventilation Heat Gain - Indoor (W)"])?;
         let natural_ventilation_w_idx =
@@ -517,7 +557,9 @@ impl MetricsCalculator {
             infiltration_w_idx,
             interior_lwr_w_idx,
             internal_gains_w_idx,
-            opaque_solar_lwr_w_idx,
+            opaque_conduction_w_idx,
+            window_conduction_w_idx,
+            internal_mass_w_idx,
             forced_ventilation_w_idx,
             natural_ventilation_w_idx,
             duct_loss_w_idx,
@@ -538,7 +580,9 @@ impl MetricsCalculator {
             unmet_step_count: 0.0,
             rolling_peak,
             envelope_window_solar_wh: 0.0,
-            envelope_opaque_solar_lwr_wh: 0.0,
+            envelope_opaque_conduction_wh: 0.0,
+            envelope_window_conduction_wh: 0.0,
+            envelope_internal_mass_wh: 0.0,
             envelope_interior_lwr_wh: 0.0,
             envelope_infiltration_wh: 0.0,
             envelope_ventilation_wh: 0.0,
@@ -550,7 +594,9 @@ impl MetricsCalculator {
                 || infiltration_w_idx.is_some()
                 || interior_lwr_w_idx.is_some()
                 || internal_gains_w_idx.is_some()
-                || opaque_solar_lwr_w_idx.is_some()
+                || opaque_conduction_w_idx.is_some()
+                || window_conduction_w_idx.is_some()
+                || internal_mass_w_idx.is_some()
                 || forced_ventilation_w_idx.is_some()
                 || natural_ventilation_w_idx.is_some()
                 || duct_loss_w_idx.is_some()
@@ -638,10 +684,33 @@ impl MetricsCalculator {
             .collect::<Vec<_>>();
 
         for row in 0..batch.num_rows() {
+            // Gross PV generation this row [kW] (PV column is negative when
+            // generating). Hoisted once per row: it feeds both the gross
+            // generation accumulator and the load-behind-the-meter figure.
+            let pv_gen_kw = pv_arr
+                .and_then(|arr| value_at(arr, row))
+                .filter(|pv| *pv < 0.0)
+                .map_or(0.0, f64::abs);
+
             if let Some(total_kw) = self.guarded_power_value(total_arr, row) {
                 self.total_electric_energy_kwh += total_kw * self.timestep_h;
-                if total_kw > 0.0 {
-                    self.total_consumption_kwh += total_kw * self.timestep_h;
+                // Gross consumption is the load behind the meter: the net
+                // total plus self-consumed PV generation. Without this, an
+                // always-exporting PV home reports 0 consumption even while
+                // its loads run on self-consumed solar.
+                let load_kw = total_kw + pv_gen_kw;
+                if load_kw > 0.0 {
+                    self.total_consumption_kwh += load_kw * self.timestep_h;
+                }
+                // Gross PV generation accumulates on the same row
+                // eligibility as net and gross consumption (finite meter
+                // total): a non-finite total row is a sensor dropout the
+                // calculator explicitly skips, and counting PV on it while
+                // the other two skip breaks the documented identity
+                // net == gross_consumption − gross_pv and skews
+                // renewable_energy_fraction.
+                if pv_gen_kw > 0.0 {
+                    self.total_pv_generation_kwh_abs += pv_gen_kw * self.timestep_h;
                 }
             }
 
@@ -658,12 +727,6 @@ impl MetricsCalculator {
                     self.peak_export_kw = export_kw;
                 }
                 self.rolling_peak.push(grid_kw);
-            }
-
-            if let Some(pv) = pv_arr.and_then(|arr| value_at(arr, row))
-                && pv < 0.0
-            {
-                self.total_pv_generation_kwh_abs += pv.abs() * self.timestep_h;
             }
 
             for ((name, _), array) in self.end_use_columns.iter().zip(&end_use_arrays) {
@@ -744,9 +807,19 @@ impl MetricsCalculator {
                     self.envelope_internal_gains_wh += v * self.timestep_h;
                 }
             }
-            if let Some(idx) = self.opaque_solar_lwr_w_idx {
+            if let Some(idx) = self.opaque_conduction_w_idx {
                 if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_opaque_solar_lwr_wh += v * self.timestep_h;
+                    self.envelope_opaque_conduction_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.window_conduction_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_window_conduction_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.internal_mass_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_internal_mass_wh += v * self.timestep_h;
                 }
             }
             if let Some(idx) = self.forced_ventilation_w_idx {
@@ -902,7 +975,10 @@ impl MetricsCalculator {
             if self.total_consumption_kwh <= 0.0 {
                 0.0
             } else {
-                (self.total_pv_generation_kwh_abs / self.total_consumption_kwh).clamp(0.0, 1.0)
+                // Fraction of the gross load covered by PV. Not clamped: a
+                // net-positive home legitimately covers more than 100 % of
+                // its load, and clamping would report exactly that as 1.0.
+                self.total_pv_generation_kwh_abs / self.total_consumption_kwh
             }
         });
 
@@ -1081,7 +1157,9 @@ impl MetricsCalculator {
                 envelope_loads_kwh: if self.has_envelope_columns {
                     Some(EnvelopeComponentLoadsKwh {
                         window_solar_kwh: self.envelope_window_solar_wh / 1000.0,
-                        opaque_solar_lwr_kwh: self.envelope_opaque_solar_lwr_wh / 1000.0,
+                        window_conduction_kwh: self.envelope_window_conduction_wh / 1000.0,
+                        opaque_conduction_kwh: self.envelope_opaque_conduction_wh / 1000.0,
+                        internal_mass_kwh: self.envelope_internal_mass_wh / 1000.0,
                         interior_lwr_kwh: self.envelope_interior_lwr_wh / 1000.0,
                         infiltration_kwh: self.envelope_infiltration_wh / 1000.0,
                         ventilation_kwh: self.envelope_ventilation_wh / 1000.0,
@@ -1550,7 +1628,153 @@ mod tests {
         ]));
         let metrics = calc.finish();
 
-        assert_eq!(metrics.renewable_energy_fraction, Some(0.375));
+        // Gross load per row = net total + self-consumed PV generation:
+        // (4+2) + (4+1) = 11 kWh; PV generated 3 kWh → fraction 3/11.
+        // The old denominator (positive part of the net column, 8 kWh)
+        // ignored self-consumed PV and understated the load.
+        assert_eq!(metrics.renewable_energy_fraction, Some(3.0 / 11.0));
+        // Identity: net = gross_consumption − gross_pv (PV-only export).
+        assert!(
+            (metrics.total_energy_kwh.net_energy_kwh
+                - (metrics.total_energy_kwh.gross_consumption_kwh
+                    - metrics.total_energy_kwh.gross_pv_generation_kwh))
+                .abs()
+                < 1e-9
+        );
+    }
+
+    /// A net-positive home (exports more than it imports over the period)
+    /// reports a renewable fraction above 1.0 — its PV covers more than
+    /// 100 % of the load behind the meter. Clamping to 1.0 would erase
+    /// exactly that signal. Pins the documented unclamped contract.
+    #[test]
+    fn renewable_fraction_exceeds_one_for_net_exporter() {
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        // Net meter −2 kW (exporting) while PV generates 5 kW: load behind
+        // the meter is −2 + 5 = 3 kWh, PV is 5 kWh → fraction 5/3 > 1.0.
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![-2.0]),
+            ("PV End Use Electric Power (kW)", vec![-5.0]),
+        ]));
+        let m = calc.finish();
+        assert_eq!(m.renewable_energy_fraction, Some(5.0 / 3.0));
+        assert!(m.renewable_energy_fraction.unwrap() > 1.0);
+    }
+
+    /// Randomized energy-identity property: for any sign pattern of net
+    /// total and PV columns,
+    ///   gross_consumption − gross_pv − net == −Σ min(total + pv_gen, 0)·dt
+    /// exactly — the right-hand side is the documented battery/export caveat:
+    /// zero for PV-only-export rows (load ≥ 0 after self-consumption), equal
+    /// to clipped export otherwise. 256 deterministic cases (SplitMix64).
+    #[test]
+    fn energy_identity_holds_over_randomized_sign_patterns() {
+        let mut state = 0xB5297A4D_u64;
+        let mut next_f64 = move || {
+            state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        for case in 0..256 {
+            let n_rows = 1 + (next_f64() * 24.0) as usize;
+            // Net total spans export..heavy import; PV column negative when
+            // generating (signed) with occasional NaN rows excluded by design.
+            let total: Vec<f64> = (0..n_rows).map(|_| (next_f64() - 0.4) * 20.0).collect();
+            let pv: Vec<f64> = (0..n_rows)
+                .map(|_| {
+                    if next_f64() < 0.5 {
+                        -next_f64() * 10.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+
+            let schema =
+                schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+            let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+            calc.accumulate(&build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, total.clone()),
+                ("PV End Use Electric Power (kW)", pv.clone()),
+            ]));
+            let full = calc.finish();
+            let m = &full.total_energy_kwh;
+
+            // Reference computation, straight from the documented semantics.
+            let mut exp_net = 0.0;
+            let mut exp_consumption = 0.0;
+            let mut exp_pv = 0.0;
+            for (&t, &p) in total.iter().zip(&pv) {
+                let pv_gen = if p < 0.0 { p.abs() } else { 0.0 };
+                exp_net += t;
+                exp_consumption += (t + pv_gen).max(0.0);
+                exp_pv += pv_gen;
+            }
+            let lhs = m.gross_consumption_kwh - m.gross_pv_generation_kwh - m.net_energy_kwh;
+            let rhs = exp_consumption - exp_pv - exp_net;
+            assert!(
+                (lhs - rhs).abs() < 1e-9,
+                "case {case}: identity residual {lhs:.6e} vs reference {rhs:.6e} \
+                 (net={:.3}, consumption={:.3}, pv={:.3})",
+                m.net_energy_kwh,
+                m.gross_consumption_kwh,
+                m.gross_pv_generation_kwh
+            );
+            // And the accumulators themselves match the reference exactly.
+            assert!(
+                (m.net_energy_kwh - exp_net).abs() < 1e-9,
+                "case {case}: net"
+            );
+            assert!(
+                (m.gross_consumption_kwh - exp_consumption).abs() < 1e-9,
+                "case {case}: gross consumption"
+            );
+            assert!(
+                (m.gross_pv_generation_kwh - exp_pv).abs() < 1e-9,
+                "case {case}: gross pv"
+            );
+        }
+    }
+
+    /// The documented energy identity — `TotalEnergyKwh`: "net ==
+    /// gross_consumption − gross_pv holds whenever PV is the only export
+    /// source" — must survive a non-finite net-total row, an input class the
+    /// calculator explicitly handles elsewhere (`guarded_power_value`
+    /// returns None for it and `nan_step_count` counts it). On such a row
+    /// the PV column can still carry real, finite generation: the hoisted
+    /// per-row `pv_gen_kw` accumulates it while the net and
+    /// gross-consumption paths skip the row, so the triple silently stops
+    /// closing (and `renewable_energy_fraction` divides a numerator that
+    /// counted the row by a denominator that did not).
+    #[test]
+    fn energy_identity_holds_across_non_finite_total_rows() {
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        // Row 0: meter total non-finite (sensor dropout), PV generating 2 kW.
+        // Row 1: healthy import row, no PV. PV is the only export source.
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 4.0]),
+            ("PV End Use Electric Power (kW)", vec![-2.0, 0.0]),
+        ]));
+        let m = &calc.finish().total_energy_kwh;
+        let residual = m.net_energy_kwh - (m.gross_consumption_kwh - m.gross_pv_generation_kwh);
+        assert!(
+            residual.abs() < 1e-9,
+            "documented identity net == gross_consumption − gross_pv violated by \
+             {residual:.6} kWh (net={:.3}, consumption={:.3}, pv={:.3}): the PV \
+             accumulator counted generation on a row whose non-finite total made \
+             the net and gross-consumption accumulators skip it",
+            m.net_energy_kwh,
+            m.gross_consumption_kwh,
+            m.gross_pv_generation_kwh
+        );
     }
 
     #[test]
@@ -1889,6 +2113,8 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "Window Transmitted Solar Gain (W)",
             "Opaque Surface Heat Gain - Indoor (W)",
+            "Window Heat Gain - Indoor (W)",
+            "Internal Mass Heat Gain - Indoor (W)",
             "Interior LWR Exchange - Indoor (W)",
             "Infiltration Heat Gain - Indoor (W)",
             "Forced Ventilation Heat Gain - Indoor (W)",
@@ -1903,6 +2129,8 @@ mod tests {
             (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
             ("Window Transmitted Solar Gain (W)", vec![1000.0]),
             ("Opaque Surface Heat Gain - Indoor (W)", vec![200.0]),
+            ("Window Heat Gain - Indoor (W)", vec![150.0]),
+            ("Internal Mass Heat Gain - Indoor (W)", vec![25.0]),
             ("Interior LWR Exchange - Indoor (W)", vec![50.0]),
             ("Infiltration Heat Gain - Indoor (W)", vec![-100.0]),
             ("Forced Ventilation Heat Gain - Indoor (W)", vec![-50.0]),
@@ -1918,7 +2146,9 @@ mod tests {
             .expect("envelope loads present");
 
         assert!((loads.window_solar_kwh - 1.0).abs() < 1e-9);
-        assert!((loads.opaque_solar_lwr_kwh - 0.2).abs() < 1e-9);
+        assert!((loads.opaque_conduction_kwh - 0.2).abs() < 1e-9);
+        assert!((loads.window_conduction_kwh - 0.15).abs() < 1e-9);
+        assert!((loads.internal_mass_kwh - 0.025).abs() < 1e-9);
         assert!((loads.interior_lwr_kwh - 0.05).abs() < 1e-9);
         assert!((loads.infiltration_kwh - (-0.1)).abs() < 1e-9);
         assert!((loads.ventilation_kwh - (-0.05)).abs() < 1e-9);

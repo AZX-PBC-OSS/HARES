@@ -2555,19 +2555,32 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         );
     }
 
+    /// Strict-mode behavior of the multispeed loader, tested by calling the
+    /// loader directly with `strict: true`.
+    ///
+    /// This test must NOT set the `HARES_STRICT_DEFAULTS` env var: under the
+    /// default parallel harness (not nextest's process-per-test) the mutation
+    /// races every other test that loads a tempdir defaults store — the
+    /// observed flake class where `missing_generator_efficiency_curve_returns_none`
+    /// / `loads_hvac_curve_set_from_toml` failed with `MissingFile("…/HVAC
+    /// Multispeed Parameters.csv")` only under parallel load. The env-var
+    /// path in `DefaultsStore::load` is
+    /// exercised by the workspace-level integration runs, which run with the
+    /// variable set in the environment.
     #[test]
     fn strict_missing_multispeed_csv_returns_missing_file_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
-        // No CSV file created — with HARES_STRICT_DEFAULTS set, this should error.
-        // SAFETY: nextest runs each test in its own process, so env var mutation
-        // is isolated.
-        unsafe { std::env::set_var("HARES_STRICT_DEFAULTS", "1") };
-        let result = DefaultsStore::load(dir.path());
-        unsafe { std::env::remove_var("HARES_STRICT_DEFAULTS") };
+        let missing = dir.path().join("HVAC Multispeed Parameters.csv");
+        let result = load_hvac_multispeed_csv(&missing, true);
         assert!(
             matches!(result, Err(DefaultsError::MissingFile(_))),
-            "expected MissingFile error with HARES_STRICT_DEFAULTS, got: {result:?}"
+            "strict mode must error on a missing multispeed CSV, got: {result:?}"
+        );
+        // And the non-strict path must degrade to empty with a warning.
+        let relaxed = load_hvac_multispeed_csv(&missing, false);
+        assert!(
+            matches!(relaxed, Ok(ref v) if v.is_empty()),
+            "non-strict mode must return an empty vec on a missing CSV, got: {relaxed:?}"
         );
     }
 

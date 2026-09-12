@@ -14,6 +14,9 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
+
+use super::metrics::{FullSimulationMetrics, MetricsCalculator, MetricsError};
+use crate::config::SimulationConfig;
 use tracing;
 
 use super::OutputSummary;
@@ -58,6 +61,11 @@ pub struct StreamingRecorder {
     output_path: PathBuf,
     flushed_batches: Vec<RecordBatch>,
     retain_batches: bool,
+    /// Incremental metrics calculator fed on every flushed batch. Attached
+    /// via [`StreamingRecorder::enable_metrics`] so streaming
+    /// (non-retaining) runs still produce run metrics at O(chunk_size)
+    /// memory. `None` when not enabled or already taken.
+    metrics_calculator: Option<MetricsCalculator>,
     /// Number of batches retained since construction
     /// (available when feature `observe` is enabled).
     #[cfg(feature = "observe")]
@@ -161,6 +169,7 @@ impl StreamingRecorder {
             output_path: output_path.to_path_buf(),
             flushed_batches: Vec::new(),
             retain_batches,
+            metrics_calculator: None,
             #[cfg(feature = "observe")]
             retained_batch_count: 0,
             rotation_policy,
@@ -305,6 +314,10 @@ impl StreamingRecorder {
 
         let batch = self.build_batch()?;
 
+        if let Some(calculator) = self.metrics_calculator.as_mut() {
+            calculator.accumulate(&batch);
+        }
+
         match self.backend.as_mut() {
             Some(Backend::Parquet(w)) => {
                 w.write(&batch)?;
@@ -422,6 +435,40 @@ impl StreamingRecorder {
     #[must_use]
     pub fn retained_batch_count(&self) -> usize {
         self.retained_batch_count
+    }
+
+    /// Attaches an incremental metrics calculator, fed on every flushed
+    /// batch.
+    ///
+    /// For streaming runs (`retain_batches = false`) this is the only way
+    /// run metrics remain available: flushed batches are written to disk and
+    /// dropped, so post-hoc computation from [`Self::flushed_batches`] is
+    /// impossible. The calculator sees the same batches in the same order a
+    /// post-hoc pass over retained batches would, so both paths produce
+    /// identical metrics.
+    ///
+    /// Must be called before the first row is recorded. Falls within the
+    /// same degradation contract as post-hoc metrics: callers decide how to
+    /// surface an init failure (e.g. zeroed metrics plus a warning) rather
+    /// than treating it as fatal.
+    pub fn enable_metrics(
+        &mut self,
+        time_res_secs: u32,
+        config: &SimulationConfig,
+    ) -> Result<(), MetricsError> {
+        MetricsCalculator::new(&self.schema, time_res_secs, config).map(|calculator| {
+            self.metrics_calculator = Some(calculator);
+        })
+    }
+
+    /// Takes the incrementally collected run metrics, consuming the
+    /// calculator. `None` when metrics were never enabled (or already
+    /// taken). Only meaningful after `flush_and_close` — the final partial
+    /// batch is fed at close.
+    pub fn take_metrics(&mut self) -> Option<FullSimulationMetrics> {
+        self.metrics_calculator
+            .take()
+            .map(MetricsCalculator::finish)
     }
 
     /// Flush remaining rows, close all files, and return summary statistics
