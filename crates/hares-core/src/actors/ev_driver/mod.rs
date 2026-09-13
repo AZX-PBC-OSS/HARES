@@ -7,6 +7,11 @@
 //!
 //! Equipment is self-contained with its own BMS. The driver actor only
 //! pushes external decisions -- it never mutates equipment state directly.
+//! The driver's telemetry channels, however, report what is actually
+//! happening at the vehicle: `soc` and `charge_kw` read the equipment's
+//! committed output (previous step) whenever the equipment is observable,
+//! so a caller watching only the driver's channels sees charging as it
+//! occurs even under goal-based dispatches the equipment paces itself.
 //!
 //! ## SOC estimation model
 //!
@@ -15,8 +20,9 @@
 //! does not observe CC-CV taper, thermal derating, or BMS charge termination.
 //! All driver behavioral decisions -- plug-in, range anxiety, charging strategy
 //! -- operate on `perceived_soc()` which returns `estimated_soc`. The ground-truth
-//! `actual_soc()` reads `equipment_core` and exists only for reconciliation,
-//! observability, and diagnostics. The divergence is bounded and conservative:
+//! `actual_soc()` reads `equipment_core` and exists for reconciliation,
+//! observability, and diagnostics; the `soc` telemetry channel reports it
+//! directly. The divergence is bounded and conservative:
 //! the actor overestimates discharge and underestimates charge, causing it to
 //! over-charge rather than strand the driver.
 
@@ -39,6 +45,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
+use hares_types::telemetry_keys as tk;
 use hares_types::{
     ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState, HaresError,
     PlugInPolicy, ScheduleSource, Telemetry,
@@ -51,7 +58,7 @@ use crate::Actor;
 
 use self::composer::ChargingComposer;
 use self::departure::DepartureDeadline;
-use self::preference::{ChargingPreference, DecisionContext};
+use self::preference::{ChargingPreference, DecisionContext, needed_charge_hours_to_target};
 use self::price::PriceOptimizer;
 use self::soc_gate::SocGate;
 use self::soc_target::SocTarget;
@@ -92,6 +99,11 @@ enum DriverPhase {
 /// strategies.
 const SOC_GATE_DEFAULT_HYSTERESIS_BAND: f64 = 0.05;
 
+/// Base charging efficiency (dimensionless) used for energy and
+/// time-to-charge calculations. Temperature degradation is applied on top
+/// (see `efficiency::temp_efficiency_multiplier`).
+const CHARGING_EFFICIENCY: f64 = 0.9;
+
 /// Build the preference stack for a given charging strategy.
 fn build_preferences(
     strategy: &ChargingStrategy,
@@ -104,6 +116,7 @@ fn build_preferences(
         ChargingStrategy::Immediate { target_soc } => {
             vec![Box::new(SocTarget {
                 target_soc: *target_soc,
+                charging_efficiency: efficiency,
             })]
         }
         ChargingStrategy::Nightly {
@@ -118,6 +131,7 @@ fn build_preferences(
                 )),
                 Box::new(SocTarget {
                     target_soc: *target_soc,
+                    charging_efficiency: efficiency,
                 }),
             ]
         }
@@ -129,6 +143,7 @@ fn build_preferences(
                 upper_threshold: *threshold,
                 lower_threshold: *threshold - SOC_GATE_DEFAULT_HYSTERESIS_BAND,
                 target_soc: *target_soc,
+                charging_efficiency: efficiency,
                 charging_allowed: true,
             })]
         }
@@ -137,6 +152,7 @@ fn build_preferences(
                 upper_threshold: *partial_soc,
                 lower_threshold: *partial_soc - SOC_GATE_DEFAULT_HYSTERESIS_BAND,
                 target_soc: *partial_soc,
+                charging_efficiency: efficiency,
                 charging_allowed: true,
             })]
         }
@@ -153,6 +169,7 @@ fn build_preferences(
                 }),
                 Box::new(SocTarget {
                     target_soc: *target_soc,
+                    charging_efficiency: efficiency,
                 }),
             ]
         }
@@ -176,6 +193,7 @@ fn build_preferences(
                 }),
                 Box::new(SocTarget {
                     target_soc: *target_soc,
+                    charging_efficiency: efficiency,
                 }),
             ]
         }
@@ -200,7 +218,10 @@ fn build_preferences(
             min_soc,
         } => {
             vec![
-                Box::new(SocTarget { target_soc: 0.9 }),
+                Box::new(SocTarget {
+                    target_soc: 0.9,
+                    charging_efficiency: efficiency,
+                }),
                 Box::new(V2HDischarge {
                     threshold_soc: *discharge_threshold_soc,
                     min_soc: *min_soc,
@@ -214,7 +235,10 @@ fn build_preferences(
             price_threshold,
         } => {
             vec![
-                Box::new(SocTarget { target_soc: 1.0 }),
+                Box::new(SocTarget {
+                    target_soc: 1.0,
+                    charging_efficiency: efficiency,
+                }),
                 Box::new(V2GExport {
                     min_soc: *min_soc,
                     max_export_kw: *max_export_kw,
@@ -305,13 +329,7 @@ impl EvDriverActor {
         away_charge_power_kw: f64,
         rng: ChaCha8Rng,
     ) -> Self {
-        let prefs = build_preferences(
-            &strategy,
-            max_charge_kw,
-            0.9, // charging efficiency for energy calc
-            None,
-            24,
-        );
+        let prefs = build_preferences(&strategy, max_charge_kw, CHARGING_EFFICIENCY, None, 24);
         let composer = ChargingComposer::new(prefs, target);
         let expected_daily_miles = daily_drive_miles.mean();
 
@@ -375,7 +393,7 @@ impl EvDriverActor {
         let prefs = build_preferences(
             &self.strategy,
             self.max_charge_kw,
-            0.9,
+            CHARGING_EFFICIENCY,
             Some(schedule),
             steps_per_day,
         );
@@ -388,8 +406,51 @@ impl EvDriverActor {
         self.composer.last_action()
     }
 
-    fn populate_telemetry(&mut self, before_out: usize, out: &[DispatchRequest]) {
-        self.telemetry.set("soc", self.estimated_soc);
+    /// Latest observed charger-mediated power at the vehicle (kW), from the
+    /// equipment's committed output of the previous step. Positive =
+    /// charging, negative = V2G/V2L export. Goal-based dispatches
+    /// (`SOCTarget`, `EvSetReadyBy`) carry no rate — the equipment's BMS
+    /// computes the real power — so this observation is the only faithful
+    /// source for `charge_kw` under them.
+    ///
+    /// Face: while plugged in at home this is the equipment's grid-side
+    /// electric flow (the same face as the equipment's own end-use power
+    /// column). Away charging is deliberately excluded from that flow
+    /// (off-site, no residential port contribution — see the EV equipment's
+    /// `AwayPluggedIn` step), so the away phase reads the equipment's
+    /// `away_charge_power_kw` telemetry instead.
+    fn observed_charge_kw(&self, env: &EnvironmentState) -> Option<f64> {
+        match self.phase {
+            DriverPhase::HomePluggedIn => self
+                .equipment_id
+                .and_then(|id| env.equipment_core.get(&id))
+                .and_then(|co| co.flows.electric_kw)
+                .map(|p| p.signed_kw()),
+            DriverPhase::Away => env
+                .equipment_telemetry
+                .get(self.target_name())
+                .and_then(|t| t.get(tk::AWAY_CHARGE_POWER_KW)),
+            DriverPhase::Driving { .. } => None,
+        }
+    }
+
+    fn populate_telemetry(
+        &mut self,
+        env: &EnvironmentState,
+        before_out: usize,
+        out: &[DispatchRequest],
+    ) {
+        // SOC channel: report the equipment's ground-truth SOC whenever the
+        // equipment core is observable. `estimated_soc` is the driver's
+        // behavioral belief — reconciled only at observation events
+        // (arrival, day start) — and can sit far from truth across a
+        // multi-hour charging span, which made this channel read as "the car
+        // never charges". When the equipment is not registered the channel
+        // degrades to the estimate (`resolve_equipment_id` has already warned
+        // in that mode).
+        let observed_soc = self.actual_soc(env);
+        self.telemetry
+            .set("soc", observed_soc.unwrap_or(self.estimated_soc));
         self.telemetry.set("phase", phase_as_f64(self.phase));
         self.telemetry.set(
             "plugged_in",
@@ -401,7 +462,10 @@ impl EvDriverActor {
         );
 
         // Scan newly-emitted dispatch requests for charge/discharge power.
-        let mut charge_kw = 0.0;
+        // A rate dispatched this step is the driver's own command and takes
+        // precedence. Goal-based strategies dispatch no rate; the equipment
+        // BMS applies its own power, observed via `observed_charge_kw`.
+        let mut charge_kw: Option<f64> = None;
         let mut discharge_min_soc = 0.0;
         for req in &out[before_out..] {
             match &req.signal {
@@ -410,18 +474,21 @@ impl EvDriverActor {
                     min_soc,
                     ..
                 } => {
-                    charge_kw = *active_power_kw;
+                    charge_kw = Some(*active_power_kw);
                     // Why: None min_soc on a PowerSetpoint means "no discharge
                     // floor constraint" — only V2G/V2H strategies set min_soc.
                     // 0.0 = "allow full discharge" is the default operational
                     // behaviour, so the sentinel is semantically correct.
                     discharge_min_soc = min_soc.unwrap_or(0.0);
                 }
-                ControlSignal::EvAwayCharge { power_kw } => charge_kw = *power_kw,
+                ControlSignal::EvAwayCharge { power_kw } => charge_kw = Some(*power_kw),
                 ControlSignal::EvDrive { .. } => {} // driving, not charging
                 _ => {}
             }
         }
+        let charge_kw = charge_kw
+            .or_else(|| self.observed_charge_kw(env))
+            .unwrap_or(0.0);
         self.telemetry.set("charge_kw", charge_kw);
         self.telemetry.set("discharge_min_soc", discharge_min_soc);
         self.telemetry.set(
@@ -736,6 +803,59 @@ impl EvDriverActor {
         true
     }
 
+    /// Build the per-step decision context for **dispatch**: `current_soc`
+    /// is the driver's perceived SOC — control runs on the driver's belief,
+    /// and changing that would alter dispatch, which the module doc
+    /// explicitly forbids.
+    fn decision_context<'a>(
+        &self,
+        env: &'a EnvironmentState,
+        current_minute: u16,
+    ) -> DecisionContext<'a> {
+        DecisionContext {
+            current_soc: self.perceived_soc(),
+            capacity_kwh: self.capacity_kwh,
+            max_charge_kw: self.max_charge_kw,
+            max_discharge_kw: self.max_charge_kw,
+            env,
+            current_minute,
+            next_departure_minute: self.todays_event.map(|e| e.departure_minute),
+            time_res_minutes: self.time_res_minutes,
+        }
+    }
+
+    /// Build the context that feeds the `needed_charge_hours` **telemetry**
+    /// fold: the decision context with the observed equipment SOC
+    /// substituted whenever the equipment is observable — the channel
+    /// reports the observed battery gap (the same face as the `soc`
+    /// channel), so it tracks the shrinking gap during a charging session
+    /// instead of freezing at the driver's belief, which only moves on
+    /// driving steps and the arrival/day-start reconciliations. Falls back
+    /// to the belief in the warned unresolved-equipment mode, exactly like
+    /// the `soc` channel.
+    fn telemetry_estimate_context<'a>(
+        &self,
+        env: &'a EnvironmentState,
+        current_minute: u16,
+    ) -> DecisionContext<'a> {
+        let mut ctx = self.decision_context(env, current_minute);
+        if let Some(observed) = self.actual_soc(env) {
+            ctx.current_soc = observed;
+        }
+        ctx
+    }
+
+    /// Record the needed-charge-hours estimate for the range-anxiety
+    /// override's plan (charge to full), replacing the standing-strategy
+    /// fold refreshed at step start. Called on the paths where the override
+    /// replaces the preference stack. Runs on the observed SOC — the same
+    /// telemetry face as the fold it replaces.
+    fn record_anxiety_plan_hours(&mut self, env: &EnvironmentState, current_minute: u16) {
+        let ctx = self.telemetry_estimate_context(env, current_minute);
+        let hours = needed_charge_hours_to_target(1.0, CHARGING_EFFICIENCY, &ctx);
+        self.composer.set_needed_charge_hours(hours);
+    }
+
     /// Evaluate the composer per-step while plugged in at home.
     fn evaluate_charging(
         &mut self,
@@ -745,22 +865,15 @@ impl EvDriverActor {
     ) {
         // Range anxiety override: if tomorrow's trip would strand the driver,
         // charge to full regardless of strategy. The override returns before
-        // reaching the composer.
+        // reaching the composer, so it records the estimate for its own
+        // target (charge to full) in place of the strategy-plan fold refreshed
+        // at step start.
         if self.maybe_push_range_anxiety_override(env, out) {
+            self.record_anxiety_plan_hours(env, current_minute);
             return;
         }
 
-        let soc = self.perceived_soc();
-        let ctx = DecisionContext {
-            current_soc: soc,
-            capacity_kwh: self.capacity_kwh,
-            max_charge_kw: self.max_charge_kw,
-            max_discharge_kw: self.max_charge_kw,
-            env,
-            current_minute,
-            next_departure_minute: self.todays_event.map(|e| e.departure_minute),
-            time_res_minutes: self.time_res_minutes,
-        };
+        let ctx = self.decision_context(env, current_minute);
         self.composer.evaluate(&ctx, out);
 
         tracing::trace!(
@@ -809,6 +922,22 @@ impl Actor for EvDriverActor {
         self.maybe_roll_daily_event(env);
 
         let before_out = out.len();
+        let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
+
+        // The needed-charge-hours channel promises an estimate from the
+        // current battery state on every step, in every phase, so it is
+        // refreshed once per step — before any phase arm runs — instead of
+        // on the arms that happen to dispatch. The refresh runs on the
+        // *observed* SOC (telemetry truth); dispatch contexts keep the
+        // driver's belief. Without this, the channel freezes at the last
+        // plugged-in value while driving/away, and the first step after a
+        // checkpoint restore — or the first-ever step of a fresh actor —
+        // publishes the composer's "no estimate" sentinel, which collapses
+        // to 0.0. Paths whose active plan is the range-anxiety override
+        // replace this value with the override's own (charge-to-full)
+        // estimate.
+        let ctx = self.telemetry_estimate_context(env, current_minute);
+        self.composer.refresh_needed_charge_hours(&ctx);
 
         let event = match self.todays_event {
             Some(ev) => ev,
@@ -822,6 +951,13 @@ impl Actor for EvDriverActor {
                 // single observe block in `needs_range_anxiety_override()`.
                 if matches!(self.phase, DriverPhase::HomePluggedIn) {
                     let fired = self.maybe_push_range_anxiety_override(env, out);
+                    // The override bypasses the preference stack, so the
+                    // step-start fold above reports the strategy plan's
+                    // estimate; replace it with the override's own
+                    // (charge-to-full) estimate — the plan actually dispatched.
+                    if fired {
+                        self.record_anxiety_plan_hours(env, current_minute);
+                    }
 
                     // When anxiety fires on a non-driving day, the override must
                     // have emitted a charging signal — the early return must not
@@ -833,12 +969,10 @@ impl Actor for EvDriverActor {
                         "range anxiety override on non-driving day must emit a charging signal"
                     );
                 }
-                self.populate_telemetry(before_out, out);
+                self.populate_telemetry(env, before_out, out);
                 return;
             }
         };
-
-        let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
 
         match self.phase {
             DriverPhase::HomePluggedIn => {
@@ -1028,7 +1162,7 @@ impl Actor for EvDriverActor {
             }
         }
 
-        self.populate_telemetry(before_out, out);
+        self.populate_telemetry(env, before_out, out);
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -1081,7 +1215,9 @@ fn phase_as_f64(phase: DriverPhase) -> f64 {
 mod tests {
     use super::*;
     use crate::actor::testing::test_env;
-    use hares_types::{CoreOutput, CoreState, ElectricalSummary, EquipmentId, PriceSignal, Soc};
+    use hares_types::{
+        CoreOutput, CoreState, ElectricPower, ElectricalSummary, EquipmentId, PriceSignal, Soc,
+    };
 
     fn seed_from_u64(seed: u64) -> ChaCha8Rng {
         let mut bytes = [0u8; 32];
@@ -1196,6 +1332,25 @@ mod tests {
                 ..Default::default()
             },
         );
+    }
+
+    /// Mirror the EV equipment's committed `CoreOutput` while charging: the
+    /// equipment publishes both `state.soc` and `flows.electric_kw` from its
+    /// `step()` (hares-equipment/src/ev/mod.rs, CoreOutput construction), so
+    /// a test environment modelling "equipment actively charging" supplies
+    /// both observations.
+    fn set_core_charging(
+        actor: &mut EvDriverActor,
+        env: &mut EnvironmentState,
+        equipment_name: &str,
+        equipment_id: EquipmentId,
+        soc: f64,
+        charge_kw: f64,
+    ) {
+        set_core_soc(actor, env, equipment_name, equipment_id, soc);
+        if let Some(co) = env.equipment_core.get_mut(&equipment_id) {
+            co.flows.electric_kw = Some(ElectricPower::Bidirectional(charge_kw));
+        }
     }
 
     #[test]
@@ -1320,6 +1475,1090 @@ mod tests {
         assert!(
             (perceived - actual.unwrap()).abs() > 0.01,
             "perceived and actual SOC should diverge when estimated differs from equipment"
+        );
+    }
+
+    /// Invariant: while the vehicle is plugged in at home and the equipment
+    /// is actively charging (ground-truth SOC rising every step), the
+    /// driver's own telemetry channels must reflect that charging —
+    /// regardless of which strategy governs the session. A caller reading
+    /// only the driver's channels must never conclude the car is not
+    /// charging when it is.
+    #[test]
+    fn telemetry_reflects_charging_while_equipment_soc_rises() {
+        let strategies = [
+            ("Immediate", ChargingStrategy::Immediate { target_soc: 0.9 }),
+            (
+                "Nightly (in off-peak window)",
+                ChargingStrategy::Nightly {
+                    off_peak_start_hour: 22.0,
+                    off_peak_end_hour: 6.0,
+                    target_soc: 0.9,
+                },
+            ),
+            (
+                "LowSoc (below threshold)",
+                ChargingStrategy::LowSoc {
+                    threshold: 0.7,
+                    target_soc: 0.9,
+                },
+            ),
+            (
+                "QuickThenWait (below partial)",
+                ChargingStrategy::QuickThenWait { partial_soc: 0.8 },
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (label, strategy) in strategies {
+            let mut actor = make_plugged_in_actor(strategy, 0.5);
+
+            let mut charge_kw_ever_positive = false;
+            let mut soc_ever_rose = false;
+            let mut needed_charge_hours_ever_positive = false;
+            let mut previous_soc = 0.5;
+
+            // 120 one-minute steps from 22:00; the equipment BMS charges the
+            // whole time, so the ground-truth core SOC rises on every step and
+            // the equipment publishes its charging electric flow (0.001 SOC
+            // per minute on a 60 kWh pack = 3.6 kW).
+            for step in 0..120u16 {
+                let mut env = env_at_minute(22 * 60 + step);
+                let equipment_soc = 0.5 + f64::from(step) * 0.001;
+                set_core_charging(
+                    &mut actor,
+                    &mut env,
+                    "EV1",
+                    EquipmentId(7),
+                    equipment_soc,
+                    3.6,
+                );
+                plugged_in_step_with_env(&mut actor, &env);
+
+                let telemetry = actor.telemetry().expect("driver telemetry");
+                let charge_kw = telemetry.get("charge_kw").expect("charge_kw key");
+                let soc = telemetry.get("soc").expect("soc key");
+                let needed = telemetry
+                    .get("needed_charge_hours")
+                    .expect("needed_charge_hours key");
+
+                charge_kw_ever_positive |= charge_kw > 0.0;
+                soc_ever_rose |= soc > previous_soc;
+                needed_charge_hours_ever_positive |= needed > 0.0;
+                previous_soc = soc;
+            }
+
+            if !charge_kw_ever_positive {
+                failures.push(format!(
+                    "{label}: charge_kw telemetry stayed 0.0 across 120 steps of active charging"
+                ));
+            }
+            if !soc_ever_rose {
+                failures.push(format!(
+                    "{label}: soc telemetry never rose while equipment SOC climbed 0.5 → 0.619"
+                ));
+            }
+            if !needed_charge_hours_ever_positive {
+                failures.push(format!(
+                    "{label}: needed_charge_hours telemetry stayed 0.0 while SOC sat 0.4 below target"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "driver telemetry did not reflect charging:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+
+    /// While the vehicle is plugged in at home and the equipment is actively
+    /// charging (SOC climbing every step), the `needed_charge_hours` channel
+    /// must track the shrinking battery gap, not hold a frozen number. The fix
+    /// read ground truth into `soc` and `charge_kw`; `needed_charge_hours` is
+    /// still computed from the driver's *belief* (`perceived_soc()`), which is
+    /// never updated during a home charging session — so as `soc` rises and
+    /// `charge_kw` stays positive, `needed_charge_hours` sits at the arrival
+    /// value until the next day-start reconciliation. A caller reading the
+    /// driver's channels then sees "still needs N hours" beside "not charging,
+    /// battery full".
+    #[test]
+    fn needed_charge_hours_decreases_while_equipment_charges_at_home() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+
+        let mut env = env_at_minute(22 * 60);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.5, 3.6);
+        plugged_in_step_with_env(&mut actor, &env);
+        let first_needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            first_needed > 3.0,
+            "precondition: below target at SOC 0.5 the estimate must be positive, got {first_needed}"
+        );
+
+        // 120 one-minute steps from 22:01 — the equipment charges the whole
+        // time (0.5 → 0.619), while the driver's belief stays 0.5 (no
+        // arrival, no day boundary in the window).
+        let mut last_needed = first_needed;
+        let mut any_charge: f64 = 0.0;
+        let mut highest_soc: f64 = 0.5;
+        for step in 1..=120u16 {
+            let mut env = env_at_minute(22 * 60 + step);
+            let equipment_soc = 0.5 + f64::from(step) * 0.001;
+            set_core_charging(
+                &mut actor,
+                &mut env,
+                "EV1",
+                EquipmentId(7),
+                equipment_soc,
+                3.6,
+            );
+            plugged_in_step_with_env(&mut actor, &env);
+            let telemetry = actor.telemetry().expect("driver telemetry");
+            any_charge = any_charge.max(telemetry.get("charge_kw").expect("charge_kw key"));
+            highest_soc = highest_soc.max(telemetry.get("soc").expect("soc key"));
+            last_needed = telemetry
+                .get("needed_charge_hours")
+                .expect("needed_charge_hours key");
+        }
+
+        assert!(
+            any_charge > 0.0,
+            "precondition: the equipment must have charged over the window (charge_kw max = {any_charge})"
+        );
+        assert!(
+            highest_soc > 0.55,
+            "precondition: equipment SOC must have climbed over the window (soc max = {highest_soc})"
+        );
+
+        assert!(
+            last_needed < first_needed - 0.5,
+            "needed_charge_hours must fall as the battery charges (SOC 0.5 → 0.619), \
+             but it held {last_needed} against the initial {first_needed}; it is frozen at the \
+             driver's belief while `soc` and `charge_kw` report ground truth"
+        );
+    }
+
+    /// Class guard: every `ChargingStrategy` variant's driver telemetry must
+    /// reflect active charging while the vehicle is plugged in at home —
+    /// `soc` reports the equipment's ground truth, `charge_kw` is positive,
+    /// and `needed_charge_hours` is a real estimate (not the collapsed
+    /// "no estimate" sentinel) on BOTH dispatch paths: the composer fold
+    /// (SOC 0.5, above the range-anxiety threshold) and the range-anxiety
+    /// override (SOC 0.2, below it), which bypasses the preference stack.
+    /// The reproduction test pins the four strategies the RCA named; this
+    /// guard pins the whole enum, so a strategy added later cannot silently
+    /// ship channels that read as "never charging".
+    #[test]
+    fn every_strategy_variant_telemetry_reflects_active_charging() {
+        // Compile-time exhaustiveness anchor: adding a `ChargingStrategy`
+        // variant breaks this match, forcing the new variant into
+        // `all_variants` below until this class guard covers it.
+        const _: () = {
+            match (ChargingStrategy::Immediate { target_soc: 0.0 }) {
+                ChargingStrategy::Immediate { .. }
+                | ChargingStrategy::Nightly { .. }
+                | ChargingStrategy::LowSoc { .. }
+                | ChargingStrategy::QuickThenWait { .. }
+                | ChargingStrategy::PreDeparture { .. }
+                | ChargingStrategy::TouAware { .. }
+                | ChargingStrategy::SolarSurplus { .. }
+                | ChargingStrategy::V2H { .. }
+                | ChargingStrategy::V2G { .. } => {}
+            }
+        };
+
+        let all_variants: Vec<(&str, ChargingStrategy)> = vec![
+            ("Immediate", ChargingStrategy::Immediate { target_soc: 0.9 }),
+            (
+                "Nightly",
+                ChargingStrategy::Nightly {
+                    off_peak_start_hour: 22.0,
+                    off_peak_end_hour: 6.0,
+                    target_soc: 0.9,
+                },
+            ),
+            (
+                "LowSoc",
+                ChargingStrategy::LowSoc {
+                    threshold: 0.7,
+                    target_soc: 0.9,
+                },
+            ),
+            (
+                "QuickThenWait",
+                ChargingStrategy::QuickThenWait { partial_soc: 0.8 },
+            ),
+            (
+                "PreDeparture",
+                ChargingStrategy::PreDeparture {
+                    target_soc: 0.9,
+                    departure_schedule: vec![],
+                },
+            ),
+            (
+                "TouAware",
+                ChargingStrategy::TouAware {
+                    target_soc: 0.9,
+                    departure_schedule: vec![],
+                    charge_buffer_hours: 0.0,
+                },
+            ),
+            (
+                "SolarSurplus",
+                ChargingStrategy::SolarSurplus {
+                    min_charge_rate_kw: 1.0,
+                    departure_schedule: vec![],
+                },
+            ),
+            (
+                "V2H",
+                ChargingStrategy::V2H {
+                    discharge_threshold_soc: 0.7,
+                    min_soc: 0.2,
+                },
+            ),
+            (
+                "V2G",
+                ChargingStrategy::V2G {
+                    min_soc: 0.3,
+                    max_export_kw: 5.0,
+                    price_threshold: 0.20,
+                },
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (label, strategy) in all_variants {
+            // TouAware is the only variant whose preference stack needs a
+            // price schedule at construction.
+            let needs_price_schedule = matches!(strategy, ChargingStrategy::TouAware { .. });
+
+            // Two SOC levels exercise both dispatch paths: 0.5 sits above
+            // the range-anxiety threshold (~0.28 for this actor) so the
+            // composer fold runs; 0.2 sits below it so the range-anxiety
+            // override bypasses the preference stack.
+            for starting_soc in [0.5, 0.2] {
+                let mut actor = make_plugged_in_actor(strategy.clone(), starting_soc);
+                if needs_price_schedule {
+                    actor = actor.with_price_schedule(vec![0.10; 24].into(), 24);
+                }
+
+                // One step at 22:00 (inside Nightly's off-peak window) with
+                // the equipment actively charging: ground-truth SOC a notch
+                // above the driver's estimate, published charging flow 3.6 kW.
+                let mut env = env_at_minute(22 * 60);
+                if needs_price_schedule {
+                    env.price_signal = PriceSignal {
+                        electricity_price: Some(0.02),
+                        ..Default::default()
+                    };
+                }
+                let equipment_soc = (starting_soc + 0.01).min(1.0);
+                set_core_charging(
+                    &mut actor,
+                    &mut env,
+                    "EV1",
+                    EquipmentId(7),
+                    equipment_soc,
+                    3.6,
+                );
+                plugged_in_step_with_env(&mut actor, &env);
+
+                let telemetry = actor.telemetry().expect("driver telemetry");
+                let soc = telemetry.get("soc").expect("soc key");
+                let charge_kw = telemetry.get("charge_kw").expect("charge_kw key");
+                let needed = telemetry
+                    .get("needed_charge_hours")
+                    .expect("needed_charge_hours key");
+
+                if (soc - equipment_soc).abs() > 1e-9 {
+                    failures.push(format!(
+                        "{label} @ SOC {starting_soc}: soc telemetry ({soc}) must report the equipment's ground-truth SOC ({equipment_soc})"
+                    ));
+                }
+                if charge_kw <= 0.0 {
+                    failures.push(format!(
+                        "{label} @ SOC {starting_soc}: charge_kw telemetry ({charge_kw}) must be positive while the equipment charges"
+                    ));
+                }
+                if needed <= 0.0 {
+                    failures.push(format!(
+                        "{label} @ SOC {starting_soc}: needed_charge_hours telemetry ({needed}) must be a real estimate below target, not the collapsed no-estimate sentinel"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "strategy variants whose telemetry does not reflect active charging:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+
+    /// Non-driving days skip `evaluate_charging` entirely; the
+    /// `needed_charge_hours` channel must still report a real estimate —
+    /// the standing strategy plan's while resting above the anxiety
+    /// threshold, the override's (charge to full) while anxious.
+    #[test]
+    fn needed_charge_hours_on_non_driving_day_reports_active_plan() {
+        // Above the anxiety threshold (~0.28): no dispatch, standing plan.
+        // `make_plugged_in_actor` rolled a driving day at minute 0; clearing
+        // the event models the non-driving-day branch of `decide`.
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        let mut env = env_at_minute(12 * 60);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.51, 3.6);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert!(
+            out.is_empty(),
+            "resting non-driving day should not dispatch"
+        );
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed > 0.0,
+            "needed_charge_hours on a resting non-driving day must report the standing plan's estimate, got {needed}"
+        );
+
+        // Below the anxiety threshold: the override fires and its own
+        // target (charge to full) drives the estimate.
+        let mut actor =
+            make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.15);
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        let mut env = env_at_minute(12 * 60);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.16, 3.6);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+            )),
+            "anxious non-driving day must dispatch SOCTarget(1.0)"
+        );
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed > 0.0,
+            "needed_charge_hours on an anxious non-driving day must report the override's estimate, got {needed}"
+        );
+
+        // First-ever step is a non-driving day: a fresh actor that has never
+        // run a plugged-in evaluation still has a composer whose estimate
+        // slot holds the "no estimate" sentinel — the step-start refresh
+        // must replace it before the channel is published.
+        let mut fresh = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        fresh.event_day_ratio = 0.0;
+        fresh.estimated_soc = 0.5;
+        fresh.phase = DriverPhase::HomePluggedIn;
+        let mut env = env_at_minute(12 * 60);
+        set_core_charging(&mut fresh, &mut env, "EV1", EquipmentId(7), 0.51, 3.6);
+        let mut out = Vec::new();
+        fresh.decide(&env, &mut out);
+        assert!(
+            out.is_empty(),
+            "a resting non-driving day as the first-ever step should not dispatch"
+        );
+        let needed = fresh
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed > 0.0,
+            "needed_charge_hours on the first-ever step (non-driving day, no prior evaluation) must report a real estimate, not the fresh composer's no-estimate sentinel, got {needed}"
+        );
+    }
+
+    /// `charge_kw` under goal-based control (no rate dispatched) must report
+    /// the equipment's observed charging power — the exact value, not merely
+    /// a positive one — and must return to 0.0 when the equipment stops
+    /// charging, so the channel can never report phantom charging.
+    #[test]
+    fn charge_kw_tracks_observed_equipment_flow_under_goal_control() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+
+        // Equipment charging at 3.6 kW (SOC rising 0.001/step on 60 kWh).
+        let mut env = env_at_minute(22 * 60);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.501, 3.6);
+        plugged_in_step_with_env(&mut actor, &env);
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(3.6),
+            "charge_kw must report the observed equipment flow (3.6 kW) when no rate is dispatched"
+        );
+
+        // Equipment idle (SOC flat, zero published flow) — no phantom charging.
+        let mut env = env_at_minute(22 * 60 + 1);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.501, 0.0);
+        plugged_in_step_with_env(&mut actor, &env);
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(0.0),
+            "charge_kw must be 0.0 when the equipment publishes zero flow"
+        );
+    }
+
+    /// A rate dispatched this step is the driver's own command and wins over
+    /// the observed (previous-step) equipment flow.
+    #[test]
+    fn charge_kw_prefers_dispatched_rate_over_observed_flow() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let mut env = env_at_minute(19 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.30),
+            ..Default::default()
+        };
+        // Previous-step equipment flow says +3.6 (charging); this step the
+        // driver commands a -5.0 kW export.
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.71, 3.6);
+        plugged_in_step_with_env(&mut actor, &env);
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(-5.0),
+            "dispatched rate (-5.0) must take precedence over the observed previous-step flow (3.6)"
+        );
+    }
+
+    /// The `soc` channel reports the equipment's ground-truth SOC whenever
+    /// the equipment is observable — without disturbing the behavioral
+    /// estimate, which keeps its documented divergence.
+    #[test]
+    fn soc_telemetry_reports_equipment_ground_truth_while_observable() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        let mut env = env_at_minute(22 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.77);
+        plugged_in_step_with_env(&mut actor, &env);
+
+        let soc = actor.telemetry().expect("driver telemetry").get("soc");
+        assert_eq!(
+            soc,
+            Some(0.77),
+            "soc telemetry must report the equipment's ground-truth SOC while observable"
+        );
+        assert_eq!(
+            actor.actual_soc(&env),
+            Some(0.77),
+            "equipment ground truth should still read 0.77"
+        );
+        assert!(
+            (actor.perceived_soc() - 0.5).abs() < 1e-12,
+            "the behavioral estimate must be unchanged by telemetry reporting"
+        );
+    }
+
+    /// When the equipment is not observable (unresolved equipment id), the
+    /// `soc` channel degrades to the driver's estimate — the documented
+    /// fallback for the warned no-feedback mode.
+    #[test]
+    fn soc_telemetry_falls_back_to_estimate_when_equipment_unobservable() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        // No resolve_equipment_id call and no equipment_core entry.
+        let env = env_at_minute(22 * 60);
+        plugged_in_step_with_env(&mut actor, &env);
+        let soc = actor.telemetry().expect("driver telemetry").get("soc");
+        assert_eq!(
+            soc,
+            Some(0.5),
+            "soc telemetry must fall back to the driver's estimate when the equipment is unobservable"
+        );
+    }
+
+    /// Away charging persists in equipment state long after the single
+    /// `EvAwayCharge` dispatch; on Away steps with no dispatch to scan,
+    /// `charge_kw` must read the equipment's away-charge telemetry, and must
+    /// fall back to 0.0 when that observation is absent.
+    #[test]
+    fn charge_kw_reports_away_charging_on_non_dispatch_steps() {
+        let mut actor = make_away_charge_actor(42);
+        let mut out = Vec::new();
+
+        // Depart at 08:00 and drive until the trip completes.
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+        for step in 1..=100 {
+            out.clear();
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            if matches!(actor.phase, DriverPhase::Away) {
+                break;
+            }
+        }
+
+        // First Away step emits the deferred AwayPluggedIn + EvAwayCharge.
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60 + 101), &mut out);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvAwayCharge { .. })),
+            "expected the deferred EvAwayCharge dispatch on the first Away step"
+        );
+
+        // A later Away step dispatches nothing; the equipment's away-charge
+        // telemetry (12:00, well before the 18:00 arrival) is the only
+        // observable. 12:00 is minute 720 — past the drive, before arrival.
+        let mut env = env_at_minute(12 * 60);
+        let mut away_telemetry = Telemetry::new();
+        away_telemetry.insert(tk::AWAY_CHARGE_POWER_KW, 6.6);
+        env.equipment_telemetry
+            .insert("EV1".to_string(), away_telemetry);
+        out.clear();
+        actor.decide(&env, &mut out);
+        assert!(
+            out.is_empty(),
+            "a mid-away step should dispatch nothing, got {out:?}"
+        );
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(6.6),
+            "charge_kw must report the equipment's away-charge power on non-dispatch Away steps"
+        );
+
+        // Without the equipment telemetry observation the channel degrades
+        // to 0.0 rather than inventing a value.
+        let env = env_at_minute(12 * 60 + 1);
+        out.clear();
+        actor.decide(&env, &mut out);
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(0.0),
+            "charge_kw must degrade to 0.0 when the away-charge observation is absent"
+        );
+    }
+
+    /// While driving, the vehicle is off the charger: `charge_kw` must be
+    /// 0.0 on steps that dispatch `EvDrive` (driving energy is not charger
+    /// power), and the Driving phase must never attribute an observable
+    /// equipment flow to the charge channel.
+    #[test]
+    fn charge_kw_is_zero_while_driving() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut out = Vec::new();
+
+        // Depart at 08:00.
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+
+        // First driving step dispatches EvDrive. Even with an equipment flow
+        // still observable in the core, the Driving phase reads no charger
+        // power.
+        let mut env = env_at_minute(8 * 60 + 1);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.49, 3.6);
+        actor.decide(&env, &mut out);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvDrive { .. })),
+            "expected an EvDrive dispatch on the first driving step, got {out:?}"
+        );
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(0.0),
+            "charge_kw must be 0.0 while driving — the vehicle is off the charger"
+        );
+    }
+
+    /// The observed equipment flow is signed: a published export (negative
+    /// kW) with no rate dispatched this step must be reported as negative,
+    /// not clamped to zero — the channel stays truthful about the direction
+    /// of power at the charger.
+    #[test]
+    fn charge_kw_reports_negative_observed_export_flow() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        let mut env = env_at_minute(22 * 60);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.499, -4.0);
+        plugged_in_step_with_env(&mut actor, &env);
+        let charge_kw = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("charge_kw");
+        assert_eq!(
+            charge_kw,
+            Some(-4.0),
+            "charge_kw must report the signed observed flow (-4.0 export), not clamp to 0.0"
+        );
+    }
+
+    /// The `needed_charge_hours` channel is published on every step in every
+    /// phase and promises an estimate from the *current* battery state.
+    /// While the car drives, the battery drains and the charge time back to
+    /// target must grow accordingly — a value frozen at the last plugged-in
+    /// step reads as a live estimate that no longer reflects the battery,
+    /// the same "telemetry that does not reflect what is happening" failure
+    /// the channel exists to prevent, one phase over.
+    #[test]
+    fn needed_charge_hours_grows_as_soc_drains_while_driving() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+
+        // Last plugged-in step before the 08:00 departure: the composer
+        // refreshes the estimate from SOC 0.5.
+        plugged_in_step(&mut actor, 7 * 60 + 59);
+        let needed_before = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed_before > 0.0,
+            "plugged in at SOC 0.5 with target 0.9, the estimate must be positive, got {needed_before}"
+        );
+
+        // Depart at 08:00.
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        assert!(
+            matches!(actor.phase, DriverPhase::Driving { .. }),
+            "expected the actor to be driving after the 08:00 departure"
+        );
+
+        // Drive for 30 one-minute steps; the equipment's ground-truth SOC
+        // drains as the trip's energy is spent (≈0.166 SOC over the 67-step
+        // trip at 10°C).
+        let soc_before = actor.perceived_soc();
+        for step in 1..=30u16 {
+            let mut env = env_at_minute(8 * 60 + step);
+            let equipment_soc = 0.5 - 0.166 * (f64::from(step) / 67.0);
+            set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), equipment_soc);
+            out.clear();
+            actor.decide(&env, &mut out);
+        }
+        let soc_after = actor.perceived_soc();
+        assert!(
+            soc_after < soc_before - 0.05,
+            "the trip must drain the battery meaningfully for this test to bite: {soc_before} → {soc_after}"
+        );
+
+        let needed_after = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed_after > needed_before,
+            "needed_charge_hours must grow as the battery drains (SOC {soc_before:.3} → {soc_after:.3}), \
+             but the channel held {needed_after} against the pre-departure {needed_before}"
+        );
+    }
+
+    /// Checkpoint/restore reconstructs the actor with a fresh composer whose
+    /// estimate slot starts at the "no estimate" sentinel. On a Driving step
+    /// after a mid-trip restore, no plugged-in path runs to refresh it — so
+    /// the published channel must still report a real estimate from the
+    /// restored SOC, not the sentinel collapse to 0.0 while the battery sits
+    /// far below target.
+    #[test]
+    fn needed_charge_hours_survives_checkpoint_restore_while_driving() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+
+        // Refresh the estimate on the last plugged-in step, then depart and
+        // drive a few steps so the checkpoint captures a mid-trip Driving
+        // state with the battery below the plugged-in SOC.
+        plugged_in_step(&mut actor, 7 * 60 + 59);
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        for step in 1..=5u16 {
+            out.clear();
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+        }
+        assert!(
+            matches!(actor.phase, DriverPhase::Driving { .. }),
+            "checkpoint must capture a mid-trip Driving state"
+        );
+        let restored_soc = actor.perceived_soc();
+        let blob = actor.save_state().expect("save_state should succeed");
+
+        // Restore into a freshly-constructed actor — the production
+        // checkpoint-restore path — and continue the trip.
+        let mut restored = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+        let mut env = env_at_minute(8 * 60 + 6);
+        set_core_soc(&mut restored, &mut env, "EV1", EquipmentId(7), restored_soc);
+        out.clear();
+        restored.decide(&env, &mut out);
+
+        let needed = restored
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed > 0.0,
+            "after a mid-trip restore at SOC {restored_soc:.3} (target 0.9), needed_charge_hours \
+             must report a real estimate, not the collapsed no-estimate sentinel (0.0)"
+        );
+    }
+
+    /// Mirror `make_actor` with a configurable driving-day probability, so
+    /// tests can force a non-driving day deterministically.
+    fn make_actor_with_event_ratio(
+        strategy: ChargingStrategy,
+        event_day_ratio: f64,
+        seed: u64,
+    ) -> EvDriverActor {
+        EvDriverActor::new(
+            "TestDriver",
+            "EV1",
+            strategy,
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(30.0),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(600.0),
+            None,
+            event_day_ratio,
+            0.3,
+            60.0,
+            7.2,
+            30.0,
+            20.0,
+            0.0,
+            6.6,
+            seed_from_u64(seed),
+        )
+    }
+
+    /// Charge-time estimate for an arbitrary SOC gap on a 60 kWh pack at
+    /// the 22°C efficiency baseline (temp multiplier 1.0), rounded up to
+    /// whole one-minute steps — the same expectation style as the
+    /// soc_target needed-charge-hours tests.
+    fn expected_hours_at_epa_baseline(soc_gap: f64) -> f64 {
+        let raw: f64 = soc_gap * 60.0 / (7.2 * 0.9);
+        let step_hours: f64 = 1.0 / 60.0;
+        (raw / step_hours).ceil() * step_hours
+    }
+
+    /// Charge-to-full estimate for a 0.8 SOC gap at the 22°C baseline.
+    fn expected_hours_gap_0_8_to_full() -> f64 {
+        expected_hours_at_epa_baseline(0.8)
+    }
+
+    /// While the range-anxiety override is active, the plan actually
+    /// dispatched is charge-to-full (`SOCTarget(1.0)`) — so the
+    /// `needed_charge_hours` channel must report the charge-to-full
+    /// estimate, not the standing strategy plan's (here, target 0.9). If
+    /// the override path ever stops substituting its own estimate, the
+    /// channel keeps publishing the standing plan's smaller number while
+    /// the equipment charges to full — a plausible value describing the
+    /// wrong plan.
+    #[test]
+    fn needed_charge_hours_under_anxiety_reports_charge_to_full_plan() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
+
+        // 22:00 on a driving day at the 22°C efficiency baseline; SOC 0.2
+        // sits below the anxiety threshold (~0.27 here), so the override
+        // fires inside evaluate_charging.
+        let mut env = test_env().hour(22).outdoor_temp(22.0).build();
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.2);
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+            )),
+            "anxiety must dispatch SOCTarget(1.0) — without the override this test attacks nothing, got {out:?}"
+        );
+
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        let expected = expected_hours_gap_0_8_to_full();
+        assert!(
+            (needed - expected).abs() < 1e-9,
+            "under the anxiety override, needed_charge_hours must be the charge-to-full estimate \
+             ({expected} h for SOC 0.2 → 1.0), not the standing plan's (≈6.483 h for 0.2 → 0.9), got {needed}"
+        );
+    }
+
+    /// The same override-substitution contract on the non-driving-day arm,
+    /// whose early return bypasses the composer entirely: the published
+    /// estimate must be the override's charge-to-full figure, not the
+    /// standing strategy plan's fold refreshed at step start.
+    #[test]
+    fn needed_charge_hours_under_anxiety_on_non_driving_day_reports_charge_to_full_plan() {
+        let mut actor = make_actor_with_event_ratio(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.0, // never a driving day
+            42,
+        );
+        actor.estimated_soc = 0.2;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // 12:00 at the 22°C efficiency baseline; SOC 0.2 sits below the
+        // non-driving-day anxiety threshold (0.25 here).
+        let mut env = test_env().hour(12).outdoor_temp(22.0).build();
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.2);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+            )),
+            "anxiety on a non-driving day must dispatch SOCTarget(1.0), got {out:?}"
+        );
+
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        let expected = expected_hours_gap_0_8_to_full();
+        assert!(
+            (needed - expected).abs() < 1e-9,
+            "under the anxiety override on a non-driving day, needed_charge_hours must be the \
+             charge-to-full estimate ({expected} h for SOC 0.2 → 1.0), not the standing plan's \
+             (≈6.483 h for 0.2 → 0.9), got {needed}"
+        );
+    }
+
+    /// The `needed_charge_hours` channel reads the *observed* battery gap
+    /// every step — so during an overnight charging session it must already
+    /// reflect the charged SOC at 23:59, before any arrival or day-start
+    /// reconciliation refreshes the driver's belief. A sourcing regression
+    /// back to `perceived_soc()` would publish the stale belief's hours
+    /// (≈4.11 h from 0.5 to 0.9) beside `soc` = 0.9 and `charge_kw` = 0 —
+    /// "still needs four hours" on a full, idle battery. The rollover step
+    /// then pins that the day-start observation and belief reconciliation
+    /// do not disturb the channel.
+    #[test]
+    fn needed_charge_hours_on_day_rollover_reflects_observed_charged_soc() {
+        let mut actor = make_actor_with_event_ratio(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.0, // never a driving day — stays HomePluggedIn across midnight
+            42,
+        );
+        actor.estimated_soc = 0.5;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // 12:00 on day 1: the first step rolls day 1 and its day-start
+        // observation reconciles the belief — the equipment also reads 0.5,
+        // so the belief stays 0.5 consistently.
+        let mut env = test_env().hour(12).outdoor_temp(10.0).build();
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.5);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        // 23:59 on day 1 (same ordinal — no reconciliation): the equipment
+        // has charged to the 0.9 target overnight, but the driver's belief
+        // is still the stale 0.5 — the channel must report the observed
+        // gap (≈0 h), not the belief's ≈4.11 h.
+        let mut env = env_at_minute(23 * 60 + 59);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.9);
+        out.clear();
+        actor.decide(&env, &mut out);
+        assert!(
+            actor.perceived_soc() < 0.6,
+            "precondition: the driver's belief must still be the stale 0.5 at 23:59 — \
+             otherwise the ≈0 estimate below could come from the belief, not the observation \
+             (got {})",
+            actor.perceived_soc()
+        );
+        let needed_before_rollover = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed_before_rollover.abs() < 1e-9,
+            "before any reconciliation the estimate must reflect the observed 0.9 SOC (≈0 h \
+             needed, battery at target), not the stale 0.5 belief (≈4.11 h), got \
+             {needed_before_rollover}"
+        );
+
+        // 00:00 on day 2: the day-start observation reconciles the belief to
+        // the equipment's 0.9 — the channel must be unaffected (still ≈0).
+        let mut env = test_env().hour(0).date(2026, 1, 2).build();
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.9);
+        out.clear();
+        actor.decide(&env, &mut out);
+        let needed_after_rollover = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert!(
+            needed_after_rollover.abs() < 1e-9,
+            "the rollover step must keep reporting the observed at-target gap (≈0 h), got \
+             {needed_after_rollover}"
+        );
+    }
+
+    /// The anxiety override's estimate runs on the observed equipment SOC —
+    /// the same telemetry face as the fold it replaces. When the driver's
+    /// belief and the equipment's truth diverge (here belief 0.2, truth
+    /// 0.6), the channel must report the charge-to-full time from the
+    /// *observed* gap (≈3.72 h), not from the belief that triggered the
+    /// anxiety (≈7.42 h): the equipment will charge from its real SOC, so
+    /// the belief-based figure over-reports time the session will never
+    /// need.
+    #[test]
+    fn needed_charge_hours_under_anxiety_reports_observed_gap_not_belief() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
+
+        // 22:00 on a driving day at the 22°C baseline; belief 0.2 sits
+        // below the anxiety threshold, but the equipment's truth is 0.6.
+        let mut env = test_env().hour(22).outdoor_temp(22.0).build();
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.6);
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+            )),
+            "anxiety must dispatch SOCTarget(1.0) — without the override this test attacks nothing, got {out:?}"
+        );
+        assert!(
+            (actor.perceived_soc() - 0.2).abs() < 1e-12,
+            "precondition: the driver's belief must still be 0.2 — otherwise the estimate below \
+             could come from the belief, not the observation (got {})",
+            actor.perceived_soc()
+        );
+
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        let expected = expected_hours_at_epa_baseline(0.4); // observed 0.6 → 1.0
+        assert!(
+            (needed - expected).abs() < 1e-9,
+            "under anxiety, needed_charge_hours must report the observed gap (0.6 → 1.0 = {expected} h), \
+             not the belief gap (0.2 → 1.0 ≈ 7.417 h), got {needed}"
+        );
+    }
+
+    /// The needed-charge-hours channel reports the observed battery gap in
+    /// every phase — including Away, where the driver's belief is frozen by
+    /// design after the trip-completion credit. During an away charging
+    /// session the estimate must fall as the equipment's ground-truth SOC
+    /// climbs; a value frozen at the driver's static belief would read as
+    /// "no progress" through the whole workplace charge.
+    #[test]
+    fn needed_charge_hours_decreases_during_away_charging() {
+        let mut actor = make_away_charge_actor(42);
+        let mut out = Vec::new();
+
+        // Depart at 08:00 and drive until the trip completes into Away.
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        for step in 1..=100 {
+            out.clear();
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            if matches!(actor.phase, DriverPhase::Away) {
+                break;
+            }
+        }
+        assert!(
+            matches!(actor.phase, DriverPhase::Away),
+            "precondition: the actor must be Away before the charging session"
+        );
+
+        // The deferred AwayPluggedIn + EvAwayCharge dispatch step.
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60 + 101), &mut out);
+
+        // A 60-step away-charging window at midday (12:00–12:59, well
+        // before the 18:00 arrival): the equipment's ground-truth SOC
+        // climbs 0.35 → 0.468 while it reports 6.6 kW of away charge power.
+        let belief_at_window_start = actor.perceived_soc();
+        let mut first_needed = None;
+        let mut last_needed = 0.0;
+        let mut any_charge: f64 = 0.0;
+        for step in 0..60u16 {
+            let mut env = env_at_minute(12 * 60 + step);
+            let equipment_soc = 0.35 + f64::from(step) * 0.002;
+            set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), equipment_soc);
+            let mut away_telemetry = Telemetry::new();
+            away_telemetry.insert(tk::AWAY_CHARGE_POWER_KW, 6.6);
+            env.equipment_telemetry
+                .insert("EV1".to_string(), away_telemetry);
+            out.clear();
+            actor.decide(&env, &mut out);
+
+            let telemetry = actor.telemetry().expect("driver telemetry");
+            any_charge = any_charge.max(telemetry.get("charge_kw").expect("charge_kw key"));
+            let needed = telemetry
+                .get("needed_charge_hours")
+                .expect("needed_charge_hours key");
+            first_needed.get_or_insert(needed);
+            last_needed = needed;
+        }
+
+        let first_needed = first_needed.expect("window ran");
+        assert!(
+            any_charge > 0.0,
+            "precondition: the equipment must be charging over the window (charge_kw max = {any_charge})"
+        );
+        assert!(
+            (actor.perceived_soc() - belief_at_window_start).abs() < 1e-12,
+            "precondition: the driver's belief must be static across the away window — otherwise \
+             the fall could come from the belief, not the observation ({} → {})",
+            belief_at_window_start,
+            actor.perceived_soc()
+        );
+        assert!(
+            last_needed < first_needed - 1.0,
+            "needed_charge_hours must fall as the away session charges (observed SOC 0.35 → 0.468), \
+             but it held {last_needed} against the window-start {first_needed} — frozen at the \
+             driver's static belief while the equipment reports progress"
         );
     }
 

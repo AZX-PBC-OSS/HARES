@@ -2,6 +2,8 @@
 
 use hares_types::EnvironmentState;
 
+use super::efficiency::temp_efficiency_multiplier;
+
 /// Context passed to each preference for per-step evaluation.
 pub struct DecisionContext<'a> {
     pub current_soc: f64,
@@ -77,4 +79,54 @@ pub trait ChargingPreference: Send + Sync {
     fn needed_charge_hours(&self, _ctx: &DecisionContext) -> f64 {
         f64::INFINITY
     }
+}
+
+/// Hours needed to charge from the context's current SOC to `target_soc` at
+/// the max charge rate, rounded up to the nearest timestep to avoid
+/// underestimating charge time.
+///
+/// Single source of truth for time-to-charge estimates: `SocTarget`,
+/// `SocGate`, and `DepartureDeadline` all report through here so the
+/// estimates cannot drift between preferences.
+///
+/// Applies `temp_efficiency_multiplier` to the base charging efficiency to
+/// account for temperature-dependent degradation of charging acceptance
+/// (cold weather reduces BMS acceptance rate, thermal conditioning draws
+/// power, and internal resistance increases). The multiplier is the same
+/// piecewise-linear fleet-average curve from `efficiency.rs`, originally
+/// calibrated for driving energy consumption (AAA 2019, Geotab 2020,
+/// DOE/Argonne 2024, Recurrent Auto) but applicable to charging because
+/// the same physical mechanisms (electrochemical kinetics, resistive
+/// heating, thermal management) degrade both driving and charging efficiency
+/// at low temperatures.
+pub(super) fn needed_charge_hours_to_target(
+    target_soc: f64,
+    charging_efficiency: f64,
+    ctx: &DecisionContext,
+) -> f64 {
+    let soc_gap = (target_soc - ctx.current_soc).max(0.0);
+    let energy_kwh = soc_gap * ctx.capacity_kwh;
+    if ctx.max_charge_kw <= 0.0 || charging_efficiency <= 0.0 {
+        return f64::INFINITY;
+    }
+    let effective_efficiency =
+        charging_efficiency / temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c);
+    let raw_hours = energy_kwh / (ctx.max_charge_kw * effective_efficiency);
+    let hours = if ctx.time_res_minutes > 0.0 {
+        let step_hours = ctx.time_res_minutes / 60.0;
+        (raw_hours / step_hours).ceil() * step_hours
+    } else {
+        raw_hours
+    };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        debug_assert!(
+            hours.is_finite() && hours >= 0.0,
+            "needed_charge_hours: result is not a finite non-negative number; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
+            ctx.max_charge_kw,
+        );
+    }
+
+    hours
 }

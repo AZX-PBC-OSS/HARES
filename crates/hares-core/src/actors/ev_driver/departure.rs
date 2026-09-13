@@ -3,7 +3,9 @@
 use chrono::Datelike;
 use hares_types::DepartureConstraint;
 
-use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
+use super::preference::{
+    ChargingPreference, Constraint, DecisionContext, PreferenceVote, needed_charge_hours_to_target,
+};
 
 pub struct DepartureDeadline {
     pub schedule: Vec<DepartureConstraint>,
@@ -24,46 +26,13 @@ impl DepartureDeadline {
             .find(|dc| dc.day_filter.matches(weekday))
     }
 
-    /// Hours needed to charge from current SOC to target at max rate.
-    /// Rounds up to the nearest timestep to avoid underestimating charge time.
-    ///
-    /// Applies `temp_efficiency_multiplier` to the base charging efficiency to
-    /// account for temperature-dependent degradation of charging acceptance
-    /// (cold weather reduces BMS acceptance rate, thermal conditioning draws
-    /// power, and internal resistance increases). The multiplier is the same
-    /// piecewise-linear fleet-average curve from `efficiency.rs`, originally
-    /// calibrated for driving energy consumption (AAA 2019, Geotab 2020,
-    /// DOE/Argonne 2024, Recurrent Auto) but applicable to charging because
-    /// the same physical mechanisms (electrochemical kinetics, resistive
-    /// heating, thermal management) degrade both driving and charging efficiency
-    /// at low temperatures.
+    /// Hours needed to charge from the current SOC to this preference's
+    /// target at max rate, rounded up to the timestep. Delegates to the
+    /// shared estimate ([`super::preference::needed_charge_hours_to_target`])
+    /// so every preference that votes a target SOC reports time-to-charge
+    /// through the same physics.
     fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
-        let soc_gap = (self.target_soc - ctx.current_soc).max(0.0);
-        let energy_kwh = soc_gap * ctx.capacity_kwh;
-        if ctx.max_charge_kw <= 0.0 || self.efficiency <= 0.0 {
-            return f64::INFINITY;
-        }
-        let temp_mult =
-            super::efficiency::temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c);
-        let effective_efficiency = self.efficiency / temp_mult;
-        let raw_hours = energy_kwh / (ctx.max_charge_kw * effective_efficiency);
-        let hours = if ctx.time_res_minutes > 0.0 {
-            let step_hours = ctx.time_res_minutes / 60.0;
-            (raw_hours / step_hours).ceil() * step_hours
-        } else {
-            raw_hours
-        };
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                hours.is_finite() && hours >= 0.0,
-                "needed_charge_hours: result is not a finite non-negative number; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
-                ctx.max_charge_kw,
-            );
-        }
-
-        hours
+        needed_charge_hours_to_target(self.target_soc, self.efficiency, ctx)
     }
 
     /// Minutes remaining until departure.
