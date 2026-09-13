@@ -27,3 +27,11 @@ criterion = { workspace = true }
 name = "rc_solver"
 path = "benches/rc_solver.rs"
 harness = false
+
+# Standing gate for the solver-step performance rule:
+# covers the orchestration the rc_solver matrix bench does not —
+# build_input_vector, slot-map irradiance lookup, iterative exterior LWR.
+[[bench]]
+name = "thermal_step"
+path = "benches/thermal_step.rs"
+harness = false

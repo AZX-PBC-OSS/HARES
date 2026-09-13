@@ -13,6 +13,11 @@ check_invariants = ["hares-core/check_invariants"]
 name = "_hares"
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+# Version-locked to the pyo3 in use; provides the resolved interpreter's
+# lib dir for the test/dev rpath (see build.rs).
+pyo3-build-config = "0.28"
+
 [dependencies]
 hares-core = { workspace = true }
 hares-fleet = { workspace = true }

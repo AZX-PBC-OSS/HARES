@@ -204,12 +204,37 @@ mod tests {
             result.status, result.elapsed, result.metrics.total_energy_kwh.net_energy_kwh
         );
 
-        if result.metrics.total_energy_kwh.net_energy_kwh.is_finite() {
-            assert!(
-                result.metrics.total_energy_kwh.net_energy_kwh >= 0.0,
-                "[{version}] {bldg_name} total energy is negative"
-            );
-        }
+        // Net energy is signed by definition: consumption minus PV
+        // generation. A PV building exporting more than it consumes over a
+        // midday hour (e.g. a 5 kW array against ~1 kWh of load) is
+        // physically correct, so a negative net is allowed only when
+        // generation actually occurred. The gross terms are non-negative by
+        // definition, and the net must equal their difference.
+        let energy = &result.metrics.total_energy_kwh;
+        assert!(
+            energy.gross_consumption_kwh >= 0.0 && energy.gross_pv_generation_kwh >= 0.0,
+            "[{version}] {bldg_name} gross energy terms must be non-negative: \
+             consumption={:.4} kWh, pv={:.4} kWh",
+            energy.gross_consumption_kwh,
+            energy.gross_pv_generation_kwh
+        );
+        assert!(
+            (energy.net_energy_kwh
+                - (energy.gross_consumption_kwh - energy.gross_pv_generation_kwh))
+                .abs()
+                < 1e-9,
+            "[{version}] {bldg_name} net energy must equal consumption minus \
+             generation: net={:.4}, consumption={:.4}, pv={:.4} kWh",
+            energy.net_energy_kwh,
+            energy.gross_consumption_kwh,
+            energy.gross_pv_generation_kwh
+        );
+        assert!(
+            energy.net_energy_kwh >= 0.0 || energy.gross_pv_generation_kwh > 0.0,
+            "[{version}] {bldg_name} negative net energy without PV generation \
+             is unphysical: net={:.4} kWh",
+            energy.net_energy_kwh
+        );
 
         if output_path.exists() {
             assert_physics_bounds(&output_path);

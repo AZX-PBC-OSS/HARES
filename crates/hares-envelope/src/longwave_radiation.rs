@@ -1057,6 +1057,45 @@ mod tests {
         );
     }
 
+    /// Randomized enclosure zero-sum: over randomized surface counts, areas,
+    /// emissivities, and temperature spreads, the net LWR fluxes must sum to
+    /// zero (a closed enclosure redistributes energy; it cannot create it).
+    /// 256 deterministic pseudo-random cases (SplitMix64, no external deps).
+    #[test]
+    fn linearised_interior_lw_zero_sum_randomized() {
+        let mut state = 0x2545F4914F6CDD1D_u64;
+        let mut next_f64 = move || {
+            state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        for case in 0..256 {
+            let n = 2 + (next_f64() * 7.0) as usize;
+            let surfaces: Vec<InteriorSurface> = (0..n)
+                .map(|_| InteriorSurface {
+                    area_m2: 1.0 + next_f64() * 99.0,
+                    emissivity: 0.05 + next_f64() * 0.94,
+                })
+                .collect();
+            // Physically spanning free-float extremes: −20 °C … 80 °C.
+            let temps: Vec<f64> = (0..n).map(|_| -20.0 + next_f64() * 100.0).collect();
+            let t_zone = -20.0 + next_f64() * 100.0;
+
+            let net = interior_longwave_linearised_w(&surfaces, &temps, t_zone);
+            let total: f64 = net.iter().sum();
+            let scale: f64 = net.iter().map(|q| q.abs()).sum::<f64>().max(1.0);
+            assert!(
+                total.abs() <= 1e-9 * scale,
+                "case {case}: enclosure zero-sum violated: Σq = {total:.6e} W \
+                 (exchange scale {scale:.3e} W)"
+            );
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Sky view factor -- tilt > 90°
     // ─────────────────────────────────────────────────────────────────────────

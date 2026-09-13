@@ -620,6 +620,12 @@ pub fn build_schema(
             "Wall Heat Gain - Indoor (W)",
             "Window Heat Gain - Indoor (W)",
             "Internal Mass Heat Gain - Indoor (W)",
+            // Complete zone air heat-balance residual
+            // (C_zone·ΔT/dt − Σ(all gain terms)). The E+
+            // Output:Diagnostics analogue — small in a correct model, O(kW)
+            // when a gain is mis-wired or a boundary-condition flux leaks
+            // into zone-load terms.
+            "Zone Air Heat Balance Residual (W)",
         ] {
             fields.push(field_with_unit(*label, DataType::Float64, true));
         }
