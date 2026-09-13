@@ -392,6 +392,17 @@ fn parse_schedule_csv_str(
                     data_column_names[out_col_idx]
                 ))
             })?;
+            // `parse::<f64>()` accepts "nan"/"inf"; non-finite schedule data
+            // is corrupt and would otherwise be silently absorbed downstream
+            // (NaN compares false against every threshold). Reject at the
+            // boundary — the earliest stage — naming the row and column.
+            if !value.is_finite() {
+                return Err(ScheduleError::Parse(format!(
+                    "row {row}: non-finite value `{raw}` in column `{}`; \
+                     schedule data must be finite",
+                    data_column_names[out_col_idx]
+                )));
+            }
             columns[out_col_idx].push(value);
         }
     }
@@ -968,5 +979,33 @@ mod tests {
         let _ = fs::remove_file(path);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn non_finite_schedule_values_are_rejected_at_the_parse_boundary() {
+        // `parse::<f64>()` accepts "nan"/"inf"; admitted at the boundary
+        // they would be silently absorbed downstream (NaN compares false
+        // against every threshold, degrading to "no load"). The loader
+        // must reject them, naming the row and column.
+        for corrupt in ["nan", "inf", "-inf", "NaN", "infinity"] {
+            let csv = [
+                "Time,Clothes Washer (kW)".to_string(),
+                "2021-01-01T00:00:00-07:00,0.1".to_string(),
+                format!("2021-01-01T00:15:00-07:00,{corrupt}"),
+                "2021-01-01T00:30:00-07:00,0.3".to_string(),
+            ]
+            .join("\n");
+
+            let err = parse_schedule_csv_str(&csv, &[], None, None)
+                .expect_err("non-finite schedule value must be rejected at parse");
+            assert!(
+                err.to_string().contains("non-finite"),
+                "error must name the defect for input {corrupt:?}, got: {err}"
+            );
+            assert!(
+                err.to_string().contains("Clothes Washer"),
+                "error must name the column for input {corrupt:?}, got: {err}"
+            );
+        }
     }
 }

@@ -129,6 +129,19 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
     }
 }
 
+/// How an equipment's expected mean real power can be determined for
+/// premise-level ZIP aggregation. See
+/// [`Equipment::expected_mean_power_kw`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExpectedMeanPower {
+    /// Known expected mean draw [kW] from the equipment's own configuration.
+    Kw(f64),
+    /// The draw follows a column of the dwelling's schedule data (index
+    /// into the loaded schedule's columns); the mean must be computed from
+    /// that column by the caller.
+    ScheduleColumn(usize),
+}
+
 /// Common interface implemented by all equipment models.
 pub trait Equipment: Send + Sync {
     fn descriptor(&self) -> &EquipmentDescriptor;
@@ -299,7 +312,9 @@ pub trait Equipment: Send + Sync {
     }
 
     /// The primary resolved ZIP/power-factor model this equipment applies to
-    /// its (primary-component) real power for reactive purposes.
+    /// its (primary-component) real power for reactive purposes, together
+    /// with the regime it was resolved under
+    /// ([`ResolvedZip::real_power_zip_applies`]).
     ///
     /// Semantics per equipment family:
     /// - **Typed equipment** (HVAC, water heaters, ventilation, scheduled and
@@ -321,10 +336,43 @@ pub trait Equipment: Send + Sync {
     ///   concept (e.g. generator with Q ≡ 0 by design, protocol bridge,
     ///   indirect tank with no electric draw).
     ///
+    /// `real_power_zip_applies` distinguishes the two regimes a bare
+    /// coefficient set cannot: `true` (scheduled and event loads) means the
+    /// real-power polynomial genuinely governs real power at the bus
+    /// voltage; `false` (Rule R1 physics equipment and DER) means the
+    /// published `(zp, ip, pp) = (0, 0, 1)` is a structural pin — real power
+    /// comes from the equipment's own physics or controller and only the
+    /// reactive side of the ZIP applies. Anything computing voltage
+    /// sensitivity from the published real coefficients must consult the
+    /// flag first.
+    ///
     /// `pf = 0.0` in the returned ZIP is the "reactive disabled" sentinel
     /// (see [`hares_types::zip::ZipLoad`]). This is a pure inspection
     /// surface: it never influences stepping or Q computation.
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+        None
+    }
+
+    /// How this equipment's expected mean real power [kW] over the loaded
+    /// schedule horizon can be determined, for premise-level ZIP
+    /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by
+    /// expected draw).
+    ///
+    /// - `Some(ExpectedMeanPower::Kw(mean))` — the equipment's own
+    ///   configuration determines its expected draw (constant, daily
+    ///   profile, stochastic, or a pre-extracted event kW series).
+    /// - `Some(ExpectedMeanPower::ScheduleColumn(col_idx))` — the draw
+    ///   follows column `col_idx` of the dwelling's schedule data; the
+    ///   caller must compute the mean from that data.
+    /// - `None` (the default) — no schedule-expressible expectation exists.
+    ///   Physics-modeled equipment (HVAC, water heaters, ventilation) and
+    ///   DER draw according to weather, occupancy and control, knowable
+    ///   only by simulation; event-scheduled equipment without a kW series
+    ///   has no static expectation either.
+    ///
+    /// This is a pure inspection surface for aggregation; it never
+    /// influences stepping.
+    fn expected_mean_power_kw(&self) -> Option<ExpectedMeanPower> {
         None
     }
 

@@ -433,8 +433,20 @@ impl EquipmentConfig {
 ///    [`EquipmentConfig::ochre_class`].
 /// 3. [`hares_types::zip::ZipLoad::constant_power`] (no reactive power,
 ///    real power untouched).
+///
+/// The returned [`ResolvedZip`] is governing — the equipment (a scheduled or
+/// event load) scales its real power through the real-power polynomial at
+/// the bus voltage each step. Rule R1 callers use
+/// [`resolve_reactive_zip`] instead.
 #[must_use]
-pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ZipLoad {
+pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ResolvedZip {
+    hares_types::zip::ResolvedZip::governing(resolve_zip_load(config))
+}
+
+/// The coefficient-resolution chain shared by [`resolve_zip`] and
+/// [`resolve_reactive_zip`]: sidecar → class-table defaults → constant
+/// power.
+fn resolve_zip_load(config: &EquipmentConfig) -> hares_types::zip::ZipLoad {
     config
         .zip
         .or_else(|| hares_types::zip::zip_defaults_for_class(&config.ochre_class))
@@ -450,11 +462,13 @@ pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 
 /// Resolve the Rule R1 reactive-only ZIP model for typed equipment.
 ///
-/// The effective ZIP is resolved through [`resolve_zip`] (instance sidecar →
-/// class-table defaults → constant power), then the real-power side is forced
-/// to constant power `(0, 0, 1)`. Typed equipment computes its real electric
-/// power through its own physics and must keep it bit-identical at all
-/// voltages; only the reactive side of the ZIP model is used, via
+/// The effective ZIP is resolved through the same chain as
+/// [`resolve_zip`] (instance sidecar → class-table defaults → constant
+/// power), then returned as a non-governing [`ResolvedZip`]: the real-power
+/// side is forced to constant power `(0, 0, 1)` and flagged as
+/// structurally inapplicable, because typed equipment computes its real
+/// electric power through its own physics and must keep it bit-identical
+/// at all voltages; only the reactive side of the ZIP model is used, via
 /// [`hares_types::zip::ZipLoad::reactive_kvar`] on the already-computed
 /// power (`Q = P · tan(acos(pf)) · (zq·V² + iq·V + pq)`).
 ///
@@ -464,15 +478,10 @@ pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 /// equipment (HVAC, water heaters, fans, pumps).
 pub(crate) fn resolve_reactive_zip(
     config: &EquipmentConfig,
-) -> crate::Result<hares_types::zip::ZipLoad> {
-    let zip = hares_types::zip::ZipLoad {
-        zp: 0.0,
-        ip: 0.0,
-        pp: 1.0,
-        ..resolve_zip(config)
-    };
-    validate_zip_sums(&zip, &config.name)?;
-    Ok(zip)
+) -> crate::Result<hares_types::zip::ResolvedZip> {
+    let resolved = hares_types::zip::ResolvedZip::reactive_only(resolve_zip_load(config));
+    validate_zip_sums(&resolved.zip, &config.name)?;
+    Ok(resolved)
 }
 
 /// Validate the coefficient-sum invariants of a resolved [`ZipLoad`].
@@ -482,10 +491,54 @@ pub(crate) fn resolve_reactive_zip(
 /// sentinel the reactive polynomial is never evaluated, so it is not
 /// constrained). Called at equipment init so a bad `"zip"` override fails
 /// fast with a config error instead of skewing power silently.
+///
+/// Non-finite coefficients are rejected before the sum checks: a NaN sum
+/// defeats `(sum - 1.0).abs() > tolerance` (NaN comparisons are false) and
+/// then poisons every comparison and conversion it meets downstream, while
+/// an infinite `pf` clamps to 1 (silently zeroing Q) and an infinite `v0`
+/// rescales real power to `pp` at every voltage. `v0` must also be
+/// positive: it is a division operand at `apply` (`v / v0`), so `v0 <= 0`
+/// is a division-by-zero/negative-voltage hazard, not a modelling choice.
 pub(crate) fn validate_zip_sums(
     zip: &hares_types::zip::ZipLoad,
     equipment_name: &str,
 ) -> crate::Result<()> {
+    let fields = [
+        ("zp", zip.zp),
+        ("ip", zip.ip),
+        ("pp", zip.pp),
+        ("zq", zip.zq),
+        ("iq", zip.iq),
+        ("pq", zip.pq),
+        ("pf", zip.pf),
+        ("v0", zip.v0),
+    ];
+    for (field, value) in fields {
+        if !value.is_finite() {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "{equipment_name}: non-finite ZIP coefficient {field} = {value}; \
+                 ZIP coefficients must be finite"
+            )));
+        }
+    }
+    if zip.v0 <= 0.0 {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "{equipment_name}: ZIP reference voltage v0 = {} must be positive \
+             (division operand in the ZIP polynomial)",
+            zip.v0
+        )));
+    }
+    // Magnitude bounds, not point probes: a row like
+    // `zp = 1.79e308, ip = -1.79e308, pp = 1.0` cancels to exactly 1.0 at
+    // nominal voltage — passing the sum checks and any single-voltage
+    // probe — yet produces `inf - inf = NaN` real power at 1.05 pu, the
+    // service voltage this engine is driven at. Bounds within physical
+    // plausibility make the overflow class unrepresentable across the
+    // whole band instead of sampling it; see
+    // `hares_types::zip::validate_plausible_magnitudes` for the bound
+    // derivation.
+    hares_types::zip::validate_plausible_magnitudes(zip)
+        .map_err(|err| hares_types::HaresError::Equipment(format!("{equipment_name}: {err}")))?;
     let real_sum = zip.zp + zip.ip + zip.pp;
     if (real_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
         return Err(hares_types::HaresError::Equipment(format!(
@@ -755,16 +808,22 @@ mod tests {
     #[test]
     fn resolve_zip_falls_back_to_constant_power_for_unknown_class() {
         let cfg = raw_cfg("Totally Unknown Class", &[]);
-        assert_eq!(super::resolve_zip(&cfg), ZipLoad::constant_power());
+        let resolved = super::resolve_zip(&cfg);
+        assert_eq!(resolved.zip, ZipLoad::constant_power());
+        // A scheduled/event load of unknown class is genuinely constant
+        // power — the governing flag is real, not a Rule R1 pin.
+        assert!(resolved.real_power_zip_applies);
     }
 
     #[test]
     fn resolve_zip_uses_class_defaults_when_no_sidecar_or_raw_keys() {
         let cfg = raw_cfg("ASHP Heater", &[]);
+        let resolved = super::resolve_zip(&cfg);
         assert_eq!(
-            super::resolve_zip(&cfg),
+            resolved.zip,
             zip_defaults_for_class("ASHP Heater").expect("class row")
         );
+        assert!(resolved.real_power_zip_applies);
     }
 
     #[test]
@@ -772,7 +831,9 @@ mod tests {
         let mut cfg = raw_cfg("ASHP Heater", &[]);
         let sidecar = ZipLoad::reactive_only(0.5, 0.62, -0.12, 0.87);
         cfg.zip = Some(sidecar);
-        assert_eq!(super::resolve_zip(&cfg), sidecar);
+        let resolved = super::resolve_zip(&cfg);
+        assert_eq!(resolved.zip, sidecar);
+        assert!(resolved.real_power_zip_applies);
     }
 
     #[test]
@@ -780,8 +841,9 @@ mod tests {
         // The legacy raw `zip_*` config-key channel is gone: only the sidecar
         // and the class table feed the resolver.
         let cfg = raw_cfg("ASHP Heater", &[("zip_pf", 0.5)]);
+        let resolved = super::resolve_zip(&cfg);
         assert_eq!(
-            super::resolve_zip(&cfg),
+            resolved.zip,
             zip_defaults_for_class("ASHP Heater").expect("class row")
         );
     }
@@ -824,6 +886,244 @@ mod tests {
         // pf = 0 means the reactive polynomial is never evaluated.
         let zip = ZipLoad::reactive_only(0.3, 0.3, 0.3, 0.0);
         super::validate_zip_sums(&zip, "eq").expect("pf=0 sentinel skips reactive sum");
+    }
+
+    #[test]
+    fn validate_zip_sums_rejects_non_finite_coefficients() {
+        // The sidecar channel is reachable with non-finite values: the
+        // defaults loader (`hares-io` `load_zip_parameters`) parses
+        // `zip_parameters.toml` with no finiteness check, and TOML accepts
+        // `nan`/`inf` natively. A NaN coefficient makes the sum NaN, and
+        // `(NaN - 1.0).abs() > tolerance` is false, so the comparison-based
+        // checks admit it: the guard documented to make "a bad `zip`
+        // config override" fail at init "instead of silently skewing power"
+        // must reject non-finite coefficients explicitly. Each arm names
+        // the downstream effect of admitting it.
+        let base = zip_defaults_for_class("ASHP Heater").expect("class row");
+        let arms: &[(&str, ZipLoad)] = &[
+            // NaN real side: sum NaN bypasses the `>` check; apply() then
+            // publishes NaN real power at every step.
+            (
+                "zp = NaN",
+                ZipLoad {
+                    zp: f64::NAN,
+                    ..base
+                },
+            ),
+            // NaN reactive side with pf != 0: reactive sum NaN bypasses.
+            (
+                "zq = NaN",
+                ZipLoad {
+                    zq: f64::NAN,
+                    ..base
+                },
+            ),
+            // NaN pf: `NaN != 0.0` is true so the sentinel arm is skipped,
+            // and tan(acos(NaN)) = NaN poisons Q.
+            (
+                "pf = NaN",
+                ZipLoad {
+                    pf: f64::NAN,
+                    ..base
+                },
+            ),
+            // Infinite pf leaves both sums finite; clamp(-1, 1) then makes
+            // it behave silently as pf = 1 (Q == 0) — a wrong config
+            // accepted without a signal.
+            (
+                "pf = +inf",
+                ZipLoad {
+                    pf: f64::INFINITY,
+                    ..base
+                },
+            ),
+            // Non-finite v0 is never sum-checked: v0 = NaN makes every
+            // v/v0 NaN; v0 = +inf zeroes v/v0, silently rescaling real
+            // power to pp at every voltage.
+            (
+                "v0 = NaN",
+                ZipLoad {
+                    v0: f64::NAN,
+                    ..base
+                },
+            ),
+            (
+                "v0 = +inf",
+                ZipLoad {
+                    v0: f64::INFINITY,
+                    ..base
+                },
+            ),
+            // Control: an infinite real coefficient already fails the sum
+            // check and must stay rejected.
+            (
+                "zp = +inf",
+                ZipLoad {
+                    zp: f64::INFINITY,
+                    ..base
+                },
+            ),
+        ];
+        for (label, zip) in arms {
+            let result = super::validate_zip_sums(zip, "eq");
+            assert!(
+                result.is_err(),
+                "{label}: non-finite ZIP coefficient must fail validation, \
+                 not pass silently into stepping and premise aggregation"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_zip_sums_rejects_non_positive_v0() {
+        // `v0` is a division operand at `apply` (`v / v0`): v0 = 0 divides
+        // by zero, v0 < 0 flips the sign of the normalized voltage. Both
+        // are finite (the loader's finiteness check passes them), so the
+        // positivity check is the only guard — it must reject them, naming
+        // v0, while a sane v0 stays accepted.
+        let base = zip_defaults_for_class("ASHP Heater").expect("class row");
+        for v0 in [0.0_f64, -1.0] {
+            let zip = ZipLoad { v0, ..base };
+            let err = super::validate_zip_sums(&zip, "eq")
+                .expect_err("non-positive v0 must fail validation");
+            assert!(
+                err.to_string().contains("v0"),
+                "error must name v0, got: {err}"
+            );
+        }
+        let sane = ZipLoad { v0: 0.98, ..base };
+        super::validate_zip_sums(&sane, "eq").expect("a positive v0 must stay accepted");
+    }
+
+    #[test]
+    fn validated_zip_produces_finite_power_at_nominal_voltage() {
+        // `v0 > 0` is necessary but not sufficient: a positive v0 small
+        // enough that the normalized voltage `v / v0` overflows still
+        // corrupts `apply` — a subnormal v0 makes `v_norm` infinite, so
+        // even a constant-power row (zp = 0: `0 * inf` = NaN) produces NaN
+        // real power; a merely tiny v0 (1e-200) squares `v_norm` past
+        // `f64::MAX` and produces infinite real power for impedance rows.
+        // Both values are finite (the TOML loader's `is_finite` check
+        // passes them) and positive (the `v0 <= 0.0` check passes them),
+        // and both are reachable through the documented `"zip"` override
+        // channel, which accepts any finite f64 — executed end-to-end, a
+        // subnormal v0 override builds and initializes cleanly and then
+        // panics the simulation mid-step (release builds: silent NaN).
+        // The invariant a caller can rely on: a ZIP that passes validation
+        // produces finite real power at nominal voltage. Rejecting such a
+        // v0 at validation (or making apply safe) both satisfy it.
+        let base = zip_defaults_for_class("ASHP Heater").expect("class row");
+        let arms: &[(&str, f64)] = &[
+            ("subnormal v0 (v_norm = inf)", 1e-320),
+            ("tiny v0 (v_norm^2 overflows)", 1e-200),
+            ("sane v0 (control, must stay accepted)", 0.98),
+        ];
+        for (label, v0) in arms {
+            let zip = ZipLoad { v0: *v0, ..base };
+            if let Ok(()) = super::validate_zip_sums(&zip, "eq") {
+                let (real_kw, reactive_kvar) = zip.apply(1.0, 1.0);
+                assert!(
+                    real_kw.is_finite() && reactive_kvar.is_finite(),
+                    "{label}: validation accepted v0 = {v0}, but apply at nominal \
+                     voltage produces (P = {real_kw}, Q = {reactive_kvar}) — a \
+                     validated ZIP must produce finite power at nominal voltage"
+                );
+            }
+        }
+        // Guard against an over-broad fix: a sane v0 must stay accepted.
+        let sane = ZipLoad { v0: 0.98, ..base };
+        super::validate_zip_sums(&sane, "eq")
+            .expect("a sane positive v0 must stay accepted by validation");
+    }
+
+    #[test]
+    fn validated_zip_produces_finite_power_across_the_service_voltage_band() {
+        // Near-maximum coefficients with exact cancellation defeat every
+        // guard layer at nominal voltage: each field is finite, the sum
+        // `zp + ip + pp` cancels to exactly 1.0 (`a + (-a) + 1`), and the
+        // nominal-voltage probe cancels the same way — so the row is
+        // fully validated. At any off-nominal voltage the cancellation
+        // breaks: at 1.05 pu both products overflow with opposite signs
+        // and `inf - inf` = NaN — silent NaN real power at the service
+        // voltage this initiative's own reproduction drives
+        // (`set_grid_voltage(0.95/1.05)`), reachable through the
+        // documented `"zip"` override channel. A single-voltage probe
+        // cannot bound band behavior; the caller-reliable invariant at
+        // the band the engine operates over: a validated ZIP produces
+        // finite real and reactive power across the ±5 % service band.
+        // Rejecting such coefficients (magnitude bound, band probe) or
+        // making apply safe both satisfy it.
+        let zip = ZipLoad {
+            zp: 1.79e308,
+            ip: -1.79e308,
+            pp: 1.0,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 1.0,
+            pf: 0.84,
+            v0: 1.0,
+        };
+        if let Ok(()) = super::validate_zip_sums(&zip, "eq") {
+            for voltage_pu in [0.95, 1.0, 1.05] {
+                let (real_kw, reactive_kvar) = zip.apply(1.0, voltage_pu);
+                assert!(
+                    real_kw.is_finite() && reactive_kvar.is_finite(),
+                    "validation accepted zp = {zp}, ip = {ip} (sums cancel to 1 at \
+                     nominal), but apply at {voltage_pu} pu produces (P = {real_kw}, \
+                     Q = {reactive_kvar}) — a validated ZIP must produce finite \
+                     power across the service voltage band, not just at nominal",
+                    zp = zip.zp,
+                    ip = zip.ip,
+                );
+            }
+        }
+        // Guard against an over-broad fix: a sane row must stay accepted.
+        let sane = zip_defaults_for_class("ASHP Heater").expect("class row");
+        super::validate_zip_sums(&sane, "eq")
+            .expect("a sane class row must stay accepted by validation");
+    }
+
+    #[test]
+    fn validate_zip_sums_rejects_out_of_range_power_factor() {
+        // `pf` is the one ZipLoad field the plausibility guard does not
+        // check: power factor is cos(phi) and physically lies in [-1, 1]
+        // (the sign convention documents negative = capacitive), but a
+        // finite pf outside that range passes every guard — field
+        // finiteness, the magnitude bound (pf is not in its coefficient
+        // array), the sum checks, and the nominal-voltage probe (clamp(±)
+        // lands on 1 or -1, tan(acos(±1)) ~ 0, finite) — so the row is
+        // fully validated and then silently clamps at every use: Q is
+        // zeroed (pf > 1) with no signal, `equipment_zip` publishes the
+        // garbage pf, and a caller applying the documented Q formula
+        // (Q = P * tan(acos(pf)) * base) to the published pf gets NaN
+        // while the engine computes 0. Executed end-to-end: a
+        // `{"zip": {"pf": 1.5}}` override builds and initializes cleanly
+        // and `equipment_zip` publishes `pf: 1.5`. The pass-1 guard
+        // rejected non-finite pf; finite-but-out-of-range pf is the
+        // surviving sibling, and every DER path already validates pf in
+        // (0, 1] — the ZIP channel must hold the same line.
+        let base = zip_defaults_for_class("ASHP Heater").expect("class row");
+        for pf in [1.5_f64, 50.0, -1.2] {
+            let zip = ZipLoad { pf, ..base };
+            let result = super::validate_zip_sums(&zip, "eq");
+            assert!(
+                result.is_err(),
+                "pf = {pf} is outside the physical [-1, 1] range and must fail \
+                 validation, not pass silently and clamp at every use"
+            );
+        }
+        // Guard against an over-broad fix: pf inside [-1, 1] — including
+        // the signed capacitive convention and the 0.0 "no reactive"
+        // sentinel — must stay accepted.
+        for pf in [0.84_f64, 1.0, -0.5, 0.0] {
+            let zip = ZipLoad { pf, ..base };
+            super::validate_zip_sums(&zip, "eq").unwrap_or_else(|err| {
+                panic!(
+                    "pf = {pf} is legitimate (in-range, signed, or sentinel) \
+                       and must stay accepted, got: {err}"
+                )
+            });
+        }
     }
 
     // ── zip sidecar serde ───────────────────────────────────────────────

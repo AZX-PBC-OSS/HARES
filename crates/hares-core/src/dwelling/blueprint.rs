@@ -124,6 +124,15 @@ impl DwellingBlueprint {
             .unwrap_or_else(|| PathBuf::from("defaults"));
         let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
             Ok(store) => store,
+            // Corrupt defaults data must surface: continuing with an empty
+            // store would silently swap every equipment's resolved defaults
+            // (ZIP sidecars, HVAC curves) for class-table fallbacks — a
+            // structurally normal dwelling running different numbers.
+            Err(err @ hares_io::DefaultsError::MalformedToml { .. }) => {
+                return Err(HaresError::Io(err.to_string()));
+            }
+            // Unavailable defaults (missing dir / I/O error) keep the
+            // documented degradation: warn and run on the class tables.
             Err(err) => {
                 tracing::warn!("defaults load failed; using empty defaults store: {err}");
                 DefaultsStore::empty()

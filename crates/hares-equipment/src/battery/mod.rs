@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::telemetry_keys as tk;
-use hares_types::zip::ZipLoad;
+use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
@@ -1621,11 +1621,18 @@ impl Equipment for Battery {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<ZipLoad> {
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
         // Live runtime state: constant-power reactive-only ZIP carrying the
         // current effective power factor (config baseline, later mutated by
         // PowerFactorSetpoint) — mirrors the baseline Q path in `step()`.
-        Some(ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor))
+        // Real power is BMS-controlled, never ZIP-scaled, so the resolved
+        // regime is reactive-only.
+        Some(ResolvedZip::reactive_only(ZipLoad::reactive_only(
+            0.0,
+            0.0,
+            1.0,
+            self.power_factor,
+        )))
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {
@@ -6298,8 +6305,12 @@ mod tests {
         bat.init(&config, &base_env()).unwrap();
 
         let zip = bat.resolved_zip().expect("battery exposes a ZIP");
-        assert_eq!(zip, ZipLoad::reactive_only(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(
+            zip,
+            ResolvedZip::reactive_only(ZipLoad::reactive_only(0.0, 0.0, 1.0, 1.0))
+        );
         assert_eq!(zip.pf, 1.0);
+        assert!(!zip.real_power_zip_applies);
     }
 
     /// `resolved_zip` reflects live runtime state: a PowerFactorSetpoint
@@ -6314,7 +6325,11 @@ mod tests {
             .unwrap();
 
         let zip = bat.resolved_zip().expect("battery exposes a ZIP");
-        assert_eq!(zip, ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.85));
+        assert_eq!(
+            zip,
+            ResolvedZip::reactive_only(ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.85))
+        );
+        assert!(!zip.real_power_zip_applies);
     }
 
     /// PowerSetpoint with reactive_power_kvar is accepted and applied.

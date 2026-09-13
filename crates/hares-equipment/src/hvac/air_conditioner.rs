@@ -128,7 +128,7 @@ pub(super) struct CoolingCore {
     /// applies to the compressor component only (class default pf 0.96, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
     /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`).
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
     /// at init via `hvac::reactive::secondary_motor_zip`.
     fan_zip: hares_types::zip::ZipLoad,
@@ -325,7 +325,7 @@ impl Equipment for AirConditioner {
         &self.core.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
@@ -394,7 +394,7 @@ impl Equipment for RoomAC {
         &self.core.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
@@ -569,7 +569,9 @@ impl CoolingCore {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             zone_id_explicit,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             fan_zip: hares_types::zip::ZipLoad::constant_power(),
         }
     }

@@ -1040,13 +1040,18 @@ impl PyCoreOutput {
     }
 }
 
-/// Render a resolved [`ZipLoad`] as a Python dict with one key per struct
-/// field (`zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0`), matching the
-/// `defaults/zip_parameters.toml` row names and the `"zip"` override keys.
+/// Render a resolved [`ResolvedZip`] as a Python dict with one key per
+/// struct field (`zp`/`ip`/`pp`/`zq`/`iq`/`pq`/`pf`/`v0`, matching the
+/// `defaults/zip_parameters.toml` row names and the `"zip"` override keys)
+/// plus `real_power_zip_applies`, which declares whether the real-power
+/// coefficients govern the equipment's real power or are the Rule R1
+/// structural `(0, 0, 1)` pin (real power from physics/DER, reactive-only
+/// ZIP).
 pub(crate) fn zip_to_pydict<'py>(
     py: Python<'py>,
-    zip: &hares_types::zip::ZipLoad,
+    resolved: &hares_types::zip::ResolvedZip,
 ) -> PyResult<Bound<'py, PyDict>> {
+    let zip = &resolved.zip;
     let out = PyDict::new(py);
     out.set_item("zp", zip.zp)?;
     out.set_item("ip", zip.ip)?;
@@ -1056,6 +1061,7 @@ pub(crate) fn zip_to_pydict<'py>(
     out.set_item("pq", zip.pq)?;
     out.set_item("pf", zip.pf)?;
     out.set_item("v0", zip.v0)?;
+    out.set_item("real_power_zip_applies", resolved.real_power_zip_applies)?;
     Ok(out)
 }
 
@@ -1065,7 +1071,7 @@ pub struct PyEquipment {
     descriptor: RustEquipmentDescriptor,
     core_output: RustCoreOutput,
     telemetry: RustTelemetry,
-    resolved_zip: Option<hares_types::zip::ZipLoad>,
+    resolved_zip: Option<hares_types::zip::ResolvedZip>,
 }
 
 impl PyEquipment {
@@ -1073,7 +1079,7 @@ impl PyEquipment {
         descriptor: RustEquipmentDescriptor,
         core_output: RustCoreOutput,
         telemetry: RustTelemetry,
-        resolved_zip: Option<hares_types::zip::ZipLoad>,
+        resolved_zip: Option<hares_types::zip::ResolvedZip>,
     ) -> Self {
         Self {
             descriptor,
@@ -1109,7 +1115,12 @@ impl PyEquipment {
     /// the *current* effective power factor (config baseline, later mutated
     /// by a ``PowerFactorSetpoint``). ``None`` means the equipment has no
     /// electrical ZIP concept; ``pf == 0.0`` is the "reactive disabled"
-    /// sentinel. Pure inspection — never influences the simulation.
+    /// sentinel. ``real_power_zip_applies`` is ``False`` for Rule R1 physics
+    /// equipment and DER (the published ``(0, 0, 1)`` real side is a
+    /// structural pin — real power comes from the equipment's own physics
+    /// or controller) and ``True`` for scheduled/event loads (the
+    /// coefficients genuinely govern real power at the bus voltage).
+    /// Pure inspection — never influences the simulation.
     #[getter]
     fn resolved_zip<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         self.resolved_zip

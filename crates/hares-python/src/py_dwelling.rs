@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
 use hares_core::{
     ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingCheckpoint, DwellingConfig,
-    environment::SurfaceGeometry,
+    PremiseZip, environment::SurfaceGeometry,
 };
 use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
@@ -337,6 +337,43 @@ fn parse_solar_override_from_dict(
     }
 
     Ok(result)
+}
+
+/// Render a [`PremiseZip`] as the Python dict documented on
+/// `Dwelling.premise_zip`.
+fn premise_zip_to_pydict<'py>(
+    py: Python<'py>,
+    premise: &PremiseZip,
+) -> PyResult<Bound<'py, PyDict>> {
+    let zip = &premise.zip;
+    let out = PyDict::new(py);
+    out.set_item("zp", zip.zp)?;
+    out.set_item("ip", zip.ip)?;
+    out.set_item("pp", zip.pp)?;
+    out.set_item("zq", zip.zq)?;
+    out.set_item("iq", zip.iq)?;
+    out.set_item("pq", zip.pq)?;
+    out.set_item("pf", zip.pf)?;
+    out.set_item("v0", zip.v0)?;
+    // The aggregate is over ZIP-governed equipment by construction; the
+    // flag keeps the dict shape consistent with equipment_zip's.
+    out.set_item("real_power_zip_applies", true)?;
+    let governing = PyList::empty(py);
+    for (name, mean_power_kw) in &premise.governing {
+        let name: &str = name.as_str();
+        let entry = PyDict::new(py);
+        entry.set_item("name", name)?;
+        entry.set_item("mean_power_kw", *mean_power_kw)?;
+        governing.append(entry)?;
+    }
+    out.set_item("governing_equipment", governing)?;
+    let constant_power = PyList::empty(py);
+    for name in &premise.constant_power {
+        let name: &str = name.as_str();
+        constant_power.append(name)?;
+    }
+    out.set_item("constant_power_equipment", constant_power)?;
+    Ok(out)
 }
 
 fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
@@ -919,8 +956,22 @@ impl PyDwelling {
 
     /// The primary resolved ZIP/power-factor model for the named equipment,
     /// as a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/``pf``/
-    /// ``v0``, or ``None`` when the equipment has no electrical ZIP concept
-    /// (e.g. generator, protocol bridge, indirect tank).
+    /// ``v0``/``real_power_zip_applies``, or ``None`` when the equipment has
+    /// no electrical ZIP concept (e.g. generator, protocol bridge,
+    /// indirect tank).
+    ///
+    /// ``real_power_zip_applies`` declares whether the real-power
+    /// coefficients govern the equipment's real power: ``True`` for
+    /// scheduled/event loads (whose scheduled draw is scaled by the
+    /// real-power polynomial at the bus voltage), ``False`` for Rule R1
+    /// physics equipment (HVAC, water heaters, ventilation — real power
+    /// comes from the equipment's own physics and is deliberately
+    /// voltage-invariant, so the published ``(zp, ip, pp) = (0, 0, 1)`` is a
+    /// structural pin, not a measured response; only the reactive
+    /// coefficients apply) and for DER (real power is controller-driven).
+    /// Anything computing voltage sensitivity from the published real
+    /// coefficients must check this flag first; for the whole-dwelling
+    /// answer use [`Dwelling::premise_zip`].
     ///
     /// For DER with live var control (battery, EV, PV) ``pf`` is the current
     /// effective power factor (config baseline, later mutated by a
@@ -940,6 +991,41 @@ impl PyDwelling {
         eq.resolved_zip()
             .map(|zip| crate::py_equipment::zip_to_pydict(py, &zip))
             .transpose()
+    }
+
+    /// The dwelling's aggregate real-power voltage response, without
+    /// simulation: the power-weighted mean ZIP over the equipment whose
+    /// real-power coefficients genuinely govern their real power
+    /// (scheduled and event loads, weighted by expected mean draw over the
+    /// loaded schedule data).
+    ///
+    /// Returns a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/
+    /// ``pf``/``v0`` (the aggregate coefficients; the real side sums to 1,
+    /// the reactive side is a first-order aggregate),
+    /// ``real_power_zip_applies`` (always ``True`` — the aggregate describes
+    /// the ZIP-governed mix), ``governing_equipment`` (list of
+    /// ``{"name": str, "mean_power_kw": float | None}`` — equipment
+    /// included in the aggregate; ``None`` marks equipment whose expected
+    /// draw is not computable without simulation, which contribute no
+    /// weight), and ``constant_power_equipment`` (list of names whose real
+    /// power is physics- or DER-driven and therefore voltage-invariant by
+    /// construction — HVAC, water heaters, ventilation, battery, EV, PV).
+    ///
+    /// The aggregate covers the ZIP-governed mix only: the share of total
+    /// draw taken by physics-driven equipment depends on weather, occupancy
+    /// and control, knowable only by simulation, so a whole-premise %P/%V
+    /// combines this aggregate with those equipment's simulated energy
+    /// shares.
+    ///
+    /// ``None`` when no ZIP-governed equipment has a computable positive
+    /// expected draw — never a silent constant-power answer. Pure
+    /// inspection — never influences the simulation.
+    pub fn premise_zip<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let dwelling = self.acquire()?;
+        let Some(premise) = dwelling.premise_zip() else {
+            return Ok(None);
+        };
+        Ok(Some(premise_zip_to_pydict(py, &premise)?))
     }
 
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {

@@ -287,7 +287,7 @@ impl Equipment for HpCooler {
         self.inner.core_output()
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it).
         self.inner.resolved_zip()
@@ -592,8 +592,9 @@ impl Equipment for GshpCooler {
             )),
         };
 
+        let resolved = crate::config::resolve_reactive_zip(config)?;
         self.pump_zip = crate::hvac::reactive::secondary_motor_zip(
-            &crate::config::resolve_reactive_zip(config)?,
+            &resolved,
             crate::hvac::reactive::LOOP_PUMP_ZIP,
         );
         Ok(())
@@ -699,7 +700,7 @@ impl Equipment for GshpCooler {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
         // loop-pump component ZIP is secondary.
@@ -945,8 +946,9 @@ impl Equipment for WshpCooler {
             self.inner.core.source_temp = SourceTemperature::Constant(ewt);
         }
 
+        let resolved = crate::config::resolve_reactive_zip(config)?;
         self.pump_zip = crate::hvac::reactive::secondary_motor_zip(
-            &crate::config::resolve_reactive_zip(config)?,
+            &resolved,
             crate::hvac::reactive::LOOP_PUMP_ZIP,
         );
         Ok(())
@@ -1027,7 +1029,7 @@ impl Equipment for WshpCooler {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
         // loop-pump component ZIP is secondary.

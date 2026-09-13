@@ -4,11 +4,14 @@ mod autosize;
 pub mod blueprint;
 mod conversions;
 mod loop_allocator;
+mod premise_zip;
 mod solver_builder;
 mod synthetic;
 mod warnings;
 
 pub use warnings::WarningLog;
+
+pub use premise_zip::PremiseZip;
 
 pub use blueprint::DwellingBlueprint;
 pub use conversions::{
@@ -3032,6 +3035,25 @@ impl Dwelling {
     #[must_use]
     pub fn equipment(&self) -> &[Box<dyn Equipment>] {
         &self.equipment
+    }
+
+    /// The dwelling's aggregate real-power voltage response, without
+    /// simulation. See [`PremiseZip`] for the full contract.
+    ///
+    /// The aggregate covers the equipment whose real-power ZIP genuinely
+    /// governs their real power (scheduled and event loads), weighted by
+    /// each one's expected mean draw over the loaded schedule data.
+    /// Rule-R1 physics equipment and DER are listed in
+    /// [`PremiseZip::constant_power`] instead: their real power is
+    /// voltage-invariant by construction, but their *share* of total draw
+    /// is knowable only by simulation, so a whole-premise %P/%V combines
+    /// this aggregate with those shares.
+    ///
+    /// `None` when no ZIP-governed equipment has a computable positive
+    /// expected draw — never a silent constant-power answer.
+    #[must_use]
+    pub fn premise_zip(&self) -> Option<PremiseZip> {
+        premise_zip::aggregate_premise_zip(self.equipment(), self.environment.schedule())
     }
 
     /// Returns per-equipment HPXML setpoint reconciliation records, keyed by

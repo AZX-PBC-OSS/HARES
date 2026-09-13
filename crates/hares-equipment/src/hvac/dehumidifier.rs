@@ -164,7 +164,7 @@ pub struct Dehumidifier {
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// compressor pf 0.96 on the total electric draw. Real power stays
     /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
 }
 
 impl Dehumidifier {
@@ -230,7 +230,9 @@ impl Dehumidifier {
             off_cycle_parasitic_load_w: None,
             min_operating_temp_c: Some(DEFAULT_MIN_OPERATING_TEMP_C),
             max_operating_temp_c: Some(DEFAULT_MAX_OPERATING_TEMP_C),
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
         }
     }
 
@@ -781,7 +783,7 @@ impl Equipment for Dehumidifier {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

@@ -116,7 +116,7 @@ pub struct GasWH {
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`)
     /// for the draft-inducer fan motor: real power stays bit-identical; Q
     /// comes from `ZipLoad::reactive_kvar`.
-    zip: hares_types::zip::ZipLoad,
+    zip: hares_types::zip::ResolvedZip,
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -215,7 +215,9 @@ impl GasWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zip: hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_types::zip::ResolvedZip::reactive_only(
+                hares_types::zip::ZipLoad::constant_power(),
+            ),
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
             zone_id_explicit,
@@ -745,7 +747,7 @@ impl Equipment for GasWH {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ZipLoad> {
+    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
 

@@ -30,7 +30,13 @@ impl PyControlSignal {
         min_soc: Option<f64>,
         max_soc: Option<f64>,
     ) -> PyResult<Self> {
-        validate_non_negative(kw, "active_power_kw")?;
+        // Signed per the core ControlSignal contract: positive = charge,
+        // negative = discharge (V2G/V2H). Finiteness only — semantic
+        // limits are the receiving equipment's to enforce.
+        validate_finite(kw, "active_power_kw")?;
+        if let Some(q) = reactive_kvar {
+            validate_finite(q, "reactive_power_kvar")?;
+        }
         Ok(Self {
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: kw,
@@ -338,10 +344,16 @@ impl PyControlSignal {
             },
             "PowerSetpoint" => {
                 let active_power_kw: f64 = dict_required(d, "active_power_kw")?;
-                validate_non_negative(active_power_kw, "active_power_kw")?;
+                // Signed per the core contract (negative = discharge);
+                // finiteness only, same as the typed constructor.
+                validate_finite(active_power_kw, "active_power_kw")?;
+                let reactive_power_kvar: Option<f64> = dict_optional(d, "reactive_power_kvar")?;
+                if let Some(q) = reactive_power_kvar {
+                    validate_finite(q, "reactive_power_kvar")?;
+                }
                 ControlSignal::PowerSetpoint {
                     active_power_kw,
-                    reactive_power_kvar: dict_optional(d, "reactive_power_kvar")?,
+                    reactive_power_kvar,
                     min_soc: dict_optional(d, "min_soc")?,
                     max_soc: dict_optional(d, "max_soc")?,
                 }
@@ -752,6 +764,15 @@ where
     }
 }
 
+fn validate_finite(value: f64, name: &str) -> PyResult<()> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_non_negative(value: f64, name: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(PyValueError::new_err(format!(
@@ -903,8 +924,19 @@ mod tests {
     // --- constructor validation: non-negative ---
 
     #[test]
-    fn power_setpoint_rejects_negative_kw() {
-        assert!(PyControlSignal::power_setpoint(-1.0, None, None, None).is_err());
+    fn power_setpoint_accepts_negative_discharge() {
+        // Signed per the core contract: negative = discharge.
+        let sig = PyControlSignal::power_setpoint(-1.0, None, None, None)
+            .expect("negative kw is a discharge command");
+        assert!(matches!(
+            sig.signal,
+            ControlSignal::PowerSetpoint {
+                active_power_kw: -1.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None
+            }
+        ));
     }
 
     #[test]
@@ -1048,24 +1080,22 @@ mod tests {
     where
         F: for<'py> FnOnce(Python<'py>),
     {
-        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
-        // guards against double-initialisation race conditions.
-        unsafe {
-            pyo3::ffi::Py_Initialize();
-        }
-        // SAFETY: interpreter is now initialised.
-        let py = unsafe { Python::assume_attached() };
-        f(py);
+        // Python::attach initialises the interpreter exactly once,
+        // thread-safely (auto-initialize feature) — the crate's production
+        // pattern. Raw Py_Initialize() is fatal when two parallel test
+        // threads initialise concurrently (CPython 3.13: "_PyImport_Init:
+        // global import state already initialized").
+        Python::attach(f);
     }
 
     #[test]
-    fn from_dict_rejects_negative_power_setpoint() {
+    fn from_dict_accepts_negative_discharge_power_setpoint() {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "PowerSetpoint").unwrap();
             d.set_item("active_power_kw", -1.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
-            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+            assert!(PyControlSignal::from_dict(&cls, &d).is_ok());
         });
     }
 

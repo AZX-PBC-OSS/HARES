@@ -565,7 +565,7 @@ class TestDefaultBatteryZeroQ:
 #     (Dwelling.equipment_zip and Equipment.resolved_zip)
 # ---------------------------------------------------------------------------
 
-ZIP_KEYS = {"zp", "ip", "pp", "zq", "iq", "pq", "pf", "v0"}
+ZIP_KEYS = {"zp", "ip", "pp", "zq", "iq", "pq", "pf", "v0", "real_power_zip_applies"}
 
 
 def _equipment_resolved_zip(dw, name):
