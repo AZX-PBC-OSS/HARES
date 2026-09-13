@@ -302,10 +302,6 @@ fn run_with_streaming_output_computes_metrics() {
         .run(build_config(unique_temp_path("csv"), false))
         .expect("streaming run should succeed");
 
-    eprintln!(
-        "STREAMED WARNINGS: {:?} STATUS: {:?}",
-        streamed.warnings, streamed.status
-    );
     // Nothing is retained in memory on the streaming run -- the honest
     // timeseries is empty -- but the metrics must be fully computed.
     assert!(
