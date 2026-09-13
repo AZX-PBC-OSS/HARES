@@ -108,20 +108,27 @@ impl ParityFixture {
     }
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Time-axis parity against the OCHRE reference cadence. Assertions run
+/// whenever the reference parquet is present; a missing (gitignored, local)
+/// reference skips with a loud diagnostic, matching the parity corpus's
+/// incomplete-fixture convention.
 #[test]
-#[should_panic(expected = "reference parquet time axis must be readable")]
 fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
     let dwelling_config = build_dwelling_config(&fixture);
     let local_offset = *dwelling_config.sim_config.start_time.offset();
     let expected_start_time = dwelling_config.sim_config.start_time;
 
+    let Some(reference_time) =
+        read_reference_time_axis_local_opt(&fixture.reference_output_parquet(), local_offset)
+    else {
+        eprintln!(
+            "[alignment] skipping {} (missing: reference_output.parquet)",
+            fixture.root.display()
+        );
+        return;
+    };
     let actual_time = simulate_fixture_timestamps(dwelling_config);
-    let reference_time =
-        read_reference_time_axis_local(&fixture.reference_output_parquet(), local_offset)
-            .expect("reference parquet time axis must be readable");
     assert_eq!(
         actual_time.len(),
         reference_time.len(),
@@ -150,10 +157,11 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     }
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Peak HVAC power parity against the OCHRE reference. Assertions run
+/// whenever the reference parquet is present; a missing (gitignored, local)
+/// reference skips with a loud diagnostic, matching the parity corpus's
+/// incomplete-fixture convention.
 #[test]
-#[should_panic(expected = "reference parquet must be readable")]
 fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     // HARES implements simultaneous HP+ER (dual-fuel) operation per EnergyPlus
     // physics. At extreme cold (≈ -16.6°C OAT in this fixture) the backup ER
@@ -168,9 +176,14 @@ fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     // HP-only electrical peak observed from OCHRE reference: ~11.8 kW.
     // Full HP+ER upper bound (at worst COP ≈ 1): 11.8 + 37.6 ≈ 49.4 kW.
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
+    let Some(reference) = read_parquet_columns_opt(&fixture.reference_output_parquet()) else {
+        eprintln!(
+            "[alignment] skipping {} (missing: reference_output.parquet)",
+            fixture.root.display()
+        );
+        return;
+    };
     let actual = run_fixture_to_columns(&fixture);
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
 
     let actual_peak = peak_hvac_power(&actual).expect("actual HVAC peak power missing");
     let reference_peak = peak_hvac_power(&reference).expect("reference HVAC peak power missing");
@@ -245,15 +258,21 @@ fn ochre_ashp_fixture_runtime_state_columns_are_populated() {
     // No assertion failure when COP is zero -- ER-only mode is valid.
 }
 
-/// Fix pending on fixture availability — will stop panicking when reference
-/// parquet files are checked in.
+/// Envelope routing and boundary observability against the OCHRE reference.
+/// Assertions run whenever the reference parquet is present; a missing
+/// (gitignored, local) reference skips with a loud diagnostic, matching the
+/// parity corpus's incomplete-fixture convention.
 #[test]
-#[should_panic(expected = "reference parquet must be readable")]
 fn ochre_ashp_fixture_envelope_routes_and_boundary_observability_align() {
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
+    let Some(reference) = read_parquet_columns_opt(&fixture.reference_output_parquet()) else {
+        eprintln!(
+            "[alignment] skipping {} (missing: reference_output.parquet)",
+            fixture.root.display()
+        );
+        return;
+    };
     let actual = run_fixture_to_columns_with_verbosity(&fixture, Some(7));
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
 
     for column in [
         "Temperature - Ground (C)",
@@ -1011,6 +1030,21 @@ fn read_reference_time_axis_local(
     Ok(values)
 }
 
+/// `read_reference_time_axis_local` with the same missing-file convention as
+/// [`read_parquet_columns_opt`]: `None` only when the file is absent.
+fn read_reference_time_axis_local_opt(
+    path: &Path,
+    local_offset: FixedOffset,
+) -> Option<Vec<DateTime<FixedOffset>>> {
+    if !path.exists() {
+        return None;
+    }
+    Some(
+        read_reference_time_axis_local(path, local_offset)
+            .expect("reference parquet time axis must be readable"),
+    )
+}
+
 fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     let config_contents =
         fs::read_to_string(fixture.config_toml()).expect("fixture config.toml must be readable");
@@ -1052,6 +1086,17 @@ fn parse_simulation_config(
     }
 
     SimulationConfig::from_toml(contents).map_err(|err| format!("simulation config invalid: {err}"))
+}
+
+/// Reads the reference parquet, returning `None` only when the file is
+/// absent — reference outputs are local, gitignored artifacts, and their
+/// absence skips the reference-backed tests with a loud diagnostic rather
+/// than failing them. A present-but-unreadable file still fails loudly.
+fn read_parquet_columns_opt(path: &Path) -> Option<BTreeMap<String, Vec<f64>>> {
+    if !path.exists() {
+        return None;
+    }
+    Some(read_parquet_columns(path).expect("reference parquet must be readable"))
 }
 
 fn read_parquet_columns(path: &Path) -> Result<BTreeMap<String, Vec<f64>>, String> {

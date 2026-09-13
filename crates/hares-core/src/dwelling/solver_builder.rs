@@ -11,6 +11,7 @@ use hares_envelope::{
     InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT,
     SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
     ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
+    skin_rad_coupling,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 #[cfg(feature = "observe")]
@@ -57,6 +58,11 @@ struct SolverBoundary {
     surface_id: u32,
     area_m2: f64,
     boundary_category: Option<BoundaryCategory>,
+    /// Tilt [°] of the face this boundary presents to its interior zone —
+    /// differs from the boundary's outward convention when the interior
+    /// zone lies BELOW the boundary: an attic floor presents a ceiling
+    /// (tilt 0) to the conditioned zone beneath it. Drives the cosine
+    /// beam-solar distribution and interior TARP convection.
     tilt_deg: f64,
     azimuth_deg: f64,
     zone_id: ZoneId,
@@ -64,6 +70,7 @@ struct SolverBoundary {
     is_exterior: bool,
     is_conditioned_interior: bool,
     is_attic_interior: bool,
+    is_foundation_interior: bool,
     exterior_emissivity: f64,
     exterior_solar_absorptance: f64,
     attic_emissivity: f64,
@@ -83,6 +90,12 @@ struct SolverBoundary {
     diagnostic_r_zone_to_inner: Option<f64>,
     r_film_exterior_m2_k_w: f64,
 }
+
+// Exterior and interior skin couplings are constructed by the shared
+// `hares_envelope::skin_rad_coupling` — the single derivation of the
+// eliminated-skin (Thévenin) resistance, with the exactness proof and
+// divergence ledger entry in its doc comment. Routing for the no-material
+// case (`None`) is decided at each call site below.
 
 /// Build the intermediate `SolverBoundary` representations from building data.
 ///
@@ -148,6 +161,18 @@ fn build_solver_boundaries(
             .interior_zone
             .as_ref()
             .map(|z| *z == hares_io::hpxml::ZoneType::Attic)
+            .unwrap_or(false);
+        // Foundation zones (conditioned basements/crawlspaces) participate
+        // in interior solar/LWR distribution: their slabs and walls are
+        // real interior faces of a conditioned-adjacent volume. Without
+        // this, a conditioned basement's floor never enters the beam
+        // distribution and (in a zone-attributed budget) is invisible to
+        // interior LWR — found via the wiring_properties whole-building
+        // floor invariant.
+        let is_foundation_interior = boundary
+            .interior_zone
+            .as_ref()
+            .map(|z| *z == hares_io::hpxml::ZoneType::Foundation)
             .unwrap_or(false);
 
         let zone_idx = boundary_zone_index(
@@ -241,14 +266,16 @@ fn build_solver_boundaries(
         // Same-zone boundaries (interior == exterior) are internal thermal mass.
         let is_same_zone =
             boundary.interior_zone == boundary.exterior_zone && boundary.interior_zone.is_some();
-        let boundary_category =
-            if is_same_zone {
-                Some(BoundaryCategory::InternalMass)
-            } else {
-                match boundary.boundary_type {
+        let boundary_category = if is_same_zone {
+            Some(BoundaryCategory::InternalMass)
+        } else {
+            match boundary.boundary_type {
                     hares_io::hpxml::BoundaryType::Wall
                     | hares_io::hpxml::BoundaryType::FoundationWall
-                    | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
+                    | hares_io::hpxml::BoundaryType::RimJoist
+                    // Doors conduct to the conditioned zone like walls;
+                    // OCHRE's COMPONENT_LOAD_MAP groups Door under Wall.
+                    | hares_io::hpxml::BoundaryType::Door => Some(BoundaryCategory::Wall),
                     hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
                     hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
                         // Attic floor (exterior = Attic) represents heat flow from roof/attic
@@ -265,10 +292,9 @@ fn build_solver_boundaries(
                     }
                     hares_io::hpxml::BoundaryType::Window
                     | hares_io::hpxml::BoundaryType::Skylight => Some(BoundaryCategory::Window),
-                    hares_io::hpxml::BoundaryType::Door
-                    | hares_io::hpxml::BoundaryType::Other(_) => None,
+                    hares_io::hpxml::BoundaryType::Other(_) => None,
                 }
-            };
+        };
 
         // Tilt: use parsed value from HPXML, fall back to type-based default.
         let tilt_deg = boundary.tilt_deg.unwrap_or(match boundary.boundary_type {
@@ -277,6 +303,21 @@ fn build_solver_boundaries(
             hares_io::hpxml::BoundaryType::Skylight => 0.0,
             _ => 90.0,
         });
+
+        // Interior-face tilt: a boundary whose interior zone lies BELOW it
+        // (HPXML FloorOrCeiling = "ceiling": attic floors, floors over
+        // crawlspaces) presents a ceiling face to that zone — tilt 0 in the
+        // interior convention, so the cosine beam distribution never
+        // deposits direct beam on it (ceilings receive no direct beam).
+        // When HPXML leaves the element absent, the boundary-type default
+        // holds: a Floor boundary's interior zone is above it (the face IS
+        // the zone's floor). These zone-below boundaries never take the
+        // exterior path (exterior == Zone), so no exterior physics reads
+        // this value.
+        let tilt_deg = match boundary.floor_or_ceiling {
+            Some(hares_io::hpxml::building::FloorOrCeiling::Ceiling) => 0.0,
+            _ => tilt_deg,
+        };
 
         // Azimuth: use parsed value from HPXML, fall back to 180° (south).
         let azimuth_deg = boundary.azimuth_deg.unwrap_or(180.0);
@@ -296,15 +337,33 @@ fn build_solver_boundaries(
             .get(&surface_idx)
             .and_then(|d| d.r_outer_half_m2_k_w)
             .unwrap_or(0.0);
+        // Exterior skin coupling (shared derivation, see
+        // `hares_envelope::skin_rad_coupling`). Verified end-to-end by
+        // `iterative_skin_temperature_satisfies_exact_skin_balance`
+        // (hares-envelope, thermal_solver::longwave::tests) and
+        // `tests/exterior_skin_balance.rs`.
+        //
+        // Fallback-R exterior boundaries (no construction data): the skin
+        // sits between the exterior film and the fallback resistance leading
+        // to zone air, so the SAME divider applies — absorbed solar and LWR
+        // enter with rad_frac ≈ R_film/(R_film + R_fallback) instead of being
+        // injected 100 % directly into the zone sensible column (the
+        // pre-fix behavior inflated solar gains by ~1/rad_frac ≈ 80× and
+        // put exterior-wall solar where only window solar belongs).
+        // No shipped fixture hits this path (the parse-time warning fired
+        // zero times across the full suite); it is fidelity work for
+        // HPXMLs with missing construction data, pinned by the fallback
+        // case in tests/exterior_skin_balance.rs.
+        let fallback_beyond = diag_by_idx
+            .get(&surface_idx)
+            .filter(|d| d.path == hares_envelope::RCPath::FallbackR)
+            .map(|d| (d.r_total_m2_k_w - r_film_ext).max(1e-6));
+        let skin_beyond = fallback_beyond.unwrap_or(r_outermost_half);
+        // `None` (no material beyond the film at all) routes the surface
+        // through the non-iterative linearized path.
         let (exterior_rad_frac, exterior_rad_res_k_w) =
-            if r_outermost_half > 0.0 && boundary.area_m2 > 0.0 {
-                (
-                    r_film_ext / (r_film_ext + r_outermost_half),
-                    r_film_ext / boundary.area_m2,
-                )
-            } else {
-                (0.0, 0.0)
-            };
+            skin_rad_coupling(r_film_ext, skin_beyond, boundary.area_m2)
+                .map_or((0.0, 0.0), |c| (c.rad_frac, c.rad_res_k_w));
 
         let r_inner_half = diag_by_idx
             .get(&surface_idx)
@@ -337,11 +396,8 @@ fn build_solver_boundaries(
         //   OCHRE Envelope.py:254 for the formula; the HARES test
         //   `radiation_frac_impulse_response_matches_closed_form` validates
         //   the split against an assembled state-space model.
-        let interior_rad_frac = if r_inner_half > 0.0 {
-            r_film_int / (r_film_int + r_inner_half)
-        } else {
-            1.0
-        };
+        let interior_rad_frac = skin_rad_coupling(r_film_int, r_inner_half, boundary.area_m2)
+            .map_or(1.0, |c| c.rad_frac);
 
         // Window / Skylight solar data -- fenestration boundary types that
         // share the same physics (U-factor, SHGC, solar transmittance).
@@ -528,6 +584,7 @@ fn build_solver_boundaries(
             is_exterior,
             is_conditioned_interior,
             is_attic_interior,
+            is_foundation_interior,
             exterior_emissivity,
             exterior_solar_absorptance,
             attic_emissivity,
@@ -624,6 +681,7 @@ fn include_interior_lwr(
     is_exterior: bool,
     is_conditioned_interior: bool,
     is_attic_interior: bool,
+    is_foundation_interior: bool,
     area_m2: f64,
 ) -> bool {
     if area_m2 <= 0.0 {
@@ -632,7 +690,7 @@ fn include_interior_lwr(
     if is_window {
         return is_exterior;
     }
-    is_conditioned_interior || is_attic_interior
+    is_conditioned_interior || is_attic_interior || is_foundation_interior
 }
 
 /// Compute total operable window area and area-weighted opening azimuth
@@ -969,6 +1027,16 @@ pub(crate) fn build_default_solvers(
 
     for sb in &solver_boundaries {
         if sb.is_exterior {
+            // Dead boundaries carry no nodes and no flux: the RC assembly
+            // already skips them (`bd.area_m2 <= 0.0 → continue`), so the
+            // solver config must too — otherwise construction-time
+            // validation rejects the dead entry (area must be positive) and
+            // per-area diagnostics would be meaningless. Minimal test
+            // fixtures legitimately contain zero-area placeholder
+            // boundaries.
+            if sb.area_m2 <= 0.0 {
+                continue;
+            }
             // Resolve state/input indices: use outer wiring if available, else zone air.
             let (state_index, input_index) = if let Some(ref ow) = sb.outer_wiring {
                 (ow.state_row, ow.b_col)
@@ -1051,6 +1119,7 @@ pub(crate) fn build_default_solvers(
             sb.is_exterior,
             sb.is_conditioned_interior,
             sb.is_attic_interior,
+            sb.is_foundation_interior,
             sb.area_m2,
         );
         if include_in_lwr {
@@ -1083,21 +1152,47 @@ pub(crate) fn build_default_solvers(
                     let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
                     let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
                     let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
+                    // Exact eliminated-skin resistance for the window
+                    // interior film — the shared derivation
+                    // (`hares_envelope::skin_rad_coupling`): the window skin
+                    // sits between the interior film `res_int` and the rest
+                    // of the glazing stack, so the exact coupling is the
+                    // parallel combination, not the bare film (which
+                    // over-drives the ScriptF window skin when the remaining
+                    // stack resistance is comparable to the film).
+                    let rad_res = skin_rad_coupling(
+                        res_int,
+                        (r_total - res_int).max(0.0),
+                        sb.area_m2.max(1e-9),
+                    )
+                    .map_or(res_int / sb.area_m2.max(1e-9), |c| c.rad_res_k_w);
                     (
                         WINDOW_EMISSIVITY,
                         0.0,
                         rad_frac,
-                        res_int / sb.area_m2.max(1e-9),
+                        rad_res,
                         Some(DrivingTemp::Outdoor),
                     )
                 } else {
-                    // Opaque surfaces: rad_res_k_w uses convection-only R_film
-                    // (OCHRE "full" mode: R_film = 1/h_conv, no parallel R_rad).
+                    // Opaque interior skin: exact parallel form via the
+                    // shared constructor (`hares_envelope::skin_rad_coupling`).
+                    // When there is no inner half-layer the skin coincides
+                    // with the RC node (rad_frac = 1) and the film alone is
+                    // the coupling resistance.
+                    let r_inner_half = diag_by_idx
+                        .get(&sb.surface_idx)
+                        .and_then(|d| d.r_inner_half_m2_k_w)
+                        .unwrap_or(0.0);
+                    let rad_res =
+                        skin_rad_coupling(sb.r_film_int_m2_k_w, r_inner_half, sb.area_m2.max(1e-9))
+                            .map_or(sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9), |c| {
+                                c.rad_res_k_w
+                            });
                     (
                         sb.attic_emissivity,
                         sb.interior_solar_absorptance,
                         sb.interior_rad_frac,
-                        sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
+                        rad_res,
                         None,
                     )
                 };
@@ -1112,6 +1207,8 @@ pub(crate) fn build_default_solvers(
                     rad_res_k_w,
                     solar_absorptance,
                     is_floor,
+                    tilt_deg: sb.tilt_deg,
+                    azimuth_deg: sb.azimuth_deg,
                     driving_temp,
                 },
             );
@@ -1223,6 +1320,8 @@ pub(crate) fn build_default_solvers(
                 solar_absorptance: s.solar_absorptance,
                 radiation_frac: s.radiation_frac,
                 is_floor: s.is_floor,
+                tilt_deg: s.tilt_deg, // interior-face tilt (interior LWR surface)
+                azimuth_deg: s.azimuth_deg,
             })
             .collect();
         if !solar_surfaces.is_empty() {
@@ -1794,7 +1893,7 @@ mod tests {
         attic_infiltration_method, attic_interior_emissivity, compute_opening_azimuth_and_area,
         exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
         foundation_infiltration_method, garage_infiltration_method, include_interior_lwr,
-        interior_solar_absorptance,
+        interior_solar_absorptance, skin_rad_coupling,
     };
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::InfiltrationMethod;
@@ -1804,6 +1903,47 @@ mod tests {
         garage_ela_coefficients,
     };
     use hares_types::ZoneId;
+
+    /// The eliminated-skin radiative resistance must be the PARALLEL
+    /// combination of film and material half-layer resistances, not the bare
+    /// film resistance. Physics: exact Thévenin resistance of the skin node;
+    /// see `skin_rad_coupling` docs and the end-to-end closure test
+    /// `iterative_skin_temperature_satisfies_exact_skin_balance`.
+    #[test]
+    fn skin_rad_coupling_uses_parallel_resistance() {
+        // Thin-skin regime (R_half ≈ R_film): bare-film form would give
+        // 0.03/20 = 1.5e-3 K/W; the exact parallel form gives 9.375e-4 K/W.
+        let c = skin_rad_coupling(0.03, 0.05, 20.0).expect("coupling exists");
+        assert!(
+            (c.rad_frac - 0.375).abs() < 1e-15,
+            "rad_frac={}",
+            c.rad_frac
+        );
+        assert!(
+            (c.rad_res_k_w - 9.375e-4).abs() < 1e-12,
+            "rad_res must be the parallel combination (R_f·R_h)/(R_f+R_h)/A, got {}",
+            c.rad_res_k_w
+        );
+        // Algebraic identity: R_par/A == rad_frac·R_h/A.
+        assert!(
+            (c.rad_res_k_w - c.rad_frac * 0.05 / 20.0).abs() < 1e-15,
+            "identity rad_res == rad_frac·R_half/A violated"
+        );
+
+        // Massive-skin regime (R_half >> R_film): parallel → film, so the two
+        // forms converge — this is why OCHRE's approximation holds for heavy
+        // construction and fails for thin skins.
+        let c_m = skin_rad_coupling(0.03, 3.0, 20.0).expect("coupling exists");
+        assert!((c_m.rad_res_k_w - 0.03 / 20.0).abs() / (0.03 / 20.0) < 0.01);
+        assert!(c_m.rad_frac < 0.01);
+
+        // No material half-layer or non-positive area: `None` — the caller
+        // owns routing (exterior → non-iterative path; interior → skin
+        // coincides with the RC node).
+        assert!(skin_rad_coupling(0.03, 0.0, 20.0).is_none());
+        assert!(skin_rad_coupling(0.03, 0.05, 0.0).is_none());
+        assert!(skin_rad_coupling(0.0, 0.05, 20.0).is_none());
+    }
 
     #[test]
     fn n_iter_matches_ochre_formula() {
@@ -2039,19 +2179,28 @@ mod tests {
 
     #[test]
     fn attic_interior_surfaces_participate_in_lwr() {
-        assert!(include_interior_lwr(false, false, false, true, 12.0));
+        assert!(include_interior_lwr(false, false, false, true, false, 12.0));
     }
 
     #[test]
     fn conditioned_interior_behavior_is_unchanged() {
-        assert!(include_interior_lwr(false, false, true, false, 12.0));
-        assert!(!include_interior_lwr(false, false, true, false, 0.0));
+        assert!(include_interior_lwr(false, false, true, false, false, 12.0));
+        assert!(!include_interior_lwr(false, false, true, false, false, 0.0));
+    }
+
+    /// Foundation-interior surfaces (conditioned basements/crawlspaces)
+    /// participate: their slabs and walls are real interior faces — a
+    /// conditioned basement's floor must be in the beam distribution.
+    #[test]
+    fn foundation_interior_surfaces_participate_in_lwr() {
+        assert!(include_interior_lwr(false, false, false, false, true, 12.0));
+        assert!(!include_interior_lwr(false, false, false, false, true, 0.0));
     }
 
     #[test]
     fn window_behavior_is_unchanged() {
-        assert!(include_interior_lwr(true, true, false, false, 8.0));
-        assert!(!include_interior_lwr(true, false, false, false, 8.0));
+        assert!(include_interior_lwr(true, true, false, false, false, 8.0));
+        assert!(!include_interior_lwr(true, false, false, false, false, 8.0));
     }
 
     /// Window boundaries without explicit emittance default to EMISSIVITY_WINDOW (0.84)
@@ -3285,6 +3434,250 @@ mod tests {
         );
         assert_eq!(ext_cols, 0, "no exterior surface columns for fallback-R");
         assert_eq!(int_cols, 0, "no interior surface columns for fallback-R");
+    }
+
+    /// A Floor boundary whose exterior zone is the attic is the conditioned
+    /// zone's CEILING: its interior face points down, and the beam model
+    /// (`beam_cosine_factor`: "ceilings never receive direct beam") must
+    /// never light it. The tilt handed to the interior solar distribution
+    /// must therefore present it as a ceiling (0° in this convention), not
+    /// as the 180° floor the type-based default assigns to every
+    /// `BoundaryType::Floor`. The repository's own gate fixture
+    /// (`data/examples/BEopt_example.xml`, `Floor1`) is exactly this shape:
+    /// ExteriorAdjacentTo "attic - vented", `FloorOrCeiling` = ceiling, no
+    /// tilt element — so the default fires there, and the zone's largest
+    /// interior surface (~111 m²) sun-shares as a floor.
+    ///
+    /// The category arm three lines below the tilt default already
+    /// discriminates this exact case (`is_attic_floor` → `Roof`); the tilt
+    /// default must not undo that discrimination for the beam geometry.
+    #[test]
+    fn attic_floor_boundary_tilt_presents_ceiling_to_beam_distribution() {
+        use chrono::TimeZone;
+        use hares_envelope::{
+            BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
+        };
+        use hares_io::hpxml::building::FloorOrCeiling;
+        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
+        use hares_types::{EnvironmentState, GridState, ZoneState};
+        use std::collections::HashMap;
+
+        use super::{RCContext, WeatherAverages, build_solver_boundaries};
+
+        let building = Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones: vec![
+                Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: None,
+                    volume_m3: None,
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Attic,
+                    floor_area_m2: None,
+                    volume_m3: None,
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+            ],
+            // Floor1 of BEopt_example.xml: Floor type, interior = living
+            // space, exterior = vented attic, FloorOrCeiling = ceiling, no
+            // tilt element, 1200 ft².
+            boundaries: vec![Boundary {
+                id: "Floor1".to_string(),
+                boundary_type: BoundaryType::Floor,
+                area_m2: 111.45,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Attic),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: Some(FloorOrCeiling::Ceiling),
+                tilt_deg: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // Production resolves an attic exterior zone to ExteriorTarget::Zone
+        // (conversions::resolve_exterior); the attic is zone index 1.
+        let boundary_inputs = vec![BoundaryInput {
+            area_m2: 111.45,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Zone(1),
+            material_layers: vec![],
+            precomputed_rc: vec![],
+            fallback_r_m2_k_w: 1.0,
+            r_film_interior_m2_k_w: 0.12,
+            r_film_exterior_m2_k_w: 0.03,
+            framing_factor: None,
+            interior_emissivity: 0.9,
+            foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
+        }];
+
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<NodeId, usize> = HashMap::new();
+
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Zone(1),
+                area_m2: 111.45,
+                r_film_int_m2_k_w: 0.12,
+                r_film_ext_m2_k_w: 0.03,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.9,
+                foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
+                #[cfg(feature = "observe")]
+                same_zone_film_r_m2_k_w: None,
+            }],
+            zone_capacitances_j_k: vec![1000.0, 1000.0],
+            total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 2,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![
+                ZoneState {
+                    id: ZoneId(1),
+                    temperature_c: 20.0,
+                    humidity_ratio: 0.01,
+                    volume_m3: 250.0,
+                },
+                ZoneState {
+                    id: ZoneId(2),
+                    temperature_c: 30.0,
+                    humidity_ratio: 0.01,
+                    volume_m3: 100.0,
+                },
+            ],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: hares_types::PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let weather_avgs = WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 10.0,
+        };
+
+        let (boundaries, _ext_cols, _int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
+                .expect("build_solver_boundaries should succeed for the attic-floor boundary");
+
+        assert_eq!(boundaries.len(), 1);
+        // The attic floor's interior face is the conditioned zone's ceiling;
+        // in the HARES tilt convention a ceiling presents tilt 0 (the beam
+        // cosine factor is identically zero for it — "ceilings never receive
+        // direct beam"). tilt 180 would make the zone's largest interior
+        // surface sun-lit as a floor.
+        assert!(
+            (boundaries[0].tilt_deg - 0.0).abs() < 1e-9,
+            "attic-floor boundary (Floor type, exterior Attic, \
+             FloorOrCeiling=ceiling) must present tilt 0 (ceiling) to the \
+             beam distribution — its interior face points down and can never \
+             receive direct beam — got tilt {} (floor): the conditioned \
+             zone's ceiling is sun-lit as a floor",
+            boundaries[0].tilt_deg
+        );
     }
 
     /// Skylight solar data is populated in `build_solver_boundaries` when the

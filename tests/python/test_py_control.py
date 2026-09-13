@@ -25,9 +25,12 @@ class TestControlSignalConstructors:
         assert sig.to_dict()["active_power_kw"] == 1.5
         assert "PowerSetpoint" in repr(sig)
 
-    def test_power_setpoint_rejects_negative_kw(self):
-        with pytest.raises(ValueError):
-            ControlSignal.power_setpoint(-1.0)
+    def test_power_setpoint_accepts_negative_kw_as_discharge(self):
+        # Signed active power: negative is a discharge setpoint. The Rust core,
+        # the actor-level signal, the gym action space, and the HELICS
+        # co-simulation all treat the sign as the charge/discharge direction.
+        sig = ControlSignal.power_setpoint(-1.0)
+        assert sig.to_dict()["active_power_kw"] == -1.0
 
     def test_power_setpoint_accepts_zero_and_positive(self):
         sig = ControlSignal.power_setpoint(0.0)
@@ -546,7 +549,6 @@ class TestControlSignalFromDict:
     def test_from_dict_rejects_invalid_values(self):
         """from_dict raises ValueError for out-of-range numeric fields."""
         invalid_cases = [
-            {"type": "PowerSetpoint", "active_power_kw": -1.0},
             {"type": "PowerLimit", "max_power_kw": -1.0},
             {"type": "SOCTarget", "target_soc": 1.5},
             {"type": "SOCTarget", "target_soc": -0.1},

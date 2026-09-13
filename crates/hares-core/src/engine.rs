@@ -137,40 +137,24 @@ impl SimulationEngine {
                 #[cfg(feature = "profiling")]
                 emit_dwelling_profiling_summary(&dwelling.profiling_summary());
 
-                if batches.is_empty() {
-                    // Zero-step edge case: duration == 0 or duration == initialization_duration.
-                    // No data was produced, so flag rather than return bogus metrics.
-                    warnings.push(
-                        "simulation produced zero output batches (zero-step run)".to_string(),
-                    );
-                    SimulationResults {
-                        timeseries_path: output_path.clone(),
-                        timeseries: Some(Vec::new()),
-                        metrics: empty_metrics(),
-                        warnings,
-                        status: SimStatus::Flagged(
-                            "zero-step simulation: no metrics computed".to_string(),
-                        ),
-                        elapsed,
-                    }
-                } else {
-                    let outcome = compute_metrics_from_batches(&batches, &config.sim_config);
-                    if let Some(w) = &outcome.warning {
-                        warnings.push(w.clone());
-                    }
-                    let status = if warnings.is_empty() {
-                        SimStatus::Ok
-                    } else {
-                        SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
-                    };
-                    SimulationResults {
-                        timeseries_path: output_path.clone(),
-                        timeseries: Some(batches),
-                        metrics: outcome.metrics,
-                        warnings,
-                        status,
-                        elapsed,
-                    }
+                let (metrics, unavailable_reason) = finalize_run_metrics(
+                    &mut dwelling,
+                    &batches,
+                    &config.sim_config,
+                    &mut warnings,
+                );
+                let status = match unavailable_reason {
+                    Some(reason) => SimStatus::Flagged(reason.to_string()),
+                    None if warnings.is_empty() => SimStatus::Ok,
+                    None => SimStatus::Flagged(format!("{} warning(s)", warnings.len())),
+                };
+                SimulationResults {
+                    timeseries_path: output_path.clone(),
+                    timeseries: Some(batches),
+                    metrics,
+                    warnings,
+                    status,
+                    elapsed,
                 }
             }
             Ok(Err(err)) => {
@@ -286,38 +270,21 @@ impl SimulationEngine {
         let result = match sim_outcome {
             Ok(Ok(_)) => {
                 let batches = dwelling.flushed_batches().to_vec();
-                if batches.is_empty() {
-                    warnings.push(
-                        "simulation produced zero output batches (zero-step run)".to_string(),
-                    );
-                    SimulationResults {
-                        timeseries_path: None,
-                        timeseries: Some(Vec::new()),
-                        metrics: empty_metrics(),
-                        warnings,
-                        status: SimStatus::Flagged(
-                            "zero-step simulation: no metrics computed".to_string(),
-                        ),
-                        elapsed,
-                    }
-                } else {
-                    let outcome = compute_metrics_from_batches(&batches, sim_config);
-                    if let Some(w) = &outcome.warning {
-                        warnings.push(w.clone());
-                    }
-                    let status = if warnings.is_empty() {
-                        SimStatus::Ok
-                    } else {
-                        SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
-                    };
-                    SimulationResults {
-                        timeseries_path: None,
-                        timeseries: Some(batches),
-                        metrics: outcome.metrics,
-                        warnings,
-                        status,
-                        elapsed,
-                    }
+
+                let (metrics, unavailable_reason) =
+                    finalize_run_metrics(dwelling, &batches, sim_config, &mut warnings);
+                let status = match unavailable_reason {
+                    Some(reason) => SimStatus::Flagged(reason.to_string()),
+                    None if warnings.is_empty() => SimStatus::Ok,
+                    None => SimStatus::Flagged(format!("{} warning(s)", warnings.len())),
+                };
+                SimulationResults {
+                    timeseries_path: None,
+                    timeseries: Some(batches),
+                    metrics,
+                    warnings,
+                    status,
+                    elapsed,
                 }
             }
             Ok(Err(err)) => {
@@ -468,7 +435,7 @@ fn compute_metrics_from_batches(
     );
 
     let schema = batches[0].schema();
-    let time_res_secs = u32::try_from(sim_config.time_res.num_seconds()).unwrap_or(3600);
+    let time_res_secs = sim_config.time_res_secs_u32();
 
     let mut calculator = match MetricsCalculator::new(&schema, time_res_secs, sim_config) {
         Ok(calc) => calc,
@@ -489,6 +456,56 @@ fn compute_metrics_from_batches(
     MetricsOutcome {
         metrics: calculator.finish().metrics,
         warning: None,
+    }
+}
+
+/// Metrics for a completed run: from retained batches when available,
+/// otherwise from the streaming recorder's incremental collection.
+///
+/// Returns the metrics and, when they could not be computed, the honest
+/// reason: a true zero-step run (a recorder exists but recorded no rows),
+/// a calculator init failure (rows were recorded; the specific error is in
+/// the warnings), or no recorder at all (`write_output` disabled or the
+/// recorder failed to initialize; specifics in the warnings). An empty
+/// retained-batch list alone is NOT treated as a zero-step run -- streaming
+/// configurations never retain batches.
+fn finalize_run_metrics(
+    dwelling: &mut Dwelling,
+    batches: &[RecordBatch],
+    sim_config: &SimulationConfig,
+    warnings: &mut Vec<String>,
+) -> (SimulationMetrics, Option<&'static str>) {
+    if !batches.is_empty() {
+        let outcome = compute_metrics_from_batches(batches, sim_config);
+        if let Some(w) = &outcome.warning {
+            warnings.push(w.clone());
+        }
+        return (outcome.metrics, None);
+    }
+
+    // Diagnose from what was actually recorded. A zero-row run must be
+    // flagged even though an (empty) incremental calculator is attached:
+    // its zeroed metrics are not a computed result.
+    match dwelling.recorded_rows() {
+        Some(0) => {
+            let reason = "zero-step simulation: no timesteps recorded";
+            warnings.push(reason.to_string());
+            (empty_metrics(), Some(reason))
+        }
+        Some(_) => match dwelling.take_streamed_metrics() {
+            Some(full) => (full.metrics, None),
+            None => {
+                let reason = "streamed metrics unavailable (calculator missing or init failed; see warnings)";
+                warnings.push(reason.to_string());
+                (empty_metrics(), Some(reason))
+            }
+        },
+        None => {
+            let reason =
+                "no output recorder (write_output disabled or init failed); metrics unavailable";
+            warnings.push(reason.to_string());
+            (empty_metrics(), Some(reason))
+        }
     }
 }
 

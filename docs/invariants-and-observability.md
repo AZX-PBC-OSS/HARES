@@ -217,7 +217,7 @@ envelope solver:
 | Field                    | Unit | Description                                  |
 |--------------------------|------|----------------------------------------------|
 | `window_solar_w`         | W    | SHGC × IAM × area × POA                     |
-| `opaque_solar_lwr_w`     | W    | Exterior surface solar + LWR combined        |
+| `opaque_solar_lwr_w`     | W    | Gross exterior solar + LWR absorbed at the skin — an outside-face boundary condition, not a zone load (net-to-zone: `wall/floor/roof_heat_gain_w`) |
 | `interior_lwr_w`         | W    | Interior longwave radiation exchange         |
 | `infiltration_w`         | W    | Infiltration sensible (indoor zone)          |
 | `ventilation_w`          | W    | Forced mechanical ventilation sensible       |

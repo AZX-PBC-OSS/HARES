@@ -171,6 +171,65 @@ pub enum ExteriorTarget {
     Ground,
 }
 
+/// Radiative coupling of an eliminated (capacitance-free) surface-skin
+/// node — the single, shared construction for every skin the thermal
+/// solver eliminates (exterior opaque, window interior, interior opaque).
+///
+/// The skin sits between a convection-only film resistance `r_film` and the
+/// nearest material resistance `r_beyond` (both [m²·K/W]). Eliminating it
+/// from the surface heat balance (EnergyPlus `CalcOutsideSurfTemp` solves
+/// the same balance with every path carrying its own parallel conductance)
+/// gives the exact skin equation
+///   `T_skin = t_init + Q · R_par`,
+///   `t_init = rad_frac·T_node + (1 − rad_frac)·T_beyond`,
+///   `rad_frac = r_film / (r_film + r_beyond)`,
+///   `R_par = r_film · r_beyond / (r_film + r_beyond)` (per area),
+/// and with these values the divider injection `Q·rad_frac` into the RC
+/// node is exactly consistent with the series film+half-layer conductance
+/// in the A-matrix at every state, not just at steady state. Identity:
+/// `rad_res_k_w == rad_frac · r_beyond / area_m2`.
+///
+/// OCHRE's `radiation_res` uses the bare film `r_film/area` with this exact
+/// parallel form commented out in its own source (Envelope.py:258) under a
+/// `res_material >> res_film` assumption — the bare form over-drives the
+/// skin by `Q·r_film²/(r_film + r_beyond)` whenever the material conducts
+/// comparably to the film (wood siding, stucco, metal). See
+/// docs/alignment/DIVERGENCES.md (D-001).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinCoupling {
+    /// Current-divider share of a skin flux that reaches the RC node:
+    /// `r_film / (r_film + r_beyond)`.
+    pub rad_frac: f64,
+    /// Exact eliminated-skin (Thévenin) resistance [K/W]:
+    /// `r_film·r_beyond/(r_film + r_beyond) / area_m2`.
+    pub rad_res_k_w: f64,
+}
+
+/// Construct the exact [`SkinCoupling`] for an eliminated skin node.
+///
+/// Returns `None` when there is no material beyond the skin
+/// (`r_beyond <= 0` or non-positive area) — routing for that case belongs
+/// to the caller (the exterior path falls back to the non-iterative
+/// linearized branch; interior paths treat the skin as coincident with the
+/// RC node).
+#[must_use]
+pub fn skin_rad_coupling(
+    r_film_m2_k_w: f64,
+    r_beyond_m2_k_w: f64,
+    area_m2: f64,
+) -> Option<SkinCoupling> {
+    if r_beyond_m2_k_w > 0.0 && area_m2 > 0.0 && r_film_m2_k_w > 0.0 {
+        let rad_frac = r_film_m2_k_w / (r_film_m2_k_w + r_beyond_m2_k_w);
+        Some(SkinCoupling {
+            rad_frac,
+            rad_res_k_w: (r_film_m2_k_w * r_beyond_m2_k_w / (r_film_m2_k_w + r_beyond_m2_k_w))
+                / area_m2,
+        })
+    } else {
+        None
+    }
+}
+
 /// Pre-resolved boundary data for RC construction.
 #[derive(Debug, Clone)]
 pub struct BoundaryInput {

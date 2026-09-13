@@ -24,13 +24,17 @@ pub struct PyControlSignal {
 impl PyControlSignal {
     #[staticmethod]
     #[pyo3(signature = (kw, reactive_kvar=None, min_soc=None, max_soc=None))]
+    /// Signed active power: positive charges, negative discharges. The Rust
+    /// validator and every storage equipment treat the sign as the
+    /// charge/discharge direction, so the binding rejects only non-finite
+    /// values.
     pub fn power_setpoint(
         kw: f64,
         reactive_kvar: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
     ) -> PyResult<Self> {
-        validate_non_negative(kw, "active_power_kw")?;
+        validate_finite(kw, "active_power_kw")?;
         Ok(Self {
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: kw,
@@ -338,7 +342,7 @@ impl PyControlSignal {
             },
             "PowerSetpoint" => {
                 let active_power_kw: f64 = dict_required(d, "active_power_kw")?;
-                validate_non_negative(active_power_kw, "active_power_kw")?;
+                validate_finite(active_power_kw, "active_power_kw")?;
                 ControlSignal::PowerSetpoint {
                     active_power_kw,
                     reactive_power_kvar: dict_optional(d, "reactive_power_kvar")?,
@@ -752,6 +756,15 @@ where
     }
 }
 
+fn validate_finite(value: f64, name: &str) -> PyResult<()> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_non_negative(value: f64, name: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(PyValueError::new_err(format!(
@@ -903,8 +916,8 @@ mod tests {
     // --- constructor validation: non-negative ---
 
     #[test]
-    fn power_setpoint_rejects_negative_kw() {
-        assert!(PyControlSignal::power_setpoint(-1.0, None, None, None).is_err());
+    fn power_setpoint_accepts_negative_kw_as_discharge() {
+        assert!(PyControlSignal::power_setpoint(-1.0, None, None, None).is_ok());
     }
 
     #[test]
@@ -1048,24 +1061,28 @@ mod tests {
     where
         F: for<'py> FnOnce(Python<'py>),
     {
-        // SAFETY: Py_Initialize() is idempotent; the auto-initialize feature
-        // guards against double-initialisation race conditions.
-        unsafe {
-            pyo3::ffi::Py_Initialize();
-        }
-        // SAFETY: interpreter is now initialised.
-        let py = unsafe { Python::assume_attached() };
-        f(py);
+        // The `auto-initialize` feature performs guarded, idempotent
+        // interpreter startup on first attach. Calling `ffi::Py_Initialize()`
+        // directly races that guard ("global import state already
+        // initialized", then SIGSEGV from `assume_attached` without the GIL).
+        Python::attach(f);
     }
 
     #[test]
-    fn from_dict_rejects_negative_power_setpoint() {
+    fn from_dict_accepts_negative_power_setpoint_as_discharge() {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "PowerSetpoint").unwrap();
-            d.set_item("active_power_kw", -1.0_f64).unwrap();
+            d.set_item("active_power_kw", -3.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
-            assert!(PyControlSignal::from_dict(&cls, &d).is_err());
+            let sig = PyControlSignal::from_dict(&cls, &d).unwrap();
+            assert!(matches!(
+                sig.signal,
+                ControlSignal::PowerSetpoint {
+                    active_power_kw: -3.0,
+                    ..
+                }
+            ));
         });
     }
 

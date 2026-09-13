@@ -11,8 +11,9 @@ pub mod thermal_solver;
 
 pub use boundary_rc::{
     BoundaryDiagnostic, BoundaryInput, BoundaryRcError, BuildingRC, EnvelopeDiagnostics,
-    ExteriorTarget, InteriorLwrMethod, LayerInput, PrecomputedRCLayer, RCPath, SurfaceLayerInfo,
-    ZoneInput, assemble_building_rc, derive_zone_capacitances, parallel_path_conductivity,
+    ExteriorTarget, InteriorLwrMethod, LayerInput, PrecomputedRCLayer, RCPath, SkinCoupling,
+    SurfaceLayerInfo, ZoneInput, assemble_building_rc, derive_zone_capacitances,
+    parallel_path_conductivity, skin_rad_coupling,
 };
 pub use electrical_solver::{
     ElectricalSolver, ElectricalSolverConfig, ElectricalSolverError, SolverZipCoefficients,

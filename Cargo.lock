@@ -1165,6 +1165,7 @@ dependencies = [
  "hares-types",
  "numpy",
  "pyo3",
+ "pyo3-build-config",
  "rand 0.10.0",
  "rand_chacha 0.10.0",
  "rayon",

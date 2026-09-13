@@ -81,6 +81,14 @@ path = "../../tests/resstock_smoke.rs"
 name = "batch_step_tests"
 path = "../../tests/batch_step_tests.rs"
 
+[[test]]
+name = "envelope_opaque_loads"
+path = "../../tests/envelope_opaque_loads.rs"
+
+[[test]]
+name = "wiring_properties"
+path = "tests/wiring_properties.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"
