@@ -292,7 +292,8 @@ impl ControlSignal {
             Self::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
-                ..
+                min_soc,
+                max_soc,
             } => {
                 if !active_power_kw.is_finite() {
                     return Err(HaresError::Control(format!(
@@ -305,6 +306,31 @@ impl ControlSignal {
                             "PowerSetpoint reactive_power_kvar must be finite, got {r}"
                         )));
                     }
+                }
+                // The SOC window carries the same semantics as SOCTarget's
+                // window (a discharge floor / charge ceiling); validate it
+                // with the same rules so a garbage window cannot reach any
+                // equipment arm and be silently substituted downstream.
+                if let Some(m) = min_soc {
+                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "PowerSetpoint min_soc invalid: {m}, expected [0, 1]"
+                        )));
+                    }
+                }
+                if let Some(m) = max_soc {
+                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "PowerSetpoint max_soc invalid: {m}, expected [0, 1]"
+                        )));
+                    }
+                }
+                if let (Some(min), Some(max)) = (min_soc, max_soc)
+                    && min >= max
+                {
+                    return Err(HaresError::Control(format!(
+                        "PowerSetpoint min_soc ({min}) must be < max_soc ({max})"
+                    )));
                 }
             }
             Self::PowerLimit {
@@ -928,6 +954,66 @@ mod tests {
             reactive_power_kvar: Some(f64::NAN),
             min_soc: None,
             max_soc: None,
+        });
+    }
+
+    #[test]
+    fn power_setpoint_soc_window_valid() {
+        assert_ok(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.2),
+            max_soc: Some(0.9),
+        });
+        // Bounds are inclusive; a single-sided window is valid.
+        assert_ok(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.0),
+            max_soc: Some(1.0),
+        });
+        assert_ok(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.5),
+            max_soc: None,
+        });
+    }
+
+    #[test]
+    fn power_setpoint_soc_window_out_of_range() {
+        for (min_soc, max_soc) in [
+            (Some(-0.1), None),
+            (Some(1.5), None),
+            (Some(f64::NAN), None),
+            (None, Some(1.1)),
+            (None, Some(f64::NEG_INFINITY)),
+        ] {
+            assert_err(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc,
+                max_soc,
+            });
+        }
+    }
+
+    #[test]
+    fn power_setpoint_soc_window_inverted_or_empty_rejected() {
+        // An inverted or empty window would silently substitute downstream:
+        // every equipment arm treats the pair as a discharge floor / charge
+        // ceiling and none re-checks the ordering.
+        assert_err(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        });
+        assert_err(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.5),
+            max_soc: Some(0.5),
         });
     }
 

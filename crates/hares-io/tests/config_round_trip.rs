@@ -527,7 +527,7 @@ fn sample_pv_config() -> PvConfig {
         capacity_kw: 5.0,
         tilt_deg: Some(30.0),
         azimuth_deg: Some(180.0),
-        module_type: Some("mono-si".to_string()),
+        module_type: Some("standard".to_string()),
         noct_c: Some(45.0),
         array_type: None,
         system_losses_fraction: Some(0.14),

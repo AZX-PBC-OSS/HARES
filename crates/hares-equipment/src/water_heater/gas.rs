@@ -45,6 +45,28 @@ const GAS_WH_CHECKPOINT_VERSION: u32 = 2;
 // water heaters. ASHRAE HoF 2021 Ch.51 Table 2 range; DOE 10 CFR 430 Subpart C
 // App. E §2.6.
 const DEFAULT_PILOT_POWER_W: f64 = 150.0;
+
+/// Standing-pilot default power from an `ignition_type` override.
+///
+/// Electronic-ignition spellings mean no pilot light; standing-pilot
+/// spellings keep the default. Any other value is a configuration error —
+/// a typo of "electronic" silently running a standing pilot would burn
+/// ~150 W for the whole simulation with no signal. Matched via
+/// [`normalize_config_name`](crate::config::normalize_config_name)
+/// (case/whitespace/underscore-insensitive).
+fn default_pilot_power_w(ignition_type: Option<&str>) -> Result<f64, HaresError> {
+    let Some(s) = ignition_type else {
+        return Ok(DEFAULT_PILOT_POWER_W);
+    };
+    match crate::config::normalize_config_name(s).as_str() {
+        "electronic" | "electronicignition" => Ok(0.0),
+        "standingpilot" | "pilot" => Ok(DEFAULT_PILOT_POWER_W),
+        _ => Err(HaresError::Equipment(format!(
+            "invalid ignition_type '{s}': expected ElectronicIgnition or StandingPilot \
+             (case/whitespace/underscore-insensitive)"
+        ))),
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GasWhState {
     setpoint_c: f64,
@@ -329,12 +351,7 @@ impl GasWH {
             .max(0.0);
         self.pilot_power_w = c
             .pilot_power_w
-            .unwrap_or(match c.ignition_type.as_deref() {
-                Some("ElectronicIgnition") | Some("electronic") | Some("electronic ignition") => {
-                    0.0
-                }
-                _ => DEFAULT_PILOT_POWER_W,
-            })
+            .unwrap_or(default_pilot_power_w(c.ignition_type.as_deref())?)
             .max(0.0);
         // Draft-inducer / power-vent blower draw while the burner fires.
         // Default 0 W (atmospheric-vent unit, no blower) preserves existing
@@ -826,7 +843,7 @@ impl Equipment for GasWH {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -1546,6 +1563,44 @@ mod tests {
     }
 
     #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // The arm silently clamps an out-of-domain LoadFraction into [0, 1]
+        // (5.0 quietly becomes full on) and accepts any finite setpoint —
+        // the DutyCycle arm in this same file rejects out-of-domain values,
+        // and the central validator rejects both signals on the checked
+        // path, so the same garbage must not silently become a different
+        // constraint here.
+        let mut eq = GasWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        for bad_setpoint in [5000.0, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(bad_setpoint),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                })
+                .expect_err("out-of-domain setpoint must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("setpoint"),
+                "error must name the field for {bad_setpoint}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn state_round_trip_preserves_dr_state() {
         use hares_types::{ControlSignal, DRLevel};
 
@@ -1706,6 +1761,39 @@ mod tests {
         assert_eq!(
             eq.pilot_power_w, 0.0,
             "HPXML 'electronic ignition' string must suppress pilot power"
+        );
+    }
+
+    #[test]
+    fn pilot_keeps_default_for_explicit_standing_pilot() {
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", None),
+            ("ignition_type", Some("StandingPilot".into())),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert_eq!(
+            eq.pilot_power_w,
+            super::DEFAULT_PILOT_POWER_W,
+            "explicit StandingPilot should keep the standing-pilot default"
+        );
+    }
+
+    #[test]
+    fn init_errors_on_unknown_ignition_type() {
+        // A typo of "electronic" must not silently run a standing pilot for
+        // the whole simulation.
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", None),
+            ("ignition_type", Some("electronicc".into())),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(21.0))
+            .expect_err("unknown ignition_type must fail init");
+        assert!(
+            format!("{err:?}").contains("ignition_type"),
+            "error must name the offending key, got {err:?}"
         );
     }
 

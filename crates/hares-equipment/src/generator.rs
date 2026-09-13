@@ -1998,7 +1998,7 @@ impl Equipment for Generator {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
                 active_power_kw, ..

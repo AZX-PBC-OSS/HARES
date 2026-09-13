@@ -195,6 +195,25 @@ pub struct HeatPumpWH {
     draw_tracker: super::DrawVolumeTracker,
 }
 
+/// Parse an `element_hp_control_mode` override (case/whitespace-insensitive).
+///
+/// An unrecognised value is a configuration error, not silently
+/// `MutuallyExclusive`: the mode decides whether backup elements can run
+/// alongside the compressor.
+fn parse_element_hp_control_mode(mode: Option<&str>) -> Result<ElementHpControlMode, HaresError> {
+    let Some(s) = mode else {
+        return Ok(ElementHpControlMode::MutuallyExclusive);
+    };
+    match crate::config::normalize_config_name(s).as_str() {
+        "simultaneous" => Ok(ElementHpControlMode::Simultaneous),
+        "mutuallyexclusive" => Ok(ElementHpControlMode::MutuallyExclusive),
+        _ => Err(HaresError::Equipment(format!(
+            "invalid element_hp_control_mode '{s}': expected Simultaneous or MutuallyExclusive \
+             (case/whitespace/underscore-insensitive)"
+        ))),
+    }
+}
+
 impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
@@ -665,10 +684,8 @@ impl HeatPumpWH {
         self.min_off_time_s = c.min_off_time_s.unwrap_or(0.0);
         self.hp_only_mode = c.hp_only_mode.unwrap_or(false);
 
-        self.element_hp_control = match c.element_hp_control_mode.as_deref() {
-            Some("Simultaneous") | Some("simultaneous") => ElementHpControlMode::Simultaneous,
-            _ => ElementHpControlMode::MutuallyExclusive,
-        };
+        self.element_hp_control =
+            parse_element_hp_control_mode(c.element_hp_control_mode.as_deref())?;
         self.mains_temp_c = super::require_mains_temp_c(env, "Heat Pump Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.zip = crate::config::resolve_reactive_zip(config)?;
@@ -1305,7 +1322,7 @@ impl Equipment for HeatPumpWH {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -1665,6 +1682,45 @@ mod tests {
 
     pub(super) fn config() -> EquipmentConfig {
         equipment_config(base_typed_config())
+    }
+
+    #[test]
+    fn init_errors_on_unknown_element_hp_control_mode() {
+        // A typo must not silently become MutuallyExclusive: the mode decides
+        // whether backup elements can run alongside the compressor.
+        let mut typed = base_typed_config();
+        typed.element_hp_control_mode = Some("Simultaneus".to_string());
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(21.0))
+            .expect_err("unknown element_hp_control_mode must fail init");
+        assert!(
+            format!("{err:?}").contains("element_hp_control_mode"),
+            "error must name the offending key, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_element_hp_control_mode_spellings_parse() {
+        use super::ElementHpControlMode;
+
+        for (mode, expected) in [
+            ("Simultaneous", ElementHpControlMode::Simultaneous),
+            ("simultaneous", ElementHpControlMode::Simultaneous),
+            ("MutuallyExclusive", ElementHpControlMode::MutuallyExclusive),
+            (
+                "mutually exclusive",
+                ElementHpControlMode::MutuallyExclusive,
+            ),
+        ] {
+            let mut typed = base_typed_config();
+            typed.element_hp_control_mode = Some(mode.to_string());
+            let cfg = equipment_config(typed);
+            let mut eq = HeatPumpWH::new(cfg.clone());
+            eq.init(&cfg, &env(21.0)).unwrap();
+            assert_eq!(eq.element_hp_control, expected, "spelling '{mode}'");
+        }
     }
 
     #[test]
@@ -3475,6 +3531,44 @@ mod mutual_exclusion_tests {
             "backup must also run when temp is below backup threshold in Simultaneous mode"
         );
         assert_eq!(mode, OperatingMode::HeatingHPAndER);
+    }
+
+    /// Out-of-domain control values must be rejected, not silently clamped
+    /// or accepted, on the unchecked path (see the test body for the class).
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        // The arm silently clamps an out-of-domain LoadFraction into [0, 1]
+        // and accepts any finite setpoint — the DutyCycle arm in this same
+        // file rejects out-of-domain values, and the central validator
+        // rejects both signals on the checked path, so the same garbage must
+        // not silently become a different constraint here.
+        let cfg = base_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = wh
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        for bad_setpoint in [5000.0, f64::NAN] {
+            let err = wh
+                .apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(bad_setpoint),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                })
+                .expect_err("out-of-domain setpoint must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("setpoint"),
+                "error must name the field for {bad_setpoint}, got {err:?}"
+            );
+        }
     }
 
     /// ModeOverride::HeatingHPAndER forces both on, overriding mutual exclusion.

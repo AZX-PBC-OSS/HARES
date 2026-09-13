@@ -483,7 +483,7 @@ impl Equipment for ElectricBoiler {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         if apply_simple_mode_override_and_dr(
             &mut self.mode_override,
             &mut self.dr_level,
@@ -900,7 +900,7 @@ impl Equipment for GasBoiler {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         if apply_simple_mode_override_and_dr(
             &mut self.mode_override,
             &mut self.dr_level,

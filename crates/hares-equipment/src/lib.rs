@@ -163,17 +163,33 @@ pub trait Equipment: Send + Sync {
         1
     }
 
-    /// Equipment-specific control application (no capability check).
+    /// Equipment-specific control arm: state-dependent validation and state
+    /// mutation for one signal.
     ///
-    /// Implementors: override this method with equipment-specific logic.
-    /// Do NOT override `apply_control` -- it provides the capability gate and
-    /// delegates to this method after validation.
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<()>;
+    /// Implementors: override this method with equipment-specific logic. Do
+    /// NOT override `apply_control` or `apply_control_unchecked` — both gate
+    /// this method and delegate here. The central numeric bounds are enforced
+    /// before this method runs on every path, so the arm never sees a value
+    /// [`ControlSignal::validate_numeric_bounds`] rejects; keep only
+    /// state-dependent checks (e.g. "EV must be Disconnected to drive") and
+    /// equipment-specific physics bounds here.
+    fn apply_signal(&mut self, signal: &ControlSignal) -> Result<()>;
+
+    /// Replay entry for signals already validated at intake: skips the
+    /// capability gate and rejection accounting of [`Self::apply_control`],
+    /// but still enforces the central numeric bounds — whatever path
+    /// delivers a signal, the arm must never receive a value the central
+    /// validator rejects. One rule for every equipment; equipment-specific
+    /// state checks run inside [`Self::apply_signal`] as usual.
+    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<()> {
+        signal.validate_numeric_bounds()?;
+        self.apply_signal(signal)
+    }
 
     /// Capability-gated control dispatch boundary.
     ///
     /// Validates capability flags and numeric bounds before dispatching to
-    /// equipment-specific `apply_control_unchecked`.  Signals that fail
+    /// the equipment's [`Self::apply_signal`] arm.  Signals that fail
     /// numeric bounds are rejected with a typed error — no silent clamping.
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
@@ -208,7 +224,7 @@ pub trait Equipment: Send + Sync {
                 });
             }
         }
-        self.apply_control_unchecked(signal)
+        self.apply_signal(signal)
     }
 
     /// Read-only pre-flight check: validates capability flags and any
@@ -597,7 +613,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
             if let ControlSignal::PowerSetpoint {
                 active_power_kw, ..
             } = signal
@@ -1177,7 +1193,7 @@ mod tests {
             fn core_output(&self) -> &CoreOutput {
                 &self.core_output
             }
-            fn apply_control_unchecked(&mut self, _: &ControlSignal) -> crate::Result<()> {
+            fn apply_signal(&mut self, _: &ControlSignal) -> crate::Result<()> {
                 Ok(())
             }
 

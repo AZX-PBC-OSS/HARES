@@ -36,7 +36,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// User-facing units (mm, per-day, days) should be converted to SI at the
 /// config parsing boundary. All fields are stored in SI internally.
+///
+/// Deserialized from override JSON nested inside `PvConfig.soiling`:
+/// unknown fields are rejected so a mistyped key cannot silently drop a
+/// configured soiling parameter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SoilingConfig {
     /// Rainfall accumulation window [s].
     /// Rain within this rolling window is summed to detect cleaning events.
@@ -181,6 +186,20 @@ mod tests {
     use hares_physics::constants::{SECONDS_PER_DAY, SECONDS_PER_HOUR};
 
     use super::*;
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        // SoilingConfig deserializes from override JSON nested inside
+        // PvConfig.soiling: a mistyped key must not be silently dropped.
+        let json = serde_json::to_string(&SoilingConfig::default()).unwrap();
+        let with_typo = json.replace('}', ",\"cleaning_treshold_m\":0.006}");
+        let err = serde_json::from_str::<SoilingConfig>(&with_typo)
+            .expect_err("unknown SoilingConfig fields must be rejected");
+        assert!(
+            format!("{err}").contains("cleaning_treshold_m"),
+            "error must name the unknown field, got {err}"
+        );
+    }
 
     fn default_config() -> SoilingConfig {
         SoilingConfig::default()

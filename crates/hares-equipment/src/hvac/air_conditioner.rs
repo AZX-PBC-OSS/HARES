@@ -339,8 +339,8 @@ impl Equipment for AirConditioner {
         self.core.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        self.core.apply_control_unchecked(signal)
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.core.apply_signal(signal)
     }
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
@@ -408,8 +408,8 @@ impl Equipment for RoomAC {
         self.core.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        self.core.apply_control_unchecked(signal)
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.core.apply_signal(signal)
     }
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
@@ -1898,7 +1898,7 @@ impl CoolingCore {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint { deadband_c, .. } => {
                 self.hvac.apply_control_signal(signal)?;
@@ -2171,6 +2171,68 @@ mod tests {
         let mut typed = ac_config().typed::<CentralAirConditionerConfig>().unwrap();
         mutator(&mut typed);
         EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed).unwrap()
+    }
+
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // The arm stores every numeric field raw — DutyCycle on_fraction,
+        // LoadFraction, PowerLimit, MaxCapacityFraction, deadband (into
+        // hysteresis), IdealCapacity — while the water-heater arms reject
+        // the same DutyCycle domain and the central validator rejects all
+        // of these on the checked path. Negative IdealCapacity is
+        // legitimate here (cooling), so the probe is non-finite only.
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env(24.0, 0.01, 18.0, 30.0);
+        eq.init(&cfg, &e).unwrap();
+
+        for (bad, token) in [
+            (
+                ControlSignal::DutyCycle {
+                    on_fraction: 1.5,
+                    period_s: None,
+                    component: None,
+                },
+                "duty",
+            ),
+            (ControlSignal::LoadFraction { fraction: 5.0 }, "fraction"),
+            (
+                ControlSignal::PowerLimit {
+                    max_power_kw: -5.0,
+                    ramp_rate_kw_per_s: None,
+                },
+                "power",
+            ),
+            (
+                ControlSignal::MaxCapacityFraction { fraction: 5.0 },
+                "capacity",
+            ),
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: None,
+                    cooling_setpoint_c: Some(5000.0),
+                    deadband_c: Some(100.0),
+                },
+                "setpoint",
+            ),
+            (
+                ControlSignal::IdealCapacity {
+                    capacity_w: f64::NAN,
+                    degraded: false,
+                },
+                "capacity",
+            ),
+        ] {
+            let err = eq
+                .apply_control_unchecked(&bad)
+                .expect_err("out-of-domain control value must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains(token),
+                "error must name the offending signal for {bad:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

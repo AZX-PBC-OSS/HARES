@@ -2876,33 +2876,22 @@ impl Dwelling {
     /// Actors are called in registration order each timestep. They emit
     /// dispatch requests that are routed through the control dispatcher
     /// by [`PriorityTier`].
-    pub fn add_actor(&mut self, actor: Box<dyn Actor>) {
-        #[cfg(feature = "actor_profiling")]
-        self.actor_name_cache.push(actor.name().to_string());
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        let actor_name = actor.name().to_string();
-        self.actors.push(actor);
-        self.rebuild_schedule();
-        self.refresh_equipment_caches();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        tracing::info!(
-            actor_name = actor_name,
-            actor_index = self.actors.len() - 1,
-            "actor registered"
-        );
-    }
-
-    /// Creates and adds an actor from the registry using the provided config.
+    /// Register an actor. Duplicate names are rejected, mirroring
+    /// [`Self::add_equipment`]: two same-named actors would both dispatch
+    /// every step (double-driving an EV, double-managing a battery) with no
+    /// signal that one of them is unwanted.
     ///
     /// # Errors
     ///
-    /// Returns an error if the actor type is not registered.
-    pub fn add_actor_by_name(
-        &mut self,
-        registry: &crate::actor_registry::ActorRegistry,
-        config: crate::actor_registry::ActorConfig,
-    ) -> Result<()> {
-        let actor = registry.create(config)?;
+    /// `HaresError::Control` when an actor with the same name is already
+    /// registered.
+    pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> Result<()> {
+        let actor_name = actor.name().to_string();
+        if self.actors.iter().any(|a| a.name() == actor_name) {
+            return Err(HaresError::Control(format!(
+                "duplicate actor name '{actor_name}' is not allowed"
+            )));
+        }
         #[cfg(feature = "actor_profiling")]
         self.actor_name_cache.push(actor.name().to_string());
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -2917,6 +2906,40 @@ impl Dwelling {
             "actor registered"
         );
         Ok(())
+    }
+
+    /// Evict actors bound to the named equipment — a controller without its
+    /// equipment is an orphan whose dispatches degrade to no-ops. Called by
+    /// every equipment-removal path.
+    fn evict_actors_targeting(&mut self, equipment_name: &str) {
+        let before = self.actors.len();
+        self.actors
+            .retain(|a| a.dispatch_target_name() != Some(equipment_name));
+        if self.actors.len() == before {
+            return;
+        }
+        self.auto_registered_actor_names
+            .retain(|name| !self.actors.iter().any(|a| a.name() == name));
+        self.rebuild_schedule();
+        tracing::info!(
+            equipment = %equipment_name,
+            evicted = before - self.actors.len(),
+            "actors targeting removed equipment evicted"
+        );
+    }
+
+    /// Creates and adds an actor from the registry using the provided config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the actor type is not registered.
+    pub fn add_actor_by_name(
+        &mut self,
+        registry: &crate::actor_registry::ActorRegistry,
+        config: crate::actor_registry::ActorConfig,
+    ) -> Result<()> {
+        let actor = registry.create(config)?;
+        self.add_actor(actor)
     }
 
     /// Returns the number of registered actors.
@@ -3196,15 +3219,26 @@ impl Dwelling {
         Ok(())
     }
 
-    /// Removes all equipment and refreshes internal caches.
+    /// Removes all equipment and refreshes internal caches. Actors bound to
+    /// any equipment are evicted with it (see [`Self::remove_equipment`]).
     pub fn clear_equipment(&mut self) {
         self.equipment.clear();
+        // Every equipment-targeted actor is now an orphan.
+        self.actors.retain(|a| a.dispatch_target_name().is_none());
+        self.auto_registered_actor_names.clear();
+        self.rebuild_schedule();
         self.refresh_equipment_caches();
     }
 
     /// Removes equipment by name and returns it.
     ///
     /// Returns `Err` if no equipment with the given name exists.
+    /// Removes equipment by name and returns it.
+    ///
+    /// Returns `Err` if no equipment with the given name exists. Actors
+    /// targeting the removed equipment are evicted — a controller without
+    /// its equipment is an orphan, and its survival would block re-adding a
+    /// same-named replacement (see [`Self::add_actor`]).
     pub fn remove_equipment(&mut self, name: &str) -> Result<Box<dyn Equipment>> {
         let pos = self
             .equipment
@@ -3212,19 +3246,30 @@ impl Dwelling {
             .position(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
         let removed = self.equipment.remove(pos);
+        self.evict_actors_targeting(name);
         self.refresh_equipment_caches();
         Ok(removed)
     }
 
     /// Removes all equipment whose end-use matches any of the given set.
     ///
-    /// Returns the count of equipment removed.
+    /// Returns the count of equipment removed. Actors targeting removed
+    /// equipment are evicted (see [`Self::remove_equipment`]).
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> usize {
         let before = self.equipment.len();
+        let removed_names: Vec<String> = self
+            .equipment
+            .iter()
+            .filter(|e| end_uses.contains(&e.descriptor().end_use))
+            .map(|e| e.descriptor().name.clone())
+            .collect();
         self.equipment
             .retain(|e| !end_uses.contains(&e.descriptor().end_use));
         let removed = before - self.equipment.len();
         if removed > 0 {
+            for name in &removed_names {
+                self.evict_actors_targeting(name);
+            }
             self.refresh_equipment_caches();
         }
         removed
@@ -7428,7 +7473,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -7579,7 +7624,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -7693,7 +7738,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -7803,7 +7848,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -7914,7 +7959,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -8034,7 +8079,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -8148,10 +8193,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
-            &mut self,
-            _signal: &ControlSignal,
-        ) -> std::result::Result<(), HaresError> {
+        fn apply_signal(&mut self, _signal: &ControlSignal) -> std::result::Result<(), HaresError> {
             Ok(())
         }
     }
@@ -8264,10 +8306,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_control_unchecked(
-            &mut self,
-            _signal: &ControlSignal,
-        ) -> std::result::Result<(), HaresError> {
+        fn apply_signal(&mut self, _signal: &ControlSignal) -> std::result::Result<(), HaresError> {
             Ok(())
         }
     }
@@ -9103,7 +9142,7 @@ occupancy = 1.0
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -10373,11 +10412,11 @@ occupancy = 1.0
         fn load_state(&mut self, state: &[u8]) -> std::result::Result<(), hares_types::HaresError> {
             self.inner.load_state(state)
         }
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
-            self.inner.apply_control_unchecked(signal)
+            self.inner.apply_signal(signal)
         }
         fn actor_seed(&self) -> Option<ActorSeed> {
             self.seed.clone()
@@ -10430,7 +10469,7 @@ occupancy = 1.0
         let unhealthy = UnhealthyStubActor {
             name: "UnhealthyActor".to_string(),
         };
-        dwelling.add_actor(Box::new(unhealthy));
+        dwelling.add_actor(Box::new(unhealthy)).unwrap();
 
         // The dwelling debug_assert should fire because the actor reports
         // unhealthy after decide(). In debug builds (tests), this panics.
@@ -10526,20 +10565,104 @@ occupancy = 1.0
     }
 
     #[test]
-    fn immediate_no_ev_actor() {
-        // Equipment with no ActorSeed (simulates ChargingStrategy::Immediate)
-        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", None));
+    fn add_actor_rejects_duplicate_names() {
+        // Two same-named actors would both dispatch every step — mirroring
+        // add_equipment's duplicate guard, the second registration is a loud
+        // error, not a silent double-driver.
+        let toml_path = unique_temp_toml("dup_actor");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+
+        dwelling
+            .add_actor(Box::new(StubActor {
+                name: "MyActor".to_string(),
+            }))
+            .unwrap();
+        let err = dwelling
+            .add_actor(Box::new(StubActor {
+                name: "MyActor".to_string(),
+            }))
+            .expect_err("duplicate actor name must be rejected");
+        assert!(
+            format!("{err:?}").contains("MyActor"),
+            "error must name the duplicate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn auto_register_ev_idempotent() {
+        // An actor already named EvDriver:<equipment> (e.g. one attached
+        // manually via add_ev_with_driver) must suppress the built-in, so a
+        // later auto_register_actors re-run (set_tariff) cannot attach a
+        // second, competing driver to the same EV.
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV1",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+
+        let existing_actor: Box<dyn crate::Actor> = Box::new(StubActor {
+            name: "EvDriver:EV1".to_string(),
+        });
+        let existing: Vec<Box<dyn crate::Actor>> = vec![existing_actor];
 
         let actors = build_actors_from_seeds(
             &[eq],
-            &[],
+            &existing,
             false,
             None,
             24,
             &std::collections::HashMap::new(),
             &derive_dwelling_rng(0, 0),
         );
-        assert!(actors.is_empty());
+        assert!(
+            actors.is_empty(),
+            "duplicate EvDriver should not be registered"
+        );
+    }
+
+    #[test]
+    fn auto_register_ev_dedup_is_per_equipment() {
+        // EV1 already has a driver attached under the canonical name; EV2
+        // does not. A re-registration must build only EV2's driver: dedup
+        // is keyed on the equipment name, so one EV's existing driver must
+        // not suppress another EV's built-in one.
+        let seed = || {
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            })
+        };
+        let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", seed()));
+        let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV2", seed()));
+        let existing: Vec<Box<dyn crate::Actor>> = vec![Box::new(StubActor {
+            name: "EvDriver:EV1".to_string(),
+        })];
+
+        let actors = build_actors_from_seeds(
+            &[eq1, eq2],
+            &existing,
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
+        );
+        let names: Vec<&str> = actors.iter().map(|a| a.name()).collect();
+        assert_eq!(
+            names,
+            vec!["EvDriver:EV2"],
+            "only the EV without an existing driver should get one"
+        );
     }
 
     #[test]
@@ -12162,10 +12285,7 @@ master_seed = 0
             fn core_output(&self) -> &CoreOutput {
                 &self.core_output
             }
-            fn apply_control_unchecked(
-                &mut self,
-                _: &ControlSignal,
-            ) -> std::result::Result<(), HaresError> {
+            fn apply_signal(&mut self, _: &ControlSignal) -> std::result::Result<(), HaresError> {
                 Ok(())
             }
             fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
@@ -12363,7 +12483,7 @@ master_seed = 0
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -12466,7 +12586,7 @@ master_seed = 0
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
@@ -12560,7 +12680,7 @@ master_seed = 0
             Ok(())
         }
 
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {

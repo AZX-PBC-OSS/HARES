@@ -301,8 +301,8 @@ impl Equipment for HpCooler {
         self.inner.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        self.inner.apply_control_unchecked(signal)
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.inner.apply_signal(signal)
     }
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
@@ -714,8 +714,8 @@ impl Equipment for GshpCooler {
         self.inner.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        self.inner.apply_control_unchecked(signal)
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.inner.apply_signal(signal)
     }
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
@@ -1042,8 +1042,8 @@ impl Equipment for WshpCooler {
         self.inner.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        self.inner.apply_control_unchecked(signal)
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.inner.apply_signal(signal)
     }
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {

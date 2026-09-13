@@ -265,7 +265,7 @@ impl PV {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let id = parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0);
-        let (arrays, init_error) = if config.is_typed() {
+        let (arrays, mut init_error) = if config.is_typed() {
             (vec![], None)
         } else {
             (
@@ -275,7 +275,16 @@ impl PV {
                 )),
             )
         };
-        let shading_model = shading::parse_shading_config(&config);
+        // A deferred shading parse error must not mask (nor be masked by)
+        // the raw-unsupported error; the raw-unsupported error is the more
+        // fundamental cause, so it wins.
+        let shading_model = match shading::parse_shading_config(&config) {
+            Ok(model) => model,
+            Err(err) => {
+                init_error = init_error.or(Some(err));
+                shading::ShadingModel::None
+            }
+        };
 
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(id),
@@ -720,6 +729,7 @@ impl PV {
                         .module_type
                         .as_deref()
                         .map(ModuleType::from_str)
+                        .transpose()?
                         .unwrap_or(base.module_type);
                     let array_type = spec
                         .array_type
@@ -752,6 +762,7 @@ impl PV {
                 .module_type
                 .as_deref()
                 .map(ModuleType::from_str)
+                .transpose()?
                 .unwrap_or(base.module_type);
             let array_type = c
                 .array_type
@@ -1452,7 +1463,7 @@ impl Equipment for PV {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerLimit { max_power_kw, .. } => {
                 if !max_power_kw.is_finite() {

@@ -183,10 +183,7 @@ impl Equipment for ZoneTemperatureSniffer {
     fn load_state(&mut self, _state: &[u8]) -> Result<(), HaresError> {
         Ok(())
     }
-    fn apply_control_unchecked(
-        &mut self,
-        _signal: &hares_types::ControlSignal,
-    ) -> Result<(), HaresError> {
+    fn apply_signal(&mut self, _signal: &hares_types::ControlSignal) -> Result<(), HaresError> {
         Ok(())
     }
 }

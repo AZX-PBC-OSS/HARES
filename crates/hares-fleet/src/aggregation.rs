@@ -641,9 +641,15 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         let mut has_null = vec![false; column_count];
 
         for (sample_weight, _cols, buckets) in &successful {
+            // assert!, not debug_assert!: this block is only compiled under
+            // debug_assertions or check_invariants, and debug_assert! is a
+            // no-op in release builds even here — leaving the documented
+            // check_invariants contract (see
+            // check_unit_aggregation_mapping_invariant's doc comment) inert
+            // in the CI release configuration.
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
-                debug_assert!(
+                assert!(
                     sample_weight.is_finite() && *sample_weight >= 0.0,
                     "sample_weight {} must be finite and >= 0.0",
                     sample_weight

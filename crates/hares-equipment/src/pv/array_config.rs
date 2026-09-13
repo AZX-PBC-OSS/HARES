@@ -29,14 +29,7 @@ pub enum ArrayType {
 
 impl ArrayType {
     pub(crate) fn from_str(s: &str) -> Result<Self, HaresError> {
-        let normalized: String = s
-            .trim()
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace() && *c != '_')
-            .flat_map(|c| c.to_lowercase())
-            .collect();
-
-        match normalized.as_str() {
+        match crate::config::normalize_config_name(s).as_str() {
             "openrack" => Ok(Self::OpenRack),
             "roofmounted" => Ok(Self::RoofMounted),
             "insulatedback" => Ok(Self::InsulatedBack),
@@ -91,19 +84,18 @@ pub enum ModuleType {
 }
 
 impl ModuleType {
-    pub(crate) fn from_str(s: &str) -> Self {
-        let normalized: String = s
-            .trim()
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace() && *c != '_')
-            .flat_map(|c| c.to_lowercase())
-            .collect();
-
-        match normalized.as_str() {
-            "premium" => Self::Premium,
-            "thinfilm" => Self::ThinFilm,
-            "standard" => Self::Standard,
-            _ => Self::Standard,
+    /// Strict parse: an unrecognised module type is a configuration error,
+    /// not `Standard` — the type selects the temperature coefficient of
+    /// power, so a typo would silently skew every PV output.
+    pub(crate) fn from_str(s: &str) -> Result<Self, HaresError> {
+        match crate::config::normalize_config_name(s).as_str() {
+            "standard" => Ok(Self::Standard),
+            "premium" => Ok(Self::Premium),
+            "thinfilm" => Ok(Self::ThinFilm),
+            unrecognised => Err(HaresError::Equipment(format!(
+                "Unrecognised module_type '{s}'. Normalised to '{unrecognised}', but expected one of: \
+                 Standard, Premium, ThinFilm (case/whitespace/underscore-insensitive)"
+            ))),
         }
     }
 
@@ -305,18 +297,51 @@ mod tests {
 
     #[test]
     fn module_type_parsing_is_case_insensitive_and_accepts_aliases() {
-        assert_eq!(ModuleType::from_str("Premium"), ModuleType::Premium);
-        assert_eq!(ModuleType::from_str("premium"), ModuleType::Premium);
-        assert_eq!(ModuleType::from_str("PREMIUM"), ModuleType::Premium);
+        assert_eq!(
+            ModuleType::from_str("Premium").unwrap(),
+            ModuleType::Premium
+        );
+        assert_eq!(
+            ModuleType::from_str("premium").unwrap(),
+            ModuleType::Premium
+        );
+        assert_eq!(
+            ModuleType::from_str("PREMIUM").unwrap(),
+            ModuleType::Premium
+        );
 
-        assert_eq!(ModuleType::from_str("ThinFilm"), ModuleType::ThinFilm);
-        assert_eq!(ModuleType::from_str("thin film"), ModuleType::ThinFilm);
-        assert_eq!(ModuleType::from_str("thin_film"), ModuleType::ThinFilm);
-        assert_eq!(ModuleType::from_str("thinfilm"), ModuleType::ThinFilm);
+        assert_eq!(
+            ModuleType::from_str("ThinFilm").unwrap(),
+            ModuleType::ThinFilm
+        );
+        assert_eq!(
+            ModuleType::from_str("thin film").unwrap(),
+            ModuleType::ThinFilm
+        );
+        assert_eq!(
+            ModuleType::from_str("thin_film").unwrap(),
+            ModuleType::ThinFilm
+        );
+        assert_eq!(
+            ModuleType::from_str("thinfilm").unwrap(),
+            ModuleType::ThinFilm
+        );
 
-        assert_eq!(ModuleType::from_str("Standard"), ModuleType::Standard);
-        assert_eq!(ModuleType::from_str("standard"), ModuleType::Standard);
-        assert_eq!(ModuleType::from_str("unknown"), ModuleType::Standard);
+        assert_eq!(
+            ModuleType::from_str("Standard").unwrap(),
+            ModuleType::Standard
+        );
+        assert_eq!(
+            ModuleType::from_str("standard").unwrap(),
+            ModuleType::Standard
+        );
+        // Unrecognised values are configuration errors, not silently Standard:
+        // the module type selects the temperature coefficient of power.
+        let err = ModuleType::from_str("unknown").expect_err("must reject unknown");
+        assert!(
+            format!("{err:?}").contains("module_type"),
+            "error must name the offending key, got {err:?}"
+        );
     }
 
     #[test]

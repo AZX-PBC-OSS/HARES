@@ -489,9 +489,9 @@ fn compute_monthly_means_sub_hourly(
 }
 
 fn parse_meta_f64(raw: &str, name: &str) -> Result<f64, WeatherError> {
-    raw.trim().parse::<f64>().map_err(|_| {
+    hares_types::parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "PSM3 metadata: failed to parse `{name}`: `{}`",
+            "PSM3 metadata: failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })
@@ -506,12 +506,21 @@ fn parse_data_f64(
     let raw = fields.get(idx).ok_or_else(|| {
         WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
     })?;
-    raw.trim().parse::<f64>().map_err(|_| {
+    let val: f64 = raw.trim().parse().map_err(|_| {
         WeatherError::Parse(format!(
             "row {row}: failed to parse `{name}`: `{}`",
             raw.trim()
         ))
-    })
+    })?;
+    // `f64::from_str` accepts "nan"/"inf": reject non-finite values so a
+    // corrupt weather file fails loudly instead of poisoning output.
+    if !val.is_finite() {
+        return Err(WeatherError::Parse(format!(
+            "row {row}: `{name}` value is non-finite: `{}`",
+            raw.trim()
+        )));
+    }
+    Ok(val)
 }
 
 fn parse_data_u32(

@@ -961,7 +961,7 @@ fn simulate_fixture_steps(
 ) -> Vec<StepResult> {
     let mut dwelling = build_dwelling(fixture);
     if let Some(actor) = actor {
-        dwelling.add_actor(actor);
+        dwelling.add_actor(actor).unwrap();
     }
 
     dwelling

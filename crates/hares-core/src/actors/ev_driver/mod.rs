@@ -793,6 +793,10 @@ impl Actor for EvDriverActor {
         Some(&self.telemetry)
     }
 
+    fn dispatch_target_name(&self) -> Option<&str> {
+        Some(self.target_name())
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         // All signals emitted by this actor use `Schedule` tier.
         // The EV driver executes a pre-defined driving/charging schedule
