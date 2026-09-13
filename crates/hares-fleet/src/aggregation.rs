@@ -355,6 +355,9 @@ pub fn aggregate(
         }
     }
 
+    // Read only by the invariant block below, so the binding carries the
+    // same compile-time gate; plain release builds compile both away.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     let n_successful = successful.len();
     let aggregate_timeseries = build_aggregate_batch(successful);
 

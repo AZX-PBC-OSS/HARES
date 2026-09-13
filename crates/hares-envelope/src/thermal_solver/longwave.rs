@@ -346,6 +346,12 @@ impl ThermalSolver {
                 }
             }
 
+            // The flag is consumed only by the invariant block below. In
+            // plain release builds it is dead, so a no-op read keeps the
+            // declaration and assignments lint-clean under -D warnings.
+            #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+            let _ = converged;
+
             self.exterior_surface_temps[i] = t_surf;
 
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);

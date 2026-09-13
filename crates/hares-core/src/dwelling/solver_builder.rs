@@ -444,6 +444,9 @@ fn build_solver_boundaries(
                     base_shgc * win.interior_shading_fraction * win.exterior_shading_summer;
                 let shgc_winter =
                     base_shgc * win.winter_shading_fraction * win.exterior_shading_winter;
+                // Read only by the invariant block below, so the binding is
+                // gated to keep plain release builds lint-clean.
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 let r_total = 1.0 / u_factor.max(0.01);
                 // r_glass from the E+ Step 1 polynomial, computed once in
                 // building_to_boundary_inputs (conversions.rs) and stored as
