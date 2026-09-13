@@ -55,6 +55,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arrow::array::Array;
 use hares_types::HaresError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::metadata::KeyValue;
 
 /// Axis normalization for nearest-neighbor distance computation.
 #[derive(Clone, Debug)]
@@ -134,6 +135,38 @@ impl Clone for PvLut {
     }
 }
 
+/// Parse a required numeric value from a PV SAM LUT file's key-value
+/// metadata. The harvest tooling writes these KVs; a present-but-unparseable
+/// value means a corrupt or hand-edited LUT, and silently defaulting
+/// (latitude 0, inverter efficiency 0) would produce wrong PV output with
+/// no trace.
+fn harvest_kv_f64(kv: &KeyValue) -> Result<f64, HaresError> {
+    let raw = kv.value.as_deref().unwrap_or("");
+    let value: f64 = raw.parse().map_err(|_| {
+        HaresError::Equipment(format!(
+            "PV SAM LUT key-value '{}' has non-numeric value '{raw}'",
+            kv.key
+        ))
+    })?;
+    if !value.is_finite() {
+        return Err(HaresError::Equipment(format!(
+            "PV SAM LUT key-value '{}' has non-finite value '{raw}'",
+            kv.key
+        )));
+    }
+    Ok(value)
+}
+
+fn harvest_kv_u8(kv: &KeyValue) -> Result<u8, HaresError> {
+    let raw = kv.value.as_deref().unwrap_or("");
+    raw.parse::<u8>().map_err(|_| {
+        HaresError::Equipment(format!(
+            "PV SAM LUT key-value '{}' has non-integer value '{raw}'",
+            kv.key
+        ))
+    })
+}
+
 impl PvLut {
     pub(crate) fn from_path(path: &Path) -> Result<Self, HaresError> {
         let ext = path
@@ -179,35 +212,19 @@ impl PvLut {
             for kv in kv_list {
                 match kv.key.as_str() {
                     "harvest_lut_latitude_deg" => {
-                        latitude_deg = kv
-                            .value
-                            .as_deref()
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
+                        latitude_deg = harvest_kv_f64(kv)?;
                     }
                     "harvest_lut_longitude_deg" => {
-                        longitude_deg = kv
-                            .value
-                            .as_deref()
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
+                        longitude_deg = harvest_kv_f64(kv)?;
                     }
                     "harvest_lut_sam_inv_eff" => {
-                        sam_inv_eff = kv
-                            .value
-                            .as_deref()
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
+                        sam_inv_eff = harvest_kv_f64(kv)?;
                     }
                     "harvest_lut_sam_losses" => {
-                        sam_losses = kv
-                            .value
-                            .as_deref()
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
+                        sam_losses = harvest_kv_f64(kv)?;
                     }
                     "harvest_lut_sam_array_type" => {
-                        sam_array_type = kv.value.as_deref().and_then(|v| v.parse::<u8>().ok());
+                        sam_array_type = Some(harvest_kv_u8(kv)?);
                     }
                     _ => {}
                 }
@@ -784,6 +801,57 @@ pub(super) fn bracket_corners(bracket: (usize, usize, f64)) -> [(usize, f64); 2]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harvest_kv_rejects_non_numeric_values() {
+        // A present-but-unparseable LUT KV must fail loudly: silently
+        // defaulting (e.g. latitude 0) would produce wrong PV output.
+        let bad = KeyValue {
+            key: "harvest_lut_latitude_deg".to_string(),
+            value: Some("fourty degrees".to_string()),
+        };
+        let err = harvest_kv_f64(&bad).expect_err("non-numeric KV must fail");
+        assert!(
+            format!("{err:?}").contains("harvest_lut_latitude_deg"),
+            "error must name the offending key, got {err:?}"
+        );
+
+        let missing = KeyValue {
+            key: "harvest_lut_sam_array_type".to_string(),
+            value: None,
+        };
+        assert!(harvest_kv_u8(&missing).is_err());
+
+        let good = KeyValue {
+            key: "harvest_lut_latitude_deg".to_string(),
+            value: Some("39.74".to_string()),
+        };
+        assert!((harvest_kv_f64(&good).unwrap() - 39.74).abs() < 1e-12);
+    }
+
+    #[test]
+    fn harvest_kv_rejects_non_finite_values() {
+        // `f64::from_str` accepts "nan"/"inf": a hand-edited LUT carrying
+        // one of these as latitude, longitude, inverter efficiency or losses
+        // must fail loudly, not poison PV output with no trace.
+        for key in [
+            "harvest_lut_latitude_deg",
+            "harvest_lut_longitude_deg",
+            "harvest_lut_sam_inv_eff",
+            "harvest_lut_sam_losses",
+        ] {
+            for bad in ["nan", "inf", "-inf"] {
+                let kv = KeyValue {
+                    key: key.to_string(),
+                    value: Some(bad.to_string()),
+                };
+                assert!(
+                    harvest_kv_f64(&kv).is_err(),
+                    "harvest_kv_f64 accepted non-finite '{bad}' for {key}"
+                );
+            }
+        }
+    }
 
     /// Verify `axis_bracket` returns correct index and fraction for a value
     /// exactly on the third axis point.

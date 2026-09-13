@@ -531,8 +531,8 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
         let mut valid = true;
         for (i, value) in monthly_slice.iter().enumerate() {
             match value.trim().parse::<f64>() {
-                Ok(v) => monthly[i] = v,
-                Err(_) => {
+                Ok(v) if v.is_finite() => monthly[i] = v,
+                _ => {
                     valid = false;
                     break;
                 }
@@ -1016,18 +1016,18 @@ fn parse_u32(raw: &str, row: usize, name: &str) -> Result<u32, WeatherError> {
 }
 
 fn parse_f64(raw: &str, row: usize, name: &str) -> Result<f64, WeatherError> {
-    raw.trim().parse::<f64>().map_err(|_| {
+    parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "row {row}: failed to parse `{name}` as number: `{}`",
+            "row {row}: failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })
 }
 
 fn parse_f64_field(raw: &str, name: &str) -> Result<f64, WeatherError> {
-    raw.trim().parse::<f64>().map_err(|_| {
+    parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "failed to parse `{name}` as number: `{}`",
+            "failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })

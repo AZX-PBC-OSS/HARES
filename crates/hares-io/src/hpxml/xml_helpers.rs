@@ -225,7 +225,7 @@ pub(crate) fn parse_setpoint_from_control(
                 .text
                 .trim()
                 .split(',')
-                .filter_map(|s| s.trim().parse::<f64>().ok())
+                .filter_map(parse_trimmed_f64)
                 .map(conv::temperature_f_to_c)
                 .collect();
             if vals.len() == 24 {
@@ -237,7 +237,7 @@ pub(crate) fn parse_setpoint_from_control(
     // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
     let const_key = format!("SetpointTemp{hvac_type}Season");
     if let Some(node) = control.child(&const_key) {
-        if let Ok(f_val) = node.text.trim().parse::<f64>() {
+        if let Some(f_val) = parse_trimmed_f64(&node.text) {
             let c_val = conv::temperature_f_to_c(f_val);
             return Some(vec![c_val; 24]);
         }
@@ -283,7 +283,7 @@ pub(crate) fn parse_schedule_extension_params(
             .text
             .trim()
             .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
+            .filter_map(parse_trimmed_f64)
             .collect();
         if vals.len() == 24 {
             out.push(("weekday_schedule_fractions".to_string(), json!(vals)));
@@ -300,7 +300,7 @@ pub(crate) fn parse_schedule_extension_params(
             .text
             .trim()
             .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
+            .filter_map(parse_trimmed_f64)
             .collect();
         if vals.len() == 24 {
             out.push(("weekend_schedule_fractions".to_string(), json!(vals)));
@@ -326,7 +326,7 @@ pub(crate) fn parse_schedule_extension_params(
             .text
             .trim()
             .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
+            .filter_map(parse_trimmed_f64)
             .collect();
         if vals.len() == 12 {
             out.push(("month_multipliers".to_string(), json!(vals)));

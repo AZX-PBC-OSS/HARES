@@ -958,7 +958,7 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
 
     // Add thermostat with setpoints that violate the deadband constraint.
     let thermostat = IdealThermostat::new(hvac_name).with_setpoints(21.0, 22.0);
-    dwelling.add_actor(Box::new(thermostat));
+    dwelling.add_actor(Box::new(thermostat)).unwrap();
 
     // Collect pre-step equipment operating modes.
     let mut equipment_modes_history: Vec<HashMap<String, f64>> = Vec::new();

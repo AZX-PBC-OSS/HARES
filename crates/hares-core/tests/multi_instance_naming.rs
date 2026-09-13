@@ -179,7 +179,7 @@ impl Equipment for TelemetryRecordSpy {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> hares_equipment::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> hares_equipment::Result<()> {
         let fraction = match signal {
             ControlSignal::CurtailmentPercent { percent } => *percent,
             _ => 100.0,

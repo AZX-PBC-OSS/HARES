@@ -99,9 +99,11 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
         Presence::Home,
         Presence::Home,
     ];
-    dwelling.add_actor(Box::new(
-        Occupant::new("Occupant").with_presence_schedule(schedule),
-    ));
+    dwelling
+        .add_actor(Box::new(
+            Occupant::new("Occupant").with_presence_schedule(schedule),
+        ))
+        .unwrap();
 
     // Run the full simulation horizon (10 steps at 60s each).
     dwelling

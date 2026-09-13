@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_equipment::{EquipmentConfig, EvConfig, VentilationConfig};
-use hares_types::FuelType;
+use hares_types::{FuelType, parse_trimmed_f64};
 
 use super::HpxmlError;
 use super::building::{Building, XmlNode, ZoneType};
@@ -59,7 +59,7 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
-        .and_then(|n| n.text.trim().parse::<f64>().ok())
+        .and_then(|n| parse_trimmed_f64(&n.text))
     {
         #[cfg(feature = "observe")]
         tracing::info!(
@@ -71,7 +71,7 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
     }
     if let Some(n_occ) = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
-        .and_then(|n| n.text.trim().parse::<f64>().ok())
+        .and_then(|n| parse_trimmed_f64(&n.text))
     {
         // Diverges from OCHRE hpxml.py:791-800 which uses house-type-specific
         // regression formulas (-1.47+1.69*n_occ for detached, -0.68+1.09*n_occ
@@ -120,7 +120,7 @@ pub(super) fn resolve_scheduled_loads(
                 "BuildingConstruction",
                 "NumberofBedrooms",
             ])
-            .and_then(|n| n.text.trim().parse::<f64>().ok())
+            .and_then(|n| parse_trimmed_f64(&n.text))
         {
             // ANSI/RESNET 301-2014 §4.2.2.2.1: occupant count from bedrooms
             // (2 occupants for the first bedroom + 1 for each additional).
@@ -792,7 +792,7 @@ pub(super) fn resolve_scheduled_loads(
             let n_fans = child_f64(ceiling_fan, "Count").unwrap_or(n_bedrooms + 1.0);
             let efficiency_cfm_per_w = ceiling_fan
                 .path(&["Airflow", "Efficiency"])
-                .and_then(|n| n.text.parse::<f64>().ok())
+                .and_then(|n| parse_trimmed_f64(&n.text))
                 .unwrap_or(3000.0 / 42.6);
             let annual_kwh = n_fans * 3000.0 / efficiency_cfm_per_w * 10.5 * 365.0 / 1000.0;
             params.insert("count".to_string(), json!(n_fans));
@@ -1194,10 +1194,7 @@ fn read_extension_month_multipliers(ext: Option<&XmlNode>, prefix: &str) -> Opti
         format!("{prefix}MonthlyScheduleMultipliers")
     };
     let raw = ext.child(&key)?.text.trim();
-    let vals: Vec<f64> = raw
-        .split(',')
-        .filter_map(|x| x.trim().parse::<f64>().ok())
-        .collect();
+    let vals: Vec<f64> = raw.split(',').filter_map(parse_trimmed_f64).collect();
     if vals.len() == 12 {
         Some(vals)
     } else {

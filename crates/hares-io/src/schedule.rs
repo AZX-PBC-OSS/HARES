@@ -386,9 +386,9 @@ fn parse_schedule_csv_str(
 
         for (out_col_idx, src_col_idx) in source_col_indices.iter().enumerate() {
             let raw = fields[*src_col_idx].trim();
-            let value = raw.parse::<f64>().map_err(|_| {
+            let value = hares_types::parse_trimmed_f64(raw).ok_or_else(|| {
                 ScheduleError::Parse(format!(
-                    "row {row}: failed to parse value `{raw}` in column `{}` as f64",
+                    "row {row}: failed to parse value `{raw}` in column `{}` as a finite f64",
                     data_column_names[out_col_idx]
                 ))
             })?;

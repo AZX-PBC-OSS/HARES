@@ -635,7 +635,7 @@ impl Equipment for IndirectTank {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -749,4 +749,122 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::OUTLET_TEMP_C, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
+}
+
+#[cfg(test)]
+mod control_domain_tests {
+    use super::IndirectTank;
+    use super::IndirectTankConfig;
+    use crate::Equipment;
+    use chrono::{FixedOffset, TimeZone};
+    use hares_types::{ControlSignal, EnvironmentState, GridState, WeatherState, ZoneState};
+
+    fn env() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: hares_types::ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    fn config() -> crate::EquipmentConfig {
+        let cfg = IndirectTankConfig {
+            equipment_id: Some(7),
+            zone_id: Some(2),
+            boiler_loop_id: Some(3),
+            tank_volume_m3: Some(0.189),
+            tank_height_m: Some(1.2),
+            ua_w_per_k: Some(2.0),
+            hx_ua_w_per_k: Some(150.0),
+            setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            draw_flow_rate_kg_s: None,
+            avg_water_draw_l_per_day: Some(227.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: Some(0.92),
+            zone_type: Some("conditioned".to_string()),
+            first_hour_rating_m3: Some(0.2),
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            boiler_loop_flow_rate_kg_s: Some(0.3),
+        };
+        crate::EquipmentConfig::from_typed("indirect".to_string(), "Indirect Tank".to_string(), cfg)
+            .expect("typed config")
+    }
+
+    /// The arm stores the setpoint with no check of its own — not even
+    /// finiteness, which every sibling water-heater arm checks — and
+    /// silently clamps an out-of-domain LoadFraction into [0, 1]. The
+    /// DutyCycle arms in the sibling files reject out-of-domain values, and
+    /// the central validator rejects both signals on the checked path, so
+    /// the same garbage must not silently become a different constraint on
+    /// the unchecked path here either.
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        let cfg = config();
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        for bad_setpoint in [5000.0, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(bad_setpoint),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                })
+                .expect_err("out-of-domain setpoint must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("setpoint"),
+                "error must name the field for {bad_setpoint}, got {err:?}"
+            );
+        }
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+    }
 }
