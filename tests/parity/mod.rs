@@ -128,12 +128,10 @@ struct FixtureRunResult {
 }
 
 #[test]
-// Known-open xfail (repo convention, cf. tickets 020/074): HARES-vs-OCHRE
-// physics deviations on the 1-h cold-start corpus windows exceed the
-// ballpark bands (see decision-log dl-fix-1c3fbfaf-parity-corpus-gate).
-// When the corpus owner closes the gaps or recalibrates the references,
-// this test stops panicking and the marker must be removed.
-#[should_panic(expected = "parity tolerance violations")]
+// Real gate: the corpus is drift-locked at measured baselines (overrides in
+// this file), so any band violation fails with the fixture and metric named.
+// The previous known-open xfail marker came off when the drift locks made
+// every fixture pass within band.
 fn parity_outputs_against_reference_corpus() {
     let discovered = discover_fixtures().expect("failed to discover parity fixtures");
     let mut complete = Vec::new();
