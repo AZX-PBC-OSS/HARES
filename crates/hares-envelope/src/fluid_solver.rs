@@ -1599,6 +1599,8 @@ mod tests {
     }
 
     #[test]
+    // Gated to match the cfg gating the panic in resolve().
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[should_panic(expected = "mismatched fluid types")]
     fn resolve_panics_on_mixed_fluid_types_in_same_loop() {
         // When two accumulators share the same loop_id but differ on fluid_type,
@@ -1656,6 +1658,8 @@ mod tests {
     // =======================================================================
 
     #[test]
+    // Gated to match the cfg gating the panic in the serial-flow check.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[should_panic(expected = "mass conservation violated")]
     fn serial_loop_divergent_flows_trigger_mass_conservation_panic() {
         // Two accumulators on the same loop with different flow rates.
@@ -2020,6 +2024,8 @@ mod tests {
     }
 
     #[test]
+    // Gated to match the cfg gating the panic in the topology check.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[should_panic(expected = "mass conservation violated")]
     fn parallel_loop_splitter_mixer_topology_violation_panics() {
         // Same topology as above but branch C reports 0.5 kg/s while the

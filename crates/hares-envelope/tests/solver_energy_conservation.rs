@@ -353,6 +353,9 @@ fn build_1r1c_solver_with_balance_terms(
 /// and the guard in `Dwelling::check_invariants` (which skips the thermal
 /// check when `q_gains` is empty) will not silently suppress the check in
 /// real dwellings with RC envelope models.
+///
+/// Gated to match the cfg gating the balance-terms computation itself.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 #[test]
 fn thermal_balance_terms_close_with_populated_node_capacitances() {
     const Q_GAIN_W: f64 = 1700.0;

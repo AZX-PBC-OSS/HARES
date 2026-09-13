@@ -10675,6 +10675,9 @@ occupancy = 1.0
         }
     }
 
+    // The panic relies on the actor-health invariant, which is gated the
+    // same way as the check itself in run_timestep.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[test]
     fn run_timestep_panics_on_unhealthy_actor() {
         let toml_path = unique_temp_toml("unhealthy_actor");

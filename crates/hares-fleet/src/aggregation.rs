@@ -1532,6 +1532,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[test]
     #[should_panic(expected = "sample_weight")]
     fn build_aggregate_batch_debug_assert_catches_invalid_weight() {
