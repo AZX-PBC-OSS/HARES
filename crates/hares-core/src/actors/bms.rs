@@ -1017,6 +1017,13 @@ impl Actor for BatteryManagementActor {
         Some(&self.telemetry)
     }
 
+    fn dispatch_target_name(&self) -> Option<&str> {
+        match &self.dispatch_target {
+            DispatchTarget::ByName(n) => Some(n.as_ref()),
+            DispatchTarget::ByEndUse(_) => None,
+        }
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         self.step_count += 1;
         let action_before = self.last_action.clone();

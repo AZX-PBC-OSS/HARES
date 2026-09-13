@@ -144,16 +144,19 @@ pub fn parse_pybamm_lut_csv(path: &Path) -> crate::Result<ChargingCurveLut> {
         if cols.len() <= soc_idx || cols.len() <= frac_idx {
             continue;
         }
-        let soc = cols[soc_idx].parse::<f64>().map_err(|e| {
+        // `f64::from_str` accepts "nan"/"inf": reject non-finite values so a
+        // corrupt or hand-edited LUT fails loudly instead of poisoning the
+        // charging curve.
+        let soc = hares_types::parse_trimmed_f64(cols[soc_idx]).ok_or_else(|| {
             HaresError::Equipment(format!(
-                "EV PyBaMM LUT '{}' invalid soc '{}': {e}",
+                "EV PyBaMM LUT '{}' invalid soc '{}'",
                 path.display(),
                 cols[soc_idx]
             ))
         })?;
-        let frac = cols[frac_idx].parse::<f64>().map_err(|e| {
+        let frac = hares_types::parse_trimmed_f64(cols[frac_idx]).ok_or_else(|| {
             HaresError::Equipment(format!(
-                "EV PyBaMM LUT '{}' invalid power_fraction '{}': {e}",
+                "EV PyBaMM LUT '{}' invalid power_fraction '{}'",
                 path.display(),
                 cols[frac_idx]
             ))

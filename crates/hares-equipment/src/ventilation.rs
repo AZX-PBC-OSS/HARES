@@ -949,7 +949,7 @@ impl Equipment for Ventilation {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ModeOverride { mode } => {
                 self.mode = *mode;
@@ -1200,6 +1200,30 @@ mod tests {
             VentilationType::Hrv,
             "absent ventilation_type must default to Hrv"
         );
+    }
+
+    /// Out-of-domain LoadFraction must be rejected, not silently turned
+    /// into fan-on, on the unchecked path.
+    #[test]
+    fn load_fraction_rejects_non_finite_on_unchecked_path() {
+        // The arm treats LoadFraction as a bare on/off gate (`<= 0.0` →
+        // Off, else On); a NaN fraction compares false against `<= 0.0`, so
+        // the fan silently turns On. The central validator rejects NaN on
+        // the checked path — the arm must not be the surface where garbage
+        // becomes full ventilation.
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        hrv.init(&cfg, &env(0.0, 20.0)).unwrap();
+
+        for bad in [f64::NAN, 5.0, -0.5] {
+            let err = hrv
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
     }
 
     #[test]

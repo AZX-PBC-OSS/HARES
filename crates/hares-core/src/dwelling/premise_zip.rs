@@ -250,10 +250,10 @@ mod tests {
         fn rename(&mut self, _name: String) {
             unimplemented!()
         }
-        fn apply_control_unchecked(
+        fn apply_signal(
             &mut self,
             _signal: &hares_types::ControlSignal,
-        ) -> hares_equipment::Result<()> {
+        ) -> std::result::Result<(), hares_types::HaresError> {
             unimplemented!()
         }
         fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {

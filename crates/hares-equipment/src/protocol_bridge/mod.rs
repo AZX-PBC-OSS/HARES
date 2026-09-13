@@ -282,7 +282,7 @@ impl Equipment for ProtocolBridge {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ProtocolNative { protocol, payload } => {
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]

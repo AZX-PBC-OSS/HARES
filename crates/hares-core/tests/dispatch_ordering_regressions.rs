@@ -220,7 +220,7 @@ impl Equipment for StubPowerEquipment {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<(), HaresError> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> Result<(), HaresError> {
         if let ControlSignal::CurtailmentPercent { percent } = signal {
             self.curtailment_fraction = (percent / 100.0).clamp(0.0, 1.0);
         }
@@ -311,15 +311,17 @@ fn actor_curtailment_applies_same_step_to_nonthermal_equipment() {
 
     // Actor fires on step 0 (first simulated step). With the fix the stub's
     // step() sees the curtailment in the same timestep the actor emitted it.
-    dwelling.add_actor(Box::new(OneShotActor::new(
-        "pv_derate",
-        0,
-        DispatchRequest {
-            target: DispatchTarget::ByName(Arc::from(stub_name)),
-            signal: ControlSignal::CurtailmentPercent { percent: 50.0 },
-            priority: PriorityTier::UserOverride,
-        },
-    )));
+    dwelling
+        .add_actor(Box::new(OneShotActor::new(
+            "pv_derate",
+            0,
+            DispatchRequest {
+                target: DispatchTarget::ByName(Arc::from(stub_name)),
+                signal: ControlSignal::CurtailmentPercent { percent: 50.0 },
+                priority: PriorityTier::UserOverride,
+            },
+        )))
+        .unwrap();
 
     dwelling.step().expect("step must succeed");
 
@@ -476,15 +478,17 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
         signal: ControlSignal::CurtailmentPercent { percent: 100.0 },
         priority: PriorityTier::Safety,
     });
-    dwelling_a.add_actor(Box::new(OneShotActor::new(
-        "schedule_reenable",
-        0,
-        DispatchRequest {
-            target: DispatchTarget::ByName(Arc::from(stub_name)),
-            signal: ControlSignal::CurtailmentPercent { percent: 0.0 },
-            priority: PriorityTier::Schedule,
-        },
-    )));
+    dwelling_a
+        .add_actor(Box::new(OneShotActor::new(
+            "schedule_reenable",
+            0,
+            DispatchRequest {
+                target: DispatchTarget::ByName(Arc::from(stub_name)),
+                signal: ControlSignal::CurtailmentPercent { percent: 0.0 },
+                priority: PriorityTier::Schedule,
+            },
+        )))
+        .unwrap();
     dwelling_a.step().expect("scenario A step must succeed");
     let observed_a = stub_output_kw(&dwelling_a, stub_name);
     assert!(
@@ -503,15 +507,17 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
         signal: ControlSignal::CurtailmentPercent { percent: 0.0 },
         priority: PriorityTier::Schedule,
     });
-    dwelling_b.add_actor(Box::new(OneShotActor::new(
-        "safety_block",
-        0,
-        DispatchRequest {
-            target: DispatchTarget::ByName(Arc::from(stub_name)),
-            signal: ControlSignal::CurtailmentPercent { percent: 100.0 },
-            priority: PriorityTier::Safety,
-        },
-    )));
+    dwelling_b
+        .add_actor(Box::new(OneShotActor::new(
+            "safety_block",
+            0,
+            DispatchRequest {
+                target: DispatchTarget::ByName(Arc::from(stub_name)),
+                signal: ControlSignal::CurtailmentPercent { percent: 100.0 },
+                priority: PriorityTier::Safety,
+            },
+        )))
+        .unwrap();
     dwelling_b.step().expect("scenario B step must succeed");
     let observed_b = stub_output_kw(&dwelling_b, stub_name);
     assert!(

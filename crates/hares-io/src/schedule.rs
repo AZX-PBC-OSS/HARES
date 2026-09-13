@@ -386,13 +386,17 @@ fn parse_schedule_csv_str(
 
         for (out_col_idx, src_col_idx) in source_col_indices.iter().enumerate() {
             let raw = fields[*src_col_idx].trim();
+            // Two-stage parse (the psm3 precedent): an unreadable number and
+            // a non-finite number are different defects and the error must
+            // name which one occurred. `f64::from_str` accepts "nan"/"inf",
+            // so the finite check must be explicit.
             let value = raw.parse::<f64>().map_err(|_| {
                 ScheduleError::Parse(format!(
-                    "row {row}: failed to parse value `{raw}` in column `{}` as f64",
+                    "row {row}: failed to parse value `{raw}` in column `{}` as a number",
                     data_column_names[out_col_idx]
                 ))
             })?;
-            // `parse::<f64>()` accepts "nan"/"inf"; non-finite schedule data
+            // `f64::from_str` accepts "nan"/"inf"; non-finite schedule data
             // is corrupt and would otherwise be silently absorbed downstream
             // (NaN compares false against every threshold). Reject at the
             // boundary — the earliest stage — naming the row and column.
