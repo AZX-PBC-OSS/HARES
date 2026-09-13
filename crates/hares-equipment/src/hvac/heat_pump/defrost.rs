@@ -1,6 +1,7 @@
 //! Defrost control for heat-pump heating: OnDemand (humidity-based) and Timed modes.
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 use tracing::debug;

@@ -55,6 +55,27 @@ impl ChargingComposer {
         }
     }
 
+    /// Recompute the needed-charge-hours fold across preferences without
+    /// emitting a dispatch. The actor calls this once per step, before any
+    /// phase arm runs, with a context whose `current_soc` is the *observed*
+    /// equipment SOC (telemetry truth) — `evaluate` deliberately does not
+    /// fold, because its context carries the driver's perceived SOC for
+    /// dispatch and would clobber the observed-based estimate.
+    pub(super) fn refresh_needed_charge_hours(&mut self, ctx: &DecisionContext) {
+        self.last_needed_charge_hours = self
+            .preferences
+            .iter()
+            .map(|p| p.needed_charge_hours(ctx))
+            .fold(f64::INFINITY, f64::min);
+    }
+
+    /// Record the time-to-charge estimate for a plan resolved outside the
+    /// preference stack (the actor-level range-anxiety override), so the
+    /// `needed_charge_hours` telemetry reflects the plan actually dispatched.
+    pub(super) fn set_needed_charge_hours(&mut self, hours: f64) {
+        self.last_needed_charge_hours = hours;
+    }
+
     /// Evaluate all preferences and emit a resolved DispatchRequest.
     ///
     /// 1. Check constraints -- first Override wins.
@@ -62,14 +83,11 @@ impl ChargingComposer {
     /// 3. Resolve: highest-scored target_soc, most conservative power_kw,
     ///    max min_soc, earliest departure.
     /// 4. Translate to ControlSignal.
+    ///
+    /// Dispatch-only: the caller's `DecisionContext` carries the driver's
+    /// perceived SOC; the needed-charge-hours telemetry fold is refreshed
+    /// separately by the actor (see `refresh_needed_charge_hours`).
     pub fn evaluate(&mut self, ctx: &DecisionContext, out: &mut Vec<DispatchRequest>) {
-        // Capture needed charge hours for telemetry (minimum across all preferences)
-        self.last_needed_charge_hours = self
-            .preferences
-            .iter()
-            .map(|p| p.needed_charge_hours(ctx))
-            .fold(f64::INFINITY, f64::min);
-
         // Check constraints first
         for pref in &mut self.preferences {
             if let Constraint::Override(vote) = pref.constraint(ctx) {
@@ -552,8 +570,7 @@ mod tests {
             Box::new(FixedHours(7.0)),
         ];
         let mut composer = ChargingComposer::new(prefs, "ev1");
-        let mut out = Vec::new();
-        composer.evaluate(&ctx, &mut out);
+        composer.refresh_needed_charge_hours(&ctx);
 
         assert!(
             (composer.last_needed_charge_hours() - 3.0).abs() < 1e-9,
@@ -569,8 +586,7 @@ mod tests {
 
         let prefs: Vec<Box<dyn ChargingPreference>> = vec![];
         let mut composer = ChargingComposer::new(prefs, "ev1");
-        let mut out = Vec::new();
-        composer.evaluate(&ctx, &mut out);
+        composer.refresh_needed_charge_hours(&ctx);
 
         assert_eq!(
             composer.last_needed_charge_hours(),

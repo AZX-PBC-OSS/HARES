@@ -9,16 +9,24 @@ for all five orientation cases.
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
 import pytest
 
+# The generator script imports xmltodict, which ships only in the ochre
+# dependency group. The ochre marker scopes the module to the runs whose
+# env has that group; the importorskip guard keeps collection clean in
+# the plain helics env (marker filtering alone cannot, since it applies
+# after collection). The dedicated check-ashrae-reference CI job covers
+# the same fixture independently.
+pytest.importorskip("xmltodict")
+pytestmark = pytest.mark.ochre
+
 # Import the reference script as a module.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
-from gen_ashrae_reference import (  # type: ignore[import-not-found]
+from gen_ashrae_reference import (  # noqa: E402  (path insert above)  # type: ignore[import-not-found]
     MIN_DELTA_T_TARP_NATURAL_K,
     FilmInputs,
     ashrae_simple_interior_h_conv,

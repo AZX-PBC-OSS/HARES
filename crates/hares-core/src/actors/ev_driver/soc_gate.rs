@@ -1,6 +1,8 @@
 //! SocGate preference -- "only act when SOC below threshold" with hysteresis.
 
-use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
+use super::preference::{
+    ChargingPreference, Constraint, DecisionContext, PreferenceVote, needed_charge_hours_to_target,
+};
 
 /// Gating preference that prevents rapid charge/no-charge cycling near a single
 /// threshold by using separate upper and lower bounds with hysteresis.
@@ -13,6 +15,10 @@ pub struct SocGate {
     pub upper_threshold: f64,
     pub lower_threshold: f64,
     pub target_soc: f64,
+    /// Base charging efficiency (dimensionless, e.g. 0.9) used for the
+    /// time-to-charge estimate. Temperature degradation is applied on top
+    /// inside [`needed_charge_hours_to_target`].
+    pub charging_efficiency: f64,
     /// Internal hysteresis state: `true` = charging currently allowed.
     pub charging_allowed: bool,
 }
@@ -23,6 +29,7 @@ impl Default for SocGate {
             upper_threshold: 1.0,
             lower_threshold: 0.95,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         }
     }
@@ -67,6 +74,15 @@ impl ChargingPreference for SocGate {
     fn charging_allowed(&self) -> Option<bool> {
         Some(self.charging_allowed)
     }
+
+    /// Time to charge from the current SOC to the gate's target, reported
+    /// regardless of the hysteresis state: the estimate is a property of the
+    /// battery gap (what the channel name promises), not the strategy's
+    /// intent — a resting `QuickThenWait`/`LowSoc` vehicle still needs those
+    /// hours to close the gap.
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+        needed_charge_hours_to_target(self.target_soc, self.charging_efficiency, ctx)
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +111,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -116,6 +133,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -130,6 +148,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -147,6 +166,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 0.8,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -164,6 +184,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -210,6 +231,7 @@ mod tests {
             upper_threshold: partial_soc,
             lower_threshold: partial_soc - band,
             target_soc: partial_soc,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
 
@@ -249,6 +271,7 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: false,
         };
 
@@ -265,8 +288,54 @@ mod tests {
             upper_threshold: 0.8,
             lower_threshold: 0.7,
             target_soc: 1.0,
+            charging_efficiency: 0.9,
             charging_allowed: true,
         };
         assert_eq!(pref.charging_allowed(), Some(true));
+    }
+
+    #[test]
+    fn needed_charge_hours_reports_gap_even_while_hysteresis_hold() {
+        // A resting gate (charging_allowed=false between thresholds) still
+        // reports the physical time to close the gap — the estimate is a
+        // property of the battery, not the strategy's intent.
+        let env = TestEnvBuilder::new().outdoor_temp(22.0).build();
+        let pref = SocGate {
+            upper_threshold: 0.8,
+            lower_threshold: 0.7,
+            target_soc: 0.8,
+            charging_efficiency: 0.9,
+            charging_allowed: false,
+        };
+
+        // SOC 0.75, target 0.8: gap 0.05 on 60 kWh = 3 kWh;
+        // 3 / (7.2 * 0.9) h, rounded up to whole 1-minute steps.
+        let ctx = make_ctx(&env, 0.75);
+        let raw: f64 = 3.0 / (7.2 * 0.9);
+        let step_hours: f64 = 1.0 / 60.0;
+        let expected = (raw / step_hours).ceil() * step_hours;
+        let hours = pref.needed_charge_hours(&ctx);
+        assert!(
+            (hours - expected).abs() < 1e-9,
+            "needed_charge_hours while resting ({hours}) should equal the constant-efficiency expected ({expected}) at 22C"
+        );
+    }
+
+    #[test]
+    fn needed_charge_hours_zero_at_target() {
+        let env = TestEnvBuilder::new().outdoor_temp(22.0).build();
+        let pref = SocGate {
+            upper_threshold: 0.8,
+            lower_threshold: 0.7,
+            target_soc: 0.8,
+            charging_efficiency: 0.9,
+            charging_allowed: true,
+        };
+
+        let ctx = make_ctx(&env, 0.8);
+        assert!(
+            pref.needed_charge_hours(&ctx).abs() < 1e-9,
+            "needed_charge_hours must be 0.0 when the SOC gap is zero"
+        );
     }
 }

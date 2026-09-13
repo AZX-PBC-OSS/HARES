@@ -231,12 +231,14 @@ impl DegradationState {
 
     /// Cycle-aging Arrhenius accumulator (Σ exp(−Ea_b2/R · (1/T − 1/T_ref)) · dt_day).
     /// Exposed for invariant checks after the midnight reset.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     pub(crate) fn b2_accum(&self) -> f64 {
         self.b2_accum
     }
 
     /// BOL-transient accumulator (Σ b3_ref · arr · tafel · (1+θ·DOD) · dt_day).
     /// Exposed for invariant checks after the midnight reset.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     pub(crate) fn b3_accum(&self) -> f64 {
         self.b3_accum
     }
