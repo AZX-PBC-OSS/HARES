@@ -4,6 +4,7 @@
 //! chimneys), trees, and neighboring buildings. Not a full ray-tracer (that's
 //! SAM's domain) -- these are practical models for common residential scenarios.
 
+use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 
 /// Shading model applied per-array to reduce effective irradiance.
@@ -155,20 +156,25 @@ fn angular_distance(a: f64, b: f64) -> f64 {
 ///
 /// Expected config keys:
 /// - `shading_model`: "none", "fixed", "monthly", "obstruction", "horizon"
+///   (case/whitespace/underscore-insensitive; the CamelCase variant names
+///   `FixedLoss`, `MonthlyLoss`, `ObstructionAngle`, `HorizonProfile` are
+///   accepted aliases). An unrecognised model name is a configuration
+///   error — silently running unshaded would skew every PV output.
 /// - `shading_annual_fraction`: for FixedLoss
 /// - `shading_monthly_fractions`: [f64; 12] for MonthlyLoss
 /// - `shading_obstruction_azimuth_deg`, `_elevation_deg`, `_width_deg`: for ObstructionAngle
 /// - `shading_horizon_points`: flat [az0, el0, az1, el1, ...] for HorizonProfile
-pub fn parse_shading_config(config: &crate::EquipmentConfig) -> ShadingModel {
+pub fn parse_shading_config(config: &crate::EquipmentConfig) -> Result<ShadingModel, HaresError> {
     let model_name = config.get_str("shading_model").unwrap_or("none");
-    match model_name {
-        "fixed" | "FixedLoss" => {
+    match crate::config::normalize_config_name(model_name).as_str() {
+        "none" => Ok(ShadingModel::None),
+        "fixed" | "fixedloss" => {
             let frac = config.get_f64("shading_annual_fraction").unwrap_or(0.0);
-            ShadingModel::FixedLoss {
+            Ok(ShadingModel::FixedLoss {
                 annual_fraction: frac.clamp(0.0, 1.0),
-            }
+            })
         }
-        "monthly" | "MonthlyLoss" => {
+        "monthly" | "monthlyloss" => {
             let raw = config
                 .get_f64_array("shading_monthly_fractions")
                 .unwrap_or_default();
@@ -176,9 +182,9 @@ pub fn parse_shading_config(config: &crate::EquipmentConfig) -> ShadingModel {
             for (i, f) in fractions.iter_mut().enumerate() {
                 *f = raw.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
             }
-            ShadingModel::MonthlyLoss { fractions }
+            Ok(ShadingModel::MonthlyLoss { fractions })
         }
-        "obstruction" | "ObstructionAngle" => {
+        "obstruction" | "obstructionangle" => {
             let az = config
                 .get_f64("shading_obstruction_azimuth_deg")
                 .unwrap_or(0.0);
@@ -188,13 +194,13 @@ pub fn parse_shading_config(config: &crate::EquipmentConfig) -> ShadingModel {
             let w = config
                 .get_f64("shading_obstruction_width_deg")
                 .unwrap_or(60.0);
-            ShadingModel::ObstructionAngle {
+            Ok(ShadingModel::ObstructionAngle {
                 azimuth_deg: az.rem_euclid(360.0),
                 elevation_deg: el.clamp(0.0, 90.0),
                 width_deg: w.clamp(0.0, 180.0),
-            }
+            })
         }
-        "horizon" | "HorizonProfile" => {
+        "horizon" | "horizonprofile" => {
             let raw = config
                 .get_f64_array("shading_horizon_points")
                 .unwrap_or_default();
@@ -214,9 +220,12 @@ pub fn parse_shading_config(config: &crate::EquipmentConfig) -> ShadingModel {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             });
-            ShadingModel::HorizonProfile { points }
+            Ok(ShadingModel::HorizonProfile { points })
         }
-        _ => ShadingModel::None,
+        unrecognised => Err(HaresError::Equipment(format!(
+            "Unrecognised shading_model '{model_name}'. Normalised to '{unrecognised}', but expected one of: \
+             none, fixed, monthly, obstruction, horizon (case/whitespace/underscore-insensitive)"
+        ))),
     }
 }
 
@@ -338,7 +347,7 @@ mod tests {
         raw.insert("shading_model".to_string(), "fixed".into());
         raw.insert("shading_annual_fraction".to_string(), 0.15.into());
         let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
-        let model = parse_shading_config(&cfg);
+        let model = parse_shading_config(&cfg).unwrap();
         assert!((model.shading_factor(45.0, 180.0, 6) - 0.85).abs() < 1e-10);
     }
 
@@ -353,7 +362,7 @@ mod tests {
             ]),
         );
         let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
-        let model = parse_shading_config(&cfg);
+        let model = parse_shading_config(&cfg).unwrap();
         assert!((model.shading_factor(45.0, 180.0, 1) - 0.5).abs() < 1e-10); // Jan: 50% shade
         assert!((model.shading_factor(45.0, 180.0, 6) - 1.0).abs() < 1e-10); // Jun: 0% shade
     }
@@ -366,7 +375,7 @@ mod tests {
         raw.insert("shading_obstruction_elevation_deg".to_string(), 25.0.into());
         raw.insert("shading_obstruction_width_deg".to_string(), 40.0.into());
         let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
-        let model = parse_shading_config(&cfg);
+        let model = parse_shading_config(&cfg).unwrap();
         // Sun at east (90°), low altitude (10°) → blocked
         assert_eq!(model.shading_factor(10.0, 90.0, 6), 0.0);
         // Sun at south (180°) → not blocked
@@ -377,7 +386,7 @@ mod tests {
     fn config_parsing_none_default() {
         let raw = std::collections::HashMap::new();
         let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
-        let model = parse_shading_config(&cfg);
+        let model = parse_shading_config(&cfg).unwrap();
         assert_eq!(model.shading_factor(45.0, 180.0, 6), 1.0);
     }
 
@@ -390,11 +399,25 @@ mod tests {
             crate::config::ConfigValue::FloatArray(vec![90.0, 20.0, 180.0, 10.0, 270.0, 15.0]),
         );
         let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
-        let model = parse_shading_config(&cfg);
+        let model = parse_shading_config(&cfg).unwrap();
         // Sun at east (90°), altitude 15° → below 20° horizon → blocked
         assert_eq!(model.shading_factor(15.0, 90.0, 6), 0.0);
         // Sun at east (90°), altitude 25° → above 20° horizon → not blocked
         assert_eq!(model.shading_factor(25.0, 90.0, 6), 1.0);
+    }
+
+    #[test]
+    fn config_parsing_rejects_unknown_model() {
+        // An unrecognised shading model is a configuration error, not
+        // silently "unshaded": the model scales every PV output.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("shading_model".to_string(), "dormer".into());
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
+        let err = parse_shading_config(&cfg).expect_err("unknown model must be rejected");
+        assert!(
+            format!("{err:?}").contains("shading_model"),
+            "error must name the offending key, got {err:?}"
+        );
     }
 
     #[test]

@@ -810,7 +810,7 @@ impl Equipment for EventBasedLoad {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::LoadFraction { fraction } => {
                 if !fraction.is_finite() {
@@ -1515,7 +1515,7 @@ impl Equipment for WetAppliance {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::LoadFraction { fraction } => {
                 if !fraction.is_finite() {
@@ -2055,6 +2055,42 @@ mod tests {
             .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
             .expect("schedule domain must exist");
         slot.custom_payload = Some(values);
+    }
+
+    #[test]
+    fn load_fraction_rejects_out_of_domain_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // Both arms guard finiteness but then clamp only at zero
+        // (`fraction.max(0.0)`): a fraction above 1 is stored raw and
+        // scales the event's power directly, while a negative fraction is
+        // silently resolved to 0.0. The central validator rejects both on
+        // the checked path; the arms must not silently rewrite them.
+        let mut cfg = event_config("event", "EventBasedLoad");
+        let mut e = EventBasedLoad::new(cfg.clone());
+        e.init(&cfg, &base_env()).unwrap();
+        for bad in [5.0, -0.5] {
+            let err = e
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        cfg = wet_config("washer", "Clothes Washer", 1.0);
+        let mut w = WetAppliance::new(cfg.clone(), "Clothes Washer");
+        w.init(&cfg, &base_env()).unwrap();
+        for bad in [5.0, -0.5] {
+            let err = w
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -3055,9 +3091,14 @@ mod tests {
         let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: -10.0 });
         assert!(result.is_err(), "negative delay_s must be rejected");
         let msg = result.unwrap_err().to_string();
+        // Negative values are rejected by the central numeric-bounds check
+        // (enforced on the unchecked path too, via the `Equipment` trait's
+        // provided `apply_control_unchecked`); the arm's own check remains
+        // for the zero case, which the central rule allows and the arm
+        // rejects as "must be positive".
         assert!(
-            msg.contains("must be positive"),
-            "error should mention positivity, got: {msg}"
+            msg.contains("must be finite and >= 0") || msg.contains("must be positive"),
+            "error should reject the negative delay, got: {msg}"
         );
     }
 

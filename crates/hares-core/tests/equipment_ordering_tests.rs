@@ -356,10 +356,7 @@ impl Equipment for StepOrderSpy {
         Ok(())
     }
 
-    fn apply_control_unchecked(
-        &mut self,
-        _signal: &hares_types::ControlSignal,
-    ) -> Result<(), HaresError> {
+    fn apply_signal(&mut self, _signal: &hares_types::ControlSignal) -> Result<(), HaresError> {
         Ok(())
     }
 }

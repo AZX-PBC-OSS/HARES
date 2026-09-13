@@ -44,6 +44,18 @@ pub trait Actor: Send + Sync + 'static {
     /// Returns the actor's name for logging and diagnostics.
     fn name(&self) -> &str;
 
+    /// The equipment name this actor dispatches to, when the actor is bound
+    /// to exactly one equipment instance. `None` for actors that dispatch
+    /// broadly, by end-use, or not to equipment at all.
+    ///
+    /// The dwelling uses this to evict the actor when its target equipment
+    /// is removed — a controller without its equipment is an orphan whose
+    /// dispatches degrade to no-ops, and whose survival blocks re-adding a
+    /// same-named replacement.
+    fn dispatch_target_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Declares what state changes this actor cares about.
     ///
     /// Default: empty (polled every step). When the dwelling implements

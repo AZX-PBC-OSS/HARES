@@ -423,9 +423,9 @@ fn resolve_columns(headers: &[&str]) -> Result<ColumnIndices, WeatherError> {
 }
 
 fn parse_field(raw: &str, row: usize, name: &str) -> Result<f64, WeatherError> {
-    raw.trim().parse::<f64>().map_err(|_| {
+    hares_types::parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "row {row}: failed to parse `{name}` as number: `{}`",
+            "row {row}: failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })

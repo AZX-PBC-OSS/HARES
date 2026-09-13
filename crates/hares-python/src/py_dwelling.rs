@@ -795,7 +795,7 @@ impl PyDwelling {
     pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
         let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
-        dwelling.add_actor(Box::new(wrapper));
+        dwelling.add_actor(Box::new(wrapper)).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1073,6 +1073,15 @@ impl PyDwelling {
         }
 
         dwelling.add_equipment(eq).map_err(to_py_err)?;
+        // Equipment added after construction never sees the construction-time
+        // actor registration, and registration otherwise only re-runs on
+        // set_tariff — without this call the EV would sit inert unless a
+        // tariff happened to be set later. Battery needs no equivalent: its
+        // python surface always constructs BmsMode::Manual (the deliberate
+        // no-actor mode). add_ev_with_driver must NOT do this: it attaches
+        // its own driver under the canonical EvDriver:<name> the
+        // re-registration dedups against.
+        dwelling.auto_register_actors();
         Ok(())
     }
 
@@ -1156,8 +1165,12 @@ impl PyDwelling {
             bytes
         };
 
+        // Canonical built-in actor name ("EvDriver:<equipment>") so that a
+        // later auto_register_actors re-run (set_tariff) recognizes this
+        // driver as already attached and does not build a second, competing
+        // one from the equipment's actor seed.
         let actor = EvDriverActor::new(
-            &format!("{}_driver", spec.label),
+            &format!("EvDriver:{}", spec.label),
             spec.label,
             preset.strategy.clone(),
             preset.plug_in_policy.clone(),
@@ -1176,7 +1189,7 @@ impl PyDwelling {
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
-        dwelling.add_actor(Box::new(actor));
+        dwelling.add_actor(Box::new(actor)).map_err(to_py_err)?;
         Ok(())
     }
 

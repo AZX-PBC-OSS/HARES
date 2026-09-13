@@ -84,6 +84,22 @@ impl From<Vec<f64>> for ConfigValue {
     }
 }
 
+/// Normalise a configuration name for enum-ish matching: case-insensitive,
+/// whitespace- and underscore-insensitive ("Level 1", "level_1" and "LEVEL1"
+/// all match "level1").
+///
+/// Single source of truth for the name-matching contract used by every
+/// strict string parser at the typed-config boundary (`parse_charging_level`,
+/// `ModuleType::from_str`, `ArrayType::from_str`, water-heater mode parsers,
+/// `parse_shading_config`) so their accepted-spelling rules cannot drift.
+pub(crate) fn normalize_config_name(s: &str) -> String {
+    s.trim()
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '_')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 impl ConfigValue {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
@@ -581,6 +597,24 @@ mod tests {
                 .to_string()
                 .contains("not initialized with typed config")
         );
+    }
+
+    #[test]
+    fn normalize_config_name_is_case_space_and_underscore_insensitive() {
+        // The documented contract every strict string parser at the
+        // typed-config boundary relies on; pinning it here covers all call
+        // sites (charging level, PV module/array type, water-heater modes,
+        // shading model) without repeating one test per site.
+        for spelling in ["Level 1", "level_1", "LEVEL1", " level  1 ", "l_e_v_e_l_1"] {
+            assert_eq!(
+                normalize_config_name(spelling),
+                "level1",
+                "spelling '{spelling}'"
+            );
+        }
+        // Distinct names must stay distinct: normalisation must not
+        // collapse different words into the same key.
+        assert_ne!(normalize_config_name("level 12"), "level1");
     }
 
     #[test]

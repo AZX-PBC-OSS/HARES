@@ -10,6 +10,7 @@ use super::core_config::default_one;
 use super::core_config::equipment_type_name;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HvacSetpointConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_setpoint_c: Option<f64>,
@@ -423,6 +424,19 @@ fn default_fluid_type() -> FluidType {
 mod tests {
     use super::*;
     use crate::config::{ConfigPayload, EquipmentConfig};
+
+    #[test]
+    fn setpoint_config_unknown_fields_are_rejected() {
+        // HvacSetpointConfig deserializes from override JSON nested inside
+        // the heating configs: a mistyped key must not be silently dropped.
+        let with_typo = r#"{"heating_setpoint_c":21.0,"heating_setpoin_c":21.0}"#;
+        let err = serde_json::from_str::<HvacSetpointConfig>(with_typo)
+            .expect_err("unknown HvacSetpointConfig fields must be rejected");
+        assert!(
+            format!("{err}").contains("heating_setpoin_c"),
+            "error must name the unknown field, got {err}"
+        );
+    }
 
     #[test]
     fn all_configs_round_trip_via_serde_json() {

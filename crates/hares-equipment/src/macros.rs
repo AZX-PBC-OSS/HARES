@@ -66,11 +66,8 @@ macro_rules! delegate_equipment {
                 self.$inner.load_state(state)
             }
 
-            fn apply_control_unchecked(
-                &mut self,
-                signal: &hares_types::ControlSignal,
-            ) -> $crate::Result<()> {
-                self.$inner.apply_control_unchecked(signal)
+            fn apply_signal(&mut self, signal: &hares_types::ControlSignal) -> $crate::Result<()> {
+                self.$inner.apply_signal(signal)
             }
 
             fn rename(&mut self, name: String) {

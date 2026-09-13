@@ -369,6 +369,12 @@ pub enum ScheduleSource {
 ///
 /// This is the canonical persisted form used in config payloads; runtime code
 /// converts it into [`ScheduleSource`] via [`ScheduleSourceConfig::into_runtime`].
+///
+/// Why no `#[serde(deny_unknown_fields)]`: this enum is internally tagged
+/// (`tag = "kind"`), and serde's internally-tagged derive does not implement
+/// that attribute (serde_derive 1.0.229 `de/enum_internally.rs` never reads
+/// it) — unknown fields inside a variant are silently dropped. Writers must
+/// emit exact variant fields; there is no type-level guard available here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]

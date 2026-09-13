@@ -805,7 +805,7 @@ impl Equipment for ScheduledLoad {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::LoadFraction { fraction } => {
                 self.load_fraction = fraction.max(0.0);
@@ -1518,6 +1518,30 @@ mod tests {
         ports.zero();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(ports.electrical.net_active_w(), 0.0);
+    }
+
+    #[test]
+    fn load_fraction_rejects_out_of_domain_on_unchecked_path() {
+        // The arm clamps only at zero (`fraction.max(0.0)`): a fraction
+        // above 1 is stored raw and multiplies the schedule power directly
+        // (5.0 → five times the load), while a negative or NaN fraction is
+        // silently resolved to 0.0 (f64::max ignores NaN) — a load that
+        // quietly turns off. The central validator rejects all of these on
+        // the checked path; the arm must not silently rewrite them.
+        let config = config_with_schedule("s", "Lighting", &[3.0, 3.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
     }
 
     #[test]

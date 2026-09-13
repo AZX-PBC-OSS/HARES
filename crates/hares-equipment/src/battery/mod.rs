@@ -995,11 +995,12 @@ impl Battery {
 
         self.cell_resistance_ohm = c.cell_resistance_ohm.unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
 
-        self.chemistry = c
-            .chemistry
-            .as_deref()
-            .and_then(|s| s.parse::<BatteryChemistry>().ok())
-            .unwrap_or(BatteryChemistry::Nmc);
+        self.chemistry = match c.chemistry.as_deref() {
+            Some(s) => s
+                .parse::<BatteryChemistry>()
+                .map_err(|e| HaresError::Equipment(format!("invalid chemistry: {e}")))?,
+            None => BatteryChemistry::Nmc,
+        };
         if !self.custom_ocv {
             self.ocv_table = OcvTable::for_chemistry(self.chemistry);
         }
@@ -1765,7 +1766,7 @@ impl Equipment for Battery {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
@@ -1776,6 +1777,14 @@ impl Equipment for Battery {
                 if min_soc.is_some() || max_soc.is_some() {
                     return Err(HaresError::Control(
                         "Battery PowerSetpoint must not carry min_soc/max_soc; SOC window constraints arrive via SOCTarget".to_string(),
+                    ));
+                }
+                // Self-contained guard: `apply_control_unchecked` bypasses the
+                // central signal validation, and a non-finite setpoint would
+                // poison every downstream power calculation.
+                if !active_power_kw.is_finite() {
+                    return Err(HaresError::Control(
+                        "Battery PowerSetpoint active_power_kw must be finite".to_string(),
                     ));
                 }
                 self.power_setpoint_kw = Some(*active_power_kw);
@@ -2416,6 +2425,57 @@ mod tests {
             1,
             "day_ordinal must be contiguous across year boundary: Dec 31={ord_dec31}, Jan 1={ord_jan1}"
         );
+    }
+
+    #[test]
+    fn power_setpoint_rejects_non_finite_active_power_on_unchecked_path() {
+        // apply_control_unchecked bypasses the central signal validation;
+        // the arm must stay self-safe (it already re-checks the reactive
+        // component — this mirrors that guard for the active component).
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let err = bat
+            .apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                active_power_kw: f64::NAN,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .expect_err("non-finite active setpoint must be rejected");
+        assert!(
+            format!("{err:?}").contains("active_power_kw"),
+            "error must name the offending field, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn power_limit_rejects_non_finite_and_negative_on_unchecked_path() {
+        // The arm stores max_power_kw raw with no check of its own. A NaN
+        // limit silently no-ops downstream (`limit.min(NaN)` returns the
+        // limit, f64::min ignores NaN) — a requested cap that quietly never
+        // applies — and a negative limit inverts the discharge clamp
+        // (`power_kw.max(-limit)` forces at least |limit| kW of discharge).
+        // The central validator rejects both on the checked path; the PV arm
+        // guards finiteness at the arm level. The battery arm must not be
+        // the surface where the same garbage silently rewrites power.
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        for bad in [f64::NAN, f64::NEG_INFINITY, -5.0] {
+            let err = bat
+                .apply_control_unchecked(&ControlSignal::PowerLimit {
+                    max_power_kw: bad,
+                    ramp_rate_kw_per_s: None,
+                })
+                .expect_err("invalid PowerLimit must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("power"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -4997,6 +5057,25 @@ mod tests {
     }
 
     #[test]
+    fn init_errors_on_unparseable_chemistry_override() {
+        // A present-but-unparseable chemistry must fail init, not silently
+        // substitute NMC: the OCV and u_neg tables selected from the fallback
+        // chemistry drive every charge-voltage decision for a battery the
+        // operator did not configure.
+        for bad in ["Graphite", "lfp "] {
+            let config = typed_battery_config(Some(bad), None);
+            let mut bat = Battery::new(config.clone());
+            let err = bat
+                .init(&config, &base_env())
+                .expect_err("unparseable chemistry must fail init");
+            assert!(
+                format!("{err:?}").contains("chemistry"),
+                "error must name the offending key for override '{bad}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn lut_tapers_battery_charge_at_high_soc() {
         let lut = make_4d_lut(&[(0.0, 1.0), (0.5, 1.0), (0.8, 0.5), (1.0, 0.0)]);
         let config = battery_config(&[]);
@@ -5179,6 +5258,106 @@ mod tests {
                 assert!((max_discharge_kw - 5.0).abs() < 1e-6);
             }
             _ => panic!("expected Battery seed"),
+        }
+    }
+
+    /// Class rule: every `BmsMode` variant is pinned to its side of the
+    /// `actor_seed` exemption. `Manual` — and only `Manual` — gets no
+    /// management actor, because a manually driven battery legitimately
+    /// needs no built-in dispatch logic; every other variant must produce a
+    /// seed or the configured mode never runs. The exhaustive match (no
+    /// wildcard arm) fails compilation when a variant is added to the enum,
+    /// so a new variant cannot silently inherit either side of the guard.
+    #[test]
+    fn actor_seed_pins_every_bms_mode_variant() {
+        use hares_types::{
+            BmsAction, BmsScheduleWindow, BmsTimeWindow, DayFilter, StormWatchTrigger,
+        };
+
+        let modes: Vec<(BmsMode, bool)> = vec![
+            (
+                BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                true,
+            ),
+            (
+                BmsMode::TimeOfUseOptimization {
+                    reserve_soc: 0.2,
+                    charge_threshold_percentile: 0.3,
+                    discharge_threshold_percentile: 0.7,
+                    solar_only_charging: false,
+                    price_deadband: 0.0,
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (
+                BmsMode::BackupReserve {
+                    target_soc: 0.9,
+                    charge_from_grid: true,
+                    charge_rate_fraction: 0.5,
+                    soc_deadband: 0.0,
+                },
+                true,
+            ),
+            (
+                BmsMode::DemandResponse {
+                    base_mode: Box::new(BmsMode::Manual),
+                    dr_discharge_rate: 0.5,
+                    min_soc_during_dr: 0.3,
+                    dr_deactivation_multiplier: 0.0,
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (
+                BmsMode::Scheduled {
+                    windows: vec![BmsScheduleWindow {
+                        time_window: BmsTimeWindow {
+                            day: DayFilter::Any,
+                            start_minute: 0,
+                            end_minute: 60,
+                        },
+                        action: BmsAction::Idle,
+                    }],
+                },
+                true,
+            ),
+            (
+                BmsMode::StormWatch {
+                    target_soc: 0.95,
+                    trigger: StormWatchTrigger::ManualEnable,
+                    base_mode: Box::new(BmsMode::Manual),
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (BmsMode::Manual, false),
+        ];
+
+        for (mode, expect_seed) in modes {
+            // Exhaustiveness tripwire: names every variant, no wildcard arm.
+            match &mode {
+                BmsMode::SelfConsumption { .. }
+                | BmsMode::TimeOfUseOptimization { .. }
+                | BmsMode::BackupReserve { .. }
+                | BmsMode::DemandResponse { .. }
+                | BmsMode::Scheduled { .. }
+                | BmsMode::StormWatch { .. }
+                | BmsMode::Manual => {}
+            }
+            let config = typed_battery_config(None, Some(mode.clone()));
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &warm_env()).unwrap();
+            assert_eq!(
+                bat.actor_seed().is_some(),
+                expect_seed,
+                "actor_seed() returned the wrong side of the exemption for {mode:?}"
+            );
         }
     }
 

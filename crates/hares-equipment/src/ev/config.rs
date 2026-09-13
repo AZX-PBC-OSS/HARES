@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::EquipmentConfig;
 use crate::config::EquipmentTypedConfig;
 
-use hares_types::{ChargingLevel, ChargingPriority};
+use hares_types::{ChargingLevel, ChargingPriority, ChargingStrategy, PlugInPolicy};
 
 pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(crate) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";
@@ -17,6 +17,10 @@ pub(crate) const KEY_VEHICLE_TYPE: &str = "vehicle_type";
 pub(crate) const KEY_RANGE_MILES: &str = "range_miles";
 pub(super) const KEY_INITIAL_SOC: &str = "initial_soc";
 pub(super) const KEY_INITIAL_CONNECTION_STATE: &str = "initial_connection_state";
+pub(super) const KEY_CHEMISTRY: &str = "chemistry";
+pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
+pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
+pub(crate) const KEY_CHARGING_PRIORITY: &str = "charging_priority";
 pub(super) const KEY_SOC_MAX: &str = "soc_max";
 pub(super) const KEY_EFFICIENCY: &str = "charging_efficiency";
 pub(super) const KEY_POWER_LIMIT_KW: &str = "power_limit_kw";
@@ -37,13 +41,9 @@ pub(super) const KEY_V2G_SOC_RESERVE: &str = "v2g_soc_reserve";
 pub(super) const KEY_V2G_MAX_DISCHARGE_KW: &str = "v2g_max_discharge_kw";
 pub(crate) const KEY_READY_SOC: &str = "ready_soc";
 pub(crate) const KEY_FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
-pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
-pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
-pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
 pub(super) const KEY_POWER_FACTOR: &str = "power_factor";
 pub(super) const KEY_CHARGER_CAPACITY_KVA: &str = "charger_capacity_kva";
 pub(super) const KEY_CC_CV_TRANSITION_SOC: &str = "cc_cv_transition_soc";
-pub(crate) const KEY_CHARGING_PRIORITY: &str = "charging_priority";
 
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
 pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;
@@ -146,6 +146,13 @@ pub(super) fn default_max_power_kw(
     }
 }
 
+/// Classify the vehicle for the default L2 charge power (OCHRE vehicle
+/// numbers 1-4).
+///
+/// `vehicle_type` is a raw-payload-only key: `EvConfig` does not carry it
+/// (`deny_unknown_fields` rejects it in typed payloads, and raw payloads are
+/// refused at init), so in production the "BEV" default always applies; the
+/// raw read exists for the test fixture builder, which mirrors this default.
 pub(super) fn vehicle_number_from_config(config: &EquipmentConfig, capacity_kwh: f64) -> u8 {
     let range_miles = config
         .get_f64(KEY_RANGE_MILES)
@@ -163,6 +170,62 @@ pub(super) fn vehicle_number_from_config(config: &EquipmentConfig, capacity_kwh:
         3
     } else {
         4
+    }
+}
+
+/// Parse a `charging_strategy` override JSON string: shape errors (malformed
+/// JSON, unknown fields) and domain errors (`target_soc` out of [0, 1],
+/// off-peak hours ≥ 24, …) both fail. Single source of truth for the raw
+/// and typed construction surfaces.
+pub(super) fn parse_charging_strategy(s: &str) -> Result<ChargingStrategy, HaresError> {
+    let strategy: ChargingStrategy = serde_json::from_str(s)
+        .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
+    strategy
+        .validate()
+        .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
+    Ok(strategy)
+}
+
+/// Parse a `plug_in_policy` override JSON string; see
+/// [`parse_charging_strategy`] for the error contract.
+pub(super) fn parse_plug_in_policy(s: &str) -> Result<PlugInPolicy, HaresError> {
+    let policy: PlugInPolicy = serde_json::from_str(s)
+        .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
+    policy
+        .validate()
+        .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
+    Ok(policy)
+}
+
+/// Parse a `charging_priority` override string (case/whitespace-insensitive).
+pub(super) fn parse_charging_priority(s: &str) -> Result<ChargingPriority, HaresError> {
+    match crate::config::normalize_config_name(s).as_str() {
+        "externalauthority" => Ok(ChargingPriority::ExternalAuthority),
+        "deadlineguarantee" => Ok(ChargingPriority::DeadlineGuarantee),
+        _ => Err(HaresError::Equipment(format!(
+            "invalid charging_priority '{s}': expected ExternalAuthority or DeadlineGuarantee"
+        ))),
+    }
+}
+
+/// Parse a charging level name into [`ChargingLevel`].
+///
+/// Accepts the spellings seen across config sources, matched via
+/// [`normalize_config_name`](crate::config::normalize_config_name)
+/// (case/whitespace/underscore-insensitive): "L1", "Level 1", "1" and
+/// "L2", "Level 2", "2" (HPXML supplies "Level 2" or the bare digit;
+/// the python surface supplies "L1"/"L2"). Any other value is a
+/// configuration error: the charging level sizes the EVSE power bounds, so
+/// an unrecognised string silently becoming L2 would silently clamp the
+/// configured charge power.
+pub(super) fn parse_charging_level(s: &str) -> Result<ChargingLevel, HaresError> {
+    match crate::config::normalize_config_name(s).as_str() {
+        "l1" | "level1" | "1" => Ok(ChargingLevel::L1),
+        "l2" | "level2" | "2" => Ok(ChargingLevel::L2),
+        _ => Err(HaresError::Equipment(format!(
+            "invalid charging_level '{s}': expected one of L1, Level 1, 1, L2, Level 2, 2 \
+             (case/whitespace/underscore-insensitive)"
+        ))),
     }
 }
 

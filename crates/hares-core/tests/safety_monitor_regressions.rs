@@ -169,7 +169,7 @@ impl Equipment for ModeTrackingEquipment {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<(), HaresError> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> Result<(), HaresError> {
         if let ControlSignal::ModeOverride { mode } = signal {
             self.telemetry.set("last_mode_code", mode.as_code());
         }
@@ -227,7 +227,7 @@ fn safety_tier_heating_overrides_grid_tier_off_during_freeze() {
 
     // Register GridOffActor that emits Grid-tier Off every step.
     let grid_actor = GridOffActor::new("grid_off", target.clone());
-    dwelling.add_actor(Box::new(grid_actor));
+    dwelling.add_actor(Box::new(grid_actor)).unwrap();
 
     // Register SafetyMonitor configured with freeze threshold of 30°C.
     // Since zone temp will be near 21°C (default indoor), this guarantees
@@ -235,7 +235,7 @@ fn safety_tier_heating_overrides_grid_tier_off_during_freeze() {
     let monitor = SafetyMonitor::new("safety")
         .with_target(target.clone())
         .with_freeze_protection_threshold(30.0);
-    dwelling.add_actor(Box::new(monitor));
+    dwelling.add_actor(Box::new(monitor)).unwrap();
 
     dwelling.step().expect("step must succeed");
 
@@ -272,12 +272,12 @@ fn safety_tier_heating_vs_grid_off_both_target_by_name() {
         .expect("add_equipment must succeed");
 
     let grid_actor = GridOffActor::new("grid_off_named", target_name.clone());
-    dwelling.add_actor(Box::new(grid_actor));
+    dwelling.add_actor(Box::new(grid_actor)).unwrap();
 
     let monitor = SafetyMonitor::new("safety_named")
         .with_target(target_name.clone())
         .with_freeze_protection_threshold(30.0);
-    dwelling.add_actor(Box::new(monitor));
+    dwelling.add_actor(Box::new(monitor)).unwrap();
 
     dwelling.step().expect("step must succeed");
 

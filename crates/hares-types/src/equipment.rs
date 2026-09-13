@@ -479,14 +479,33 @@ impl fmt::Display for EvConnectionState {
 }
 
 /// When the EV should plug in at home.
+///
+/// Parsed from override JSON: unknown fields are rejected so a mistyped
+/// key (e.g. `threshod`) cannot silently drop a configured constraint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PlugInPolicy {
     Always,
     LowSoc { threshold: f64 },
 }
 
+impl PlugInPolicy {
+    /// Validate the `LowSoc` threshold; `Always` carries no values.
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        match self {
+            Self::Always => Ok(()),
+            Self::LowSoc { threshold } => validate_fraction("LowSoc threshold", *threshold),
+        }
+    }
+}
+
 /// A departure deadline with day-of-week filter and required SoC.
+///
+/// Deserialized from override JSON nested inside `ChargingStrategy`
+/// variants: unknown fields are rejected so a mistyped key cannot silently
+/// drop a configured deadline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepartureConstraint {
     pub day_filter: DayFilter,
     /// Minute of day the vehicle must depart; valid range [0, 1439].
@@ -555,7 +574,11 @@ pub enum ChargingPriority {
 ///
 /// `TouAware` references the TOU rate schedule from the environment/simulation
 /// config -- the EV just knows "be TOU-aware" and reads peak periods externally.
+/// Parsed from override JSON (`charging_strategy`): unknown fields are
+/// rejected so a mistyped key cannot silently drop a configured constraint
+/// — several strategies would otherwise silently never charge.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ChargingStrategy {
     Immediate {
         target_soc: f64,
@@ -708,7 +731,10 @@ impl ChargingStrategy {
     }
 }
 
+/// Parsed from override JSON (`grid_export_rule`): unknown fields are
+/// rejected so a mistyped key cannot silently drop a configured constraint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub enum GridExportRule {
     SolarOnly,
     #[default]
@@ -827,10 +853,13 @@ pub struct BmsScheduleWindow {
 }
 
 /// Battery management system operating mode.
-///
 /// Configures how the `BatteryManagementActor` dispatches charge/discharge
 /// control signals relative to PV production, grid prices, and backup needs.
+///
+/// Parsed from override JSON (`bms_mode`): unknown fields are rejected so a
+/// mistyped key cannot silently drop a configured constraint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub enum BmsMode {
     SelfConsumption {
         min_soc: f64,
@@ -4149,6 +4178,113 @@ mod tests {
         assert!(FuelPower::new(FuelType::Gas, -1.0).is_err());
         assert!(FuelPower::new(FuelType::Gas, f64::NAN).is_err());
         assert!(FuelPower::new(FuelType::Gas, f64::INFINITY).is_err());
+    }
+
+    /// Rejection cases not covered by the variant-specific tests above:
+    /// non-finite fractions, `QuickThenWait`'s `partial_soc` bounds, `LowSoc`'s
+    /// `target_soc` bound, and an invalid constraint nested inside a
+    /// `PreDeparture` schedule. A value that parses as JSON but lies outside
+    /// its physical domain must not reach the simulation, where it would
+    /// silently distort charge decisions.
+    #[test]
+    fn charging_strategy_validate_rejects_out_of_domain_values() {
+        let bad: Vec<ChargingStrategy> = vec![
+            ChargingStrategy::Immediate {
+                target_soc: f64::NAN,
+            },
+            ChargingStrategy::QuickThenWait { partial_soc: -0.1 },
+            ChargingStrategy::QuickThenWait { partial_soc: 1.5 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: f64::NAN,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            ChargingStrategy::LowSoc {
+                threshold: 0.3,
+                target_soc: 1.1,
+            },
+            ChargingStrategy::PreDeparture {
+                target_soc: 0.9,
+                departure_schedule: vec![DepartureConstraint {
+                    day_filter: crate::DayFilter::Any,
+                    departure_minute: 480,
+                    target_soc: 2.0,
+                }],
+            },
+        ];
+
+        for strategy in bad {
+            assert!(
+                strategy.validate().is_err(),
+                "out-of-domain strategy must fail validation: {strategy:?}"
+            );
+        }
+    }
+
+    /// Boundary values are valid: 0.0 and 1.0 fractions, an hour just under
+    /// 24, a zero charge buffer, and `V2H`'s `min_soc` exactly equal to its
+    /// `discharge_threshold_soc` must all pass so validation cannot reject a
+    /// legitimate configuration. The acceptance tests above use only
+    /// mid-range values.
+    #[test]
+    fn charging_strategy_validate_accepts_boundary_valid_values() {
+        let good: Vec<ChargingStrategy> = vec![
+            ChargingStrategy::Immediate { target_soc: 0.0 },
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            ChargingStrategy::QuickThenWait { partial_soc: 1.0 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 23.999,
+                off_peak_end_hour: 0.0,
+                target_soc: 1.0,
+            },
+            ChargingStrategy::LowSoc {
+                threshold: 0.0,
+                target_soc: 1.0,
+            },
+            ChargingStrategy::TouAware {
+                target_soc: 1.0,
+                departure_schedule: vec![],
+                charge_buffer_hours: 0.0,
+            },
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 0.0,
+                departure_schedule: vec![],
+            },
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.5,
+            },
+            ChargingStrategy::V2G {
+                min_soc: 1.0,
+                max_export_kw: 0.0,
+                price_threshold: 0.0,
+            },
+        ];
+
+        for strategy in good {
+            assert!(
+                strategy.validate().is_ok(),
+                "boundary-valid strategy must pass validation: {strategy:?}"
+            );
+        }
+    }
+
+    /// `PlugInPolicy::validate` has no direct test elsewhere (only indirect
+    /// coverage through EV init): pin the threshold bounds and the
+    /// non-finite rejection.
+    #[test]
+    fn plug_in_policy_validate_bounds_threshold() {
+        assert!(PlugInPolicy::Always.validate().is_ok());
+        assert!(PlugInPolicy::LowSoc { threshold: 0.0 }.validate().is_ok());
+        assert!(PlugInPolicy::LowSoc { threshold: 1.0 }.validate().is_ok());
+        assert!(PlugInPolicy::LowSoc { threshold: 1.5 }.validate().is_err());
+        assert!(
+            PlugInPolicy::LowSoc {
+                threshold: f64::NAN
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     // all_standard test deferred to T-1267: `EndUse::all_standard()` does not yet

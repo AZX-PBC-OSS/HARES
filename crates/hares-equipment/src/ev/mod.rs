@@ -31,18 +31,23 @@ use checkpoint::EvCheckpoint;
 use config::*;
 use telemetry::{default_telemetry, telemetry_fields};
 
-fn charging_level_from_config(config: &EquipmentConfig) -> ChargingLevel {
-    let level = config
-        .get_str(KEY_CHARGING_LEVEL)
-        .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPXML))
-        .unwrap_or("L2")
-        .trim()
-        .replace(' ', "")
-        .to_ascii_lowercase();
-
-    match level.as_str() {
-        "l1" | "level1" => ChargingLevel::L1,
-        _ => ChargingLevel::L2,
+/// Keep the placeholder value while deferring the parse error to `init()`:
+/// the registry factory must construct, but an invalid raw value must not
+/// silently become the placeholder. The first deferred error wins; later
+/// ones are dropped (init surfaces one cause, not a list).
+fn defer_strict<T>(
+    result: Result<T, HaresError>,
+    fallback: T,
+    deferred: &mut Option<HaresError>,
+) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => {
+            if deferred.is_none() {
+                *deferred = Some(err);
+            }
+            fallback
+        }
     }
 }
 
@@ -183,6 +188,11 @@ pub struct Ev {
     /// Guards against post-registration LUT mutation via the `Equipment` trait
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
     initialized: bool,
+
+    /// Deferred raw-config parse error, surfaced by `init()` before the typed
+    /// parse runs (the registry factory cannot fail, so construction-time
+    /// strictness is stored here — the same channel PV uses).
+    init_error: Option<hares_types::HaresError>,
 }
 
 impl Ev {
@@ -214,25 +224,78 @@ impl Ev {
             zone_type: None,
         };
 
-        let charging_level = charging_level_from_config(&config);
+        // Raw-config parsing on this path is strict: an invalid value defers
+        // an error that init() surfaces before init_typed runs (the registry
+        // factory contract is infallible, so construction cannot fail — the
+        // same deferred-error channel PV uses). The placeholder keeps the
+        // struct constructible until init rejects it. Production paths supply
+        // a typed config, where init_typed applies the same strict parses.
+        let mut init_error = None;
+        let charging_level = defer_strict(
+            config
+                .get_str(KEY_CHARGING_LEVEL)
+                .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPXML))
+                .map_or(Ok(ChargingLevel::L2), parse_charging_level),
+            ChargingLevel::L2,
+            &mut init_error,
+        );
         let battery_capacity_kwh = resolve_capacity_kwh(&config).unwrap_or(DEFAULT_CAPACITY_KWH);
         let rated_power_kw = resolve_rated_power_kw(&config, charging_level, battery_capacity_kwh)
             .unwrap_or_else(|| default_max_power_kw(&config, charging_level, battery_capacity_kwh));
         let soc_max = config.get_f64(KEY_SOC_MAX).unwrap_or(DEFAULT_SOC_MAX);
 
-        let initial_connection_state = config
-            .get_str(KEY_INITIAL_CONNECTION_STATE)
-            .and_then(|s| s.parse::<EvConnectionState>().ok())
-            .unwrap_or(EvConnectionState::HomePluggedIn);
+        let initial_connection_state = defer_strict(
+            config.get_str(KEY_INITIAL_CONNECTION_STATE).map_or(
+                Ok(EvConnectionState::HomePluggedIn),
+                |s| {
+                    s.parse::<EvConnectionState>().map_err(|e| {
+                        HaresError::Equipment(format!("invalid initial_connection_state: {e}"))
+                    })
+                },
+            ),
+            EvConnectionState::HomePluggedIn,
+            &mut init_error,
+        );
 
-        let chemistry = config
-            .get_str(KEY_CHEMISTRY)
-            .and_then(|s| s.parse::<BatteryChemistry>().ok())
-            .unwrap_or(BatteryChemistry::Nmc);
+        let chemistry = defer_strict(
+            config
+                .get_str(KEY_CHEMISTRY)
+                .map_or(Ok(BatteryChemistry::Nmc), |s| {
+                    s.parse::<BatteryChemistry>()
+                        .map_err(|e| HaresError::Equipment(format!("invalid chemistry: {e}")))
+                }),
+            BatteryChemistry::Nmc,
+            &mut init_error,
+        );
 
         let fuel_economy_kwh_per_mi = config
             .get_f64(KEY_FUEL_ECONOMY_KWH_PER_MI)
             .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+
+        let charging_strategy = defer_strict(
+            config.get_str(KEY_CHARGING_STRATEGY).map_or(
+                Ok(ChargingStrategy::Immediate { target_soc: 1.0 }),
+                parse_charging_strategy,
+            ),
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            &mut init_error,
+        );
+
+        let plug_in_policy = defer_strict(
+            config
+                .get_str(KEY_PLUG_IN_POLICY)
+                .map_or(Ok(PlugInPolicy::Always), parse_plug_in_policy),
+            PlugInPolicy::Always,
+            &mut init_error,
+        );
+
+        let charging_priority = defer_strict(
+            config
+                .get_str(KEY_CHARGING_PRIORITY)
+                .map_or(Ok(ChargingPriority::default()), parse_charging_priority),
+            ChargingPriority::default(),
+            &mut init_error,
+        );
 
         let ev = Self {
             descriptor,
@@ -302,24 +365,11 @@ impl Ev {
             custom_u_neg: false,
             v2l_active: false,
             v2l_power_kw: 0.0,
-            charging_strategy: config
-                .get_str(KEY_CHARGING_STRATEGY)
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(ChargingStrategy::Immediate { target_soc: 1.0 }),
-            plug_in_policy: config
-                .get_str(KEY_PLUG_IN_POLICY)
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(PlugInPolicy::Always),
+            charging_strategy,
+            plug_in_policy,
             power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
             power_setpoint_kw: None,
-            charging_priority: config
-                .get_str(KEY_CHARGING_PRIORITY)
-                .map(|s| match s.trim() {
-                    "ExternalAuthority" => ChargingPriority::ExternalAuthority,
-                    "DeadlineGuarantee" => ChargingPriority::DeadlineGuarantee,
-                    _ => ChargingPriority::DeadlineGuarantee,
-                })
-                .unwrap_or_default(),
+            charging_priority,
             power_setpoint_min_soc: None,
             power_setpoint_max_soc: None,
             dr_level: DRLevel::Normal,
@@ -340,6 +390,7 @@ impl Ev {
             }),
             reactive_power_kvar: 0.0,
             initialized: false,
+            init_error,
             degradation: crate::battery::degradation::DegradationState::default(),
             rainflow: crate::battery::degradation::RainflowCounter::default(),
             ocv_table: OcvTable::for_chemistry(chemistry),
@@ -364,15 +415,9 @@ impl Ev {
         self.battery_capacity_kwh = c.capacity_kwh;
         self.battery_capacity_kwh_rated = c.capacity_kwh;
 
-        let level_str = c.charging_level.as_deref().unwrap_or("L2");
-        self.charging_level = match level_str
-            .trim()
-            .replace(' ', "")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "l1" | "level1" => ChargingLevel::L1,
-            _ => ChargingLevel::L2,
+        self.charging_level = match c.charging_level.as_deref() {
+            None => ChargingLevel::L2,
+            Some(s) => config::parse_charging_level(s)?,
         };
 
         self.charging_efficiency = c.charging_efficiency.unwrap_or(DEFAULT_EFFICIENCY);
@@ -380,14 +425,25 @@ impl Ev {
         self.l1_voltage_v = c.l1_voltage_v.unwrap_or(DEFAULT_L1_VOLTAGE_V);
         self.soc_max = c.soc_max.unwrap_or(DEFAULT_SOC_MAX);
 
-        self.rated_power_kw = match self.charging_level {
-            ChargingLevel::L1 => c
-                .max_charging_power_kw
-                .clamp(L1_MIN_POWER_KW, L1_MAX_POWER_KW),
-            ChargingLevel::L2 => c
-                .max_charging_power_kw
-                .clamp(L2_MIN_POWER_KW, L2_MAX_POWER_KW),
+        // The charging level caps the EVSE hardware: an L1 coupler cannot
+        // deliver L2 power. The clamp is correct physics; the warn makes the
+        // adjustment observable so a contradictory config is never silent.
+        let (level_label, (min_kw, max_kw)) = match self.charging_level {
+            ChargingLevel::L1 => ("L1", (L1_MIN_POWER_KW, L1_MAX_POWER_KW)),
+            ChargingLevel::L2 => ("L2", (L2_MIN_POWER_KW, L2_MAX_POWER_KW)),
         };
+        let clamped = c.max_charging_power_kw.clamp(min_kw, max_kw);
+        if clamped != c.max_charging_power_kw {
+            tracing::warn!(
+                equipment = %self.descriptor.name,
+                charging_level = level_label,
+                requested_kw = c.max_charging_power_kw,
+                applied_kw = clamped,
+                bounds = ?[min_kw, max_kw],
+                "max_charging_power_kw adjusted to charging-level hardware bounds"
+            );
+        }
+        self.rated_power_kw = clamped;
 
         self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
         self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
@@ -415,11 +471,12 @@ impl Ev {
 
         self.discharge_respects_deadline = c.discharge_respects_deadline;
 
-        self.chemistry = c
-            .chemistry
-            .as_deref()
-            .and_then(|s| s.parse::<BatteryChemistry>().ok())
-            .unwrap_or(BatteryChemistry::Nmc);
+        self.chemistry = match c.chemistry.as_deref() {
+            Some(s) => s
+                .parse::<BatteryChemistry>()
+                .map_err(|e| HaresError::Equipment(format!("invalid chemistry: {e}")))?,
+            None => BatteryChemistry::Nmc,
+        };
         if !self.custom_ocv {
             self.ocv_table = OcvTable::for_chemistry(self.chemistry);
         }
@@ -442,11 +499,12 @@ impl Ev {
         });
         self.q_setpoint_kvar = None;
 
-        self.connection_state = c
-            .initial_connection_state
-            .as_deref()
-            .and_then(|s| s.parse::<EvConnectionState>().ok())
-            .unwrap_or(EvConnectionState::HomePluggedIn);
+        self.connection_state = match c.initial_connection_state.as_deref() {
+            Some(s) => s.parse::<EvConnectionState>().map_err(|e| {
+                HaresError::Equipment(format!("invalid initial_connection_state: {e}"))
+            })?,
+            None => EvConnectionState::HomePluggedIn,
+        };
 
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_SOC);
         self.soc = initial_soc.clamp(0.0, 1.0);
@@ -458,15 +516,13 @@ impl Ev {
         );
 
         if let Some(strat_str) = c.charging_strategy.as_deref() {
-            self.charging_strategy = serde_json::from_str(strat_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
+            self.charging_strategy = parse_charging_strategy(strat_str)?;
         } else {
             self.charging_strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
         }
 
         if let Some(policy_str) = c.plug_in_policy.as_deref() {
-            self.plug_in_policy = serde_json::from_str(policy_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
+            self.plug_in_policy = parse_plug_in_policy(policy_str)?;
         } else {
             self.plug_in_policy = PlugInPolicy::Always;
         }
@@ -1196,6 +1252,11 @@ impl Equipment for Ev {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        // Surface a deferred raw-config parse error before the typed parse:
+        // an invalid raw value must not silently stand in as its placeholder.
+        if let Some(e) = self.init_error.take() {
+            return Err(e);
+        }
         self.init_typed(config)
     }
 
@@ -1367,9 +1428,10 @@ impl Equipment for Ev {
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {
-        if matches!(self.charging_strategy, ChargingStrategy::Immediate { .. }) {
-            return None;
-        }
+        // The driver actor is the vehicle-use simulation (departures, trips,
+        // SOC depletion), not just charging-schedule logic: every strategy,
+        // `Immediate` included, needs it or the EV never leaves home, never
+        // discharges, and so never has anything to charge back.
         Some(crate::ActorSeed::Ev {
             strategy: self.charging_strategy.clone(),
             plug_in_policy: self.plug_in_policy.clone(),
@@ -1526,7 +1588,7 @@ impl Equipment for Ev {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
@@ -1543,6 +1605,34 @@ impl Equipment for Ev {
                             "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
                         ));
                     }
+                }
+                // Self-contained guard (see EvDrive): a non-finite active
+                // setpoint would silently disarm charging (`f64::max`
+                // swallows NaN) or saturate v2g/v2l discharge to the
+                // hardware maximum — battery, PV, and scheduled load all
+                // guard this value at the arm level too.
+                if !active_power_kw.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "EV PowerSetpoint active_power_kw must be finite, got {active_power_kw}"
+                    )));
+                }
+                // A non-finite SOC window would be silently substituted with
+                // defaults downstream (`max(NaN)` returns the reserve, the
+                // `min(NaN)` cap no-ops) — a requested constraint that
+                // quietly never applies.
+                if let Some(m) = min_soc
+                    && !m.is_finite()
+                {
+                    return Err(HaresError::Control(format!(
+                        "EV PowerSetpoint min_soc must be finite, got {m}"
+                    )));
+                }
+                if let Some(m) = max_soc
+                    && !m.is_finite()
+                {
+                    return Err(HaresError::Control(format!(
+                        "EV PowerSetpoint max_soc must be finite, got {m}"
+                    )));
                 }
                 if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
@@ -1564,6 +1654,31 @@ impl Equipment for Ev {
                 min_soc,
                 max_soc,
             } => {
+                // Self-contained guard (see EvDrive): `f64::clamp` propagates
+                // NaN, which makes `soc >= soc_limit` compare false forever —
+                // full-power charging toward an unreachable target; ±∞
+                // would silently stand in as 1.0/0.0. The battery arm
+                // rejects non-finite targets after clamping; match it before
+                // storing.
+                if !target_soc.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "EV SOCTarget target_soc must be finite, got {target_soc}"
+                    )));
+                }
+                if let Some(m) = min_soc
+                    && !m.is_finite()
+                {
+                    return Err(HaresError::Control(format!(
+                        "EV SOCTarget min_soc must be finite, got {m}"
+                    )));
+                }
+                if let Some(m) = max_soc
+                    && !m.is_finite()
+                {
+                    return Err(HaresError::Control(format!(
+                        "EV SOCTarget max_soc must be finite, got {m}"
+                    )));
+                }
                 self.soc_target = Some((*target_soc).clamp(0.0, 1.0));
                 self.soc_target_min = *min_soc;
                 self.soc_target_max = *max_soc;
@@ -1614,6 +1729,15 @@ impl Equipment for Ev {
                         "EvDrive rejected: EV must be Disconnected to drive".to_string(),
                     ));
                 }
+                // Self-contained guard: `apply_control_unchecked` bypasses the
+                // central signal validation, and a non-finite or negative
+                // energy would create SOC from nowhere (or poison every
+                // downstream clamp).
+                if !kwh.is_finite() || *kwh < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvDrive kwh must be finite and >= 0, got {kwh}"
+                    )));
+                }
                 let available_kwh = self.battery_capacity_kwh * self.soc;
                 if *kwh > available_kwh {
                     return Err(HaresError::Control(format!(
@@ -1628,12 +1752,33 @@ impl Equipment for Ev {
                         "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
                     ));
                 }
+                // Self-contained guard (see EvDrive): a non-finite or negative
+                // charge power would silently no-op (`> 0.0` compares false)
+                // instead of being reported.
+                if !power_kw.is_finite() || *power_kw < 0.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvAwayCharge power_kw must be finite and >= 0, got {power_kw}"
+                    )));
+                }
                 self.away_charger_power_kw = *power_kw;
             }
             ControlSignal::EvSetReadyBy {
                 departure_hour,
                 target_soc,
             } => {
+                // Self-contained guard (see EvDrive): these feed the charging
+                // target and the deadline pacing — NaN or out-of-range values
+                // would silently disable or never satisfy charging.
+                if !departure_hour.is_finite() || *departure_hour < 0.0 || *departure_hour > 24.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvSetReadyBy departure_hour must be finite and in [0, 24], got {departure_hour}"
+                    )));
+                }
+                if !target_soc.is_finite() || *target_soc < 0.0 || *target_soc > 1.0 {
+                    return Err(HaresError::Control(format!(
+                        "EvSetReadyBy target_soc must be finite and in [0, 1], got {target_soc}"
+                    )));
+                }
                 self.ready_by_hour = Some(*departure_hour);
                 self.ready_by_soc = Some(*target_soc);
             }

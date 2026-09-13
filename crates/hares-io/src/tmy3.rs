@@ -31,6 +31,8 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
+use hares_types::parse_trimmed_f64;
+
 use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c,
 };
@@ -347,9 +349,9 @@ fn parse_hhmm(s: &str, row: usize) -> Result<(u32, u32), WeatherError> {
 }
 
 fn parse_meta_f64(raw: &str, name: &str) -> Result<f64, WeatherError> {
-    raw.trim().parse::<f64>().map_err(|_| {
+    parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "TMY3 station header: failed to parse `{name}`: `{}`",
+            "TMY3 station header: failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })
@@ -359,9 +361,9 @@ fn parse_f64(fields: &[&str], idx: usize, row: usize, name: &str) -> Result<f64,
     let raw = fields.get(idx).ok_or_else(|| {
         WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
     })?;
-    raw.trim().parse::<f64>().map_err(|_| {
+    parse_trimmed_f64(raw).ok_or_else(|| {
         WeatherError::Parse(format!(
-            "row {row}: failed to parse `{name}`: `{}`",
+            "row {row}: failed to parse `{name}` as a finite number: `{}`",
             raw.trim()
         ))
     })

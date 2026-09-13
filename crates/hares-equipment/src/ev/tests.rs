@@ -1393,6 +1393,143 @@ fn ev_drive_while_away_plugged_in_rejected() {
     assert!(err.to_string().contains("Disconnected"));
 }
 
+/// Hypothesis: `EvDrive` with negative kWh bypasses the handler's overdraw
+/// guard (`kwh > available_kwh` is false for any negative value), so the SOC
+/// arithmetic `soc - kwh / battery_capacity_kwh` runs with a negated term and
+/// *raises* SOC — energy from nowhere. The equipment's direct control surface
+/// (`apply_control_unchecked`, a public trait method) performs no payload
+/// validation of its own. Physical invariant: a drive command must never
+/// increase SOC, whether the signal is accepted or rejected.
+#[test]
+fn ev_drive_negative_kwh_must_not_increase_soc() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    let soc_before = ev.telemetry().get("soc").unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: -5.0 });
+
+    // Observe through a step while Disconnected (thermal drift only; the
+    // step never touches SOC) so telemetry reflects post-drive state.
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let soc_after = ev.telemetry().get("soc").unwrap();
+    assert!(
+        soc_after <= soc_before + 1e-12,
+        "negative drive kWh created energy from nowhere: SOC rose from {soc_before} to {soc_after}"
+    );
+    assert!(
+        soc_after.is_finite() && (0.0..=1.0).contains(&soc_after),
+        "SOC must stay finite and within [0, 1], got {soc_after}"
+    );
+}
+
+/// Hypothesis: `EvDrive` with NaN kWh slips past the `kwh > available_kwh`
+/// guard (NaN compares false against everything) and
+/// `(soc - NaN / capacity).clamp(0.0, 1.0)` propagates NaN (f64::clamp
+/// returns NaN unchanged), permanently poisoning SOC. Manifestations: in
+/// debug builds the next step panics in `Telemetry::set` (non-finite SOC);
+/// in plain release builds telemetry silently freezes at the last finite
+/// SOC while the taper math `(soc_limit - NaN).max(0.0)` collapses to 0 kW,
+/// permanently disabling charging of a plugged-in EV below target.
+/// Physical invariants: SOC stays finite and within [0, 1]; a plugged-in EV
+/// below its target keeps drawing charge power.
+#[test]
+fn ev_drive_nan_kwh_must_not_poison_soc_or_power() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: f64::NAN });
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let soc = ev.telemetry().get("soc").unwrap();
+    assert!(
+        soc.is_finite() && (0.0..=1.0).contains(&soc),
+        "NaN drive kWh poisoned SOC: got {soc}"
+    );
+
+    // The poison must not leak into the power path either: plug back in at
+    // home and step — a healthy EV at 20% SOC with no setpoint must charge.
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::HomePluggedIn,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let soc = ev.telemetry().get("soc").unwrap();
+    assert!(
+        soc.is_finite() && (0.0..=1.0).contains(&soc),
+        "SOC must remain finite after a charging step, got {soc}"
+    );
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power.is_finite() && power > 0.0,
+        "NaN-poisoned SOC silently disabled charging: plugged-in EV below \
+         target draws {power} kW (healthy config draws ~7.2 kW)"
+    );
+}
+
+/// Hypothesis: the EvDrive overdraw guard `kwh > available_kwh` is one-sided.
+/// Positive infinity is rejected (it exceeds available energy), but negative
+/// infinity passes (it is never greater than a finite bound) and
+/// `(soc - (-inf) / capacity).clamp(0.0, 1.0)` evaluates to exactly 1.0 — a
+/// free full charge from negative-infinite "driving". Physical invariant: a
+/// drive command must never increase SOC.
+#[test]
+fn ev_drive_infinite_kwh_must_not_create_energy() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    let soc_before = ev.telemetry().get("soc").unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+
+    // Positive infinity: the available-energy guard must reject it outright.
+    let result = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: f64::INFINITY });
+    assert!(
+        result.is_err(),
+        "+inf drive kWh must be rejected by the available-energy guard"
+    );
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    let soc = ev.telemetry().get("soc").unwrap();
+    assert!(
+        (soc - soc_before).abs() < 1e-12,
+        "rejected +inf drive must leave SOC unchanged, got {soc} (was {soc_before})"
+    );
+
+    // Negative infinity: the same guard is blind to it — SOC must not rise.
+    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        kwh: f64::NEG_INFINITY,
+    });
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    let soc = ev.telemetry().get("soc").unwrap();
+    assert!(
+        soc <= soc_before + 1e-12,
+        "-inf drive kWh created a free full charge: SOC rose from {soc_before} to {soc}"
+    );
+}
+
 #[test]
 fn ev_away_charge_increases_soc_no_residential_power() {
     let mut raw = base_raw();
@@ -2464,14 +2601,6 @@ fn ev_charging_strategy_backward_compat() {
         ev.charging_strategy(),
         &hares_types::ChargingStrategy::Immediate { target_soc: 1.0 }
     );
-}
-
-#[test]
-fn actor_seed_immediate_returns_none() {
-    let config = ev_config(base_raw());
-    let mut ev = Ev::new(config.clone());
-    ev.init(&config, &sample_env()).unwrap();
-    assert!(ev.actor_seed().is_none());
 }
 
 #[test]
@@ -4665,4 +4794,826 @@ fn load_state_recomputes_degraded_capacity_from_rated_and_soh() {
             < 1e-9,
         "restored usable capacity must equal rated·(1−fade)"
     );
+}
+
+// ── Auto-driver attachment: every strategy needs vehicle-use simulation ──
+
+/// `EvAwayCharge` with a non-finite or negative power must be rejected on
+/// the unchecked path too: the away-charge gate (`> 0.0`) compares false
+/// against NaN, silently dropping the command instead of reporting it.
+#[test]
+fn ev_away_charge_rejects_non_finite_and_negative_power() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+
+    for bad in [f64::NAN, -1.5, f64::NEG_INFINITY] {
+        let err = ev
+            .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: bad })
+            .expect_err("invalid away-charge power must be rejected");
+        assert!(
+            format!("{err:?}").contains("EvAwayCharge"),
+            "error must name the signal for {bad}, got {err:?}"
+        );
+    }
+}
+
+/// `EvSetReadyBy` with out-of-domain values must be rejected on the
+/// unchecked path too: they feed the charging target and deadline pacing,
+/// so NaN would silently disable charging and an out-of-range hour would
+/// pace the deadline against a time that never arrives.
+#[test]
+fn ev_set_ready_by_rejects_out_of_domain_values() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    for bad in [
+        ControlSignal::EvSetReadyBy {
+            departure_hour: f64::NAN,
+            target_soc: 0.8,
+        },
+        ControlSignal::EvSetReadyBy {
+            departure_hour: 25.0,
+            target_soc: 0.8,
+        },
+        ControlSignal::EvSetReadyBy {
+            departure_hour: 7.0,
+            target_soc: 1.5,
+        },
+    ] {
+        let err = ev
+            .apply_control_unchecked(&bad)
+            .expect_err("out-of-domain EvSetReadyBy must be rejected");
+        assert!(
+            format!("{err:?}").contains("EvSetReadyBy"),
+            "error must name the signal for {bad:?}, got {err:?}"
+        );
+    }
+}
+
+/// `PowerSetpoint` with a non-finite active power must be rejected on the
+/// unchecked path too: the battery, PV, and scheduled-load arms all guard
+/// this value at the arm level. On the EV a NaN setpoint is silently
+/// accepted and then silently disarms charging — `f64::max` swallows NaN,
+/// so the setpoint resolves to 0 kW with no error, forever — while −∞
+/// satisfies the `< 0.0` discharge gate whenever v2g/v2l is enabled and is
+/// silently saturated to the hardware maximum, a garbage request
+/// indistinguishable from "discharge everything you can".
+#[test]
+fn power_setpoint_rejects_non_finite_active_power_on_unchecked_path() {
+    let env = sample_env();
+
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &env).unwrap();
+    let err = ev
+        .apply_control_unchecked(&ControlSignal::PowerSetpoint {
+            active_power_kw: f64::NAN,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect_err("non-finite active setpoint must be rejected");
+    assert!(
+        format!("{err:?}").contains("active_power_kw"),
+        "error must name the offending field for NaN, got {err:?}"
+    );
+
+    // With discharge enabled, −∞ passes the negative-power v2g/v2l gate
+    // (`< 0.0` holds), so only a finiteness guard can catch it there; NaN
+    // bypasses the same gate in every configuration.
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &env).unwrap();
+    for bad in [f64::NAN, f64::NEG_INFINITY] {
+        let err = ev
+            .apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                active_power_kw: bad,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .expect_err("non-finite active setpoint must be rejected when v2g is enabled");
+        assert!(
+            format!("{err:?}").contains("active_power_kw"),
+            "error must name the offending field for {bad}, got {err:?}"
+        );
+    }
+}
+
+/// The EV arms' SOC-window guards must also hold on the unchecked path
+/// (the checked path is covered by the central validator, but
+/// `apply_control_unchecked` bypasses it — the arms are the last line for
+/// the window fields they store raw).
+#[test]
+fn ev_soc_window_fields_reject_non_finite_on_unchecked_path() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    for signal in [
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: Some(f64::NAN),
+            max_soc: None,
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: Some(f64::INFINITY),
+        },
+        ControlSignal::SOCTarget {
+            target_soc: 0.8,
+            min_soc: Some(f64::NAN),
+            max_soc: None,
+        },
+        ControlSignal::SOCTarget {
+            target_soc: 0.8,
+            min_soc: None,
+            max_soc: Some(f64::NEG_INFINITY),
+        },
+    ] {
+        let err = ev
+            .apply_control_unchecked(&signal)
+            .expect_err("non-finite SOC window must be rejected on the unchecked path");
+        assert!(
+            format!("{err:?}").contains("soc"),
+            "error must name the offending window field for {signal:?}, got {err:?}"
+        );
+    }
+}
+
+/// `SOCTarget` with a non-finite target must be rejected on the unchecked
+/// path too: the battery arm rejects it after clamping, while the EV arm's
+/// `clamp(0.0, 1.0)` keeps NaN (`f64::clamp` propagates NaN), making
+/// `soc >= soc_limit` compare false forever — the EV then charges at full
+/// power toward a target it can never reach, even at `soc_max` where the
+/// drawn energy vanishes in the SOC clamp. ±∞ silently becomes a plausible
+/// target (1.0 / 0.0) standing in for garbage, which the checked path's
+/// central validator would have rejected outright.
+#[test]
+fn soc_target_rejects_non_finite_target_on_unchecked_path() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let err = ev
+            .apply_control_unchecked(&ControlSignal::SOCTarget {
+                target_soc: bad,
+                min_soc: None,
+                max_soc: None,
+            })
+            .expect_err("non-finite SOCTarget must be rejected");
+        assert!(
+            format!("{err:?}").contains("target_soc"),
+            "error must name the offending field for {bad}, got {err:?}"
+        );
+    }
+}
+
+/// `PowerSetpoint`'s SOC window must be validated on the checked path: the
+/// central `validate_numeric_bounds` checks only the active and reactive
+/// components of this signal, so a non-finite `min_soc`/`max_soc` reaches
+/// the arm, is stored raw, and is then silently substituted with defaults
+/// downstream (`v2g_soc_reserve.max(NaN)` returns the reserve; the
+/// `limit.min(NaN)` cap no-ops) — a requested constraint that quietly
+/// never applies, the present-but-invalid silently-substituted shape.
+#[test]
+fn power_setpoint_rejects_non_finite_soc_window_on_checked_path() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    for signal in [
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: Some(f64::NAN),
+            max_soc: None,
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: Some(f64::NAN),
+        },
+    ] {
+        let err = ev
+            .apply_control(&signal)
+            .expect_err("non-finite PowerSetpoint SOC window must be rejected");
+        assert!(
+            format!("{err:?}").contains("soc"),
+            "error must name the offending field for {signal:?}, got {err:?}"
+        );
+    }
+}
+
+/// `SOCTarget` with finite but out-of-domain values must be rejected on the
+/// unchecked path too: the arm's new guards stop non-finite values, but a
+/// finite `target_soc` outside [0, 1] is silently clamped into a plausible
+/// target (5.0 → 1.0, −0.5 → 0.0 — the latter silently disarms charging,
+/// this initiative's original symptom class), and an inverted or
+/// out-of-domain window silently collapses the charge target
+/// (`limit.max(min).min(max)`: min 0.8 / max 0.2 caps a 0.9 target at 0.2;
+/// a window value above 1 or below 0 has no SOC meaning at all). The
+/// central validator rejects all of these on the checked path, and the
+/// battery arm rejects inverted bounds at the arm — the EV arm must not be
+/// the one surface where garbage quietly becomes a different constraint.
+#[test]
+fn soc_target_rejects_out_of_domain_values_on_unchecked_path() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    for bad in [
+        ControlSignal::SOCTarget {
+            target_soc: 5.0,
+            min_soc: None,
+            max_soc: None,
+        },
+        ControlSignal::SOCTarget {
+            target_soc: -0.5,
+            min_soc: None,
+            max_soc: None,
+        },
+        ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        },
+        ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: Some(7.5),
+            max_soc: None,
+        },
+        ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: None,
+            max_soc: Some(-0.1),
+        },
+    ] {
+        let err = ev
+            .apply_control_unchecked(&bad)
+            .expect_err("out-of-domain SOCTarget must be rejected");
+        assert!(
+            format!("{err:?}").to_lowercase().contains("soc"),
+            "error must name the signal or offending field for {bad:?}, got {err:?}"
+        );
+    }
+}
+
+/// `PowerSetpoint`'s SOC window must be domain-checked on the unchecked
+/// path too: the arm's new guards stop non-finite values, but a finite
+/// out-of-domain or inverted window is stored raw and silently rewrites
+/// behaviour — `min_soc` above 1 puts the v2g/v2l discharge floor above
+/// any reachable SOC (discharge permanently disabled), an inverted window
+/// caps the charge target at the max while flooring at the min, and a
+/// negative `max_soc` disarms charging outright. The central validator
+/// rejects range and ordering on the checked path; the arm must not be the
+/// surface where the same garbage quietly applies as a different
+/// constraint.
+#[test]
+fn power_setpoint_rejects_out_of_domain_soc_window_on_unchecked_path() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    for signal in [
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: Some(7.5),
+            max_soc: None,
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: Some(-0.1),
+        },
+    ] {
+        let err = ev
+            .apply_control_unchecked(&signal)
+            .expect_err("out-of-domain PowerSetpoint SOC window must be rejected");
+        assert!(
+            format!("{err:?}").to_lowercase().contains("soc"),
+            "error must name the signal or offending field for {signal:?}, got {err:?}"
+        );
+    }
+}
+
+/// An EV built through the ordinary construction path must always be
+/// provisioned with an EvDriverActor seed: that actor is the only built-in
+/// mechanism that simulates vehicle departures and depletes SOC. Withholding
+/// it leaves the EV parked at its initial SOC forever, so it never charges.
+#[test]
+fn actor_seed_default_strategy_returns_ev_seed() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    match ev.actor_seed() {
+        Some(crate::ActorSeed::Ev { strategy, .. }) => {
+            assert_eq!(
+                strategy,
+                hares_types::ChargingStrategy::Immediate { target_soc: 1.0 }
+            );
+        }
+        other => panic!("expected Some(ActorSeed::Ev) for default strategy, got {other:?}"),
+    }
+}
+
+/// An explicit `Immediate` override must not suppress the driver either:
+/// it selects charging behaviour, not the absence of vehicle use.
+#[test]
+fn actor_seed_immediate_strategy_returns_ev_seed() {
+    let mut raw = base_raw();
+    let json = serde_json::to_string(&hares_types::ChargingStrategy::Immediate { target_soc: 0.8 })
+        .unwrap();
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text(json),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    match ev.actor_seed() {
+        Some(crate::ActorSeed::Ev { strategy, .. }) => {
+            assert_eq!(
+                strategy,
+                hares_types::ChargingStrategy::Immediate { target_soc: 0.8 }
+            );
+        }
+        other => panic!("expected Some(ActorSeed::Ev) for Immediate strategy, got {other:?}"),
+    }
+}
+
+/// Class rule: no `ChargingStrategy` variant may suppress the driver seed.
+/// Charging strategy selects *when/how* to charge, never *whether* the
+/// vehicle is used.
+#[test]
+fn actor_seed_returns_ev_seed_for_every_charging_strategy() {
+    let strategies = vec![
+        hares_types::ChargingStrategy::Immediate { target_soc: 0.9 },
+        hares_types::ChargingStrategy::Nightly {
+            off_peak_start_hour: 23.0,
+            off_peak_end_hour: 6.0,
+            target_soc: 0.9,
+        },
+        hares_types::ChargingStrategy::LowSoc {
+            threshold: 0.3,
+            target_soc: 0.9,
+        },
+        hares_types::ChargingStrategy::QuickThenWait { partial_soc: 0.6 },
+        hares_types::ChargingStrategy::PreDeparture {
+            target_soc: 0.9,
+            departure_schedule: vec![],
+        },
+        hares_types::ChargingStrategy::TouAware {
+            target_soc: 0.9,
+            departure_schedule: vec![],
+            charge_buffer_hours: 2.0,
+        },
+        hares_types::ChargingStrategy::SolarSurplus {
+            min_charge_rate_kw: 1.4,
+            departure_schedule: vec![],
+        },
+        hares_types::ChargingStrategy::V2H {
+            discharge_threshold_soc: 0.8,
+            min_soc: 0.3,
+        },
+        hares_types::ChargingStrategy::V2G {
+            min_soc: 0.3,
+            max_export_kw: 7.2,
+            price_threshold: 0.25,
+        },
+    ];
+
+    for expected in &strategies {
+        let mut raw = base_raw();
+        let json = serde_json::to_string(expected).unwrap();
+        raw.insert(
+            KEY_CHARGING_STRATEGY.to_string(),
+            crate::config::ConfigValue::Text(json),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).unwrap();
+
+        match ev.actor_seed() {
+            Some(crate::ActorSeed::Ev { strategy, .. }) => {
+                assert_eq!(&strategy, expected);
+            }
+            other => {
+                panic!("strategy {expected:?} must still produce an Ev driver seed, got {other:?}")
+            }
+        }
+    }
+
+    // Exhaustiveness tripwire: this match names every `ChargingStrategy`
+    // variant with no wildcard arm, so adding a variant to the enum fails
+    // compilation here until the author adds a sample to the list above —
+    // a new variant cannot silently escape the every-variant assertion.
+    for s in &strategies {
+        match s {
+            hares_types::ChargingStrategy::Immediate { .. }
+            | hares_types::ChargingStrategy::Nightly { .. }
+            | hares_types::ChargingStrategy::LowSoc { .. }
+            | hares_types::ChargingStrategy::QuickThenWait { .. }
+            | hares_types::ChargingStrategy::PreDeparture { .. }
+            | hares_types::ChargingStrategy::TouAware { .. }
+            | hares_types::ChargingStrategy::SolarSurplus { .. }
+            | hares_types::ChargingStrategy::V2H { .. }
+            | hares_types::ChargingStrategy::V2G { .. } => {}
+        }
+    }
+}
+
+/// A malformed `charging_strategy` override must fail loudly at `init()`,
+/// never degrade silently: an EV that parsed a mistyped override as the
+/// default `Immediate` would run a whole simulation with behaviour the
+/// operator never asked for and no signal that anything was wrong.
+#[test]
+fn init_errors_on_malformed_charging_strategy_override() {
+    let mut raw = base_raw();
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text("not valid json".to_string()),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+
+    let err = ev
+        .init(&config, &sample_env())
+        .expect_err("malformed charging_strategy must fail init, not fall back to a default");
+    assert!(
+        format!("{err:?}").contains("invalid charging_strategy"),
+        "error must name the offending key, got {err:?}"
+    );
+}
+
+/// A `charging_strategy` override that is well-formed JSON but carries
+/// domain-invalid values must fail `init()` just like malformed JSON does.
+/// The parse at `init_typed` is the boundary where the value enters the
+/// system, and the auto-attached driver acts on these numbers directly: a
+/// `target_soc` above 1.0 can never be reached, an off-peak hour >= 24
+/// matches no time of day, and a `LowSoc` threshold above 1.0 gates
+/// charging on permanently -- each leaves the EV never (or always)
+/// charging with no signal that the configured value was nonsense.
+#[test]
+fn init_errors_on_domain_invalid_charging_strategy_override() {
+    let bad_strategies = [
+        r#"{"Immediate":{"target_soc":1.5}}"#,
+        r#"{"Immediate":{"target_soc":-0.1}}"#,
+        r#"{"Nightly":{"off_peak_start_hour":24.0,"off_peak_end_hour":6.0,"target_soc":0.9}}"#,
+        r#"{"LowSoc":{"threshold":1.2,"target_soc":0.9}}"#,
+    ];
+
+    for bad in bad_strategies {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_STRATEGY.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("domain-invalid charging_strategy must fail init");
+        assert!(
+            format!("{err:?}").contains("charging_strategy"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// An `initial_connection_state` override that does not name a real
+/// `EvConnectionState` must fail `init()` loudly. A caller asking for the
+/// vehicle to start away (e.g. `"AwayUnplugged"`, or a typo of a real
+/// variant) must not silently get a vehicle parked at home plugged in: the
+/// wrong starting condition changes every departure/charge decision the
+/// simulation makes and leaves no trace that the configured value was
+/// dropped.
+#[test]
+fn init_errors_on_unparseable_initial_connection_state_override() {
+    let bad_states = ["AwayUnplugged", "HomPluggedIn"];
+
+    for bad in bad_states {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unparseable initial_connection_state must fail init");
+        assert!(
+            format!("{err:?}").contains("initial_connection_state"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// A `charging_level` override that names no real level must fail `init()`
+/// loudly: the level sizes the EVSE power bounds, so an unrecognised string
+/// silently becoming L2 would silently clamp the configured charge power.
+/// Both spellings HPXML and the python surface supply must keep working.
+#[test]
+fn init_errors_on_unknown_charging_level_override() {
+    for bad in ["L3", "DC", "Level 12"] {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_LEVEL.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unknown charging_level must fail init");
+        assert!(
+            format!("{err:?}").contains("charging_level"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn accepted_charging_level_spellings_parse() {
+    for (good, expected) in [
+        ("L1", ChargingLevel::L1),
+        ("Level 1", ChargingLevel::L1),
+        ("1", ChargingLevel::L1),
+        ("L2", ChargingLevel::L2),
+        ("Level 2", ChargingLevel::L2),
+        ("2", ChargingLevel::L2),
+    ] {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_LEVEL.to_string(),
+            crate::config::ConfigValue::Text(good.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).unwrap();
+        // No public level accessor: the telemetry code (1 = L1, 2 = L2) is
+        // the observable contract.
+        let level_code = ev
+            .telemetry()
+            .get(tk::CHARGING_LEVEL)
+            .expect("level telemetry");
+        let expected_code = match expected {
+            ChargingLevel::L1 => 1.0,
+            ChargingLevel::L2 => 2.0,
+        };
+        assert_eq!(level_code, expected_code, "spelling '{good}'");
+    }
+}
+
+/// An invalid raw-config value must not silently become its placeholder:
+/// `Ev::new` constructs (the factory cannot fail) but defers the error,
+/// and the first `init()` surfaces it before any simulation can run on the
+/// placeholder state.
+#[test]
+fn raw_config_invalid_values_defer_error_to_init() {
+    let mut raw = HashMap::new();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    // Domain-invalid strategy: parses as JSON, fails validate().
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text(r#"{"Immediate":{"target_soc":1.5}}"#.to_string()),
+    );
+    // Unknown charging level.
+    raw.insert(
+        KEY_CHARGING_LEVEL.to_string(),
+        crate::config::ConfigValue::Text("L3".to_string()),
+    );
+    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
+    let ev = Ev::new(config.clone());
+    // Constructed with placeholders, not silently valid:
+    assert_eq!(
+        ev.charging_strategy(),
+        &ChargingStrategy::Immediate { target_soc: 1.0 }
+    );
+
+    let mut ev = ev;
+    let err = ev
+        .init(&config, &sample_env())
+        .expect_err("deferred raw-config error must surface at init");
+    // The first invalid field (charging_level, parsed before strategy) wins.
+    assert!(
+        format!("{err:?}").contains("charging_level"),
+        "error must name the first offending key, got {err:?}"
+    );
+}
+
+/// An unknown `charging_priority` raw value must defer an error rather than
+/// silently becoming `DeadlineGuarantee`.
+#[test]
+fn raw_config_unknown_charging_priority_defers_error_to_init() {
+    let mut raw = HashMap::new();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(
+        KEY_CHARGING_PRIORITY.to_string(),
+        crate::config::ConfigValue::Text("ExternaAuthority".to_string()),
+    );
+    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
+    let mut ev = Ev::new(config.clone());
+    let err = ev
+        .init(&config, &sample_env())
+        .expect_err("unknown charging_priority must fail init");
+    assert!(
+        format!("{err:?}").contains("charging_priority"),
+        "error must name the offending key, got {err:?}"
+    );
+}
+
+/// An unparseable `chemistry` override must fail `init()` loudly: the
+/// silent fallback substituted NMC, whose open-circuit-voltage curve then
+/// drives every charge-voltage decision for a battery the operator did not
+/// configure, with no trace that the supplied value was dropped.
+#[test]
+fn init_errors_on_unparseable_chemistry_override() {
+    let bad_chemistries = ["Graphite", "lfp "]; // trailing space fails FromStr
+
+    for bad in bad_chemistries {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHEMISTRY.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unparseable chemistry must fail init");
+        assert!(
+            format!("{err:?}").contains("chemistry"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// A `plug_in_policy` override that is well-formed JSON but carries a
+/// domain-invalid threshold must fail `init()` for the same reason a
+/// domain-invalid `charging_strategy` must: the seed carries the policy
+/// into the auto-attached driver, whose `LowSoc` plug-in decision reads
+/// the raw threshold. A threshold below 0.0 can never be crossed, so the
+/// vehicle never plugs in and never charges -- the silent inert-EV shape,
+/// with no signal that the configured value was nonsense. A threshold
+/// above 1.0 is crossed permanently and degrades to `Always`.
+#[test]
+fn init_errors_on_domain_invalid_plug_in_policy_override() {
+    let bad_policies = [
+        r#"{"LowSoc":{"threshold":1.5}}"#,
+        r#"{"LowSoc":{"threshold":-0.1}}"#,
+    ];
+
+    for bad in bad_policies {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_PLUG_IN_POLICY.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("domain-invalid plug_in_policy must fail init");
+        assert!(
+            format!("{err:?}").contains("plug_in_policy"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// An unrecognized `charging_level` override must fail `init()` loudly.
+/// Every other string key in this parse rejects a present-but-unknown
+/// value; `charging_level` alone still maps anything it does not
+/// recognize onto `L2`, including `L3` (a real charging concept this
+/// model does not support -- silently simulating it as L2 misconfigures
+/// the power clamp) and `Level-1`, an L1-intent spelling the L1 arms do
+/// not list, which silently becomes L2 and charges at 4-6x the intended
+/// power. An empty string is likewise present-but-meaningless.
+#[test]
+fn init_errors_on_unrecognized_charging_level_override() {
+    let bad_levels = ["L3", "Level-1", ""];
+
+    for bad in bad_levels {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_LEVEL.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unrecognized charging_level must fail init");
+        assert!(
+            format!("{err:?}").contains("charging_level"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// A `charging_strategy` override carrying a field name the variant does
+/// not define must fail `init()` loudly. Serde silently ignores unknown
+/// fields by default, so a typo like `off_peak_statr_hour` drops the
+/// operator's intended parameter while the strategy still parses and
+/// validates -- the run then executes a different charging schedule than
+/// the one configured, with no trace that any field was discarded. This
+/// is the field-level form of the "override content is discarded"
+/// failure this initiative was opened on.
+#[test]
+fn init_errors_on_unknown_charging_strategy_fields() {
+    let bad_overrides = [
+        r#"{"Nightly":{"off_peak_start_hour":22.0,"off_peak_end_hour":6.0,"target_soc":0.9,"off_peak_statr_hour":23.0}}"#,
+    ];
+
+    for bad in bad_overrides {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_STRATEGY.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unknown charging_strategy fields must fail init");
+        assert!(
+            format!("{err:?}").contains("charging_strategy"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
+}
+
+/// An unknown field inside a `DepartureConstraint` nested in a strategy's
+/// `departure_schedule` must fail `init()` loudly, for the same reason an
+/// unknown field on the strategy variant itself must: the
+/// `deny_unknown_fields` sweep covered `ChargingStrategy` and its sibling
+/// override types but not the struct nested one level deeper inside them.
+/// A plausible field the model does not have (a readiness minute such as
+/// `ready_by_minut`) is silently dropped while the constraint still
+/// parses -- the operator believes they configured a departure-readiness
+/// deadline the simulation never sees.
+#[test]
+fn init_errors_on_unknown_departure_constraint_fields() {
+    let bad_overrides = [
+        r#"{"PreDeparture":{"target_soc":0.9,"departure_schedule":[{"day_filter":"Any","departure_minute":480,"target_soc":0.8,"ready_by_minut":300}]}}"#,
+        r#"{"TouAware":{"target_soc":0.9,"charge_buffer_hours":2.0,"departure_schedule":[{"day_filter":"Any","departure_minute":480,"target_soc":0.8,"priority":1}]}}"#,
+    ];
+
+    for bad in bad_overrides {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_CHARGING_STRATEGY.to_string(),
+            crate::config::ConfigValue::Text(bad.to_string()),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+
+        let err = ev
+            .init(&config, &sample_env())
+            .expect_err("unknown DepartureConstraint fields must fail init");
+        assert!(
+            format!("{err:?}").contains("charging_strategy"),
+            "error must name the offending key for override '{bad}', got {err:?}"
+        );
+    }
 }

@@ -908,7 +908,7 @@ impl Equipment for IdealHvac {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::IdealCapacity {
                 capacity_w,
@@ -3150,6 +3150,56 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
         eq
+    }
+
+    #[test]
+    fn out_of_domain_ideal_capacity_and_deadband_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // The arm stores IdealCapacity raw and silently no-ops an invalid
+        // deadband (`if db.is_finite() && *db >= 0.0` — a negative deadband
+        // is dropped without an error, and an over-range one is stored into
+        // hysteresis). The central validator rejects non-finite capacity and
+        // out-of-range deadbands on the checked path. Negative capacity is
+        // legitimate (cooling), so the capacity probe is non-finite only.
+        let cfg = ideal_config("IH-domain", 20.0, 26.0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        let e = env(18.0, 300, 0);
+        eq.init(&cfg, &e).unwrap();
+
+        for (bad, token) in [
+            (
+                ControlSignal::IdealCapacity {
+                    capacity_w: f64::NAN,
+                    degraded: false,
+                },
+                "capacity",
+            ),
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(20.0),
+                    cooling_setpoint_c: None,
+                    deadband_c: Some(-1.0),
+                },
+                "deadband",
+            ),
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(20.0),
+                    cooling_setpoint_c: None,
+                    deadband_c: Some(100.0),
+                },
+                "deadband",
+            ),
+        ] {
+            let err = eq
+                .apply_control_unchecked(&bad)
+                .expect_err("out-of-domain control value must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains(token),
+                "error must name the offending signal for {bad:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

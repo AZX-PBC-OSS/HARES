@@ -455,7 +455,7 @@ impl Equipment for ElectricFurnace {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         if apply_simple_mode_override_and_dr(
             &mut self.mode_override,
             &mut self.dr_level,
@@ -851,7 +851,7 @@ impl Equipment for GasFurnace {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         if apply_simple_mode_override_and_dr(
             &mut self.mode_override,
             &mut self.dr_level,
@@ -1318,6 +1318,60 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // The heating path stores the deadband raw into hysteresis
+        // (helpers.rs), stores MaxCapacityFraction raw (hvac_core), resolves
+        // a non-finite IdealCapacity to duty 0 with no error, and the
+        // thermostat path stores a NaN setpoint because every comparison
+        // against NaN is false (the deadband auto-correct never fires). The
+        // central validator rejects all of these on the checked path.
+        let cfg = ef_config(8_000.0, 1.05);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let state = env(18.0);
+        eq.init(&cfg, &state).unwrap();
+
+        for (bad, token) in [
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(f64::NAN),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                },
+                "setpoint",
+            ),
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: None,
+                    deadband_c: Some(100.0),
+                },
+                "deadband",
+            ),
+            (
+                ControlSignal::MaxCapacityFraction { fraction: 5.0 },
+                "capacity",
+            ),
+            (
+                ControlSignal::IdealCapacity {
+                    capacity_w: f64::NAN,
+                    degraded: false,
+                },
+                "capacity",
+            ),
+        ] {
+            let err = eq
+                .apply_control_unchecked(&bad)
+                .expect_err("out-of-domain control value must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains(token),
+                "error must name the offending signal for {bad:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

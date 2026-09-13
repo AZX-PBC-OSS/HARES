@@ -587,7 +587,7 @@ impl Equipment for TanklessWH {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -1395,6 +1395,44 @@ mod tests {
             (thermal - capacity_w).abs() < 1e-6,
             "thermal output must equal capacity ({capacity_w} W), got {thermal}"
         );
+    }
+
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // The arm silently clamps an out-of-domain LoadFraction into [0, 1]
+        // and accepts any finite setpoint — the DutyCycle arm in this same
+        // file rejects out-of-domain values, and the central validator
+        // rejects both signals on the checked path, so the same garbage must
+        // not silently become a different constraint here.
+        let cfg = config();
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        for bad_setpoint in [5000.0, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(bad_setpoint),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                })
+                .expect_err("out-of-domain setpoint must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("setpoint"),
+                "error must name the field for {bad_setpoint}, got {err:?}"
+            );
+        }
     }
 
     /// Over-capacity with duty cycle < 1: time-averaged output = max_power * duty.

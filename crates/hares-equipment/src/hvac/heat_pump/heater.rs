@@ -451,7 +451,7 @@ impl Equipment for HeatPumpHeaterCore {
         self.load_state(state)
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         self.apply_control_unchecked(signal)
     }
 }
@@ -2623,6 +2623,8 @@ impl HeatPumpHeaterCore {
         Ok(())
     }
 
+    /// The heater's control arm (reached via the `Equipment` trait's
+    /// `apply_signal` forwarder above).
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint { deadband_c, .. } => {
@@ -3119,6 +3121,68 @@ mod tests {
         let mut e = env(zone_temp_c, outdoor_c, outdoor_w);
         e.current_time += ChronoDuration::seconds(seconds);
         e
+    }
+
+    /// The heater core keeps its own raw-store arm — a third distinct
+    /// match, not the AC core's and not the shared heating helpers — so it
+    /// is the one arm family the class fix's per-arm tests never drove.
+    /// Pin that the `Equipment` trait's gated boundary fronts it: every
+    /// out-of-domain value the central validator rejects must be refused
+    /// on the unchecked path too.
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+
+        for (bad, token) in [
+            (
+                ControlSignal::DutyCycle {
+                    on_fraction: 1.5,
+                    period_s: None,
+                    component: None,
+                },
+                "duty",
+            ),
+            (ControlSignal::LoadFraction { fraction: 5.0 }, "fraction"),
+            (
+                ControlSignal::PowerLimit {
+                    max_power_kw: -5.0,
+                    ramp_rate_kw_per_s: None,
+                },
+                "power",
+            ),
+            (
+                ControlSignal::MaxCapacityFraction { fraction: 5.0 },
+                "capacity",
+            ),
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(20.0),
+                    cooling_setpoint_c: None,
+                    deadband_c: Some(100.0),
+                },
+                "deadband",
+            ),
+            (
+                ControlSignal::IdealCapacity {
+                    capacity_w: f64::NAN,
+                    degraded: false,
+                },
+                "capacity",
+            ),
+        ] {
+            let err = eq
+                .apply_control_unchecked(&bad)
+                .expect_err("out-of-domain control value must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains(token),
+                "error must name the offending signal for {bad:?}, got {err:?}"
+            );
+        }
     }
 
     /// `resolved_zip` on an ASHP heater reports the primary (compressor)

@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
 use hares_physics::units::power_kw_to_w;
+use hares_types::parse_trimmed_f64;
 /// ZIP load model parameters for voltage-dependent power modelling.
 ///
 /// Re-exported from the shared contract crate: `defaults/zip_parameters.toml`
@@ -1086,8 +1087,8 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     values.push(0.0);
                 }
                 Some(raw) => match raw.parse::<f64>() {
-                    Ok(v) => values.push(v),
-                    Err(_) => {
+                    Ok(v) if v.is_finite() => values.push(v),
+                    Ok(_) | Err(_) => {
                         tracing::warn!(
                             path = %path.display(),
                             row = %row_name,
@@ -1429,7 +1430,7 @@ fn parse_optional_f64(raw: Option<&String>) -> Option<f64> {
         if trimmed.is_empty() {
             None
         } else {
-            trimmed.parse::<f64>().ok()
+            parse_trimmed_f64(trimmed)
         }
     })
 }
@@ -1441,10 +1442,7 @@ fn parse_efficiency_cell(raw: &str) -> (f64, String) {
     }
 
     let mut parts = trimmed.split_whitespace();
-    let value = parts
-        .next()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.0);
+    let value = parts.next().and_then(parse_trimmed_f64).unwrap_or(0.0);
     let kind = parts.next().unwrap_or("SEER").to_ascii_uppercase();
     (value, kind)
 }

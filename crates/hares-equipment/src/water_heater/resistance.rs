@@ -122,6 +122,25 @@ pub struct ResistanceWH {
     draw_tracker: super::DrawVolumeTracker,
 }
 
+/// Parse an `element_priority_mode` override (case/whitespace-insensitive).
+///
+/// An unrecognised value is a configuration error, not silently
+/// `MasterSlave`: the mode decides whether both heating elements can draw
+/// power at once (NEC interlock behaviour depends on it).
+fn parse_element_priority_mode(mode: Option<&str>) -> Result<ElementPriorityMode, HaresError> {
+    let Some(s) = mode else {
+        return Ok(ElementPriorityMode::MasterSlave);
+    };
+    match crate::config::normalize_config_name(s).as_str() {
+        "simultaneous" => Ok(ElementPriorityMode::Simultaneous),
+        "masterslave" => Ok(ElementPriorityMode::MasterSlave),
+        _ => Err(HaresError::Equipment(format!(
+            "invalid element_priority_mode '{s}': expected Simultaneous or MasterSlave \
+             (case/whitespace/underscore-insensitive)"
+        ))),
+    }
+}
+
 impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
@@ -342,10 +361,7 @@ impl ResistanceWH {
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.element_priority = match c.element_priority_mode.as_deref() {
-            Some("Simultaneous") | Some("simultaneous") => ElementPriorityMode::Simultaneous,
-            _ => ElementPriorityMode::MasterSlave,
-        };
+        self.element_priority = parse_element_priority_mode(c.element_priority_mode.as_deref())?;
         self.max_combined_power_w = c.max_combined_power_w;
         if self.element_priority == ElementPriorityMode::Simultaneous
             && self.max_combined_power_w.is_none()
@@ -823,7 +839,7 @@ impl Equipment for ResistanceWH {
         Ok(())
     }
 
-    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -1329,6 +1345,43 @@ mod tests {
         assert_eq!(mode, hares_types::OperatingMode::Heating);
         assert!(!eq.upper_element_on);
         assert!(eq.lower_element_on);
+    }
+
+    /// Out-of-domain control values must be rejected, not silently clamped
+    /// or accepted, on the unchecked path (see the test body for the class).
+    #[test]
+    fn out_of_domain_control_values_rejected_on_unchecked_path() {
+        // The arm silently clamps an out-of-domain LoadFraction into [0, 1]
+        // and accepts any finite setpoint — the DutyCycle arm in this same
+        // file rejects out-of-domain values, and the central validator
+        // rejects both signals on the checked path, so the same garbage must
+        // not silently become a different constraint here.
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        for bad in [5.0, -0.5, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        for bad_setpoint in [5000.0, f64::NAN] {
+            let err = eq
+                .apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(bad_setpoint),
+                    cooling_setpoint_c: None,
+                    deadband_c: None,
+                })
+                .expect_err("out-of-domain setpoint must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("setpoint"),
+                "error must name the field for {bad_setpoint}, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -2046,6 +2099,36 @@ mod element_priority_tests {
             custom: vec![],
             humidity: vec![],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn init_errors_on_unknown_element_priority_mode() {
+        // A typo must not silently become MasterSlave: the mode decides
+        // whether both elements can draw power at once.
+        let cfg = cold_config("Simultaneus");
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env_state())
+            .expect_err("unknown element_priority_mode must fail init");
+        assert!(
+            format!("{err:?}").contains("element_priority_mode"),
+            "error must name the offending key, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_element_priority_mode_spellings_parse() {
+        for (mode, expected) in [
+            ("Simultaneous", ElementPriorityMode::Simultaneous),
+            ("simultaneous", ElementPriorityMode::Simultaneous),
+            ("MasterSlave", ElementPriorityMode::MasterSlave),
+            ("master slave", ElementPriorityMode::MasterSlave),
+        ] {
+            let cfg = cold_config(mode);
+            let mut eq = ResistanceWH::new(cfg.clone());
+            eq.init(&cfg, &env_state()).unwrap();
+            assert_eq!(eq.element_priority, expected, "spelling '{mode}'");
         }
     }
 

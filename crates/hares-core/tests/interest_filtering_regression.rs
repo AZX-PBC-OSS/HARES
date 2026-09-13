@@ -161,7 +161,7 @@ impl Actor for CountingActor {
 fn every_step_actor_called_every_step() {
     let mut dwelling = build_dwelling("every_step", "2024-06-15T12:00:00Z", 7200);
     let (_actor, count) = CountingActor::new("every_step_actor", vec![]);
-    dwelling.add_actor(Box::new(_actor));
+    dwelling.add_actor(Box::new(_actor)).unwrap();
 
     dwelling.step().expect("step 1");
     assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -177,7 +177,7 @@ fn every_step_actor_called_every_step() {
 fn every_step_variant_called_every_step() {
     let mut dwelling = build_dwelling("every_step_var", "2024-06-15T12:00:00Z", 7200);
     let (_actor, count) = CountingActor::new("every_step_actor", vec![ActorInterest::EveryStep]);
-    dwelling.add_actor(Box::new(_actor));
+    dwelling.add_actor(Box::new(_actor)).unwrap();
 
     dwelling.step().expect("step 1");
     assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -192,7 +192,7 @@ fn time_of_day_actor_called_at_matching_hour_skipped_elsewhere() {
     let mut dwelling = build_dwelling("tod", "2024-06-15T12:00:00Z", 7200);
     let (actor, count) =
         CountingActor::new("tod_actor", vec![ActorInterest::TimeOfDay { hour: 12 }]);
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     // First step is at hour 12 — should trigger.
     dwelling.step().expect("step at hour 12");
@@ -239,7 +239,7 @@ fn zone_temperature_delta_actor_skipped_on_small_delta() {
             threshold_c: 2.0,
         }],
     );
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     // Step 1: prior_zone_temps empty → triggers (first step).
     dwelling.step().expect("step 1");
@@ -282,7 +282,7 @@ fn zone_temperature_delta_actor_called_when_threshold_exceeded() {
             threshold_c: 2.0,
         }],
     );
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     // Step 1: prior_zone_temps empty → triggers.
     let result1 = dwelling.step().expect("step 1");
@@ -339,7 +339,7 @@ fn multiple_interests_call_actor_when_any_triggers() {
             ActorInterest::PriceSignalChange,
         ],
     );
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     dwelling.step().expect("step 1");
     assert_eq!(
@@ -360,7 +360,7 @@ fn multiple_interests_call_actor_when_any_triggers() {
 fn empty_interests_treated_as_every_step() {
     let mut dwelling = build_dwelling("empty_interests", "2024-06-15T12:00:00Z", 7200);
     let (actor, count) = CountingActor::new("empty_actor", vec![]);
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     dwelling.step().expect("step 1");
     assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -376,7 +376,7 @@ fn empty_interests_treated_as_every_step() {
 fn price_signal_change_actor_triggered_on_first_step() {
     let mut dwelling = build_dwelling("price_change", "2024-06-15T12:00:00Z", 7200);
     let (actor, count) = CountingActor::new("price_actor", vec![ActorInterest::PriceSignalChange]);
-    dwelling.add_actor(Box::new(actor));
+    dwelling.add_actor(Box::new(actor)).unwrap();
 
     // First step: prev_zone_temps is empty → PriceSignalChange triggers.
     dwelling.step().expect("step 1");

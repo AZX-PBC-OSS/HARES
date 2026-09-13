@@ -8,7 +8,7 @@ use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_types::FuelType;
+use hares_types::{FuelType, parse_trimmed_f64};
 
 use super::building::{Building, XmlNode};
 use super::data_patches::HpxmlDataPatches;
@@ -444,7 +444,7 @@ fn parse_avg_water_draw_and_bedrooms(
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
-        .and_then(|n| n.text.trim().parse::<f64>().ok())
+        .and_then(|n| parse_trimmed_f64(&n.text))
     {
         Some(v) => v,
         None => resolve_bedroom_count(None, data_patches),
@@ -453,7 +453,7 @@ fn parse_avg_water_draw_and_bedrooms(
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
     let n_occupants = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
-        .and_then(|n| n.text.trim().parse::<f64>().ok());
+        .and_then(|n| parse_trimmed_f64(&n.text));
     let house_type = details
         .path(&[
             "BuildingSummary",
@@ -517,7 +517,7 @@ pub fn extract_bedroom_count(building: &Building, data_patches: Option<&HpxmlDat
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
-        .and_then(|n| n.text.trim().parse::<f64>().ok());
+        .and_then(|n| parse_trimmed_f64(&n.text));
     raw.or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
         .unwrap_or(2.0)
 }
@@ -644,7 +644,7 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
             "ConditionedFloorArea",
         ])
         .and_then(|n| {
-            let val = n.text.trim().parse::<f64>().ok()?;
+            let val = parse_trimmed_f64(&n.text)?;
             // HPXML ConditionedFloorArea may carry a `units` attribute; default is ft2.
             let units = n.attrs.get("units").map(String::as_str).unwrap_or("ft2");
             if units.eq_ignore_ascii_case("m2") {
@@ -667,7 +667,7 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
                 "NumberofConditionedFloorsAboveGrade",
             ])
         })
-        .and_then(|n| n.text.trim().parse::<f64>().ok())
+        .and_then(|n| parse_trimmed_f64(&n.text))
         .unwrap_or(1.0)
         .max(1.0);
 
