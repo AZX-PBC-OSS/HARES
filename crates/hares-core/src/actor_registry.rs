@@ -32,7 +32,7 @@ use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
 use hares_types::{DRLevel, EndUse, HaresError};
 
-use hares_equipment::ev::catalog::archetype_by_id;
+use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
 
 use crate::Actor;
@@ -324,8 +324,27 @@ impl ActorRegistry {
                     HaresError::Control("EvDriver requires 'seed' parameter".into())
                 })? as u64;
 
-                // If a preset is specified, load defaults from the archetype catalog
-                let preset = config.get_str("preset").and_then(archetype_by_id);
+                // If a preset is specified, load defaults from the archetype
+                // catalog. A present-but-unresolvable id is a config error:
+                // silently falling through to the default strategy would
+                // change simulated charging behavior without any signal.
+                let preset = match config.get_str("preset") {
+                    Some(id) => Some(archetype_by_id(id).ok_or_else(|| {
+                        let valid = EvArchetypeId::ALL
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        // NB: no apostrophes around {id} — the core
+                        // source-scan test's sanitizer pairs apostrophes
+                        // naively, and an inserted pair shifts the pairing
+                        // file-wide (see no_string_telemetry_reads_in_core).
+                        HaresError::Control(format!(
+                            "unknown EvDriver preset {id}: valid presets are {valid}"
+                        ))
+                    })?),
+                    None => None,
+                };
 
                 let seed_bytes = {
                     let mut b = [0u8; 32];
@@ -634,6 +653,31 @@ mod tests {
             .create(config)
             .expect("create ev driver with preset");
         assert_eq!(actor.name(), "Driver2");
+    }
+
+    #[test]
+    fn actor_registry_create_ev_driver_unknown_preset_errors() {
+        // A present-but-typo'd preset must fail loudly — silently falling
+        // through to the default strategy would change simulated charging
+        // behavior with no signal to the user.
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver3", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0))
+            .with_param("preset", ConfigValue::Text("daily_commuter_typo".into()));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("unknown preset must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daily_commuter_typo"),
+            "error must name the bad preset value: {msg}"
+        );
+        assert!(
+            msg.contains("DailyCommuterL2"),
+            "error must list the valid preset ids: {msg}"
+        );
     }
 
     #[test]
