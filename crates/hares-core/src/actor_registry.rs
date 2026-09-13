@@ -32,7 +32,7 @@ use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
 use hares_types::{DRLevel, EndUse, HaresError};
 
-use hares_equipment::ev::catalog::archetype_by_id;
+use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
 
 use crate::Actor;
@@ -324,8 +324,42 @@ impl ActorRegistry {
                     HaresError::Control("EvDriver requires 'seed' parameter".into())
                 })? as u64;
 
-                // If a preset is specified, load defaults from the archetype catalog
-                let preset = config.get_str("preset").and_then(archetype_by_id);
+                // If a preset is specified, load defaults from the archetype
+                // catalog. A present-but-unresolvable id is a config error:
+                // silently falling through to the default strategy would
+                // change simulated charging behavior without any signal. A
+                // present-but-non-string value is an error for the same
+                // reason — the user clearly intended a preset.
+                let preset = match config.parameters.get("preset") {
+                    None => None,
+                    Some(ConfigValue::Text(id)) => Some(archetype_by_id(id).ok_or_else(|| {
+                        let valid = EvArchetypeId::ALL
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        // NB: no apostrophes around {id} — the core
+                        // source-scan test's sanitizer pairs apostrophes
+                        // naively, and an inserted pair shifts the pairing
+                        // file-wide (see no_string_telemetry_reads_in_core).
+                        HaresError::Control(format!(
+                            "unknown EvDriver preset {id}: valid presets are {valid}"
+                        ))
+                    })?),
+                    Some(other) => {
+                        let actual = match other {
+                            ConfigValue::Float(_) => "float",
+                            ConfigValue::Text(_) => "string",
+                            ConfigValue::Bool(_) => "bool",
+                            ConfigValue::FloatArray(_) => "float array",
+                        };
+                        // NB: no apostrophes around {other} — see the
+                        // source-scan sanitizer note on the preset error above.
+                        return Err(HaresError::Control(format!(
+                            "EvDriver preset must be a string id, got {actual}: {other}"
+                        )));
+                    }
+                };
 
                 let seed_bytes = {
                     let mut b = [0u8; 32];
@@ -483,6 +517,14 @@ impl ActorRegistry {
                         )));
                     }
                 };
+                // This closure is the user-facing boundary, so validate here;
+                // BatteryManagementActor::new/with_name stay unvalidated
+                // internal constructors (battery init validates its own path).
+                // NB: no apostrophes around {mode_str} — see the source-scan
+                // sanitizer note on the EvDriver preset error above.
+                bms_mode.validate().map_err(|e| {
+                    HaresError::Control(format!("invalid BatteryManagement mode {mode_str}: {e}"))
+                })?;
                 let export_str = config.get_str("grid_export_rule").unwrap_or("unrestricted");
                 let grid_export_rule = match export_str {
                     "unrestricted" => GridExportRule::Unrestricted,
@@ -634,6 +676,95 @@ mod tests {
             .create(config)
             .expect("create ev driver with preset");
         assert_eq!(actor.name(), "Driver2");
+    }
+
+    #[test]
+    fn actor_registry_create_ev_driver_unknown_preset_errors() {
+        // A present-but-typo'd preset must fail loudly — silently falling
+        // through to the default strategy would change simulated charging
+        // behavior with no signal to the user.
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver3", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0))
+            .with_param("preset", ConfigValue::Text("daily_commuter_typo".into()));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("unknown preset must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daily_commuter_typo"),
+            "error must name the bad preset value: {msg}"
+        );
+        assert!(
+            msg.contains("DailyCommuterL2"),
+            "error must list the valid preset ids: {msg}"
+        );
+    }
+
+    #[test]
+    fn actor_registry_create_ev_driver_non_string_preset_errors() {
+        // A non-string preset (e.g. `preset = 3` in a TOML table) must not
+        // silently take the default branch either: the key is present, so
+        // the user intended a preset.
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver4", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0))
+            .with_param("preset", ConfigValue::Float(3.0));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("non-string preset must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string"),
+            "error must name the expected type: {msg}"
+        );
+        assert!(
+            msg.contains("float"),
+            "error must name the actual type: {msg}"
+        );
+    }
+
+    #[test]
+    fn actor_registry_create_battery_management_inverted_soc_window_errors() {
+        // The registry closure is the user-facing boundary: a domain-invalid
+        // mode must be rejected here, not construct silently.
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("BMS1", "BatteryManagement")
+            .with_param("target", ConfigValue::Text("BAT1".into()))
+            .with_param("steps_per_day", ConfigValue::Float(96.0))
+            .with_param("min_soc", ConfigValue::Float(0.9))
+            .with_param("max_soc", ConfigValue::Float(0.2));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("inverted SoC window must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("min_soc"),
+            "error must name the offending field: {msg}"
+        );
+    }
+
+    #[test]
+    fn actor_registry_create_battery_management_negative_deadband_errors() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("BMS2", "BatteryManagement")
+            .with_param("target", ConfigValue::Text("BAT1".into()))
+            .with_param("steps_per_day", ConfigValue::Float(96.0))
+            .with_param("surplus_deadband_kw", ConfigValue::Float(-1.0));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("negative surplus deadband must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("surplus_deadband_kw"),
+            "error must name the offending field: {msg}"
+        );
     }
 
     #[test]

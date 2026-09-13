@@ -3275,9 +3275,6 @@ impl Dwelling {
 
     /// Removes equipment by name and returns it.
     ///
-    /// Returns `Err` if no equipment with the given name exists.
-    /// Removes equipment by name and returns it.
-    ///
     /// Returns `Err` if no equipment with the given name exists. Actors
     /// targeting the removed equipment are evicted — a controller without
     /// its equipment is an orphan, and its survival would block re-adding a
@@ -5940,9 +5937,13 @@ impl Dwelling {
         self.prior_electrical_summary = ElectricalSummary {
             pv_generation_kw: -pv_kw,
             actual_pv_kw: -pv_kw,
+            // Charge-only subtraction for battery and EV alike: discharge
+            // power lands in generation_power_w, never in load_power_w, so
+            // subtracting a negative (discharging) value here would inflate
+            // the non-dispatchable base load.
             base_load_kw: power_w_to_kw(self.ports.electrical.load_power_w)
                 - battery_kw.max(0.0)
-                - ev_kw,
+                - ev_kw.max(0.0),
             net_grid_kw: net_grid,
             battery_power_kw: battery_kw,
             ev_power_kw: ev_kw,
@@ -8442,6 +8443,114 @@ mod tests {
         let telemetry = dwelling.telemetry();
 
         assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
+    }
+
+    /// Regression: an EV actively discharging (V2L, negative `ev_power_kw`)
+    /// must not raise `base_load_kw`. The electrical port already routes the
+    /// discharge into `generation_power_w`, so subtracting the *signed* EV
+    /// power from `load_power_w` added the discharge magnitude to the
+    /// non-dispatchable load — and the BMS caps its discharge at
+    /// `base_load_kw`, so the error fed a control decision.
+    #[test]
+    fn base_load_kw_excludes_ev_discharge() {
+        use hares_equipment::EvConfig;
+        use hares_equipment::ev::Ev;
+        use hares_equipment::scheduled_load::ScheduledLoad;
+        use std::collections::HashMap;
+
+        let toml_path = unique_temp_toml("base_load_ev_discharge");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let env = dwelling.latest_env().clone();
+
+        // 1.5 kW constant non-dispatchable load.
+        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+        raw.insert("power_schedule_source".to_string(), "constant".into());
+        raw.insert("power_constant_kw".to_string(), 1.5.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+        let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
+        let mut load = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
+        load.init(&config, &env).expect("init ScheduledLoad");
+        dwelling
+            .add_equipment(Box::new(load))
+            .expect("add_equipment must succeed");
+
+        // V2L-capable EV, plugged in at home by default.
+        let config = EquipmentConfig::from_typed(
+            "EV1".to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: 60.0,
+                charging_level: Some("L2".to_string()),
+                max_charging_power_kw: 7.2,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: Some(0.8),
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: Some(true),
+                v2l_soc_reserve: Some(0.2),
+                v2l_max_discharge_kw: Some(3.0),
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
+                cc_cv_transition_soc: None,
+                charging_priority: None,
+                discharge_respects_deadline: true,
+            },
+        )
+        .expect("typed EV config");
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &env).expect("init EV");
+        dwelling
+            .add_equipment(Box::new(ev))
+            .expect("add_equipment must succeed");
+
+        // Command a 2 kW discharge and step once.
+        dwelling.apply_control(
+            "EV1",
+            ControlSignal::PowerSetpoint {
+                active_power_kw: -2.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+        );
+        dwelling.step().expect("step with discharging EV");
+
+        let summary = &dwelling.prior_electrical_summary;
+        assert!(
+            summary.ev_power_kw < 0.0,
+            "EV must be actively discharging, got ev_power_kw = {}",
+            summary.ev_power_kw
+        );
+        assert!(
+            (summary.base_load_kw - 1.5).abs() < 1e-9,
+            "base_load_kw must equal the 1.5 kW non-dispatchable load; signed \
+             EV subtraction would have added the discharge (ev_power_kw = {}), \
+             got {}",
+            summary.ev_power_kw,
+            summary.base_load_kw
+        );
     }
 
     /// Equipment that reports less electric power in `CoreOutput` than it

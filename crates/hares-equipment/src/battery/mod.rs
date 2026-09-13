@@ -1057,8 +1057,13 @@ impl Battery {
             .clamp(f64::EPSILON, 1.0);
 
         if let Some(mode_str) = c.bms_mode.as_deref() {
-            self.bms_mode = serde_json::from_str(mode_str)
+            // Parse-then-validate, mirroring the EV charging_strategy path:
+            // JSON shape alone must not admit a domain-invalid mode.
+            let mode: BmsMode = serde_json::from_str(mode_str)
                 .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
+            mode.validate()
+                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
+            self.bms_mode = mode;
         }
         if let Some(rule_str) = c.grid_export_rule.as_deref() {
             self.grid_export_rule = serde_json::from_str(rule_str)
@@ -5219,6 +5224,48 @@ mod tests {
                 solar_only_charging: false,
                 surplus_deadband_kw: 0.0,
             }
+        );
+    }
+
+    #[test]
+    fn battery_domain_invalid_bms_mode_rejected() {
+        // JSON shape is fine but the domain values are not: init must run
+        // BmsMode::validate, not just serde. An inverted SoC window and a
+        // negative deadband are the two representative failures.
+        let inverted_window = BmsMode::SelfConsumption {
+            min_soc: 0.9,
+            max_soc: 0.2,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        };
+        let config = typed_battery_config(None, Some(inverted_window));
+        let mut bat = Battery::new(config.clone());
+        let err = bat
+            .init(&config, &warm_env())
+            .expect_err("inverted SoC window must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("bms_mode"), "error must name bms_mode: {msg}");
+        assert!(
+            msg.contains("min_soc"),
+            "error must carry the validator detail: {msg}"
+        );
+
+        let negative_deadband = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+            surplus_deadband_kw: -1.0,
+        };
+        let config = typed_battery_config(None, Some(negative_deadband));
+        let mut bat = Battery::new(config.clone());
+        let err = bat
+            .init(&config, &warm_env())
+            .expect_err("negative surplus deadband must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("bms_mode"), "error must name bms_mode: {msg}");
+        assert!(
+            msg.contains("surplus_deadband_kw"),
+            "error must carry the validator detail: {msg}"
         );
     }
 
