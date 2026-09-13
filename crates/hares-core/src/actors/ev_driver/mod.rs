@@ -1573,14 +1573,14 @@ mod tests {
 
     /// While the vehicle is plugged in at home and the equipment is actively
     /// charging (SOC climbing every step), the `needed_charge_hours` channel
-    /// must track the shrinking battery gap, not hold a frozen number. The fix
-    /// read ground truth into `soc` and `charge_kw`; `needed_charge_hours` is
-    /// still computed from the driver's *belief* (`perceived_soc()`), which is
-    /// never updated during a home charging session — so as `soc` rises and
-    /// `charge_kw` stays positive, `needed_charge_hours` sits at the arrival
-    /// value until the next day-start reconciliation. A caller reading the
-    /// driver's channels then sees "still needs N hours" beside "not charging,
-    /// battery full".
+    /// must track the shrinking battery gap, not hold a frozen number. The
+    /// fold runs on the observed equipment SOC, so it falls as the session
+    /// charges the battery. A regression sourcing the fold from the driver's
+    /// *belief* (`perceived_soc()`), which is never updated during a home
+    /// charging session, would instead hold the arrival value until the next
+    /// day-start reconciliation: a caller reading the driver's channels would
+    /// see "still needs N hours" beside a rising `soc` and positive
+    /// `charge_kw`.
     #[test]
     fn needed_charge_hours_decreases_while_equipment_charges_at_home() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
