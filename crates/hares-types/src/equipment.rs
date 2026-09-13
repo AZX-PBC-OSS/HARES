@@ -858,6 +858,9 @@ pub struct BmsScheduleWindow {
 ///
 /// Parsed from override JSON (`bms_mode`): unknown fields are rejected so a
 /// mistyped key cannot silently drop a configured constraint.
+///
+/// `validate()` runs at both battery init and actor construction, so a
+/// domain-invalid mode is rejected at either boundary.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub enum BmsMode {
