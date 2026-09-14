@@ -24,12 +24,12 @@ tests. Tests that depend on it will fail if the submodule is not initialised.
 |--------|---------|---------|
 | Rust   | 1.87+   | [rustup.rs](https://rustup.rs/) |
 | uv     | 0.11+   | `brew install uv` or [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
-| Python | 3.13    | Managed by uv |
+| Python | 3.12–3.13 | Managed by uv |
 
 After installing Rust and uv:
 
 ```bash
-uv venv --python 3.13
+uv venv --python 3.12
 uv sync
 ```
 

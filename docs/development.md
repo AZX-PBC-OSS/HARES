@@ -57,7 +57,7 @@ formatting. Also ships with rustup. Run `cargo fmt` before committing.
 environments, and dependencies. It replaces pip, venv, and pip-tools.
 
 ```bash
-uv venv --python 3.13       # create a virtualenv with Python 3.13
+uv venv --python 3.12       # create a virtualenv with Python 3.12 (3.12–3.13 supported)
 uv sync                     # install all project dependencies into the venv
 uv run <command>             # run a command inside the virtualenv
 uv add <package>             # add a dependency to pyproject.toml

@@ -11,7 +11,7 @@ feature flags, and benchmarking guidance. The short version:
 ```bash
 git clone https://github.com/AZX-PBC-OSS/HARES.git && cd HARES
 git submodule update --init --recursive
-uv venv --python 3.13 && uv sync
+uv venv --python 3.12 && uv sync
 ```
 
 ### Pre-commit checklist

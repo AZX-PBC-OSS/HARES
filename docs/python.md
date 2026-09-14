@@ -9,7 +9,7 @@ and [Maturin](https://www.maturin.rs/). The resulting package is called `ochre_n
 |-------|----------------|---------|
 | Rust  | 1.87+          | [rustup.rs](https://rustup.rs/) |
 | uv    | 0.11+          | `brew install uv` or [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
-| Python| 3.13           | Managed by uv (see below) |
+| Python| 3.12–3.13     | Managed by uv (see below) |
 
 ## Quick start
 
@@ -19,8 +19,8 @@ git clone https://github.com/AZX-PBC-OSS/HARES.git
 cd HARES
 git submodule update --init --recursive
 
-# Create a virtual environment with Python 3.13 and install dev dependencies
-uv venv --python 3.13
+# Create a virtual environment with Python 3.12 and install dev dependencies
+uv venv --python 3.12
 uv sync
 
 # Build the Rust extension in-place (debug mode, fast iteration)
@@ -144,4 +144,4 @@ The extension hasn't been built yet. Run `uv run maturin develop`.
 
 **Wrong Python version**
 Maturin builds against the Python in the active virtualenv. Verify with
-`uv run python --version` — it should be 3.13.x.
+`uv run python --version` — it should be 3.12.x or 3.13.x.
