@@ -14,11 +14,18 @@ use hares_core::Dwelling;
 use hares_core::actors::Occupant;
 use hares_core::actors::Presence;
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
+fn nanos_suffix() -> String {
+    // Uniqueness by construction: pid separates test processes, a monotonic
+    // counter separates same-nanosecond allocations across parallel test
+    // threads, nanos keep names distinct across runs.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
-        .as_nanos()
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
 }
 
 fn unique_temp_toml(tag: &str) -> PathBuf {

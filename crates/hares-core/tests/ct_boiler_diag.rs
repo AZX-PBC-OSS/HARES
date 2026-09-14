@@ -57,14 +57,16 @@ mod tests {
     }
 
     fn utn(base: &str) -> String {
-        format!(
-            "{}_{}",
-            base,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
+        // Uniqueness by construction: pid + monotonic counter + nanos
+        // (see hares-core/tests/engine.rs).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{base}_{}_{nanos}_{seq}", std::process::id())
     }
 
     #[test]

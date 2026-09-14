@@ -1772,11 +1772,21 @@ mod tests {
     }
 
     fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
+        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
+        // uniqueness by construction (the pid alone does not separate threads
+        // allocating within the same nanosecond).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}_{}_{}.{}", std::process::id(), nanos, ext))
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}_{seq}.{ext}",
+            std::process::id(),
+            nanos
+        ))
     }
 
     fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {

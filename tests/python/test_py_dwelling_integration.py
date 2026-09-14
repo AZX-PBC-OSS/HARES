@@ -882,9 +882,10 @@ class TestDerSimulationExplorer:
         assert "EV Electric Power (kW)" in cols
         assert "EV SOC (-)" in cols
 
-        # PV should produce power (positive in telemetry convention)
+        # PV generation is negative in the telemetry convention (matching
+        # OCHRE: negative = generating power, same as battery discharge)
         pv_col = df["PV Electric Power (kW)"]
-        assert pv_col.max() > 0, "PV should produce power during daylight"
+        assert pv_col.min() < 0, "PV should produce power during daylight"
 
         # Battery SOC should be in [0, 1]
         bat_soc = df["Battery SOC (-)"]
@@ -903,10 +904,10 @@ class TestDerSimulationExplorer:
             "Battery SOC should vary over 2-week simulation (charged/discharged)"
         )
 
-        # PV total generation sum should be positive (producing power)
+        # PV total generation sum should be negative (producing power)
         pv_sum = pv_col.sum()
-        assert pv_sum > 0, (
-            f"PV total generation should be positive (producing), got {pv_sum}"
+        assert pv_sum < 0, (
+            f"PV total generation should be negative (producing), got {pv_sum}"
         )
 
         # Expected row count: 2 weeks × 96 steps/day = 1344

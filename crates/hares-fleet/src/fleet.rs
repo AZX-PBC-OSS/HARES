@@ -1037,12 +1037,20 @@ mod tests {
     use tempfile::tempdir;
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
+        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
+        // uniqueness by construction across processes, threads, and runs.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let mut path = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before UNIX epoch")
             .as_nanos();
-        path.push(format!("hares-fleet-{nanos}.{suffix}"));
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!(
+            "hares-fleet-{}-{nanos}-{seq}.{suffix}",
+            std::process::id()
+        ));
         path
     }
 

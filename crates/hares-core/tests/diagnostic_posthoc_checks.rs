@@ -309,27 +309,35 @@ fn no_violations_when_everything_is_in_range() {
 
 // ── Integration test: end-to-end wiring of post-hoc checks in Dwelling ───────
 
+fn unique_nanos_suffix() -> String {
+    // Uniqueness by construction: pid + monotonic counter + nanos
+    // (see hares-core/tests/engine.rs).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
+}
+
 /// Verifies that when an observer is enabled on a dwelling with HVAC equipment,
 /// the post-hoc diagnostic checks are wired into simulate() and produce summary
 /// output in the diagnostic CSV when output_verbosity >= 4.
 #[test]
 fn observer_enabled_simulation_appends_posthoc_summary_to_diagnostic_csv() {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
 
     let toml_path = {
         let mut p = std::env::temp_dir();
-        p.push(format!("hares-posthoc-{nanos}.toml"));
+        p.push(format!("hares-posthoc-{}.toml", unique_nanos_suffix()));
         p
     };
     let csv_path = {
         let mut p = std::env::temp_dir();
-        p.push(format!("hares-posthoc-{nanos}.csv"));
+        p.push(format!("hares-posthoc-{}.csv", unique_nanos_suffix()));
         p
     };
 

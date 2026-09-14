@@ -416,12 +416,45 @@ pub fn inject_schedule_into_specs(
     defaults: &DefaultsStore,
     foundation_name: Option<&str>,
 ) -> Result<(), HaresError> {
-    let csv_col_map: HashMap<String, usize> = schedule
+    let mut csv_col_map: HashMap<String, usize> = schedule
         .column_names
         .iter()
         .enumerate()
         .map(|(i, name)| (name.clone(), i))
         .collect();
+
+    // OCHRE schedule.py:390-391: copy zone-specific schedules when the
+    // schedule file lacks them — Basement Lighting follows the interior
+    // lighting column when `lighting_basement` is absent but
+    // `lighting_interior` is present. A Basement Lighting spec can only
+    // exist for a Finished Basement foundation (gated in resolve_loads and
+    // ensure_specs_for_csv_columns), so no extra foundation check is needed.
+    if specs.iter().any(|s| s.name == "Basement Lighting")
+        && !csv_col_map.contains_key("lighting_basement")
+    {
+        if let Some(&interior_idx) = csv_col_map.get("lighting_interior") {
+            let values = schedule.columns[interior_idx].clone();
+            let aggregation = schedule
+                .column_aggregations
+                .get(interior_idx)
+                .copied()
+                .unwrap_or(ColumnAggregation::Mean);
+            match schedule.add_column("lighting_basement", values, aggregation) {
+                Ok(()) => {
+                    if let Some(&idx) = schedule.column_index.get("lighting_basement") {
+                        csv_col_map.insert("lighting_basement".to_string(), idx);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "failed to copy lighting_interior column to lighting_basement; \
+                         Basement Lighting will fall back to other schedule sources"
+                    );
+                }
+            }
+        }
+    }
 
     // Invariant: check for unmapped CSV columns before any processing.
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -3883,6 +3916,122 @@ mod tests {
         assert!(
             !specs.iter().any(|s| s.name == "Basement Lighting"),
             "Basement Lighting must not be auto-created from CSV column when foundation is Crawlspace"
+        );
+    }
+
+    /// OCHRE schedule.py:390-391: when Basement Lighting equipment exists and
+    /// the schedule file has `lighting_interior` but not `lighting_basement`,
+    /// the interior column is copied so basement lighting follows the
+    /// interior profile.
+    #[test]
+    fn basement_lighting_uses_interior_csv_column_when_basement_column_absent() {
+        let mut schedule = make_schedule_with_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Finished Basement"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        let basement_idx = schedule
+            .column_index
+            .get("lighting_basement")
+            .expect("lighting_basement column must be copied from lighting_interior");
+        let interior_idx = schedule.column_index["lighting_interior"];
+        assert_eq!(
+            schedule.columns[*basement_idx], schedule.columns[interior_idx],
+            "copied lighting_basement column must match lighting_interior values"
+        );
+        let basement = specs
+            .iter()
+            .find(|s| s.name == "Basement Lighting")
+            .expect("Basement Lighting spec");
+        assert_eq!(
+            basement
+                .parameters
+                .get("power_schedule_source")
+                .and_then(Value::as_str),
+            Some("column"),
+            "Basement Lighting must resolve its power schedule from the copied column"
+        );
+    }
+
+    /// The copy is scoped to Basement Lighting equipment: no basement spec,
+    /// no `lighting_basement` column.
+    #[test]
+    fn interior_lighting_column_not_copied_without_basement_spec() {
+        let mut schedule = make_schedule_with_lighting_column(&[0.02, 0.01, 0.005]);
+        let mut specs = vec![make_spec("Indoor Lighting", 100.0)];
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Finished Basement"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !schedule.column_index.contains_key("lighting_basement"),
+            "lighting_interior must not be copied without a Basement Lighting spec"
+        );
+    }
+
+    /// An explicit `lighting_basement` column is never overwritten by the
+    /// interior column.
+    #[test]
+    fn basement_lighting_column_not_overwritten_by_interior_copy() {
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..3)
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+        let mut column_index = HashMap::new();
+        column_index.insert("lighting_interior".to_string(), 0);
+        column_index.insert("lighting_basement".to_string(), 1);
+        let mut schedule = ScheduleTimeSeries {
+            timestamps,
+            column_names: vec![
+                "lighting_interior".to_string(),
+                "lighting_basement".to_string(),
+            ],
+            columns: vec![vec![0.02, 0.01, 0.005], vec![0.9, 0.8, 0.7]],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![
+                crate::ColumnAggregation::Mean,
+                crate::ColumnAggregation::Mean,
+            ],
+        };
+        let basement_original = schedule.columns[1].clone();
+        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Finished Basement"),
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert_eq!(
+            schedule.columns[1], basement_original,
+            "explicit lighting_basement column must be preserved"
+        );
+        assert_eq!(
+            schedule
+                .column_names
+                .iter()
+                .filter(|name| name.as_str() == "lighting_basement")
+                .count(),
+            1,
+            "lighting_basement must not be duplicated by the interior copy"
         );
     }
 }

@@ -78,12 +78,18 @@ mod tests {
     }
 
     fn utn(base: &str, ext: &str) -> String {
+        // Uniqueness by construction: pid + monotonic counter + nanos +
+        // thread id (see hares-core/tests/engine.rs).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!(
-            "{base}_{}_{:?}.{ext}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
+            "{base}_{}_{nanos}_{:?}_{seq}.{ext}",
+            std::process::id(),
             std::thread::current().id()
         )
     }

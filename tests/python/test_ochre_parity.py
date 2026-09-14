@@ -32,13 +32,14 @@ DURATION_H = 1
 TIME_RES_MIN = 1
 
 # ZOH resampling for all continuous weather fields -- matches OCHRE's pandas ffill().
+# Note: sky_temp is not overridable -- HARES always recomputes it from the
+# interpolated inputs (see ResampleOverrides::ochre_compat in hares-io).
 OCHRE_COMPAT_RESAMPLE: dict[str, str] = {
     "dry_bulb": "zoh",
     "dew_point": "zoh",
     "rel_humidity": "zoh",
     "pressure": "zoh",
     "infrared": "zoh",
-    "sky_temp": "zoh",
     "ground_temp": "zoh",
     "opaque_sky_cover": "zoh",
 }
@@ -97,6 +98,7 @@ def _run_hares() -> dict[str, float]:
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
+    dwelling.initialize()
 
     # Step through and accumulate per-column power sums
     time_res_h = TIME_RES_MIN / 60.0
@@ -134,6 +136,7 @@ def _run_hares_simulate() -> dict[str, float]:
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
+    dwelling.initialize()
     df = dwelling.simulate()
 
     time_res_h = TIME_RES_MIN / 60.0
@@ -318,6 +321,9 @@ def _run_hares_7d() -> tuple[dict[str, float], float, float]:
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
+    # OCHRE initializes inside its constructor; include HARES' explicit
+    # initialize() in the init timing for a fair comparison.
+    dwelling.initialize()
     init_elapsed = time.perf_counter() - t0
 
     t1 = time.perf_counter()

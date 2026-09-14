@@ -711,7 +711,6 @@ pub(super) fn resolve_scheduled_loads(
             }
         }
 
-        let ext = lighting.child("extension");
         for (location, fractions) in by_location {
             let name = match location.as_str() {
                 "interior" => "Indoor Lighting",
@@ -755,6 +754,32 @@ pub(super) fn resolve_scheduled_loads(
                 );
             }
 
+            // OCHRE hpxml.py:1703-1709: garage lighting is only created when a
+            // garage is modeled. A garage is modeled when a Garage zone exists —
+            // either from an `Enclosure/Garages` element or from walls
+            // referencing garage adjacency (ResStock style, where the zone
+            // carries no floor area but OCHRE's wall-geometry-derived garage
+            // area is positive, so the floor area alone must not gate this).
+            // HPXML files commonly carry garage lighting groups even for
+            // houses without any garage.
+            if location == "garage" && !has_garage_zone(building) {
+                #[cfg(feature = "observe")]
+                tracing::info!(
+                    target: "observe",
+                    garage_lighting_created = false,
+                    "garage lighting skipped — no garage is modeled"
+                );
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            if location == "garage" {
+                tracing::info!(
+                    target: "observe",
+                    garage_lighting_created = true,
+                    "garage lighting created — garage is modeled"
+                );
+            }
+
             let area_ft2 = match location.as_str() {
                 "garage" => garage_area_ft2,
                 "basement" => foundation_area_ft2,
@@ -766,9 +791,23 @@ pub(super) fn resolve_scheduled_loads(
                     indoor_area_ft2
                 }
             };
-            let usage_multiplier = ext
-                .and_then(|n| child_f64(n, &format!("{}UsageMultiplier", capitalize(&location))))
-                .unwrap_or(1.0);
+            // OCHRE hpxml.py `add_simple_schedule_params(extension, prefix)`:
+            // HPXML-provided weekday/weekend fractions and month multipliers
+            // (e.g. `InteriorWeekdayScheduleFractions`) take precedence over
+            // the Default Schedule Parameters profiles; the schedule injector
+            // prefers them via `resolve_hpxml_profile`. The usage multiplier
+            // is not a schedule parameter — OCHRE applies it to the annual
+            // kWh inside `parse_lighting`, so fold it in here instead of
+            // leaving an unconsumed spec parameter.
+            let mut usage_multiplier = 1.0;
+            let mut schedule_params = Vec::new();
+            for (key, value) in parse_schedule_extension_params(lighting, &capitalize(&location)) {
+                if key == "usage_multiplier" {
+                    usage_multiplier = value.as_f64().unwrap_or(1.0);
+                } else {
+                    schedule_params.push((key, value));
+                }
+            }
             let annual_kwh = fractions
                 .explicit_kwh
                 .unwrap_or_else(|| derive_lighting_annual_kwh(&location, area_ft2, &fractions))
@@ -776,12 +815,8 @@ pub(super) fn resolve_scheduled_loads(
 
             let mut params = Map::new();
             params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
-            if let Some(multipliers) = read_extension_month_multipliers(ext, &capitalize(&location))
-            {
-                params.insert(
-                    "month_multipliers".to_string(),
-                    Value::Array(multipliers.into_iter().map(Value::from).collect()),
-                );
+            for (key, value) in schedule_params {
+                params.insert(key, value);
             }
             specs.push(build_spec(name, FuelType::Electric, params, defaults));
         }
@@ -1236,6 +1271,17 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// A garage is modeled when a Garage zone exists, regardless of whether its
+/// floor area is populated (ResStock-style wall-referenced garages create the
+/// zone without an area). Mirrors OCHRE's positive garage floor area gate in
+/// hpxml.py:1703-1709, which is derived from garage wall geometry.
+fn has_garage_zone(building: &Building) -> bool {
+    building
+        .zones
+        .iter()
+        .any(|z| matches!(z.zone_type, ZoneType::Garage))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::building::{parse_building, parse_xml_document};
@@ -1519,6 +1565,11 @@ mod tests {
                   </BuildingSummary>
                   <Enclosure>
                     <Walls />
+                    <Garages>
+                      <Garage>
+                        <FloorArea units="ft2">400</FloorArea>
+                      </Garage>
+                    </Garages>
                     <Foundations>
                       <Foundation>
                         <FoundationType><Basement><Conditioned>true</Conditioned></Basement></FoundationType>
@@ -1577,6 +1628,461 @@ mod tests {
         );
         // Re-resolving must yield the identical order (run-to-run determinism).
         assert_eq!(first, resolve_names());
+    }
+
+    /// Resolves the lighting specs from an XML document and returns them
+    /// keyed by name, for lighting-specific assertions.
+    fn resolve_lighting_specs(xml: &str) -> Vec<EquipmentSpec> {
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+        specs
+            .into_iter()
+            .filter(|s| s.name.ends_with("Lighting"))
+            .collect()
+    }
+
+    /// Reads a spec parameter as a `Vec<f64>` (JSON array).
+    fn param_f64s(spec: &EquipmentSpec, key: &str) -> Option<Vec<f64>> {
+        spec.parameters
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+    }
+
+    /// OCHRE hpxml.py `add_simple_schedule_params(extension, prefix)`: HPXML
+    /// extension weekday/weekend fractions and month multipliers
+    /// (e.g. `InteriorWeekdayScheduleFractions`) take precedence over the
+    /// Default Schedule Parameters profiles, selected per location prefix.
+    #[test]
+    fn lighting_extension_schedule_fractions_prefered_over_defaults() {
+        let weekday: String = std::iter::repeat_n("0.04", 24)
+            .collect::<Vec<_>>()
+            .join(",");
+        let weekend: String = std::iter::repeat_n("0.02", 24)
+            .collect::<Vec<_>>()
+            .join(",");
+        let ext_weekday: String = std::iter::repeat_n("0.07", 24)
+            .collect::<Vec<_>>()
+            .join(",");
+        let ext_weekend: String = std::iter::repeat_n("0.03", 24)
+            .collect::<Vec<_>>()
+            .join(",");
+        let months = "1.5,1.5,1.5,1.5,1.5,1.5,1.5,1.5,1.5,1.5,1.5,1.5";
+        let ext_months = "0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5";
+        let xml = format!(
+            r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>interior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <LightingGroup>
+                      <Location>exterior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <extension>
+                      <InteriorWeekdayScheduleFractions>{weekday}</InteriorWeekdayScheduleFractions>
+                      <InteriorWeekendScheduleFractions>{weekend}</InteriorWeekendScheduleFractions>
+                      <InteriorMonthlyScheduleMultipliers>{months}</InteriorMonthlyScheduleMultipliers>
+                      <ExteriorWeekdayScheduleFractions>{ext_weekday}</ExteriorWeekdayScheduleFractions>
+                      <ExteriorWeekendScheduleFractions>{ext_weekend}</ExteriorWeekendScheduleFractions>
+                      <ExteriorMonthlyScheduleMultipliers>{ext_months}</ExteriorMonthlyScheduleMultipliers>
+                    </extension>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        );
+        let specs = resolve_lighting_specs(&xml);
+
+        let indoor = specs
+            .iter()
+            .find(|s| s.name == "Indoor Lighting")
+            .expect("Indoor Lighting spec");
+        assert_eq!(
+            param_f64s(indoor, "weekday_schedule_fractions").as_deref(),
+            Some(&[0.04; 24][..]),
+            "Indoor Lighting must use InteriorWeekdayScheduleFractions"
+        );
+        assert_eq!(
+            param_f64s(indoor, "weekend_schedule_fractions").as_deref(),
+            Some(&[0.02; 24][..]),
+            "Indoor Lighting must use InteriorWeekendScheduleFractions"
+        );
+        assert_eq!(
+            param_f64s(indoor, "month_multipliers").as_deref(),
+            Some(&[1.5; 12][..]),
+            "Indoor Lighting must use InteriorMonthlyScheduleMultipliers"
+        );
+
+        let exterior = specs
+            .iter()
+            .find(|s| s.name == "Exterior Lighting")
+            .expect("Exterior Lighting spec");
+        assert_eq!(
+            param_f64s(exterior, "weekday_schedule_fractions").as_deref(),
+            Some(&[0.07; 24][..]),
+            "Exterior Lighting must use ExteriorWeekdayScheduleFractions"
+        );
+        assert_eq!(
+            param_f64s(exterior, "weekend_schedule_fractions").as_deref(),
+            Some(&[0.03; 24][..]),
+            "Exterior Lighting must use ExteriorWeekendScheduleFractions"
+        );
+        assert_eq!(
+            param_f64s(exterior, "month_multipliers").as_deref(),
+            Some(&[0.5; 12][..]),
+            "Exterior Lighting must use ExteriorMonthlyScheduleMultipliers"
+        );
+    }
+
+    /// OCHRE gates extension schedule params on the weekday key alone
+    /// (`add_simple_schedule_params` returns `{}` without it); a weekend-only
+    /// extension must not produce fractions. With only the weekday key, the
+    /// weekend param stays absent so the schedule layer falls back to
+    /// weekday-equals-weekend, matching OCHRE.
+    #[test]
+    fn lighting_extension_weekday_only_leaves_weekend_unset() {
+        let weekday: String = std::iter::repeat_n("0.04", 24)
+            .collect::<Vec<_>>()
+            .join(",");
+        let xml = format!(
+            r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>interior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <extension>
+                      <InteriorWeekdayScheduleFractions>{weekday}</InteriorWeekdayScheduleFractions>
+                    </extension>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        );
+        let specs = resolve_lighting_specs(&xml);
+        let indoor = specs
+            .iter()
+            .find(|s| s.name == "Indoor Lighting")
+            .expect("Indoor Lighting spec");
+        assert_eq!(
+            param_f64s(indoor, "weekday_schedule_fractions").as_deref(),
+            Some(&[0.04; 24][..])
+        );
+        assert!(
+            !indoor.parameters.contains_key("weekend_schedule_fractions"),
+            "weekend fractions must fall back to weekday downstream, not be set here"
+        );
+    }
+
+    /// Malformed extension fractions (wrong count) must be ignored with a
+    /// warning rather than inserted, so the defaults profile is used.
+    #[test]
+    fn lighting_malformed_extension_fractions_are_ignored() {
+        let short = "0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04";
+        let xml = format!(
+            r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>interior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                    <extension>
+                      <InteriorWeekdayScheduleFractions>{short}</InteriorWeekdayScheduleFractions>
+                    </extension>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        );
+        let specs = resolve_lighting_specs(&xml);
+        let indoor = specs
+            .iter()
+            .find(|s| s.name == "Indoor Lighting")
+            .expect("Indoor Lighting spec");
+        assert!(
+            !indoor.parameters.contains_key("weekday_schedule_fractions"),
+            "12-value fractions must be ignored (expected 24)"
+        );
+    }
+
+    /// `UsageMultiplier` scales the annual kWh (OCHRE parse_lighting), and
+    /// must not be left on the spec as an unconsumed parameter.
+    #[test]
+    fn lighting_extension_usage_multiplier_scales_annual_kwh() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>interior</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                      <Load>
+                        <Units>kWh/year</Units>
+                        <Value>1000</Value>
+                      </Load>
+                    </LightingGroup>
+                    <extension>
+                      <InteriorUsageMultiplier>1.25</InteriorUsageMultiplier>
+                    </extension>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let specs = resolve_lighting_specs(xml);
+        let indoor = specs
+            .iter()
+            .find(|s| s.name == "Indoor Lighting")
+            .expect("Indoor Lighting spec");
+        let annual = indoor
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64())
+            .expect("annual_electric_kwh");
+        assert!((annual - 1250.0).abs() < 1e-9, "annual: {annual}");
+        assert!(
+            !indoor.parameters.contains_key("usage_multiplier"),
+            "usage multiplier must be folded into annual kWh, not left as a param"
+        );
+    }
+
+    /// OCHRE hpxml.py:1703-1709: garage lighting is only created when a
+    /// garage is modeled; HPXML files commonly carry garage lighting groups
+    /// for houses without a garage zone.
+    #[test]
+    fn garage_lighting_skipped_when_no_garage_modeled() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>garage</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let specs = resolve_lighting_specs(xml);
+        assert!(
+            !specs.iter().any(|s| s.name == "Garage Lighting"),
+            "Garage Lighting must not be created when no garage is modeled"
+        );
+    }
+
+    /// Positive counterpart: a modeled garage (Enclosure/Garages) creates
+    /// Garage Lighting.
+    #[test]
+    fn garage_lighting_created_for_modeled_garage() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Garages>
+                      <Garage>
+                        <FloorArea units="ft2">400</FloorArea>
+                      </Garage>
+                    </Garages>
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>garage</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let specs = resolve_lighting_specs(xml);
+        assert!(
+            specs.iter().any(|s| s.name == "Garage Lighting"),
+            "Garage Lighting must be created for a modeled garage"
+        );
+    }
+
+    /// ResStock-style buildings model the garage through walls with
+    /// `InteriorAdjacentTo=garage` (no `Enclosure/Garages` element, so the
+    /// auto-created Garage zone has no floor area). A garage referenced by
+    /// walls is a modeled garage: OCHRE keeps Garage Lighting for these
+    /// buildings (hpxml.py:1703-1709 gates on wall-geometry-derived garage
+    /// area, which is positive), so HARES must not skip on missing floor
+    /// area alone.
+    #[test]
+    fn garage_lighting_created_for_garage_referenced_by_walls() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls>
+                      <Wall>
+                        <SystemIdentifier id='GarageWall'/>
+                        <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+                        <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+                        <WallType>
+                          <WoodStud/>
+                        </WallType>
+                        <Area>192.0</Area>
+                        <Azimuth>135</Azimuth>
+                        <Insulation>
+                          <SystemIdentifier id='GarageWallInsulation'/>
+                          <AssemblyEffectiveRValue>4.0</AssemblyEffectiveRValue>
+                        </Insulation>
+                      </Wall>
+                    </Walls>
+                    <Foundations>
+                      <Foundation>
+                        <FoundationType><SlabOnGrade/></FoundationType>
+                      </Foundation>
+                    </Foundations>
+                  </Enclosure>
+                  <Lighting>
+                    <LightingGroup>
+                      <Location>garage</Location>
+                      <LightingType><LightEmittingDiode/></LightingType>
+                      <FractionofUnitsInLocation>1.0</FractionofUnitsInLocation>
+                    </LightingGroup>
+                  </Lighting>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let specs = resolve_lighting_specs(xml);
+        assert!(
+            specs.iter().any(|s| s.name == "Garage Lighting"),
+            "Garage Lighting must be created when walls reference a garage, \
+             even without a garage floor area"
+        );
     }
 
     /// Basement lighting must NOT be created when foundation is unconditioned.

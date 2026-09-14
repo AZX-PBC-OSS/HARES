@@ -39,11 +39,17 @@ use hares_core::actors::IdealThermostat;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
+fn nanos_suffix() -> String {
+    // Uniqueness by construction: pid + monotonic counter + nanos
+    // (see hares-core/tests/engine.rs).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
-        .as_nanos()
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
 }
 
 fn unique_temp_toml(tag: &str) -> PathBuf {

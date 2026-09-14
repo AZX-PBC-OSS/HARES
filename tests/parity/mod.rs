@@ -81,16 +81,25 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
         ("cz4a_pv_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
         ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(157.5),
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(25.7),
+        // Lighting-parity correction (2026-09-13): garage lighting is no
+        // longer created for garage-less buildings (OCHRE hpxml.py:1703-1709)
+        // and lighting schedules now honor HPXML extension fractions
+        // (OCHRE add_simple_schedule_params). Residuals re-measured and bands
+        // re-sized to observed + ~1%.
+        ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.0),
         ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
         ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.70),
+        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
+        ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
         ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.9),
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(92.5),
         ("cz6b_pv_battery_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
         ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
         ("cz6b_resistance_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.75),
-        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(52.9),
+        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note:
+        // removing phantom garage lighting shifts this January midnight
+        // window's small HVAC integral (step-0 back-solve dominated).
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(59.0),
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
         _ => None,
     }

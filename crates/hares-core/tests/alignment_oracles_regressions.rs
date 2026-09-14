@@ -1348,14 +1348,20 @@ fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 }
 
 fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
+    // See engine.rs: pid + monotonic counter (thread ids repeat across
+    // processes) make uniqueness constructive.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut path = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_nanos();
     let thread_id = format!("{:?}", std::thread::current().id());
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
-        "hares-alignment-{fixture_id}-{nanos}-{thread_id}.{extension}"
+        "hares-alignment-{fixture_id}-{}-{nanos}-{thread_id}-{seq}.{extension}",
+        std::process::id()
     ));
     path
 }

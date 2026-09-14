@@ -900,6 +900,12 @@ pub fn build_schema(
         basement_lighting_created.to_string(),
     );
 
+    let garage_lighting_created = equipment_list.iter().any(|s| s.name == "Garage Lighting");
+    metadata.insert(
+        "garage_lighting_created".to_string(),
+        garage_lighting_created.to_string(),
+    );
+
     Schema::new_with_metadata(fields, metadata)
 }
 
@@ -1288,6 +1294,27 @@ mod tests {
         let meta_no = schema_no_basement.metadata();
         assert_eq!(
             meta_no.get("basement_lighting_created").map(|s| s.as_str()),
+            Some("false"),
+        );
+    }
+
+    #[test]
+    fn schema_metadata_includes_garage_lighting_created() {
+        let specs = vec![
+            make_spec("Indoor Lighting", FuelType::Electric),
+            make_spec("Garage Lighting", FuelType::Electric),
+        ];
+        let schema = build_schema(&specs, 1, &[]);
+        let meta = schema.metadata();
+        assert_eq!(
+            meta.get("garage_lighting_created").map(|s| s.as_str()),
+            Some("true"),
+        );
+
+        let schema_no_garage = build_schema(&[], 0, &[]);
+        let meta_no = schema_no_garage.metadata();
+        assert_eq!(
+            meta_no.get("garage_lighting_created").map(|s| s.as_str()),
             Some("false"),
         );
     }

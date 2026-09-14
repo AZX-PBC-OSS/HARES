@@ -35,18 +35,30 @@ fn envelope_component_gains_has_port_radiant_w() {
 // forwarded through capture_solvers().
 // ---------------------------------------------------------------------------
 
+fn unique_nanos_suffix() -> String {
+    // Uniqueness by construction: pid + monotonic counter + nanos
+    // (see hares-core/tests/engine.rs).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
+}
+
 #[cfg(feature = "observe")]
 #[test]
 fn observer_post_solvers_forwards_port_radiant_w() {
     use std::fs;
 
     let path = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
         let mut p = std::env::temp_dir();
-        p.push(format!("hares-port-radiant-obs-{nanos}.toml"));
+        p.push(format!(
+            "hares-port-radiant-obs-{}.toml",
+            unique_nanos_suffix()
+        ));
         p
     };
 
@@ -129,21 +141,15 @@ master_seed = 0
 #[test]
 fn diagnostic_csv_contains_all_envelope_diag_columns() {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
 
     let toml_path = {
         let mut p = std::env::temp_dir();
-        p.push(format!("hares-diag-csv-{nanos}.toml"));
+        p.push(format!("hares-diag-csv-{}.toml", unique_nanos_suffix()));
         p
     };
     let csv_path = {
         let mut p = std::env::temp_dir();
-        p.push(format!("hares-diag-csv-{nanos}.csv"));
+        p.push(format!("hares-diag-csv-{}.csv", unique_nanos_suffix()));
         p
     };
 

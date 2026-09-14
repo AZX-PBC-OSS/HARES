@@ -325,7 +325,6 @@ pub mod testing {
                 &req.signal,
                 ControlSignal::ThermalSetpoint {
                     heating_setpoint_c: Some(h),
-                    cooling_setpoint_c: _,
                     ..
                 } if (*h - target_c).abs() < 0.01
             ) || matches!(

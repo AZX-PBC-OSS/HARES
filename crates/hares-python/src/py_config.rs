@@ -686,8 +686,7 @@ impl PyDwellingConfig {
             }
         }
 
-        let initialization_duration =
-            initialization_duration.and_then(|d| if d == 0 { None } else { Some(d) });
+        let initialization_duration = initialization_duration.filter(|&d| d != 0);
 
         Ok(Self {
             hpxml,

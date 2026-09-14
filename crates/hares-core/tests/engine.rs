@@ -7,12 +7,23 @@ use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_io::OutputFormat;
 
 fn unique_temp_path(suffix: &str) -> PathBuf {
+    // Nanosecond timestamps alone are not unique: parallel test threads (and
+    // nextest-run sibling processes) can allocate within the same nanosecond,
+    // colliding on schedule/output paths and corrupting runs. Uniqueness by
+    // construction: pid separates processes, a monotonic counter separates
+    // same-nanosecond allocations, nanos keep names distinct across runs.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut path = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_nanos();
-    path.push(format!("hares-core-engine-{nanos}.{suffix}"));
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.push(format!(
+        "hares-core-engine-{}-{nanos}-{seq}.{suffix}",
+        std::process::id()
+    ));
     path
 }
 
