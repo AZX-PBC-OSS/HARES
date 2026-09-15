@@ -34,4 +34,7 @@ pub(super) struct EvCheckpoint {
     /// power-factor path); `Some(0.0)` is a commanded zero.
     pub(super) q_setpoint_kvar: Option<f64>,
     pub(super) power_factor: f64,
+    /// Cumulative drive energy [kWh] dispatched but not deliverable by the
+    /// pack; see `Ev::drive_shortfall_kwh`.
+    pub(super) drive_shortfall_kwh: f64,
 }

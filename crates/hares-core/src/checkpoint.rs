@@ -9,7 +9,37 @@ use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever checkpoint schema or state encoding changes.
-pub const CHECKPOINT_VERSION: u32 = 6;
+///
+/// v7: `actor_states` entries became [`ActorStateCheckpoint`] records
+/// carrying a per-actor schema version, and `EvDriverSnapshot` gained the
+/// `drive_cancelled` counter in the same change — checkpoints written by
+/// v6 builds are rejected by the version gate in [`DwellingCheckpoint::load`].
+pub const CHECKPOINT_VERSION: u32 = 7;
+
+/// One actor's checkpointed decision-state.
+///
+/// `schema_version` is recorded from
+/// [`Actor::checkpoint_version`](crate::Actor::checkpoint_version) at save
+/// time and validated against the live actor's version on restore, so an
+/// actor whose snapshot schema changed is rejected at the checkpoint
+/// boundary with a version-mismatch error naming the actor — the actor-side
+/// counterpart of the equipment's per-equipment `checkpoint_version()` /
+/// `load_versioned` gate (`hares-equipment/src/serial.rs`). Without it, an
+/// actor snapshot could gain a field with no gate of its own: the only
+/// protection was this file's `format_version`, so an actor-only schema
+/// change surfaced as a raw postcard decode failure deep inside the
+/// actor's `load_state` instead of as a version mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActorStateCheckpoint {
+    /// Actor name, matched against `Actor::name()` on restore.
+    pub name: String,
+    /// Schema version of `blob`, from `Actor::checkpoint_version()` at save
+    /// time. Must equal the live actor's version on restore.
+    pub schema_version: u32,
+    /// Opaque actor state blob from `Actor::save_state()`. Actors with no
+    /// mutable state contribute an empty blob.
+    pub blob: Vec<u8>,
+}
 
 /// Serializable snapshot of all state required to resume a dwelling run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,9 +64,11 @@ pub struct DwellingCheckpoint {
     /// Previous-step per-zone interior LWR surface temperatures [°C]
     /// (heavy-ball damping warm-start). Same shape as `interior_surface_temps`.
     pub interior_surface_prev_temps: Vec<Vec<f64>>,
-    /// Actor decision-state blobs, one per registered actor (name, blob).
-    /// Actors with no mutable state contribute an empty blob.
-    pub actor_states: Vec<(String, Vec<u8>)>,
+    /// Actor decision-state, one per registered actor. Each entry carries
+    /// the actor's name, its snapshot schema version, and its opaque state
+    /// blob; the version is validated on restore before the blob is handed
+    /// to the actor (see [`ActorStateCheckpoint`]).
+    pub actor_states: Vec<ActorStateCheckpoint>,
     /// Prior-step electrical summary (grid, PV, base load, battery, EV)
     /// so the first post-restore step sees the same env.electrical that
     /// the original continuous run would have at the same step index.
@@ -77,6 +109,33 @@ impl DwellingCheckpoint {
         result
     }
 
+    /// Deserialize a checkpoint from JSON bytes, gating on
+    /// `format_version` before the schema-dependent parse.
+    ///
+    /// The version probe runs first because a checkpoint written by an
+    /// older build may use a schema this build cannot parse (e.g. pre-v7
+    /// tuple-shaped `actor_states`), and the actionable error for such a
+    /// file is the version mismatch naming both versions — not a parse
+    /// failure naming a field the reader cannot act on. Every
+    /// deserialisation path (file load, the Python binding's byte-level
+    /// save/restore) goes through here so the gate ordering has one home.
+    pub fn deserialize_gated(json_bytes: &[u8]) -> Result<Self, HaresError> {
+        #[derive(Deserialize)]
+        struct FormatProbe {
+            format_version: u32,
+        }
+        let probe: FormatProbe = serde_json::from_slice(json_bytes)
+            .map_err(|err| HaresError::Io(format!("checkpoint parse failed: {err}")))?;
+        if probe.format_version != CHECKPOINT_VERSION {
+            return Err(HaresError::Io(format!(
+                "checkpoint version mismatch: file={}, expected={}",
+                probe.format_version, CHECKPOINT_VERSION
+            )));
+        }
+        serde_json::from_slice(json_bytes)
+            .map_err(|err| HaresError::Io(format!("checkpoint parse failed: {err}")))
+    }
+
     /// Load checkpoint from disk, verifying SHA-256 integrity before
     /// deserialisation.
     pub fn load(path: &Path) -> Result<Self, HaresError> {
@@ -100,15 +159,7 @@ impl DwellingCheckpoint {
             "checkpoint integrity check passed",
         );
 
-        let cp: DwellingCheckpoint = serde_json::from_slice(json_bytes)
-            .map_err(|err| HaresError::Io(format!("checkpoint parse failed: {err}")))?;
-        if cp.format_version != CHECKPOINT_VERSION {
-            return Err(HaresError::Io(format!(
-                "checkpoint version mismatch: file={}, expected={}",
-                cp.format_version, CHECKPOINT_VERSION
-            )));
-        }
-        Ok(cp)
+        Self::deserialize_gated(json_bytes)
     }
 }
 
@@ -128,7 +179,7 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHECKPOINT_VERSION, DwellingCheckpoint};
+    use super::{ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint};
     use hares_types::{ElectricalSummary, ZoneId};
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
@@ -164,7 +215,11 @@ mod tests {
             lwr_t_prev_c: vec![15.0, 18.0],
             interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
             interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
-            actor_states: vec![("test_actor".into(), vec![1, 2, 3])],
+            actor_states: vec![ActorStateCheckpoint {
+                name: "test_actor".into(),
+                schema_version: 1,
+                blob: vec![1, 2, 3],
+            }],
             prior_electrical_summary: ElectricalSummary::default(),
         };
 
@@ -238,6 +293,100 @@ mod tests {
         assert!(
             err.to_string().contains("version mismatch"),
             "expected version mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn old_version_checkpoint_rejected_as_version_mismatch_not_parse_error() {
+        // A checkpoint written by a pre-v7 build carries tuple-shaped
+        // `actor_states` this build's schema cannot parse. The format-version
+        // gate must reject such a file with a version mismatch naming both
+        // versions — the actionable error — before any schema-dependent
+        // deserialisation, not as a parse failure naming a field the reader
+        // cannot act on.
+        let body = serde_json::json!({
+            "format_version": 6,
+            "bldg_id": 1,
+            "timestep_index": 0,
+            "equipment_states": [],
+            "rng_state": vec![0u8; 32],
+            "envelope_state": [],
+            "humidity_states": [[1, 0.005]],
+            "fluid_states": [],
+            "rng_stream": 0,
+            "rng_word_pos": 0,
+            "thermal_last_u": [],
+            "lwr_t_prev_c": [],
+            "interior_surface_temps": [],
+            "interior_surface_prev_temps": [],
+            // Pre-v7 shape: (name, blob) tuples, no schema_version.
+            "actor_states": [["OldActor", [1, 2, 3]]],
+            "prior_electrical_summary": {
+                "pv_generation_kw": 0.0,
+                "base_load_kw": 0.0,
+                "net_grid_kw": 0.0,
+                "battery_power_kw": 0.0,
+                "ev_power_kw": 0.0,
+                "actual_pv_kw": 0.0,
+            },
+        });
+        let json_bytes = serde_json::to_vec(&body).expect("serialize test fixture");
+        let file_bytes = crate::checksum::write_with_sha256(&json_bytes);
+
+        let path = std::env::temp_dir().join(unique_temp_name(
+            "hares_core_checkpoint_old_version",
+            "json",
+        ));
+        let _guard = TempFile(path.clone());
+        std::fs::write(&path, &file_bytes).expect("write test fixture");
+
+        let err = DwellingCheckpoint::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint version mismatch")
+                && msg.contains("file=6")
+                && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
+            "a pre-v7 checkpoint must be rejected by the version gate with both versions named; got: {msg}"
+        );
+        assert!(
+            !msg.contains("parse failed"),
+            "the rejection must come from the version gate, not schema parsing; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn deserialize_gated_rejects_malformed_bytes_loudly() {
+        // The Python byte-level restore paths call `deserialize_gated`
+        // directly on raw caller-supplied bytes, with no SHA-256 pre-check.
+        // Bytes that are not JSON at all must produce a typed
+        // `checkpoint parse failed` error from the format probe — not a
+        // panic and not a silently substituted default.
+        let err = DwellingCheckpoint::deserialize_gated(b"this is not json").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint parse failed"),
+            "malformed bytes must fail loudly at the probe; got: {msg}"
+        );
+
+        // Valid JSON carrying the current format_version but a structurally
+        // invalid body must likewise fail at the full parse — not be
+        // misreported as a version mismatch (the versions agree).
+        let body = serde_json::json!({
+            "format_version": CHECKPOINT_VERSION,
+            "bldg_id": "not-a-number",
+        });
+        let err = DwellingCheckpoint::deserialize_gated(
+            &serde_json::to_vec(&body).expect("serialize test fixture"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint parse failed"),
+            "a matching-version but invalid body must fail at the full parse; got: {msg}"
+        );
+        assert!(
+            !msg.contains("version mismatch"),
+            "the versions agree, so the failure must not be reported as a mismatch; got: {msg}"
         );
     }
 

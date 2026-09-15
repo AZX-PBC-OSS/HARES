@@ -710,6 +710,99 @@ fn v2l_respects_soc_reserve_floor() {
     assert_eq!(power, 0.0, "V2L must not discharge when SOC <= reserve");
 }
 
+/// Discharging toward the reserve must land ON the floor, not below it:
+/// the step cap is the AC power the available DC energy can sustain, so
+/// the pack draw (AC / efficiency) over the step consumes exactly the
+/// energy above the floor. An AC-domain cap (available/dt without the
+/// efficiency factor) draws (1/efficiency)x that from the pack and
+/// undershoots the floor on every landing.
+#[test]
+fn v2l_discharge_lands_on_soc_reserve_floor() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.1.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.12.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // 1.2 kWh above the floor; a 5 kW request over 1 h far exceeds what
+    // that energy sustains (~1.08 kW AC), so the energy cap binds.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -5.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    assert!(
+        ev.soc < 0.12,
+        "the step must discharge toward the floor, got soc {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc >= 0.1 - 1e-9,
+        "V2L discharge must not undershoot the 0.1 reserve floor, got soc {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc <= 0.1 + 1e-6,
+        "the energy cap should land essentially on the floor, got soc {}",
+        ev.soc
+    );
+}
+
+/// The same floor-landing contract for V2G export — the cap computation is
+/// a separate copy in `compute_v2g_discharge`, so it needs its own pin.
+#[test]
+fn v2g_discharge_lands_on_soc_reserve_floor() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.22.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -5.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("setpoint");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports)
+        .expect("step");
+
+    assert!(
+        ev.soc < 0.22,
+        "the step must discharge toward the floor, got soc {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc >= 0.2 - 1e-9,
+        "V2G discharge must not undershoot the 0.2 reserve floor, got soc {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc <= 0.2 + 1e-6,
+        "the energy cap should land essentially on the floor, got soc {}",
+        ev.soc
+    );
+}
+
 #[test]
 fn v2l_respects_max_discharge_limit() {
     let mut raw = base_raw();
@@ -1812,6 +1905,409 @@ fn ev_set_ready_by_cleared_on_disconnect() {
     .unwrap();
     assert!(ev.ready_by_hour.is_none());
     assert!(ev.ready_by_soc.is_none());
+    // Disconnect ends the charging session: actor-writable setpoints and
+    // targets must not survive the plug cycle.
+    assert!(ev.power_setpoint_kw.is_none());
+    assert!(ev.soc_target.is_none());
+}
+
+/// A fresh `SOCTarget` must supersede a latched zero-power hold: without
+/// the clear in the `SOCTarget` arm, `compute_charging_power_kw` keeps
+/// consulting the stale `power_setpoint_kw` first and a strategy going
+/// idle → active would trade "always charges" for "never charges".
+#[test]
+fn soc_target_clears_latched_zero_power_hold() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // An idle window latches the hold …
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 0.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    assert_eq!(ev.soc, 0.2, "hold must suppress charging");
+
+    // … then the strategy's window opens and it dispatches a target.
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.2,
+        "a fresh SOCTarget must clear the prior hold and charge, got soc {}",
+        ev.soc
+    );
+}
+
+/// The same hold-clearing rule for `EvSetReadyBy`: a ready-by target means
+/// "charge toward this by departure", which a latched hold would veto.
+#[test]
+fn ready_by_clears_latched_zero_power_hold() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 0.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    // Tight deadline (2:00) at 22:00 — the BMS must charge immediately.
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.3,
+        "a fresh EvSetReadyBy must clear the prior hold and charge, got soc {}",
+        ev.soc
+    );
+}
+
+/// The deadline-guarantee exception to the hold: with a ready-by deadline
+/// latched and urgent, a zero-power hold dispatched *after* the ready-by
+/// (the composer's target-then-rate order means a later idle step's hold
+/// lands on top of an earlier `EvSetReadyBy`) must not veto charging —
+/// `compute_charging_power_kw` raises the request to the BMS's
+/// deadline-required power (`requested = bms_power.max(requested)`), so a
+/// soft hold never strands the driver. This is the one scenario where an
+/// idling strategy legitimately still charges.
+#[test]
+fn urgent_ready_by_deadline_charges_through_latched_hold() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Ready-by first: 0.3 -> 0.9 on a 7.2 kW charger needs 5 h against a
+    // 4 h deadline (22:00 -> 02:00), so the BMS must charge immediately.
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    // … then a later idle step latches the hold on top of it.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 0.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.3,
+        "an urgent ready-by deadline must charge through a latched zero-power hold, got soc {}",
+        ev.soc
+    );
+}
+
+/// A hold latched at checkpoint time must survive an equipment checkpoint
+/// round-trip: the v4 checkpoint carries `power_setpoint_kw`/`soc_target`,
+/// and a field dropped on save or restore would silently resurrect the
+/// charge-to-full BMS default after every restart — the exact symptom the
+/// explicit-hold contract exists to prevent, resurfacing only in
+/// checkpoint-restart runs where no actor re-dispatch is between restore
+/// and the next step.
+#[test]
+fn latched_hold_and_target_survive_equipment_checkpoint_round_trip() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.4.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // An idle window latches the hold; an earlier strategy step latched a
+    // target below the BMS default.
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.7,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 0.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+    // No field dropped on re-save: a silent schema regression shows up as a
+    // byte difference, not a default silently standing in.
+    assert_eq!(
+        state,
+        restored.save_state().unwrap(),
+        "checkpoint round-trip must preserve the latched hold/target bytes"
+    );
+
+    // The restored EV must still be held: charging stays suppressed.
+    let soc_before = restored.soc;
+    let mut ports = PortSlots::default();
+    restored
+        .step(&env, Duration::minutes(60), &mut ports)
+        .unwrap();
+    assert_eq!(
+        restored.soc, soc_before,
+        "a hold latched before the checkpoint must still suppress charging after restore, \
+         got soc {soc_before} → {}",
+        restored.soc
+    );
+
+    // …and the restored state is live: a fresh target supersedes the hold.
+    restored
+        .apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    restored
+        .step(&env, Duration::minutes(60), &mut ports)
+        .unwrap();
+    assert!(
+        restored.soc > soc_before,
+        "a fresh target on the restored EV must charge (the hold-clear must have been \
+         restored too), got soc stuck at {}",
+        restored.soc
+    );
+}
+
+/// The range-anxiety override dispatches `SOCTarget{band}` — no rate — so
+/// the `SOCTarget` arm's hold-clear leaves the BMS in full control
+/// (`requested = bms_power` on the no-setpoint branch). The BMS's deadline
+/// pacing computes its deficit against `soc_target.or(ready_by_soc)` — the
+/// override's band target shadows the ready-by's own — so a maximally
+/// urgent ready-by deadline (42 kWh needed, 1 h left) recomputes its
+/// deficit against the band (6 kWh ≈ 0.93 h < 1 h "plenty of time") and
+/// commands zero: the urgent deadline charges nothing, and the override's
+/// minimal top-up never flows either. Contrast
+/// `urgent_ready_by_deadline_charges_through_latched_hold`, where the
+/// latched HOLD leaves `soc_target` unset and the deadline charges — the
+/// override's target, not the hold, is what silences it.
+#[test]
+fn band_soc_target_must_not_veto_urgent_ready_by_charging() {
+    // Phase A (precondition): the deadline alone charges — 0.2 → 0.9 needs
+    // 42 kWh against a 1 h deadline, so the BMS is maximally urgent.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw.clone());
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.2,
+        "precondition: an urgent ready-by deadline (0.9 by 23:00, 42 kWh needed, 1 h \
+         left) must charge, got soc {}",
+        ev.soc
+    );
+
+    // Phase B (the attack): the same session, with the range-anxiety
+    // override's minimal-charge dispatch (SOCTarget at the band) landing on
+    // top of the latched deadline. The override exists to protect a short
+    // driver and fires precisely when time is short; the deadline is
+    // unmet and urgent. Charging must continue — instead the band target
+    // shadows the deadline's deficit basis and the BMS paces to zero.
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.3, // the band: (30 mi + 20 mi) × 0.3 kWh/mi / 60 kWh
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.2,
+        "an urgent ready-by deadline must keep charging when the range-anxiety override's \
+         band target lands on top of it — the override tops up minimally toward the band \
+         and the deadline still needs 42 kWh in 1 h — instead the band target shadowed \
+         the deadline's deficit basis and charging stopped: soc {}",
+        ev.soc
+    );
+}
+
+/// The same shadowing defect has a second branch: with SOC already above
+/// the band target but below the deadline's departure target, the
+/// `soc >= soc_limit` early return fired at the band and returned zero
+/// before the deadline branch ever ran — the deadline was vetoed by a
+/// ceiling it was supposed to outrank. The effective destination while a
+/// ready-by is latched is the max of the controller target and the
+/// deadline's own, so the early return cannot stop charging short of the
+/// departure SOC while it is still unmet.
+#[test]
+fn band_soc_target_ceiling_must_not_stop_charging_short_of_urgent_deadline() {
+    // SOC 0.4 is above the band (0.3) but well short of the deadline's 0.9
+    // departure target — 30 kWh needed against a 1 h deadline, urgent.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.4.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.3, // the band: (30 mi + 20 mi) × 0.3 kWh/mi / 60 kWh
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.4,
+        "an urgent ready-by deadline must keep charging above the band target but short of \
+         its own 0.9 departure target — instead the band ceiling stopped charging at the \
+         early return: soc {}",
+        ev.soc
+    );
+}
+
+/// The mirror direction of the band-veto fix: the effective destination
+/// while a ready-by is latched is the max of the two targets, so a
+/// controller target ABOVE the deadline's raises the destination — the
+/// deadline's lower departure target must not cap a higher configured
+/// ceiling. SOC 0.7 is already above the deadline's 0.6 target; a
+/// "deadline target always wins" rule would early-return zero here.
+#[test]
+fn controller_target_above_ready_by_raises_destination() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.7.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.6, // deadline already satisfied at SOC 0.7
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.95, // controller ceiling above the deadline's target
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!(
+        ev.soc > 0.7,
+        "a controller target (0.95) above the deadline's (0.6) must raise the destination — \
+         charging must continue past the satisfied deadline target: soc {}",
+        ev.soc
+    );
+}
+
+/// A hold latched at home must not silently zero away-charging: the away
+/// arm consults the same `power_setpoint_kw`, so the disconnect clear is
+/// what keeps `away_charge_fraction > 0` drivers able to charge off-site.
+#[test]
+fn disconnect_clears_latched_hold_for_away_charging() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Home session leaves a hold and a target latched …
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 0.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    // … then the driver departs and later plugs into the away charger.
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+        .unwrap();
+
+    let soc_before = ev.soc;
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    assert!(
+        ev.soc > soc_before,
+        "disconnect must clear the home-session hold so away charging works, got soc {} → {}",
+        soc_before,
+        ev.soc
+    );
 }
 
 #[test]
@@ -2032,6 +2528,134 @@ fn external_authority_respects_setpoint_despite_urgent_deadline() {
     assert!(
         (power - 1.0).abs() < 1e-9,
         "ExternalAuthority should respect 1.0 kW setpoint even with urgent deadline, got {power}"
+    );
+}
+
+/// The controller-vs-deadline destination fix (`target = max(controller,
+/// deadline)` in `compute_charging_power_kw`) is scoped by its own comment
+/// to the default `DeadlineGuarantee` — "under the default … the deadline
+/// is the hard one". `ExternalAuthority` is the opposite contract: the
+/// external controller bears sole responsibility and the BMS deadline
+/// logic is not applied. The max() applies unconditionally, so a deadline
+/// target *above* the controller's commanded destination raises the charge
+/// destination under ExternalAuthority too — the deadline logic the
+/// priority promises not to apply now shapes the destination. A controller
+/// commanding "toward 0.3 at 1 kW" with a stale 0.9 ready-by latched must
+/// stop at 0.3; instead the pack rides to 0.9.
+#[test]
+fn external_authority_deadline_target_must_not_raise_controller_destination() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(
+        KEY_CHARGING_PRIORITY.to_string(),
+        "ExternalAuthority".into(),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.charging_priority, ChargingPriority::ExternalAuthority);
+
+    // The scheduling layer latched a ready-by deadline earlier in the
+    // session; the controller then commands its own, lower destination and
+    // rate (SOCTarget first — clearing any hold — then the rate).
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.3,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    // Step ~23 h at 15 min. Under ExternalAuthority the pack must stop at
+    // the controller's 0.3 destination; the deadline's 0.9 must not raise
+    // it (deadline logic not applied), and nothing else may extend it.
+    let mut ports = PortSlots::default();
+    for step in 0..92 {
+        env.current_time = dt(2026, 1, 1, 22, 0, 0) + ChronoDuration::minutes(15 * step);
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    }
+    assert!(
+        ev.soc <= 0.31,
+        "under ExternalAuthority the controller's commanded destination (SOCTarget 0.3) \
+         must govern — the latched ready-by deadline's 0.9 target must not raise the \
+         charge destination when the priority promises the deadline logic is not \
+         applied: soc {}",
+        ev.soc
+    );
+}
+
+/// Companion to `external_authority_deadline_target_must_not_raise_controller_destination`:
+/// that test commands a rate alongside the target, so the verbatim-setpoint
+/// pacing path is what stops at the controller's destination. This one
+/// commands the target WITHOUT a rate — under `ExternalAuthority` with no
+/// setpoint the BMS still paces (`requested = bms_power`), now against the
+/// priority-scoped destination — and the stale higher deadline target must
+/// not raise that destination on this path either. Sensitive to the scoped
+/// `max()` in `compute_charging_power_kw` exactly as the sibling test is.
+#[test]
+fn external_authority_target_without_rate_paces_to_controller_destination() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(
+        KEY_CHARGING_PRIORITY.to_string(),
+        "ExternalAuthority".into(),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.charging_priority, ChargingPriority::ExternalAuthority);
+
+    // Stale ready-by deadline latched earlier; the controller commands a
+    // destination only (SOCTarget first — clearing any hold — and no rate).
+    env.current_time = dt(2026, 1, 1, 22, 0, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 23.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.3,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    // Step 2 h at 15 min, staying inside the deadline window. The pack
+    // must pace toward the controller's 0.3 and stop there — not ride the
+    // deadline's 0.9, and not stall at the start SOC.
+    let mut ports = PortSlots::default();
+    for step in 0..8 {
+        env.current_time = dt(2026, 1, 1, 22, 0, 0) + ChronoDuration::minutes(15 * step);
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    }
+    assert!(
+        ev.soc > 0.25,
+        "with no external setpoint the BMS must still pace toward the controller's \
+         destination: soc {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc <= 0.31,
+        "under ExternalAuthority the controller's commanded destination (SOCTarget 0.3) \
+         must govern on the BMS-pacing path too — the latched ready-by deadline's 0.9 \
+         must not raise it: soc {}",
+        ev.soc
     );
 }
 
@@ -2843,14 +3467,70 @@ fn soc_clamps_at_boundaries() {
         "SOC should be ~0.0 after draining remaining energy"
     );
 
-    // Attempting to overdraw should be rejected
-    let err = ev2
-        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: 1.0 })
-        .unwrap_err();
+    // A finite overdraw is truncated to the pack's remaining energy: SOC
+    // lands exactly at 0 (never below), and the undeliverable remainder is
+    // accounted as observable drive shortfall — not silently dropped, and
+    // not an error that would vanish into a warning string while the day's
+    // profile kept reporting the dispatched energy.
+    ev2.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 1.0 })
+        .unwrap();
     assert!(
-        err.to_string().contains("exceeds available"),
-        "overdraw should be rejected: {err}"
+        ev2.soc.abs() < 1e-9,
+        "overdraw truncates to available: SOC must land exactly at 0, got {}",
+        ev2.soc
     );
+    assert_eq!(
+        ev2.drive_shortfall_kwh, 1.0,
+        "the undeliverable remainder must be accounted, not dropped"
+    );
+    let mut ports = PortSlots::default();
+    ev2.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert_eq!(
+        ev2.telemetry().get("drive_shortfall_kwh"),
+        Some(1.0),
+        "the drive shortfall must be published as observable telemetry"
+    );
+}
+
+/// The shortfall is cumulative (successive overdraws sum, not last-write)
+/// and survives a checkpoint round-trip — the checkpoint schema gained the
+/// field (v4), so a save/load must not silently reset the accounting.
+#[test]
+fn drive_shortfall_accumulates_and_survives_checkpoint() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.05.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+
+    // 3.0 kWh available: first drive overdraws by 1.0, second (at SOC 0)
+    // is entirely undeliverable.
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 4.0 })
+        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 2.0 })
+        .unwrap();
+    assert_eq!(
+        ev.drive_shortfall_kwh, 3.0,
+        "successive shortfalls must accumulate, got {}",
+        ev.drive_shortfall_kwh
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+    assert_eq!(
+        restored.drive_shortfall_kwh, 3.0,
+        "checkpoint round-trip must preserve the cumulative shortfall"
+    );
+    assert_eq!(restored.soc, 0.0);
+    // Double round-trip: bytes identical (no field dropped on re-save).
+    assert_eq!(state, restored.save_state().unwrap());
 }
 
 /// Connection state transitions: HomePluggedIn -> AwayPluggedIn must be rejected

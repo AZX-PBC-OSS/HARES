@@ -132,6 +132,25 @@ pub trait Actor: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Schema version of the blob returned by [`Actor::save_state`].
+    ///
+    /// Bump whenever the serialized shape of that blob changes — a field
+    /// added, removed, or retyped. The dwelling records this version beside
+    /// the blob in every checkpoint and validates it before calling
+    /// [`Actor::load_state`], so a blob written by a build whose schema
+    /// differs is rejected at the checkpoint boundary with an error naming
+    /// the actor and both versions, rather than surfacing as a postcard
+    /// decode failure deep inside `load_state`. This mirrors the equipment
+    /// side's per-equipment `checkpoint_version()` / `load_versioned`
+    /// contract (`hares-equipment/src/serial.rs`); the dwelling-level
+    /// `CHECKPOINT_VERSION` remains the gate for the checkpoint file as a
+    /// whole.
+    ///
+    /// Default: `1`, the first versioned schema of this actor.
+    fn checkpoint_version(&self) -> u32 {
+        1
+    }
+
     /// Returns the actor's RNG (seed, stream) pair, or `None` if the actor
     /// is deterministic or uses a non-standard RNG scheme.
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {

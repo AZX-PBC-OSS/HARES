@@ -81,6 +81,24 @@ pub trait ChargingPreference: Send + Sync {
     }
 }
 
+/// Minutes from `current_minute` until `target_minute`, wrapping past
+/// midnight (a departure minute earlier in the day than the current time is
+/// the *next* day's departure). Returns a full 1440 for a target equal to
+/// the current minute: "departing now" leaves no charging time before the
+/// next departure window.
+///
+/// Single home for the wraparound arithmetic: `DepartureDeadline`'s urgency
+/// computation and the actor's range-anxiety urgency gate both measure time
+/// to departure, so they must not drift apart.
+pub(super) fn minutes_until(current_minute: u16, target_minute: u32) -> f64 {
+    let diff = i64::from(target_minute) - i64::from(current_minute);
+    if diff > 0 {
+        diff as f64
+    } else {
+        (diff + 1440) as f64
+    }
+}
+
 /// Hours needed to charge from the context's current SOC to `target_soc` at
 /// the max charge rate, rounded up to the nearest timestep to avoid
 /// underestimating charge time.

@@ -2490,6 +2490,73 @@ mod tests {
         }
     }
 
+    /// The two setpoint channels clear each other on every write — a fresh
+    /// `SOCTarget` supersedes a latched `power_setpoint_kw` and vice versa
+    /// (`apply_signal`'s `SOCTarget` arm sets `power_setpoint_kw = None`,
+    /// the `PowerSetpoint` arm sets `soc_target = None`). Without the
+    /// clearing, a latched setpoint would outrank every later target via
+    /// `determine_target_power`'s Priority 1, and a controller's SOC-window
+    /// dispatch would silently never govern — the latch-veto failure mode.
+    #[test]
+    fn soc_target_supersedes_latched_power_setpoint_and_vice_versa() {
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Latch a full-rate charge setpoint, then dispatch a fresh SOC
+        // target just above the current SOC (0.5). The setpoint must no
+        // longer govern: charging stops at the target instead of riding
+        // the latched 5 kW toward max_soc.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.6,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        for _ in 0..200 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(
+            (bat.soc - 0.6).abs() < 0.05,
+            "a fresh SOCTarget must supersede the latched 5 kW setpoint — charging must stop at \
+             the target (0.6), not ride the setpoint toward max_soc: soc {}",
+            bat.soc
+        );
+
+        // Mirror: a fresh PowerSetpoint supersedes the latched target — a
+        // 2 kW discharge must drive SOC back below the 0.6 target.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        for _ in 0..60 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(
+            bat.soc < 0.6 - 0.01,
+            "a fresh PowerSetpoint must supersede the latched SOC target — discharging at 2 kW \
+             must drive SOC below the 0.6 target: soc {}",
+            bat.soc
+        );
+    }
+
     #[test]
     fn soc_clamped_at_upper_bound() {
         // Explicitly set max_soc=1.0 so this test is independent of the OCHRE default.
@@ -2611,6 +2678,49 @@ mod tests {
         assert!(
             total_discharge_energy < total_charge_energy,
             "round-trip efficiency must be < 1.0: charged {total_charge_energy:.4} kWh, discharged {total_discharge_energy:.4} kWh"
+        );
+    }
+
+    /// Enabling self-consumption must supersede a latched setpoint/target:
+    /// the `SelfConsumption` arm clears both (`power_setpoint_kw = None`,
+    /// `soc_target = None`), otherwise `determine_target_power`'s Priority 1
+    /// keeps the stale setpoint governing forever and the battery charges
+    /// through a net load it was told to offset. Existing self-consumption
+    /// tests never latch a setpoint first, so the clearing is what this
+    /// pins.
+    #[test]
+    fn self_consumption_supersedes_latched_power_setpoint() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::SelfConsumption {
+            enabled: true,
+            solar_only_charging: false,
+        })
+        .unwrap();
+
+        // Stage 1: net load = 2 kW — self-consumption must discharge to
+        // offset it, not ride the latched 5 kW charge setpoint.
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            bat.soc < 0.5,
+            "enabling self-consumption must supersede the latched 5 kW charge setpoint — \
+             with a 2 kW net load the battery must discharge, not charge: soc {}",
+            bat.soc
         );
     }
 

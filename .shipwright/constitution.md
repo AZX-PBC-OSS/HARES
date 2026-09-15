@@ -68,6 +68,14 @@ Every file you touch must leave the codebase strictly better than you found it:
 
 Files above ~2000 lines are a signal that a module is doing too much. When you encounter this, consider whether logic can be extracted into a focused submodule with a clear responsibility. Do not be dogmatic — a 2200-line file with a single coherent concern is fine; a 1500-line file with four unrelated concerns is not. Judge by cohesion, not line count.
 
+### Silence is not a decision
+
+When two decoupled components communicate by dispatch — an actor sending control signals to equipment, a producer feeding a consumer — an instruction to do nothing must have an explicit on-the-wire representation. If "no message this step" is the only way to express "hold," the receiver's own default behaviour fills the gap, and the sender's decision is silently overridden (I-05: an idling `ChargingStrategy` dispatched nothing, and the EV's charge-to-full BMS default made every strategy converge on charge-on-plug-in).
+
+- **Every resolved decision — including "wait" — must be dispatchable.** Route all branches through a shared choke point that cannot return without emitting either an action or an explicit hold. A special case that swallows a decision (an early `return` on zero power, a branch with no push) is the bug shape.
+- **Latched receiver state must have a clearing rule.** If a dispatched setpoint persists until overwritten, define exactly which later signals supersede it and which lifecycle events (disconnect, reset) clear it. A hold that latches without a clearing rule trades "always acts" for "never acts" — the opposite failure mode by the same mechanism.
+- **Test the receiver's observable state, not the sender's silence.** A test asserting "nothing was dispatched" proves nothing about what the receiver did. Assert the downstream effect (energy consumed, state held, transition made) across the boundary. "The sender asserted nothing" is not equivalent to "nothing happened."
+
 ### Fix the class of bug, not the instance
 
 Every ticket identifies a specific instance of a problem. The fix must address the entire class. Before writing code, ask: does this same issue appear anywhere else?

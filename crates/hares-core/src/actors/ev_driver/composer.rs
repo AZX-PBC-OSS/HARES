@@ -128,9 +128,21 @@ impl ChargingComposer {
     }
 
     /// Resolve multiple votes into a single action.
+    ///
+    /// Fold rules: `power_kw`, `min_soc`/`max_soc`, and `departure_hour`
+    /// fold unconditionally across all votes (most conservative / most
+    /// restrictive / earliest). `target_soc` comes from the highest-scored
+    /// vote that carries one — NOT from the overall score winner — so a
+    /// targetless rate-vote (`PriceOptimizer`, `SolarTracking`, V2H/V2G
+    /// discharge) winning on score cannot erase the ceiling another vote
+    /// asserts, and the ceiling does not depend on stack order. Without
+    /// this, TouAware at a cheap price resolved to a rate with no target and
+    /// the equipment charged toward its `ready_soc` default (1.0) instead of
+    /// the strategy's configured ceiling.
     fn resolve(votes: &[PreferenceVote]) -> PreferenceVote {
         let mut best_score = f64::NEG_INFINITY;
         let mut best_target_soc: Option<f64> = None;
+        let mut best_target_score = f64::NEG_INFINITY;
         let mut best_label: &str = "idle";
         let mut min_power_kw: Option<f64> = None;
         let mut max_min_soc: Option<f64> = None;
@@ -138,13 +150,22 @@ impl ChargingComposer {
         let mut earliest_departure: Option<f64> = None;
 
         for vote in votes {
-            // target_soc from highest-scored vote
-            if vote.score > best_score {
+            // Score/label winner. `>=` (not `>`): a later vote that *ties* the
+            // best score wins the label (and, below, any target it carries)
+            // over the earlier vote — under `>` a tie silently kept the
+            // earlier vote's label and dropped the later vote's target.
+            if vote.score >= best_score {
                 best_score = vote.score;
-                if vote.target_soc.is_some() {
-                    best_target_soc = vote.target_soc;
-                }
                 best_label = vote.label;
+            }
+
+            // target_soc from the highest-scored vote that carries one
+            // (see doc comment); `>=` so a tied later vote's target wins.
+            if let Some(t) = vote.target_soc
+                && vote.score >= best_target_score
+            {
+                best_target_soc = Some(t);
+                best_target_score = vote.score;
             }
 
             // power_kw: most conservative (smallest absolute value, preserving sign)
@@ -203,20 +224,52 @@ impl ChargingComposer {
     /// `EvSetReadyBy`, `PowerSetpoint`, and `SOCTarget`. The charging
     /// composer operates within the EV driver's schedule-level framework.
     ///
-    /// When a vote carries both `departure_hour`/`target_soc` and `power_kw`
-    /// (e.g. an urgency Override from [`super::departure::DepartureDeadline`]),
-    /// both `EvSetReadyBy` and `PowerSetpoint` are emitted so the equipment
-    /// receives the scheduler's full intent rather than having the deadline
-    /// signal silently discard the rate.
+    /// Three ordered steps:
+    ///
+    /// 1. An idle-shaped vote (no `target_soc` and no `power_kw`, regardless
+    ///    of `departure_hour` — a departure alone cannot be expressed by any
+    ///    of the three signal variants below) dispatches an explicit
+    ///    zero-power hold. Dispatching nothing is not neutral: a plugged-in
+    ///    EV that receives no instruction charges toward its BMS `ready_soc`
+    ///    default at rated power, so actor silence silently meant "charge to
+    ///    full" and every idling strategy collapsed to charge-on-plug-in.
+    ///    `PowerSetpoint{0}` forces exactly zero charging regardless of any
+    ///    perceived-vs-observed SOC divergence (a `SOCTarget{current_soc}`
+    ///    hold would degrade to a nonzero trickle the moment the two differ).
+    ///
+    /// 2. The target-of-record (`EvSetReadyBy` when paired with a departure,
+    ///    else `SOCTarget`) is dispatched *before* any rate so a same-step
+    ///    rate from step 3 is the later write and is never dropped — the
+    ///    equipment applies same-tier signals FIFO, and the `SOCTarget`/
+    ///    `EvSetReadyBy` arms clear a prior hold before the rate lands.
+    ///
+    /// 3. The rate-of-record is dispatched for any `Some(power_kw)` —
+    ///    including exactly `0.0`, which clamps to `0.0` and is identical in
+    ///    effect to the idle hold. There is deliberately no zero-power
+    ///    special case: the old early return silently dropped both the rate
+    ///    and any target dispatched alongside it.
     fn emit_vote(
         &self,
         ctx: &DecisionContext,
         vote: &PreferenceVote,
         out: &mut Vec<DispatchRequest>,
     ) {
-        let mut emitted_ready_by = false;
+        // 1. Nothing dispatchable — say so explicitly with a hold.
+        if vote.target_soc.is_none() && vote.power_kw.is_none() {
+            out.push(DispatchRequest {
+                target: self.dispatch_target.clone(),
+                signal: ControlSignal::PowerSetpoint {
+                    active_power_kw: 0.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                },
+                priority: PriorityTier::Schedule,
+            });
+            return;
+        }
 
-        // If there's a departure_hour + target_soc, use EvSetReadyBy
+        // 2. Target-of-record, dispatched first (see doc comment).
         if let (Some(departure), Some(target)) = (vote.departure_hour, vote.target_soc) {
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
@@ -226,16 +279,20 @@ impl ChargingComposer {
                 },
                 priority: PriorityTier::Schedule,
             });
-            emitted_ready_by = true;
+        } else if let Some(target) = vote.target_soc {
+            out.push(DispatchRequest {
+                target: self.dispatch_target.clone(),
+                signal: ControlSignal::SOCTarget {
+                    target_soc: target,
+                    min_soc: vote.min_soc,
+                    max_soc: vote.max_soc,
+                },
+                priority: PriorityTier::Schedule,
+            });
         }
 
-        // If there's a power_kw, use PowerSetpoint
+        // 3. Rate-of-record, dispatched second (see doc comment).
         if let Some(unclamped) = vote.power_kw {
-            if unclamped.abs() < 1e-9 {
-                // Zero power = idle, no dispatch needed
-                return;
-            }
-
             // Defense-in-depth: clamp power against equipment context limits.
             // Individual strategies self-clamp, but this output-boundary clamp
             // catches unclamped custom preferences and strategy bugs.
@@ -303,7 +360,7 @@ impl ChargingComposer {
             #[cfg(feature = "observe")]
             {
                 tracing::debug!(
-                    ev_override_power_propagated = emitted_ready_by,
+                    ev_override_power_propagated = vote.departure_hour.is_some(),
                     power_kw = power,
                     preference = vote.label,
                     "PowerSetpoint dispatch with Ready-By coexistence",
@@ -314,25 +371,6 @@ impl ChargingComposer {
                 signal: ControlSignal::PowerSetpoint {
                     active_power_kw: power,
                     reactive_power_kvar: None,
-                    min_soc: vote.min_soc,
-                    max_soc: vote.max_soc,
-                },
-                priority: PriorityTier::Schedule,
-            });
-            return;
-        }
-
-        // If Ready-By was already emitted and there is no power_kw, we are done.
-        if emitted_ready_by {
-            return;
-        }
-
-        // If there's a target_soc, use SOCTarget
-        if let Some(target) = vote.target_soc {
-            out.push(DispatchRequest {
-                target: self.dispatch_target.clone(),
-                signal: ControlSignal::SOCTarget {
-                    target_soc: target,
                     min_soc: vote.min_soc,
                     max_soc: vote.max_soc,
                 },
@@ -522,6 +560,291 @@ mod tests {
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
+    }
+
+    /// An idle-shaped constraint override (the `TimeWindowPref`/`SocGate`/
+    /// V2H-V2G soc-floor shape) must dispatch an explicit zero-power hold,
+    /// not silence — a plugged-in EV left uninstruenced charges toward its
+    /// BMS `ready_soc` default, so silence meant "charge to full".
+    #[test]
+    fn idle_override_dispatches_explicit_hold() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(OverridePref {
+            vote: PreferenceVote::idle("time_window:outside"),
+        })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            1,
+            "an idle override must dispatch exactly one explicit hold, got {out:?}"
+        );
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    active_power_kw.abs() < 1e-9,
+                    "the hold must command exactly zero power, got {active_power_kw}"
+                );
+            }
+            other => panic!("expected zero-power PowerSetpoint hold, got {other:?}"),
+        }
+    }
+
+    /// The same contract on the scored path: when every vote idles and the
+    /// resolved vote is idle-shaped, an explicit hold dispatches.
+    #[test]
+    fn all_idle_scores_dispatch_explicit_hold() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![
+            Box::new(ScoredPref {
+                vote: PreferenceVote::idle("price:neutral"),
+            }),
+            Box::new(ScoredPref {
+                vote: PreferenceVote::idle("soc_gate:idle"),
+            }),
+        ];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert!(
+            out.iter().any(|r| matches!(
+                &r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. }
+                    if active_power_kw.abs() < 1e-9
+            )),
+            "an all-idle resolution must dispatch an explicit zero-power hold, got {out:?}"
+        );
+    }
+
+    /// A vote carrying exactly zero power (reachable from `SolarTracking`
+    /// with `min_charge_rate_kw: 0.0` and no surplus) must dispatch a
+    /// zero-power setpoint — the old code's `abs() < 1e-9` early return
+    /// silently dropped it, together with any target dispatched alongside.
+    #[test]
+    fn zero_power_vote_dispatches_zero_setpoint_not_silence() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let zero_rate_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(0.0),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "solar:zero_surplus",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: zero_rate_vote,
+        })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            1,
+            "a zero-power vote must not be silently dropped"
+        );
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(active_power_kw.abs() < 1e-9);
+            }
+            other => panic!("expected zero-power PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    /// A resolved vote carrying a target AND an exactly-zero rate (the
+    /// `SolarSurplus`-with-ceiling shape: a target-bearing vote tied with
+    /// `SolarTracking`'s zero-surplus rate) must dispatch BOTH, target
+    /// first — the zero rate is not idle-shaped (only `None` is), so the
+    /// idle-hold branch must not swallow the target, and the rate branch
+    /// must not swallow the target either (the old zero-power early return
+    /// did exactly that).
+    #[test]
+    fn target_with_zero_rate_dispatches_target_then_zero_setpoint() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: PreferenceVote {
+                target_soc: Some(0.9),
+                power_kw: Some(0.0),
+                departure_hour: None,
+                min_soc: None,
+                max_soc: None,
+                score: 1.0,
+                label: "solar:zero_surplus_with_target",
+            },
+        })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            2,
+            "a target + zero-rate vote must dispatch both signals, got {out:?}"
+        );
+        assert!(
+            matches!(&out[0].signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9),
+            "the ceiling must be dispatched first, got {out:?}"
+        );
+        assert!(
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() < 1e-9),
+            "the zero rate must be dispatched second as an explicit zero-power setpoint, got {out:?}"
+        );
+    }
+
+    /// A resolved vote carrying both a target and a rate (no departure) must
+    /// dispatch both — target first so the rate is the later same-step write
+    /// and the equipment's hold-clear-on-target lands before the rate. The
+    /// old code dispatched only the rate and silently dropped the ceiling.
+    #[test]
+    fn target_with_rate_dispatches_target_then_rate() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: PreferenceVote {
+                target_soc: Some(0.9),
+                power_kw: Some(3.5),
+                departure_hour: None,
+                min_soc: None,
+                max_soc: None,
+                score: 1.0,
+                label: "composed",
+            },
+        })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            2,
+            "target + rate must dispatch both, got {out:?}"
+        );
+        assert!(
+            matches!(&out[0].signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9),
+            "the target must be dispatched first, got {out:?}"
+        );
+        assert!(
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 3.5).abs() < 1e-9),
+            "the rate must be dispatched second, got {out:?}"
+        );
+    }
+
+    /// A targetless rate-vote winning on score must not erase the ceiling a
+    /// lower-scored vote asserts (the `PriceOptimizer`-before-`SocTarget`
+    /// stack order): without this rule TouAware at a cheap price charged at
+    /// the commanded rate toward the equipment's `ready_soc` default (1.0)
+    /// instead of the strategy's configured ceiling.
+    #[test]
+    fn targetless_rate_winner_keeps_ceiling_target() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // Stack order matters to what this pins: the targetless rate vote
+        // is FIRST and out-scores the target vote.
+        let rate_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(7.2),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 3.0,
+            label: "price:charge",
+        };
+        let ceiling_vote = PreferenceVote {
+            target_soc: Some(0.9),
+            power_kw: None,
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 0.4,
+            label: "soc_target",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![
+            Box::new(ScoredPref { vote: rate_vote }),
+            Box::new(ScoredPref { vote: ceiling_vote }),
+        ];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(
+            out.len(),
+            2,
+            "the resolved vote must carry both the ceiling and the rate, got {out:?}"
+        );
+        assert!(
+            matches!(&out[0].signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9),
+            "the ceiling must reach the equipment, got {out:?}"
+        );
+        assert!(
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 7.2).abs() < 1e-9),
+            "the winning rate must reach the equipment, got {out:?}"
+        );
+    }
+
+    /// A tied score must not drop the later vote's target: the first vote
+    /// idles at score 0, the second carries a target at the same score —
+    /// the resolved vote must include the target.
+    #[test]
+    fn tied_vote_target_is_not_dropped() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let idle_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: None,
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 0.0,
+            label: "price:neutral",
+        };
+        let tied_target_vote = PreferenceVote {
+            target_soc: Some(0.9),
+            power_kw: None,
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 0.0,
+            label: "soc_target",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![
+            Box::new(ScoredPref { vote: idle_vote }),
+            Box::new(ScoredPref {
+                vote: tied_target_vote,
+            }),
+        ];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert!(
+            out.iter().any(|r| matches!(
+                &r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+            )),
+            "a tied vote's target must not be silently dropped, got {out:?}"
+        );
     }
 
     #[test]

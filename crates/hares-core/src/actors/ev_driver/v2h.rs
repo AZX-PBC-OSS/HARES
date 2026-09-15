@@ -1,6 +1,6 @@
 //! V2HDischarge -- discharge to home when deficit exists.
 
-use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
+use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 
 pub struct V2HDischarge {
     pub threshold_soc: f64,
@@ -9,14 +9,6 @@ pub struct V2HDischarge {
 }
 
 impl ChargingPreference for V2HDischarge {
-    fn constraint(&mut self, ctx: &DecisionContext) -> Constraint {
-        if ctx.current_soc <= self.min_soc {
-            Constraint::Override(PreferenceVote::idle("v2h:soc_floor"))
-        } else {
-            Constraint::Inactive
-        }
-    }
-
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
         let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
 
@@ -28,6 +20,23 @@ impl ChargingPreference for V2HDischarge {
 
         let load = ctx.env.electrical.base_load_kw;
         let deficit = load - pv;
+
+        // The soc floor is a constraint on *this preference's vote* — do not
+        // discharge the home below `min_soc` — not on the whole stack. It
+        // must live here, in the vote, and not in `constraint()`: a floor
+        // Override(idle) short-circuits the composer before the stack's own
+        // `SocTarget` is ever consulted, and under the explicit-hold contract
+        // that idle dispatches a latching zero-power hold whose only release
+        // is a fresh target — a target the override itself prevents. The
+        // vehicle would be pinned at its floor indefinitely (only charging
+        // raises SOC). The floor still holds for discharge: this vote carries
+        // no power at or below the floor, and the equipment independently
+        // enforces it in `compute_v2l_discharge` (via the `min_soc` this
+        // preference places on its discharge setpoints) even if some other
+        // vote tries.
+        if ctx.current_soc <= self.min_soc {
+            return PreferenceVote::idle("v2h:soc_floor");
+        }
 
         if ctx.current_soc > self.threshold_soc && deficit > 0.0 {
             let discharge = deficit.min(self.max_discharge_kw);
@@ -70,21 +79,38 @@ mod tests {
     }
 
     #[test]
-    fn overrides_idle_at_soc_floor() {
-        let env = TestEnvBuilder::new().build();
+    fn declines_discharge_at_soc_floor_even_with_deficit() {
+        use crate::actors::ev_driver::preference::Constraint;
+
+        // A home deficit the preference would serve — but SOC is at/below
+        // the floor: the discharge vote stands down (no power), while the
+        // floor must NOT short-circuit the composer and block the stack's
+        // own charging votes.
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
             max_discharge_kw: 5.0,
         };
         let ctx = make_ctx(&env, 0.15);
-        match pref.constraint(&ctx) {
-            Constraint::Override(vote) => {
-                assert_eq!(vote.label, "v2h:soc_floor");
-                assert!(vote.power_kw.is_none());
-            }
-            Constraint::Inactive => panic!("expected Override"),
-        }
+        let vote = pref.score(&ctx);
+        assert_eq!(vote.label, "v2h:soc_floor");
+        assert!(
+            vote.power_kw.is_none(),
+            "no discharge at/below the soc floor, whatever the deficit"
+        );
+        assert!(
+            matches!(pref.constraint(&ctx), Constraint::Inactive),
+            "the soc floor is a constraint on this preference's vote, not a stack override — \
+             an Override(idle) here latches a hold that starves the stack's own SocTarget \
+             and pins the vehicle at its floor"
+        );
     }
 
     #[test]

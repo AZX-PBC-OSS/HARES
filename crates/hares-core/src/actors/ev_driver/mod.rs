@@ -13,6 +13,18 @@
 //! so a caller watching only the driver's channels sees charging as it
 //! occurs even under goal-based dispatches the equipment paces itself.
 //!
+//! ## Dispatch contract with the equipment
+//!
+//! Silence is never dispatched. Every plugged-in step asserts the resolved
+//! decision: an idling strategy dispatches an explicit zero-power hold
+//! (`PowerSetpoint{0}`), an active one dispatches its target and/or rate.
+//! A plugged-in EV that receives no instruction charges toward its BMS
+//! `ready_soc` default at rated power, so a silent idle step would silently
+//! mean "charge to full" — the failure this module's composer explicitly
+//! avoids. The equipment clears the hold when a fresh `SOCTarget`/
+//! `EvSetReadyBy` arrives or on disconnect, so a hold never outlives the
+//! idle window that produced it.
+//!
 //! ## SOC estimation model
 //!
 //! The actor maintains `estimated_soc` as its best guess of battery state.
@@ -58,7 +70,9 @@ use crate::Actor;
 
 use self::composer::ChargingComposer;
 use self::departure::DepartureDeadline;
-use self::preference::{ChargingPreference, DecisionContext, needed_charge_hours_to_target};
+use self::preference::{
+    ChargingPreference, DecisionContext, minutes_until, needed_charge_hours_to_target,
+};
 use self::price::PriceOptimizer;
 use self::soc_gate::SocGate;
 use self::soc_target::SocTarget;
@@ -68,7 +82,7 @@ use self::v2g::V2GExport;
 use self::v2h::V2HDischarge;
 
 /// A rolled daily driving event.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct DayEvent {
     departure_minute: u16,
     arrival_minute: u16,
@@ -80,14 +94,21 @@ struct DayEvent {
 enum DriverPhase {
     /// At home, plugged in (or waiting to plug in).
     HomePluggedIn,
-    /// Currently driving (multi-step drain).
+    /// Currently driving (multi-step drain). Carries the departed day's
+    /// plan: a trip whose steps cross midnight into a day that rolls
+    /// non-driving must still complete on its own schedule — the day roll
+    /// decides only *future* departures — so the trip's energy budget and
+    /// home-arrival minute travel with the phase, not with `todays_event`
+    /// (which the new day's roll may have replaced or cleared).
     Driving {
         remaining_kwh: f64,
         total_steps: u32,
         steps_done: u32,
+        plan: DayEvent,
     },
-    /// Away from home (parked, not driving).
-    Away,
+    /// Away from home (parked, not driving), awaiting the departed trip's
+    /// home-arrival minute — carried from the same plan (see `Driving`).
+    Away { plan: DayEvent },
 }
 
 /// Hysteresis band (SOC fraction) for SocGate lower_threshold.
@@ -294,6 +315,11 @@ pub struct EvDriverActor {
     expected_daily_miles: f64,
     /// Deferred away-charge signals to emit on the next step after driving ends.
     needs_away_charge: bool,
+    /// Cumulative count of trips cancelled because the pack could not cover
+    /// them (the driver stayed home and charged). Published as the
+    /// `drive_cancelled` telemetry channel so the shortfall is reported,
+    /// never silently dropped mobility.
+    drive_cancelled: u32,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
 }
@@ -341,7 +367,7 @@ impl EvDriverActor {
             "EV driver daily-miles distribution"
         );
 
-        let mut telemetry = Telemetry::with_capacity(7);
+        let mut telemetry = Telemetry::with_capacity(9);
         // Why: discharge_min_soc = 0.0 means "no discharge floor active" —
         // the field is populated per-step from min_soc on dispatched
         // PowerSetpoint signals. Only V2G/V2H strategies set a non-zero
@@ -355,6 +381,15 @@ impl EvDriverActor {
         telemetry.insert("soc_gate_charging_allowed", 1.0);
         telemetry.insert("needed_charge_hours", 0.0);
         telemetry.insert("discharge_min_soc", 0.0);
+        // 1.0 while the driver's perceived SOC sits below the range-anxiety
+        // band (tomorrow's trip plus the safety buffer): the driver is short
+        // and will override their usual charging pattern once time to the
+        // next departure runs short, whether or not the urgency gate has
+        // fired yet on this step. Predictive state for evaluators: a managed
+        // charging program can read which drivers its strategy is leaving
+        // short before the out-of-pattern charge lands in the profile.
+        telemetry.insert("range_anxiety_active", 0.0);
+        telemetry.insert("drive_cancelled", 0.0);
 
         Self {
             name: Arc::from(name),
@@ -383,6 +418,7 @@ impl EvDriverActor {
             time_res_minutes: 1.0,
             expected_daily_miles,
             needs_away_charge: false,
+            drive_cancelled: 0,
             telemetry,
         }
     }
@@ -426,7 +462,7 @@ impl EvDriverActor {
                 .and_then(|id| env.equipment_core.get(&id))
                 .and_then(|co| co.flows.electric_kw)
                 .map(|p| p.signed_kw()),
-            DriverPhase::Away => env
+            DriverPhase::Away { .. } => env
                 .equipment_telemetry
                 .get(self.target_name())
                 .and_then(|t| t.get(tk::AWAY_CHARGE_POWER_KW)),
@@ -503,6 +539,19 @@ impl EvDriverActor {
             "needed_charge_hours",
             self.composer.last_needed_charge_hours(),
         );
+        // The driver-is-short signal: 1.0 while perceived SOC sits below the
+        // anxiety band, regardless of whether the urgency gate has fired —
+        // predictive state (see the channel's init comment for the rationale).
+        self.telemetry.set(
+            "range_anxiety_active",
+            if self.range_anxiety_miles > 0.0 && self.below_anxiety_band(env) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        self.telemetry
+            .set("drive_cancelled", f64::from(self.drive_cancelled));
     }
 
     /// Returns the target equipment name.
@@ -652,6 +701,54 @@ impl EvDriverActor {
         current_minute >= target_minute && current_minute < target_minute.saturating_add(res)
     }
 
+    /// The pack's available drive energy [kWh], from the best observable
+    /// source. This is an energy-transfer bound, not a behavioral decision
+    /// (which the module doc keeps on the driver's belief): the physical
+    /// pack cannot leave the driveway with more energy than it holds.
+    ///
+    /// Ladder: observed SOC × the equipment's published
+    /// (degradation-adjusted) capacity when both channels are live — exact,
+    /// the same arithmetic the equipment's `EvDrive` guard uses; observed
+    /// SOC × this actor's rated capacity when only SOC is observable (an
+    /// over-estimate under pack degradation, never an under-estimate — the
+    /// residual is handled by the equipment's truncation accounting); the
+    /// driver's belief when nothing is observable (no equipment is
+    /// registered, so nothing can reject a dispatch).
+    fn observed_pack_kwh(&self, env: &EnvironmentState) -> f64 {
+        let capacity = env
+            .equipment_telemetry
+            .get(self.target_name())
+            .and_then(|t| t.get(tk::CAPACITY_KWH))
+            .unwrap_or(self.capacity_kwh);
+        self.actual_soc(env)
+            .map(|soc| soc * capacity)
+            .unwrap_or_else(|| self.perceived_soc() * self.capacity_kwh.max(0.01))
+    }
+
+    /// The SOC the driver's strategy usually keeps the pack at — the
+    /// "usual needed amount" a short driver charges back up to, whether at
+    /// home (the strategy's own target, once back above the anxiety band)
+    /// or out (the away top-up). Mirrors the `SocTarget` each variant's
+    /// stack installs in `build_preferences`; keep the two in step when a
+    /// strategy variant changes its target.
+    fn usual_target_soc(&self) -> f64 {
+        match &self.strategy {
+            ChargingStrategy::Immediate { target_soc }
+            | ChargingStrategy::Nightly { target_soc, .. }
+            | ChargingStrategy::LowSoc { target_soc, .. }
+            | ChargingStrategy::PreDeparture { target_soc, .. }
+            | ChargingStrategy::TouAware { target_soc, .. } => *target_soc,
+            ChargingStrategy::QuickThenWait { partial_soc } => *partial_soc,
+            // SolarSurplus's stack carries no explicit target; its
+            // DepartureDeadline charges toward full.
+            ChargingStrategy::SolarSurplus { .. } => 1.0,
+            // V2H/V2G stacks charge toward 0.9 / 1.0 respectively (see
+            // `build_preferences`).
+            ChargingStrategy::V2H { .. } => 0.9,
+            ChargingStrategy::V2G { .. } => 1.0,
+        }
+    }
+
     /// The actor's perceived SOC — its best guess diverging from actual equipment
     /// SOC because the actor doesn't observe CC-CV taper, thermal derating, or BMS
     /// charge termination. This is the value used for all driver behavioral decisions.
@@ -704,20 +801,18 @@ impl EvDriverActor {
         }
     }
 
-    /// Check if tomorrow's expected trip would leave perceived SOC dangerously low.
-    /// If so, the driver overrides their strategy and charges to full.
+    /// The SOC below which the day's expected driving plus the
+    /// range-anxiety buffer would strand the driver, and the mile figure the
+    /// threshold was computed from. Single home for the anxiety-band
+    /// arithmetic: the trigger check, its observe diagnostics, and the
+    /// override's urgency gate must all read the same band.
     ///
-    /// Computes the anxiety threshold using the day's actual drive_kwh from
-    /// `todays_event` when available, blended via `max(day_specific, expected_daily_miles)`
-    /// so the threshold is never lower than the static mean — ensuring minimum
-    /// protection even on below-average days. Falls back to `expected_daily_miles`
-    /// when `todays_event` is None (non-driving day).
-    fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
-        if self.range_anxiety_miles <= 0.0 {
-            return false;
-        }
+    /// Computes from the day's actual drive_kwh when available, blended via
+    /// `max(day_specific, expected_daily_miles)` so the threshold is never
+    /// lower than the static mean — minimum protection even on below-average
+    /// days. Falls back to `expected_daily_miles` on non-driving days.
+    fn anxiety_band(&self, env: &EnvironmentState) -> (f64, f64) {
         let ambient_c = env.weather.outdoor_temp_c;
-        let soc = self.perceived_soc();
         let temp_mult = temp_efficiency_multiplier(ambient_c);
 
         let day_specific_miles = match self.todays_event {
@@ -743,6 +838,30 @@ impl EvDriverActor {
             * self.fuel_economy_kwh_per_mi
             * temp_mult;
         let anxiety_soc = anxiety_kwh / self.capacity_kwh.max(0.01);
+        (anxiety_soc, miles_for_anxiety)
+    }
+
+    /// Check if tomorrow's expected trip would leave perceived SOC dangerously low.
+    /// If so, the driver overrides their strategy and charges (minimally, to
+    /// the band — see `maybe_push_range_anxiety_override`).
+    fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
+        if self.range_anxiety_miles <= 0.0 {
+            return false;
+        }
+        self.below_anxiety_band(env)
+    }
+
+    /// Whether the driver's perceived SOC sits below the range-anxiety band
+    /// (tomorrow's trip plus the safety buffer) — the "driver is short"
+    /// state. Single home for the band comparison: the override trigger, its
+    /// observe diagnostics, and the `range_anxiety_active` telemetry channel
+    /// must all read the same band.
+    fn below_anxiety_band(&self, env: &EnvironmentState) -> bool {
+        let soc = self.perceived_soc();
+        // The mile figure feeds only the observe diagnostics below;
+        // underscore binding per the module's convention for observe-only
+        // values (see `reconcile_soc`'s `_event_label`).
+        let (anxiety_soc, _miles_for_anxiety) = self.anxiety_band(env);
 
         #[cfg(feature = "observe")]
         {
@@ -758,7 +877,7 @@ impl EvDriverActor {
                 actor = %self.name,
                 anxiety_soc,
                 day_drive_kwh,
-                miles_term = miles_for_anxiety,
+                miles_term = _miles_for_anxiety,
                 expected_daily_miles = self.expected_daily_miles,
                 range_anxiety_miles = self.range_anxiety_miles,
                 perceived_soc = soc,
@@ -772,29 +891,62 @@ impl EvDriverActor {
         soc < anxiety_soc
     }
 
-    /// Emit the range-anxiety charging override if tomorrow's trip would strand
-    /// the driver. Returns `true` (and pushes a full-charge `SOCTarget`) when the
+    /// Emit the range-anxiety charging override if the next trip would strand
+    /// the driver. Returns `true` (and pushes a charging `SOCTarget`) when the
     /// override fired, `false` otherwise.
     ///
-    /// This is the single home for the override rule: both the in-phase charging
-    /// path (`evaluate_charging`) and the non-driving-day path (`decide`'s `None`
-    /// arm) route through here so the `SOCTarget(1.0)` push exists in exactly one
-    /// place.
+    /// Three conditions, in order:
+    ///
+    /// 1. `needs_range_anxiety_override` — perceived SOC is below the
+    ///    anxiety band (the next trip plus the range-anxiety buffer).
+    ///
+    /// 2. An urgency gate, when today's trip is known: the override exists to
+    ///    prevent stranding, not to preempt the driver's configured strategy
+    ///    whenever SOC happens to sit inside the band. When the known
+    ///    departure leaves enough time to reach the band — with
+    ///    the same 20% safety margin `DepartureDeadline`'s urgency override
+    ///    uses — the strategy (window, gate, price) governs and the override
+    ///    stands down until time actually runs short. With no known trip
+    ///    today there is no "later" to defer to, so the override fires on the
+    ///    band condition alone.
+    ///
+    /// 3. The target is the band itself — a *minimal* charge to the next
+    ///    trip plus a safe reserve, not a charge to full: a driver who is
+    ///    short tops up just enough to make the trip safely, then their
+    ///    usual pattern takes over again (the strategy's own target governs
+    ///    once the pack is back above the band). Charging to full here would
+    ///    instead make every anxious night a full-rate, full-pack session.
+    ///
+    /// This is the single home for the override rule: both the in-phase
+    /// charging path (`evaluate_charging`) and the non-driving-day path
+    /// (`decide`'s `None` arm, via `evaluate_charging`) route through here so
+    /// the charging push exists in exactly one place.
     ///
     /// `Schedule` tier — the EV driver is a schedule-level actor; this override is
     /// a pre-defined operational rule, not a user or grid action.
     fn maybe_push_range_anxiety_override(
         &self,
         env: &EnvironmentState,
+        current_minute: u16,
         out: &mut Vec<DispatchRequest>,
     ) -> bool {
         if !self.needs_range_anxiety_override(env) {
             return false;
         }
+        let (anxiety_soc, _) = self.anxiety_band(env);
+        if let Some(event) = self.todays_event {
+            let hours_left =
+                minutes_until(current_minute, u32::from(event.departure_minute)) / 60.0;
+            let ctx = self.decision_context(env, current_minute);
+            let needed = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx);
+            if hours_left >= needed * 1.2 {
+                return false;
+            }
+        }
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal: ControlSignal::SOCTarget {
-                target_soc: 1.0,
+                target_soc: anxiety_soc.clamp(0.0, 1.0),
                 min_soc: None,
                 max_soc: None,
             },
@@ -846,13 +998,15 @@ impl EvDriverActor {
     }
 
     /// Record the needed-charge-hours estimate for the range-anxiety
-    /// override's plan (charge to full), replacing the standing-strategy
-    /// fold refreshed at step start. Called on the paths where the override
-    /// replaces the preference stack. Runs on the observed SOC — the same
-    /// telemetry face as the fold it replaces.
+    /// override's plan (minimal charge to the band), replacing the
+    /// standing-strategy fold refreshed at step start. Called on the paths
+    /// where the override replaces the preference stack. Runs on the
+    /// observed SOC — the same telemetry face as the fold it replaces.
     fn record_anxiety_plan_hours(&mut self, env: &EnvironmentState, current_minute: u16) {
         let ctx = self.telemetry_estimate_context(env, current_minute);
-        let hours = needed_charge_hours_to_target(1.0, CHARGING_EFFICIENCY, &ctx);
+        let (anxiety_soc, _) = self.anxiety_band(env);
+        let hours =
+            needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx);
         self.composer.set_needed_charge_hours(hours);
     }
 
@@ -863,12 +1017,12 @@ impl EvDriverActor {
         current_minute: u16,
         out: &mut Vec<DispatchRequest>,
     ) {
-        // Range anxiety override: if tomorrow's trip would strand the driver,
-        // charge to full regardless of strategy. The override returns before
-        // reaching the composer, so it records the estimate for its own
-        // target (charge to full) in place of the strategy-plan fold refreshed
-        // at step start.
-        if self.maybe_push_range_anxiety_override(env, out) {
+        // Range anxiety override: if the next trip would strand the driver,
+        // top up minimally to the anxiety band regardless of strategy. The
+        // override returns before reaching the composer, so it records the
+        // estimate for its own target (the band) in place of the
+        // strategy-plan fold refreshed at step start.
+        if self.maybe_push_range_anxiety_override(env, current_minute, out) {
             self.record_anxiety_plan_hours(env, current_minute);
             return;
         }
@@ -895,6 +1049,8 @@ struct EvDriverSnapshot {
     rng_stream: u64,
     rng_word_pos: u128,
     needs_away_charge: bool,
+    /// Cumulative cancelled-trip count; see `EvDriverActor::drive_cancelled`.
+    drive_cancelled: u32,
 }
 
 impl Actor for EvDriverActor {
@@ -934,49 +1090,71 @@ impl Actor for EvDriverActor {
         // checkpoint restore — or the first-ever step of a fresh actor —
         // publishes the composer's "no estimate" sentinel, which collapses
         // to 0.0. Paths whose active plan is the range-anxiety override
-        // replace this value with the override's own (charge-to-full)
+        // replace this value with the override's own (anxiety-band)
         // estimate.
         let ctx = self.telemetry_estimate_context(env, current_minute);
         self.composer.refresh_needed_charge_hours(&ctx);
 
-        let event = match self.todays_event {
-            Some(ev) => ev,
-            None => {
-                // On a non-driving day, a driver with a critically low battery still
-                // needs to charge for tomorrow's trip. Fire the range anxiety
-                // override before returning so it can act even when a trip is
-                // skipped. Only meaningful while at home: an Away vehicle cannot
-                // plug into the home charger. Observability (SOC, threshold,
-                // plugged-in proxy, non_driving_day marker) is emitted by the
-                // single observe block in `needs_range_anxiety_override()`.
-                if matches!(self.phase, DriverPhase::HomePluggedIn) {
-                    let fired = self.maybe_push_range_anxiety_override(env, out);
-                    // The override bypasses the preference stack, so the
-                    // step-start fold above reports the strategy plan's
-                    // estimate; replace it with the override's own
-                    // (charge-to-full) estimate — the plan actually dispatched.
-                    if fired {
-                        self.record_anxiety_plan_hours(env, current_minute);
-                    }
-
-                    // When anxiety fires on a non-driving day, the override must
-                    // have emitted a charging signal — the early return must not
-                    // swallow it. `fired` and the emitted signal are coupled in
-                    // `maybe_push_range_anxiety_override`, so this guards the
-                    // coupling rather than an independently-computed condition.
-                    debug_assert!(
-                        !fired || out.len() > before_out,
-                        "range anxiety override on non-driving day must emit a charging signal"
-                    );
-                }
-                self.populate_telemetry(env, before_out, out);
-                return;
-            }
-        };
-
+        // A non-driving day changes only *future* departures. An in-flight
+        // trip — mid-route, or parked away awaiting its own arrival minute —
+        // is phase-carried state from the departure day: freezing those
+        // phases because today rolled non-driving would stall a
+        // midnight-crossing trip mid-route until the next driving day, with
+        // no driving steps dispatched, no away charging, and no arrival.
+        // The Driving and Away arms below therefore run on their carried
+        // plan regardless of `todays_event`; only the home arm consults it.
         match self.phase {
             DriverPhase::HomePluggedIn => {
+                let Some(event) = self.todays_event else {
+                    // A non-driving day still charges: route through the same
+                    // `evaluate_charging` the driving-day path uses, so the
+                    // composer's decision — a hold while the strategy idles, a
+                    // target while it charges, or the range-anxiety override,
+                    // which `evaluate_charging` tries first, unchanged — is
+                    // asserted on every plugged-in step. Returning after the
+                    // override check alone would leave a hold latched from the
+                    // previous evening in force through the entire day, so a
+                    // window strategy would miss its own window on the ~20% of
+                    // days with no trip. Only meaningful while at home: an Away
+                    // vehicle cannot plug into the home charger.
+                    self.evaluate_charging(env, current_minute, out);
+                    self.populate_telemetry(env, before_out, out);
+                    return;
+                };
                 if self.minute_matches(current_minute, event.departure_minute) {
+                    // A trip the pack cannot cover is cancelled, not driven
+                    // short: a driver who cannot complete the trip does not
+                    // depart and drive until the pack dies mid-route — they
+                    // stay home (another mode, another day) and charge. The
+                    // vehicle remains plugged in and recovers overnight
+                    // under its own strategy (with the range-anxiety backstop
+                    // if the strategy cannot cover it), so the day self-heals;
+                    // the cancellation is counted in `drive_cancelled` so a
+                    // shortfall is reported, never silently dropped mobility.
+                    let pack_kwh = self.observed_pack_kwh(env);
+                    if event.drive_kwh > pack_kwh {
+                        self.drive_cancelled += 1;
+                        // Consume the day's event: the trip is cancelled, not
+                        // deferred — a second step landing inside the
+                        // departure-minute window (possible with a start
+                        // time not aligned to the time resolution) must not
+                        // count the same trip twice, and the rest of the day
+                        // is a non-driving day for the EV (the band falls
+                        // back to expected miles, the honest basis for a
+                        // trip that will not happen).
+                        self.todays_event = None;
+                        tracing::warn!(
+                            actor = %self.name,
+                            target = self.target_name(),
+                            requested_drive_kwh = event.drive_kwh,
+                            available_pack_kwh = pack_kwh,
+                            "EV trip cancelled — the pack cannot cover the day's trip; the \
+                             driver stays home and charges"
+                        );
+                        self.populate_telemetry(env, before_out, out);
+                        return;
+                    }
+
                     // Departure: disconnect
                     out.push(DispatchRequest {
                         target: self.dispatch_target.clone(),
@@ -1000,6 +1178,7 @@ impl Actor for EvDriverActor {
                         remaining_kwh: event.drive_kwh,
                         total_steps,
                         steps_done: 0,
+                        plan: event,
                     };
 
                     tracing::debug!(
@@ -1018,10 +1197,12 @@ impl Actor for EvDriverActor {
                 remaining_kwh,
                 total_steps,
                 steps_done,
+                plan,
             } => {
                 let steps_left = total_steps.saturating_sub(steps_done);
                 if steps_left == 0 {
-                    self.phase = DriverPhase::Away;
+                    self.phase = DriverPhase::Away { plan };
+                    self.populate_telemetry(env, before_out, out);
                     return;
                 }
 
@@ -1044,21 +1225,34 @@ impl Actor for EvDriverActor {
                     // Trip complete -- defer away-charge signals to the next
                     // step so EvDrive is fully processed before EvPlugIn.
                     if self.away_charge_fraction > 0.0 {
-                        let recoup_kwh = event.drive_kwh * self.away_charge_fraction;
+                        // Habitual away top-up: a fraction of the day's drive.
+                        // But a driver who arrives short of their usual
+                        // amount charges out back up to it — the full
+                        // top-up, not the habitual fraction — and then skips
+                        // the home charge cycle (arriving at the usual
+                        // target, the evening's home session transfers
+                        // nothing). Take whichever recoup is larger.
+                        let habitual_kwh = plan.drive_kwh * self.away_charge_fraction;
+                        let usual_kwh = self.usual_target_soc() * self.capacity_kwh.max(0.01);
+                        let short_of_usual_kwh = (usual_kwh
+                            - self.perceived_soc() * self.capacity_kwh.max(0.01))
+                        .max(0.0);
+                        let recoup_kwh = habitual_kwh.max(short_of_usual_kwh);
                         let recoup_soc = recoup_kwh / self.capacity_kwh.max(0.01);
                         self.estimated_soc = (self.estimated_soc + recoup_soc).min(1.0);
                         self.needs_away_charge = true;
                     }
-                    self.phase = DriverPhase::Away;
+                    self.phase = DriverPhase::Away { plan };
                 } else {
                     self.phase = DriverPhase::Driving {
                         remaining_kwh: new_remaining,
                         total_steps,
                         steps_done: new_steps_done,
+                        plan,
                     };
                 }
             }
-            DriverPhase::Away => {
+            DriverPhase::Away { plan } => {
                 // Emit deferred away-charge signals from the previous
                 // driving step (separated so EvDrive processes first).
                 if self.needs_away_charge {
@@ -1067,6 +1261,20 @@ impl Actor for EvDriverActor {
                         target: self.dispatch_target.clone(),
                         signal: ControlSignal::EvPlugIn {
                             state: EvConnectionState::AwayPluggedIn,
+                        },
+                        priority: PriorityTier::Schedule,
+                    });
+                    // Bound the away session at the driver's usual amount:
+                    // "charge out back up to their usual needed amount" — a
+                    // top-up, not a fill-to-BMS-default. The target is
+                    // cleared again on the away disconnect, so it never
+                    // leaks into the next home session.
+                    out.push(DispatchRequest {
+                        target: self.dispatch_target.clone(),
+                        signal: ControlSignal::SOCTarget {
+                            target_soc: self.usual_target_soc(),
+                            min_soc: None,
+                            max_soc: None,
                         },
                         priority: PriorityTier::Schedule,
                     });
@@ -1079,7 +1287,7 @@ impl Actor for EvDriverActor {
                     });
                 }
 
-                if self.minute_matches(current_minute, event.arrival_minute) {
+                if self.minute_matches(current_minute, plan.arrival_minute) {
                     // Disconnect from away charger if active (must go through
                     // Disconnected before HomePluggedIn per EV transition rules)
                     if self.away_charge_fraction > 0.0 {
@@ -1110,10 +1318,23 @@ impl Actor for EvDriverActor {
                     // the actual battery state and updates their belief.
                     self.reconcile_soc(env, "arrival");
 
+                    // The arrival step itself must carry a charging decision.
+                    // The plug-in dispatch above is applied before the
+                    // equipment steps this timestep, so evaluating here —
+                    // rather than first on the *next* step — closes what would
+                    // otherwise be one full step of charging under whatever
+                    // setpoint was last latched, outside whatever window the
+                    // strategy configures. Skipped when the plug-in policy
+                    // keeps the vehicle unplugged: there is no charger to
+                    // instruct, and the next plugged-in step decides.
+                    if doing_plugin {
+                        self.evaluate_charging(env, current_minute, out);
+                    }
+
                     tracing::debug!(
                         actor = %self.name,
                         target = self.target_name(),
-                        arrival_minute = event.arrival_minute,
+                        arrival_minute = plan.arrival_minute,
                         estimated_soc = self.estimated_soc,
                         plugged_in = self.should_plug_in(),
                         "EV driver arrived home",
@@ -1175,6 +1396,7 @@ impl Actor for EvDriverActor {
             rng_stream: self.rng.get_stream(),
             rng_word_pos: self.rng.get_word_pos(),
             needs_away_charge: self.needs_away_charge,
+            drive_cancelled: self.drive_cancelled,
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("EvDriverActor save_state: {e}")))
@@ -1195,7 +1417,18 @@ impl Actor for EvDriverActor {
         rng.set_word_pos(snap.rng_word_pos);
         self.rng = rng;
         self.needs_away_charge = snap.needs_away_charge;
+        self.drive_cancelled = snap.drive_cancelled;
         Ok(())
+    }
+
+    /// v2: `DriverPhase::Driving`/`Away` carry the departed day's `DayEvent`
+    /// plan, so a midnight-crossing trip completes and arrives on its own
+    /// schedule instead of freezing when the next day rolls non-driving.
+    /// Blobs written by v1 builds (payload-less phases) cannot decode into
+    /// the new shape — the version gate rejects them here, at the checkpoint
+    /// boundary, instead of postcard failing inside `load_state`.
+    fn checkpoint_version(&self) -> u32 {
+        2
     }
 
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {
@@ -1207,7 +1440,7 @@ fn phase_as_f64(phase: DriverPhase) -> f64 {
     match phase {
         DriverPhase::HomePluggedIn => 0.0,
         DriverPhase::Driving { .. } => 1.0,
-        DriverPhase::Away => 2.0,
+        DriverPhase::Away { .. } => 2.0,
     }
 }
 
@@ -1299,17 +1532,38 @@ mod tests {
         out
     }
 
+    /// A dispatch commands charging iff it asserts a positive target or
+    /// rate. `PowerSetpoint{active_power_kw: 0.0}` is the explicit hold an
+    /// idling strategy dispatches in place of silence — the opposite of a
+    /// charging command, so idle-assertions must not count it as one.
+    fn commands_charging(req: &DispatchRequest) -> bool {
+        match &req.signal {
+            ControlSignal::SOCTarget { .. } | ControlSignal::EvSetReadyBy { .. } => true,
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => *active_power_kw > 1e-9,
+            _ => false,
+        }
+    }
+
+    /// The explicit zero-power hold an idling strategy dispatches instead
+    /// of going silent (see the module's dispatch-contract doc).
+    fn is_explicit_hold(req: &DispatchRequest) -> bool {
+        matches!(
+            &req.signal,
+            ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() <= 1e-9
+        )
+    }
+
     fn env_at_minute(minute: u16) -> EnvironmentState {
-        let hour = (minute / 60).min(23) as u8;
-        let min = minute % 60;
-        use chrono::{FixedOffset, TimeZone};
-        let tz = FixedOffset::east_opt(0).unwrap();
-        let mut env = test_env().hour(hour).build();
-        env.current_time = tz
-            .with_ymd_and_hms(2026, 1, 1, hour as u32, min as u32, 0)
-            .single()
-            .unwrap();
-        env
+        env_at_minute_temp(minute, 10.0)
+    }
+
+    /// Test env at an exact minute-of-day with a chosen outdoor temperature.
+    /// `env_at_minute` pins the 10 °C default; the anxiety tests need the
+    /// 22 °C efficiency baseline at sub-hour minutes.
+    fn env_at_minute_temp(minute: u16, outdoor_temp_c: f64) -> EnvironmentState {
+        env_at_day_minute_temp(1, minute, outdoor_temp_c)
     }
 
     fn set_core_soc(
@@ -1746,13 +2000,34 @@ mod tests {
                     actor = actor.with_price_schedule(vec![0.10; 24].into(), 24);
                 }
 
-                // One step at 22:00 (inside Nightly's off-peak window) with
-                // the equipment actively charging: ground-truth SOC a notch
-                // above the driver's estimate, published charging flow 3.6 kW.
-                let mut env = env_at_minute(22 * 60);
+                // 0.5: one step at 22:00 (inside Nightly's off-peak window)
+                // with the equipment actively charging — the composer path.
+                // 0.2: one step at 07:45, 25 minutes before the 08:00
+                // departure — inside the anxiety band AND past the
+                // override's urgency gate (needed to clear the band ≈ 0.8 h,
+                // ×1.2 margin ≈ 0.96 h ≫ 25 min), so the override fires for
+                // every variant. At 22:00 the same SOC would leave ~10 h
+                // before the next departure and the gate would stand the
+                // override down.
+                let mut env = if starting_soc > 0.3 {
+                    env_at_minute(22 * 60)
+                } else {
+                    env_at_minute(7 * 60 + 45)
+                };
                 if needs_price_schedule {
                     env.price_signal = PriceSignal {
                         electricity_price: Some(0.02),
+                        ..Default::default()
+                    };
+                }
+                // SolarSurplus's composer path votes a charge rate only
+                // when PV surplus exists; without surplus its correct
+                // decision is a hold, which would (rightly) report
+                // charge_kw = 0. Supply the surplus the strategy votes on.
+                if matches!(strategy, ChargingStrategy::SolarSurplus { .. }) {
+                    env.electrical = ElectricalSummary {
+                        pv_generation_kw: 3.0,
+                        base_load_kw: 1.0,
                         ..Default::default()
                     };
                 }
@@ -1798,15 +2073,16 @@ mod tests {
         );
     }
 
-    /// Non-driving days skip `evaluate_charging` entirely; the
-    /// `needed_charge_hours` channel must still report a real estimate —
-    /// the standing strategy plan's while resting above the anxiety
-    /// threshold, the override's (charge to full) while anxious.
+    /// Non-driving days route through `evaluate_charging` like driving
+    /// days; the `needed_charge_hours` channel must still report a real
+    /// estimate — the standing strategy plan's while resting above the
+    /// anxiety threshold, the override's (anxiety-band) while anxious.
     #[test]
     fn needed_charge_hours_on_non_driving_day_reports_active_plan() {
-        // Above the anxiety threshold (~0.28): no dispatch, standing plan.
-        // `make_plugged_in_actor` rolled a driving day at minute 0; clearing
-        // the event models the non-driving-day branch of `decide`.
+        // Above the anxiety threshold (~0.28): the strategy plan stands and
+        // its decision dispatches. `make_plugged_in_actor` rolled a driving
+        // day at minute 0; clearing the event models the non-driving-day
+        // branch of `decide`.
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
         actor.event_day_ratio = 0.0;
         actor.todays_event = None;
@@ -1815,8 +2091,11 @@ mod tests {
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
         assert!(
-            out.is_empty(),
-            "resting non-driving day should not dispatch"
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+            )),
+            "a resting non-driving day must dispatch the standing strategy plan (SOCTarget 0.9), got {out:?}"
         );
         let needed = actor
             .telemetry()
@@ -1829,7 +2108,7 @@ mod tests {
         );
 
         // Below the anxiety threshold: the override fires and its own
-        // target (charge to full) drives the estimate.
+        // target (the anxiety band) drives the estimate.
         let mut actor =
             make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.15);
         actor.event_day_ratio = 0.0;
@@ -1841,9 +2120,10 @@ mod tests {
         assert!(
             out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_non_driving_day_at_10c()).abs() < 1e-9
             )),
-            "anxious non-driving day must dispatch SOCTarget(1.0)"
+            "anxious non-driving day must dispatch the minimal SOCTarget(band)"
         );
         let needed = actor
             .telemetry()
@@ -1872,8 +2152,11 @@ mod tests {
         let mut out = Vec::new();
         fresh.decide(&env, &mut out);
         assert!(
-            out.is_empty(),
-            "a resting non-driving day as the first-ever step should not dispatch"
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+            )),
+            "a resting non-driving day as the first-ever step must dispatch the strategy decision, got {out:?}"
         );
         let needed = fresh
             .telemetry()
@@ -2014,7 +2297,7 @@ mod tests {
         for step in 1..=100 {
             out.clear();
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            if matches!(actor.phase, DriverPhase::Away) {
+            if matches!(actor.phase, DriverPhase::Away { .. }) {
                 break;
             }
         }
@@ -2281,36 +2564,55 @@ mod tests {
         (raw / step_hours).ceil() * step_hours
     }
 
-    /// Charge-to-full estimate for a 0.8 SOC gap at the 22°C baseline.
-    fn expected_hours_gap_0_8_to_full() -> f64 {
-        expected_hours_at_epa_baseline(0.8)
+    /// The anxiety band for the standard `make_actor` fixture on a DRIVING
+    /// day at the 10 °C default: the rolled trip is 30 mi × 1.11 = 33.3
+    /// day-specific miles (blended above the 30 mi expectation), so the band
+    /// is (33.3 + 20) × 0.3 × 1.11 / 60 ≈ 0.2958 SOC — the minimal charge
+    /// target (trip + safe reserve).
+    fn anxiety_band_driving_day_at_10c() -> f64 {
+        ((30.0 * 1.11) + 20.0) * 0.3 * 1.11 / 60.0
+    }
+
+    /// The anxiety band on a NON-driving day at the 10 °C default: no rolled
+    /// trip, so the band uses the 30 mi expectation — (30 + 20) × 0.3 ×
+    /// 1.11 / 60 = 0.2775 SOC.
+    fn anxiety_band_non_driving_day_at_10c() -> f64 {
+        (30.0 + 20.0) * 0.3 * 1.11 / 60.0
     }
 
     /// While the range-anxiety override is active, the plan actually
-    /// dispatched is charge-to-full (`SOCTarget(1.0)`) — so the
-    /// `needed_charge_hours` channel must report the charge-to-full
-    /// estimate, not the standing strategy plan's (here, target 0.9). If
-    /// the override path ever stops substituting its own estimate, the
-    /// channel keeps publishing the standing plan's smaller number while
-    /// the equipment charges to full — a plausible value describing the
-    /// wrong plan.
+    /// dispatched is the minimal charge to the band (`SOCTarget(band)` —
+    /// trip + safe reserve, not full) — so the `needed_charge_hours` channel
+    /// must report the to-band estimate, not the standing strategy plan's
+    /// (here, target 0.9). If the override path ever stops substituting its
+    /// own estimate, the channel keeps publishing the standing plan's
+    /// number while the equipment charges a different plan.
     #[test]
-    fn needed_charge_hours_under_anxiety_reports_charge_to_full_plan() {
+    fn needed_charge_hours_under_anxiety_reports_minimal_band_plan() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
 
-        // 22:00 on a driving day at the 22°C efficiency baseline; SOC 0.2
-        // sits below the anxiety threshold (~0.27 here), so the override
-        // fires inside evaluate_charging.
-        let mut env = test_env().hour(22).outdoor_temp(22.0).build();
+        // 07:45 on a driving day (departure 08:00) at the 22 °C efficiency
+        // baseline; SOC 0.2 sits below the anxiety band and time to
+        // departure is short enough that the override's urgency gate holds,
+        // so the override fires inside evaluate_charging. The band blends
+        // the day's rolled trip (30 mi × 1.11 at the 10 °C roll = 33.3 mi)
+        // with the buffer: (33.3 + 20) × 0.3 / 60 = 0.2665.
+        //   needed (0.2 → 0.2665) = 3.99 kWh / (7.2 × 0.9) ≈ 0.616 h
+        //   urgency threshold   = 0.616 × 1.2 ≈ 0.74 h (44.3 min)
+        //   time left at 07:45  = 25 min < 44.3 min → override fires.
+        // (At 22:00 the same SOC leaves ~10 h before the next departure —
+        // the gate stands the override down and the strategy governs.)
+        let mut env = env_at_minute_temp(7 * 60 + 45, 22.0);
         set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.2);
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         assert!(
             out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.2665).abs() < 1e-9
             )),
-            "anxiety must dispatch SOCTarget(1.0) — without the override this test attacks nothing, got {out:?}"
+            "anxiety must dispatch the minimal SOCTarget(0.2665 — trip + reserve), not a charge \
+             to full, got {out:?}"
         );
 
         let needed = actor
@@ -2318,20 +2620,21 @@ mod tests {
             .expect("driver telemetry")
             .get("needed_charge_hours")
             .expect("needed_charge_hours key");
-        let expected = expected_hours_gap_0_8_to_full();
+        let expected = expected_hours_at_epa_baseline(0.0665); // 0.2 → band 0.2665
         assert!(
             (needed - expected).abs() < 1e-9,
-            "under the anxiety override, needed_charge_hours must be the charge-to-full estimate \
-             ({expected} h for SOC 0.2 → 1.0), not the standing plan's (≈6.483 h for 0.2 → 0.9), got {needed}"
+            "under the anxiety override, needed_charge_hours must be the to-band estimate \
+             ({expected} h for SOC 0.2 → 0.2665), not the standing plan's (≈4.63 h for 0.2 → 0.9), got {needed}"
         );
     }
 
     /// The same override-substitution contract on the non-driving-day arm,
-    /// whose early return bypasses the composer entirely: the published
-    /// estimate must be the override's charge-to-full figure, not the
+    /// where the override's early return inside `evaluate_charging` bypasses
+    /// the composer: the published
+    /// estimate must be the override's to-band figure, not the
     /// standing strategy plan's fold refreshed at step start.
     #[test]
-    fn needed_charge_hours_under_anxiety_on_non_driving_day_reports_charge_to_full_plan() {
+    fn needed_charge_hours_under_anxiety_on_non_driving_day_reports_minimal_band_plan() {
         let mut actor = make_actor_with_event_ratio(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             0.0, // never a driving day
@@ -2341,7 +2644,8 @@ mod tests {
         actor.phase = DriverPhase::HomePluggedIn;
 
         // 12:00 at the 22°C efficiency baseline; SOC 0.2 sits below the
-        // non-driving-day anxiety threshold (0.25 here).
+        // non-driving-day anxiety band: no rolled trip, so the band uses
+        // the 30 mi expectation — (30 + 20) × 0.3 / 60 = 0.25.
         let mut env = test_env().hour(12).outdoor_temp(22.0).build();
         set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.2);
         let mut out = Vec::new();
@@ -2350,9 +2654,9 @@ mod tests {
         assert!(
             out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.25).abs() < 1e-9
             )),
-            "anxiety on a non-driving day must dispatch SOCTarget(1.0), got {out:?}"
+            "anxiety on a non-driving day must dispatch the minimal SOCTarget(0.25), got {out:?}"
         );
 
         let needed = actor
@@ -2360,12 +2664,12 @@ mod tests {
             .expect("driver telemetry")
             .get("needed_charge_hours")
             .expect("needed_charge_hours key");
-        let expected = expected_hours_gap_0_8_to_full();
+        let expected = expected_hours_at_epa_baseline(0.05); // 0.2 → band 0.25
         assert!(
             (needed - expected).abs() < 1e-9,
             "under the anxiety override on a non-driving day, needed_charge_hours must be the \
-             charge-to-full estimate ({expected} h for SOC 0.2 → 1.0), not the standing plan's \
-             (≈6.483 h for 0.2 → 0.9), got {needed}"
+             to-band estimate ({expected} h for SOC 0.2 → 0.25), not the standing plan's \
+             (≈4.63 h for 0.2 → 0.9), got {needed}"
         );
     }
 
@@ -2444,27 +2748,32 @@ mod tests {
     /// The anxiety override's estimate runs on the observed equipment SOC —
     /// the same telemetry face as the fold it replaces. When the driver's
     /// belief and the equipment's truth diverge (here belief 0.2, truth
-    /// 0.6), the channel must report the charge-to-full time from the
-    /// *observed* gap (≈3.72 h), not from the belief that triggered the
-    /// anxiety (≈7.42 h): the equipment will charge from its real SOC, so
-    /// the belief-based figure over-reports time the session will never
-    /// need.
+    /// 0.6), the channel must report the to-band time from the *observed*
+    /// gap — here zero, because the observed pack already sits above the
+    /// band and the dispatched minimal charge is a physical no-op — not
+    /// from the belief that triggered the anxiety (≈0.47 h to the band):
+    /// the equipment charges from its real SOC, so the belief-based figure
+    /// describes a session that will not happen.
     #[test]
     fn needed_charge_hours_under_anxiety_reports_observed_gap_not_belief() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
 
-        // 22:00 on a driving day at the 22°C baseline; belief 0.2 sits
-        // below the anxiety threshold, but the equipment's truth is 0.6.
-        let mut env = test_env().hour(22).outdoor_temp(22.0).build();
+        // 07:45 on a driving day (departure 08:00) at the 22 °C baseline;
+        // belief 0.2 sits below the anxiety band (0.2665 — the day's rolled
+        // trip blends to 33.3 mi) with too little time to close the gap
+        // (25 min < 44.3 min urgency threshold — see
+        // needed_charge_hours_under_anxiety_reports_minimal_band_plan),
+        // but the equipment's truth is 0.6.
+        let mut env = env_at_minute_temp(7 * 60 + 45, 22.0);
         set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.6);
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         assert!(
             out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 1e-9
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.2665).abs() < 1e-9
             )),
-            "anxiety must dispatch SOCTarget(1.0) — without the override this test attacks nothing, got {out:?}"
+            "anxiety must dispatch the minimal SOCTarget(0.2665) — without the override this test attacks nothing, got {out:?}"
         );
         assert!(
             (actor.perceived_soc() - 0.2).abs() < 1e-12,
@@ -2478,11 +2787,12 @@ mod tests {
             .expect("driver telemetry")
             .get("needed_charge_hours")
             .expect("needed_charge_hours key");
-        let expected = expected_hours_at_epa_baseline(0.4); // observed 0.6 → 1.0
+        // Observed 0.6 is above the 0.2665 band: nothing to charge — 0.0 h.
+        // A belief-sourced regression would report ≈0.66 h (0.2 → 0.2665).
         assert!(
-            (needed - expected).abs() < 1e-9,
-            "under anxiety, needed_charge_hours must report the observed gap (0.6 → 1.0 = {expected} h), \
-             not the belief gap (0.2 → 1.0 ≈ 7.417 h), got {needed}"
+            needed.abs() < 1e-9,
+            "under anxiety, needed_charge_hours must report the observed gap to the band \
+             (0.6 already above 0.2665 → 0 h), not the belief gap (0.2 → 0.2665 ≈ 0.66 h), got {needed}"
         );
     }
 
@@ -2502,12 +2812,12 @@ mod tests {
         for step in 1..=100 {
             out.clear();
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            if matches!(actor.phase, DriverPhase::Away) {
+            if matches!(actor.phase, DriverPhase::Away { .. }) {
                 break;
             }
         }
         assert!(
-            matches!(actor.phase, DriverPhase::Away),
+            matches!(actor.phase, DriverPhase::Away { .. }),
             "precondition: the actor must be Away before the charging session"
         );
 
@@ -2577,17 +2887,14 @@ mod tests {
         // Arrive at 18:00, check at 18:01 -- outside off-peak window (22:00-06:00)
         let out = drive_cycle_and_charge_step(&mut actor);
 
-        let has_charging_signal = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. }
-                    | ControlSignal::EvSetReadyBy { .. }
-                    | ControlSignal::PowerSetpoint { .. }
-            )
-        });
         assert!(
-            !has_charging_signal,
-            "nightly should idle outside off-peak window at 18:01, got: {:?}",
+            !out.iter().any(commands_charging),
+            "nightly must command no charging outside the off-peak window at 18:01, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(is_explicit_hold),
+            "nightly outside its window must dispatch an explicit zero-power hold, not silence, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
@@ -2725,24 +3032,29 @@ mod tests {
         let out = drive_cycle_and_charge_step(&mut actor);
 
         // After driving ~9kWh out of 60kWh, SOC ~ 0.83 > partial_soc 0.5.
-        // SocGate overrides idle above threshold.
-        let has_charging = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. }
-                    | ControlSignal::PowerSetpoint { .. }
-                    | ControlSignal::EvSetReadyBy { .. }
-            )
-        });
+        // SocGate overrides idle above threshold: no charging may be
+        // commanded, and the idle must be an explicit hold — not silence,
+        // which the equipment's BMS would fill with charge-to-full.
         assert!(
-            !has_charging,
-            "QuickThenWait should idle when SOC above partial_soc=0.5, got: {:?}",
+            !out.iter().any(commands_charging),
+            "QuickThenWait should command no charging when SOC is above partial_soc=0.5, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(is_explicit_hold),
+            "an idling QuickThenWait must dispatch an explicit zero-power hold, not silence, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn no_event_day_emits_nothing() {
+    fn non_driving_day_dispatches_strategy_decision() {
+        // A non-driving day is not a day off from charging control: the
+        // composer runs on every plugged-in step, so the strategy's own
+        // decision (here Immediate's SOCTarget) is dispatched exactly as on
+        // a driving day. Going silent instead would leave any hold from the
+        // previous evening latched through the day and let the equipment's
+        // BMS default fill the gap.
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
@@ -2751,11 +3063,29 @@ mod tests {
         actor.event_day_ratio = 0.0; // never a driving day
         let mut out = Vec::new();
 
-        actor.decide(&env_at_minute(8 * 60), &mut out);
-        assert!(out.is_empty(), "no signals on non-driving day");
+        let has_strategy_target = |out: &[DispatchRequest]| {
+            out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+                )
+            })
+        };
 
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        assert!(
+            has_strategy_target(&out),
+            "a non-driving day must dispatch the strategy's own decision (SOCTarget 0.9), got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+
+        out.clear();
         actor.decide(&env_at_minute(18 * 60), &mut out);
-        assert!(out.is_empty(), "no signals on non-driving day");
+        assert!(
+            has_strategy_target(&out),
+            "every plugged-in step of a non-driving day must carry the strategy decision, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2798,43 +3128,63 @@ mod tests {
     }
 
     #[test]
-    fn range_anxiety_overrides_strategy_when_soc_low() {
-        let mut actor = make_actor(
+    fn range_anxiety_override_preempts_strategy_when_time_runs_short() {
+        // A plugged-in Nightly driver at SOC 0.20 — below the 0.2958
+        // anxiety band (the day's rolled 33.3 mi trip blended with the
+        // buffer) but with a 12 kWh pack that still covers the 9.99 kWh
+        // day's trip, so the departure proceeds (cancellation is pinned
+        // separately for the uncoverable case).
+        let mut actor = make_plugged_in_actor(
             ChargingStrategy::Nightly {
                 off_peak_start_hour: 22.0,
                 off_peak_end_hour: 6.0,
                 target_soc: 0.9,
             },
-            PlugInPolicy::Always,
-            42,
+            0.20,
         );
-        actor.estimated_soc = 0.15;
-        let mut out = Vec::new();
 
-        // Roll event, depart, drive, arrive
-        actor.decide(&env_at_minute(0), &mut out);
-        out.clear();
-        actor.decide(&env_at_minute(8 * 60), &mut out);
-        out.clear();
-        for step in 1..=120 {
-            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            out.clear();
-        }
-        actor.decide(&env_at_minute(18 * 60), &mut out);
-        out.clear();
-
-        // Post-arrival step: range anxiety should override
-        actor.decide(&env_at_minute(18 * 60 + 1), &mut out);
-
-        let has_soc_target_full = out.iter().any(|r| {
+        // 07:45, 15 minutes before the 08:00 departure and outside the
+        // Nightly window: the driver is short of the band and out of time —
+        // needed to the band ≈ 0.99 h × 1.2 ≈ 1.18 h ≫ 15 min — so the
+        // override preempts the strategy's hold with the minimal
+        // charge-to-band target.
+        let out = plugged_in_step(&mut actor, 7 * 60 + 45);
+        let has_band_charge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_driving_day_at_10c()).abs() < 0.01
             )
         });
         assert!(
-            has_soc_target_full,
-            "range anxiety should override to SOCTarget(1.0), got: {:?}",
+            has_band_charge,
+            "15 minutes before departure, short of the band, the override must preempt the \
+             (out-of-window) Nightly strategy with the minimal SOCTarget(band), got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+
+        // 18:01 the same evening (the 08:00 departure has passed, so the
+        // wrapped time to the next departure is ~14 h): the driver is still
+        // below the band, but there is plenty of time — the urgency gate
+        // stands the override down and the configured Nightly strategy
+        // governs: an explicit hold outside the window, no anxious charge.
+        let out = plugged_in_step(&mut actor, 18 * 60 + 1);
+        let has_anxious_charge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_driving_day_at_10c()).abs() < 0.01
+            )
+        });
+        assert!(
+            !has_anxious_charge,
+            "with ~14 h until the next departure the override must stand down and let the \
+             strategy govern, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(is_explicit_hold),
+            "the Nightly strategy must hold outside its window while the override stands down, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
@@ -2861,7 +3211,7 @@ mod tests {
         for step in 1..=120 {
             out.clear();
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            if matches!(actor.phase, DriverPhase::Away) && actor.needs_away_charge {
+            if matches!(actor.phase, DriverPhase::Away { .. }) && actor.needs_away_charge {
                 // Transition to Away happened; next step emits deferred signals.
                 break;
             }
@@ -2924,6 +3274,47 @@ mod tests {
         );
     }
 
+    /// At/below its `min_soc` floor the V2H discharge preference stands
+    /// down (no power in its vote), but the floor must not pin the vehicle:
+    /// the stack's own `SocTarget` still governs, so the composer dispatches
+    /// the charge target — not the explicit zero-power hold an idle
+    /// resolution would produce. A stack-level hold here is self-reinforcing
+    /// (only charging raises SOC, and the hold blocks charging), so the
+    /// vehicle would sit at its floor indefinitely.
+    #[test]
+    fn v2h_stack_charges_off_soc_floor() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.8,
+                min_soc: 0.2,
+            },
+            0.15, // below the 0.2 floor: the discharge preference is idle
+        );
+        // 19:00 with the next departure ~13 h away: the range-anxiety
+        // override has ample time and stands down, so the dispatch below is
+        // the composer resolving the strategy's own stack.
+        let out = plugged_in_step(&mut actor, 19 * 60);
+
+        let has_strategy_target = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01
+            )
+        });
+        assert!(
+            has_strategy_target,
+            "at the soc floor the stack's SocTarget must still dispatch so the vehicle can \
+             charge off the floor, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            !out.iter().any(is_explicit_hold),
+            "the floor must not resolve to a latching zero-power hold — that would pin the \
+             vehicle at its floor indefinitely, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+    }
+
     // ======= TARIFF-011 composer integration tests =======
 
     #[test]
@@ -2952,8 +3343,10 @@ mod tests {
         actor.decide(&env_at_minute(0), &mut out);
         out.clear();
 
-        // Force Away phase with no pending away-charge signals
-        actor.phase = DriverPhase::Away;
+        // Force Away phase with no pending away-charge signals, carrying
+        // the rolled day's plan (arrival at 18:00 = 1080)
+        let plan = actor.todays_event.expect("event rolled above");
+        actor.phase = DriverPhase::Away { plan };
         actor.needs_away_charge = false;
 
         // Pick a minute that is NOT near arrival (1080). 15:00 = 900.
@@ -2961,6 +3354,155 @@ mod tests {
         assert!(
             out.is_empty(),
             "Away phase should emit nothing when not at arrival minute, got: {out:?}"
+        );
+    }
+
+    /// The `steps_left == 0` completion exit is the `Driving` arm's only
+    /// early return in `decide`; it must populate telemetry like every
+    /// other exit path, or the `phase` channel reads "Driving" for one
+    /// step after the trip has actually completed into `Away` — a stale
+    /// one-step reading on every trip completion (and after a mid-trip
+    /// checkpoint restore that lands exactly on the completion boundary).
+    #[test]
+    fn trip_completion_step_publishes_away_phase_telemetry() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let plan = DayEvent {
+            departure_minute: 480,
+            arrival_minute: 1080,
+            drive_kwh: 9.0,
+        };
+        actor.todays_event = Some(plan);
+
+        // Mid-trip step: the phase channel reports Driving (1.0).
+        actor.phase = DriverPhase::Driving {
+            remaining_kwh: 9.0,
+            total_steps: 4,
+            steps_done: 2,
+            plan,
+        };
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        assert_eq!(
+            actor.telemetry().expect("driver telemetry").get("phase"),
+            Some(1.0),
+            "mid-trip step must report the Driving phase"
+        );
+
+        // Completion step: steps are already exhausted at arm entry (the
+        // `steps_left == 0` exit). The transition to Away must be visible
+        // in telemetry on this same step.
+        actor.phase = DriverPhase::Driving {
+            remaining_kwh: 0.0,
+            total_steps: 4,
+            steps_done: 4,
+            plan,
+        };
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60 + 1), &mut out);
+        assert!(
+            matches!(actor.phase, DriverPhase::Away { .. }),
+            "the completion step must transition to Away"
+        );
+        assert_eq!(
+            actor.telemetry().expect("driver telemetry").get("phase"),
+            Some(2.0),
+            "the completion step must publish the Away phase, not leave the stale Driving reading"
+        );
+    }
+
+    /// A trip whose driving steps cross midnight into a day that rolls
+    /// non-driving must keep going: the trip is phase-carried state from
+    /// the departure day, and the day roll decides only *future*
+    /// departures. Pre-fix, `decide`'s non-driving-day branch returned
+    /// before the phase arms ran, freezing the vehicle mid-route until the
+    /// next driving day — no driving steps, no away charging, no arrival.
+    #[test]
+    fn midnight_crossing_trip_continues_into_non_driving_day() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.9;
+        // Every rolled day is non-driving (deterministic — the assertion
+        // path has no RNG dependence); the departure day's event is seeded
+        // directly, exactly what the roll produces for a late departure.
+        actor.event_day_ratio = 0.0;
+        actor.away_charge_fraction = 0.5;
+        actor.away_charge_power_kw = 6.6;
+        let mut out = Vec::new();
+        actor.decide(&env_at_day_minute_temp(1, 0, 10.0), &mut out);
+        actor.todays_event = Some(DayEvent {
+            departure_minute: 1425, // 23:45
+            arrival_minute: 60,     // 01:00 the next day
+            drive_kwh: 9.0,         // 30 mi × 0.3 kWh/mi → 60 one-minute steps
+        });
+        out.clear();
+
+        // Depart at 23:45 — the trip's 60 steps span 23:46–00:45, crossing
+        // the midnight roll into day 2.
+        actor.decide(&env_at_day_minute_temp(1, 1425, 10.0), &mut out);
+        assert!(
+            matches!(actor.phase, DriverPhase::Driving { .. }),
+            "precondition: the actor must depart at the event minute"
+        );
+
+        // Day 1 remainder of the trip.
+        for minute in 1426..=1439 {
+            out.clear();
+            actor.decide(&env_at_day_minute_temp(1, minute, 10.0), &mut out);
+        }
+
+        // Midnight: day 2 rolls non-driving.
+        out.clear();
+        actor.decide(&env_at_day_minute_temp(2, 0, 10.0), &mut out);
+        assert!(
+            actor.todays_event.is_none(),
+            "precondition: day 2 must have rolled non-driving"
+        );
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvDrive { .. })),
+            "a midnight-crossing trip must keep dispatching EvDrive on the \
+             non-driving day — the trip is phase-carried, not tied to \
+             todays_event; got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+
+        // Drive to completion: the trip ends in Away with the away-charge
+        // deferred signals pending.
+        for minute in 1..=45 {
+            out.clear();
+            actor.decide(&env_at_day_minute_temp(2, minute, 10.0), &mut out);
+        }
+        assert!(
+            matches!(actor.phase, DriverPhase::Away { .. }),
+            "the trip must complete into Away on the non-driving day"
+        );
+
+        // The deferred away-charge signals fire on the next step — also on
+        // a non-driving day.
+        out.clear();
+        actor.decide(&env_at_day_minute_temp(2, 46, 10.0), &mut out);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvAwayCharge { .. })),
+            "the deferred away-charge session must begin on the non-driving \
+             day; got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+
+        // Arrival home at the departed plan's own arrival minute (01:00),
+        // not the next driving day's.
+        out.clear();
+        actor.decide(&env_at_day_minute_temp(2, 60, 10.0), &mut out);
+        assert!(
+            matches!(actor.phase, DriverPhase::HomePluggedIn),
+            "the driver must arrive home at the departed trip's arrival minute"
         );
     }
 
@@ -2998,17 +3540,14 @@ mod tests {
         );
         let out = plugged_in_step(&mut actor, 19 * 60);
 
-        let has_charging = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. }
-                    | ControlSignal::PowerSetpoint { .. }
-                    | ControlSignal::EvSetReadyBy { .. }
-            )
-        });
         assert!(
-            !has_charging,
-            "Nightly should idle during peak hours, got: {:?}",
+            !out.iter().any(commands_charging),
+            "Nightly must command no charging during peak hours, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(is_explicit_hold),
+            "Nightly during peak hours must dispatch an explicit zero-power hold, not silence, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
@@ -3044,17 +3583,13 @@ mod tests {
         );
         let out = plugged_in_step(&mut actor, 19 * 60);
 
-        let has_charging = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. }
-                    | ControlSignal::PowerSetpoint { .. }
-                    | ControlSignal::EvSetReadyBy { .. }
-            )
-        });
         assert!(
-            !has_charging,
-            "LowSoc should idle above threshold, got: {out:?}"
+            !out.iter().any(commands_charging),
+            "LowSoc must command no charging above its threshold, got: {out:?}"
+        );
+        assert!(
+            out.iter().any(is_explicit_hold),
+            "LowSoc holding above its threshold must dispatch an explicit zero-power hold, not silence, got: {out:?}"
         );
     }
 
@@ -3470,7 +4005,7 @@ mod tests {
         for step in 1..=100 {
             out.clear();
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            if matches!(actor.phase, DriverPhase::Away) {
+            if matches!(actor.phase, DriverPhase::Away { .. }) {
                 final_drive_signals = out.clone();
                 break;
             }
@@ -3546,10 +4081,12 @@ mod tests {
 
     // H2: Range anxiety fires on a non-driving day when SOC is critically low.
     //
-    // On a non-driving day todays_event is None, so decide() exits before reaching
-    // evaluate_charging(). We test needs_range_anxiety_override() directly (accessible
-    // from within the same module's test block) to confirm the predicate is true when
-    // SOC is below the anxiety threshold regardless of whether a trip is scheduled.
+    // On a non-driving day todays_event is None, so decide() routes through
+    // evaluate_charging, which tries the range-anxiety override before the
+    // composer. We test needs_range_anxiety_override() directly (accessible
+    // from within the same module's test block) to confirm the predicate is
+    // true when SOC is below the anxiety threshold regardless of whether a
+    // trip is scheduled.
     #[test]
     fn range_anxiety_triggers_on_non_driving_day_with_low_soc() {
         // Actor: 30 mi/day expected, 20 mi buffer, 0.3 kWh/mi, 60 kWh battery.
@@ -3579,7 +4116,7 @@ mod tests {
         );
     }
 
-    // ======= Range anxiety on non-driving days (T-0431) =======
+    // ======= Range anxiety on non-driving days =======
 
     #[test]
     fn non_driving_day_range_anxiety_emits_soc_target() {
@@ -3601,19 +4138,21 @@ mod tests {
         let has_soc_target = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_non_driving_day_at_10c()).abs() < 0.01
             )
         });
         assert!(
             has_soc_target,
-            "non-driving day with low SOC: decide() must emit SOCTarget(1.0) via range anxiety, got: {:?}",
+            "non-driving day with low SOC: decide() must emit the minimal SOCTarget(band) via range anxiety, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn non_driving_day_no_anxiety_when_soc_high() {
-        // SOC well above anxiety threshold → early-return behaviour preserved.
+        // SOC well above the anxiety threshold: the override stands down and
+        // the strategy's own decision is what dispatches — not silence.
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
@@ -3627,9 +4166,21 @@ mod tests {
         let mut out = Vec::new();
         actor.decide(&env_at_minute(8 * 60), &mut out);
 
+        let has_anxiety_minimal_charge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_non_driving_day_at_10c()).abs() < 1e-9
+            )
+        });
         assert!(
-            out.is_empty(),
-            "non-driving day with SOC above anxiety threshold should emit no signals, got: {:?}",
+            !has_anxiety_minimal_charge,
+            "non-driving day with SOC above the anxiety threshold must not fire the override, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(commands_charging),
+            "with the override standing down, the strategy's own decision must dispatch, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
@@ -3658,10 +4209,11 @@ mod tests {
             out.iter().any(|r| {
                 matches!(
                     r.signal,
-                    ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+                    ControlSignal::SOCTarget { target_soc, .. }
+                        if (target_soc - anxiety_band_non_driving_day_at_10c()).abs() < 0.01
                 )
             }),
-            "Day 1 (non-driving): range anxiety must charge to full"
+            "Day 1 (non-driving): range anxiety must charge to the band (trip + reserve)"
         );
 
         // Simulate overnight charging: battery is now full.
@@ -3677,7 +4229,8 @@ mod tests {
         let has_anxiety = day2_out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+                ControlSignal::SOCTarget { target_soc, .. }
+                    if (target_soc - anxiety_band_non_driving_day_at_10c()).abs() < 0.01
             )
         });
         assert!(
@@ -3929,7 +4482,10 @@ mod tests {
         // Expensive price step: PriceOptimizer scores a discharge (negative
         // PowerSetpoint) because price 0.44 > discharge_threshold (~0.34).
         // The behavioral difference: cheap price → positive charge PowerSetpoint,
-        // expensive price → negative discharge PowerSetpoint (no positive charge).
+        // expensive price → negative discharge PowerSetpoint. The resolved
+        // vote also carries the strategy's standing SOCTarget ceiling —
+        // dispatched alongside the rate, not a charge instruction — so the
+        // ceiling must not count as charging.
         let mut env_expensive = env_at_minute(20 * 60);
         env_expensive.price_signal = PriceSignal {
             electricity_price: Some(0.44),
@@ -3940,11 +4496,11 @@ mod tests {
             matches!(
                 r.signal,
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
-            ) || matches!(r.signal, ControlSignal::SOCTarget { .. })
+            )
         });
         assert!(
             !has_positive_charge,
-            "TOU should not charge at expensive price (should discharge instead), got: {out_expensive:?}"
+            "TOU must not command charging at expensive price (should discharge instead), got: {out_expensive:?}"
         );
         let has_discharge = out_expensive.iter().any(|r| {
             matches!(
@@ -3971,20 +4527,17 @@ mod tests {
             0.5,
         );
 
-        // Evening 18:00-21:59: outside off-peak window, should idle
+        // Evening 18:00-21:59: outside off-peak window, must hold
         for hour in 18..22 {
             let out = plugged_in_step(&mut actor, hour * 60);
-            let has_charging = out.iter().any(|r| {
-                matches!(
-                    r.signal,
-                    ControlSignal::SOCTarget { .. }
-                        | ControlSignal::PowerSetpoint { .. }
-                        | ControlSignal::EvSetReadyBy { .. }
-                )
-            });
             assert!(
-                !has_charging,
-                "nightly should idle at hour {hour} (before off-peak), got: {:?}",
+                !out.iter().any(commands_charging),
+                "nightly must command no charging at hour {hour} (before off-peak), got: {:?}",
+                out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+            );
+            assert!(
+                out.iter().any(is_explicit_hold),
+                "nightly before off-peak must dispatch an explicit hold at hour {hour}, got: {:?}",
                 out.iter().map(|r| &r.signal).collect::<Vec<_>>()
             );
         }
@@ -4005,20 +4558,17 @@ mod tests {
             );
         }
 
-        // Morning 06:00-07:59: outside off-peak again, should idle
+        // Morning 06:00-07:59: outside off-peak again, must hold
         for hour in 6..8 {
             let out = plugged_in_step(&mut actor, hour * 60);
-            let has_charging = out.iter().any(|r| {
-                matches!(
-                    r.signal,
-                    ControlSignal::SOCTarget { .. }
-                        | ControlSignal::PowerSetpoint { .. }
-                        | ControlSignal::EvSetReadyBy { .. }
-                )
-            });
             assert!(
-                !has_charging,
-                "nightly should idle at hour {hour} (after off-peak), got: {:?}",
+                !out.iter().any(commands_charging),
+                "nightly must command no charging at hour {hour} (after off-peak), got: {:?}",
+                out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+            );
+            assert!(
+                out.iter().any(is_explicit_hold),
+                "nightly after off-peak must dispatch an explicit hold at hour {hour}, got: {:?}",
                 out.iter().map(|r| &r.signal).collect::<Vec<_>>()
             );
         }
@@ -4401,8 +4951,11 @@ mod tests {
             "low SOC (0.4) with neutral price should emit SOCTarget(0.9), got: {out_low:?}"
         );
 
-        // High SOC: all scores are 0, so the resolved label is soc_target with
-        // target_soc=0.9 and score=0. Equipment handles the no-op.
+        // High SOC: every vote scores 0. resolve()'s tie-break lets a later
+        // tied vote's target win over the earlier idle vote's absence of
+        // one, so the resolved vote still carries SocTarget's target 0.9 —
+        // a no-op at the equipment (SOC 0.95 is above target), but the
+        // strategy's ceiling is asserted rather than silently dropped.
         // The key: low SOC produces a meaningful charging signal (score > 0).
         let action_low = actor_low.last_action();
         assert!(
@@ -4959,6 +5512,132 @@ mod tests {
         assert_eq!(restored.phase, DriverPhase::HomePluggedIn);
     }
 
+    /// The snapshot carries every mutable decision field; a field added to
+    /// `EvDriverSnapshot` but forgotten in `load_state` compiles fine and
+    /// silently resets to the constructor default across a checkpoint — the
+    /// sibling round-trip test only pins three fields. This pins the full
+    /// snapshot, including the cumulative `drive_cancelled` counter (a
+    /// cancelled trip must stay counted across a checkpoint/restart, not
+    /// re-depart as if never cancelled) and the away-charge flag.
+    #[test]
+    fn save_state_load_state_round_trip_full_snapshot_preserved() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.61;
+        actor.current_day_ordinal = 77;
+        actor.phase = DriverPhase::Away {
+            plan: DayEvent {
+                departure_minute: 480,
+                arrival_minute: 1080,
+                drive_kwh: 9.5,
+            },
+        };
+        actor.needs_away_charge = true;
+        actor.drive_cancelled = 2;
+        actor.todays_event = Some(DayEvent {
+            departure_minute: 480,
+            arrival_minute: 1080,
+            drive_kwh: 9.5,
+        });
+
+        let blob = actor.save_state().expect("save_state should succeed");
+
+        let mut restored = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert!((restored.estimated_soc - 0.61).abs() < 1e-12);
+        assert_eq!(restored.current_day_ordinal, 77);
+        assert_eq!(
+            restored.phase,
+            DriverPhase::Away {
+                plan: DayEvent {
+                    departure_minute: 480,
+                    arrival_minute: 1080,
+                    drive_kwh: 9.5,
+                },
+            }
+        );
+        assert!(restored.needs_away_charge);
+        assert_eq!(
+            restored.drive_cancelled, 2,
+            "a cancelled trip must stay counted across a checkpoint/restart"
+        );
+        let event = restored
+            .todays_event
+            .expect("todays_event must survive the round trip");
+        assert_eq!(event.departure_minute, 480);
+        assert_eq!(event.arrival_minute, 1080);
+        assert!((event.drive_kwh - 9.5).abs() < 1e-12);
+    }
+
+    /// The snapshot round-trip must also preserve the *mid-trip* phase
+    /// variant: `DriverPhase::Driving` now carries the departed day's plan
+    /// (`remaining_kwh`, step counters, and the `DayEvent`), and a field
+    /// dropped or reset in `load_state` would silently zero the trip's
+    /// remaining energy across every checkpoint taken mid-route — the
+    /// vehicle would arrive home with phantom range or stall the trip.
+    /// The sibling full-snapshot test populates only `Away { plan }`.
+    #[test]
+    fn snapshot_round_trip_preserves_mid_trip_driving_plan() {
+        let plan = DayEvent {
+            departure_minute: 1380, // 23:00 — a midnight-crossing trip
+            arrival_minute: 60,
+            drive_kwh: 12.0,
+        };
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.phase = DriverPhase::Driving {
+            remaining_kwh: 7.5,
+            total_steps: 80,
+            steps_done: 20,
+            plan,
+        };
+
+        let blob = actor.save_state().expect("save_state should succeed");
+        let mut restored = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        match restored.phase {
+            DriverPhase::Driving {
+                remaining_kwh,
+                total_steps,
+                steps_done,
+                plan: restored_plan,
+            } => {
+                assert!(
+                    (remaining_kwh - 7.5).abs() < 1e-12,
+                    "the trip's remaining energy must survive the round trip, got {remaining_kwh}"
+                );
+                assert_eq!(total_steps, 80, "total steps must survive the round trip");
+                assert_eq!(steps_done, 20, "steps done must survive the round trip");
+                assert_eq!(
+                    restored_plan, plan,
+                    "the departed day's plan must survive the round trip — the arrival \
+                     minute and drive budget travel with the phase"
+                );
+            }
+            other => panic!("a mid-trip snapshot must restore as Driving, got {other:?}"),
+        }
+    }
+
     #[test]
     fn post_restore_estimated_soc_not_reset_to_default() {
         let mut actor = make_actor(
@@ -5474,6 +6153,1245 @@ mod tests {
             distinct.len() > 1,
             "test must reconcile against a varying ground truth to be meaningful, saw {} distinct values",
             distinct.len()
+        );
+    }
+
+    /// A configured LowSoc gate must hold when SOC is above the gate. At SOC
+    /// 0.20 with a 0.15 threshold the strategy says "do not charge", so no
+    /// charging signal may be dispatched. This probes the band where the
+    /// range-anxiety override (fixed 30 mi/day + 20 mi buffer at 0.3 kWh/mi on
+    /// a 60 kWh pack => anxiety_soc 0.25) currently preempts the composer
+    /// unconditionally, collapsing every strategy to charge-to-full.
+    #[test]
+    fn range_anxiety_override_does_not_preempt_low_soc_gate() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::LowSoc {
+                threshold: 0.15,
+                target_soc: 0.9,
+            },
+            0.20, // above the LowSoc gate: the strategy itself should idle
+        );
+        let out = plugged_in_step(&mut actor, 19 * 60);
+
+        let soc_target = out.iter().find_map(|r| match &r.signal {
+            ControlSignal::SOCTarget { target_soc, .. } => Some(*target_soc),
+            _ => None,
+        });
+        assert!(
+            soc_target.is_none(),
+            "SOC 0.20 is above LowSoc's configured 0.15 threshold, so the strategy gate \
+             says idle — but a charging signal (SOCTarget {soc_target:?}) was dispatched, \
+             meaning the range-anxiety override preempted the configured strategy"
+        );
+    }
+
+    /// A configured Nightly window must hold outside the window. At 19:00 a
+    /// Nightly{22:00-06:00} strategy says "wait", so no charging signal may be
+    /// dispatched — yet the range-anxiety override fires for the same SOC band
+    /// and dispatches charge-to-full, making Nightly indistinguishable from
+    /// Immediate for any EV whose driving load enters that band.
+    #[test]
+    fn range_anxiety_override_does_not_preempt_nightly_window() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.95,
+            },
+            0.20,
+        );
+        let out = plugged_in_step(&mut actor, 19 * 60); // outside the 22:00-06:00 window
+
+        let soc_target = out.iter().find_map(|r| match &r.signal {
+            ControlSignal::SOCTarget { target_soc, .. } => Some(*target_soc),
+            _ => None,
+        });
+        assert!(
+            soc_target.is_none(),
+            "19:00 is outside Nightly's configured 22:00-06:00 window, so the strategy \
+             says wait — but a charging signal (SOCTarget {soc_target:?}) was dispatched, \
+             meaning the range-anxiety override preempted the configured strategy"
+        );
+    }
+
+    /// Builds the equipment half of an actor/equipment pair the way an HPXML
+    /// `Equipment["EV"]` override leaves it: `charging_strategy` (when set)
+    /// reaches the actor via `Ev::actor_seed()`, but `ready_soc` is never set
+    /// (no strategy variant populates it), so the equipment retains its BMS
+    /// default of charging toward soc_max whenever it is plugged in with no
+    /// actor instruction.
+    fn make_hpxml_override_ev(
+        initial_soc: f64,
+        strategy: Option<ChargingStrategy>,
+    ) -> hares_equipment::ev::Ev {
+        use hares_equipment::Equipment;
+        use hares_equipment::config::EquipmentConfig;
+        use hares_equipment::ev::EvConfig;
+        // Deliberately no `ready_soc`: the ticket's Equipment["EV"] override
+        // sets only `charging_strategy`, which is actor-side (fed through
+        // `Ev::actor_seed()`) and never reaches the equipment's own config.
+        let config = EquipmentConfig::from_typed(
+            "EV1".to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: 60.0,
+                charging_level: None,
+                max_charging_power_kw: 7.2,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: Some(initial_soc),
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: None,
+                v2l_soc_reserve: None,
+                v2l_max_discharge_kw: None,
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                // The override carries the strategy as its serialized form —
+                // the same JSON string an HPXML `Equipment["EV"]` merge
+                // puts in the raw config, which `init_typed` parses back
+                // through `parse_charging_strategy`.
+                charging_strategy: strategy
+                    .map(|s| serde_json::to_string(&s).expect("ChargingStrategy serializes")),
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
+                cc_cv_transition_soc: None,
+                charging_priority: None,
+                discharge_respects_deadline: true,
+            },
+        )
+        .expect("typed EV config");
+        let mut ev = hares_equipment::ev::Ev::new(config.clone());
+        ev.init(&config, &env_at_minute(18 * 60))
+            .expect("EV init with valid config");
+        ev
+    }
+
+    /// Steps an actor and a real equipment instance together through
+    /// [start_minute, end_minute) at 5-minute resolution, applying every
+    /// dispatch the actor emits to the equipment, and returns the equipment's
+    /// SOC afterwards. This is the composition no existing test exercises:
+    /// what the equipment actually does while a configured strategy idles.
+    fn run_actor_equipment_window(
+        strategy: ChargingStrategy,
+        start_minute: u16,
+        end_minute: u16,
+    ) -> f64 {
+        use hares_equipment::Equipment;
+        let mut actor = make_plugged_in_actor(strategy, 0.5);
+        let mut ev = make_hpxml_override_ev(0.5, None);
+        let mut minute = start_minute;
+        while minute < end_minute {
+            let env = env_at_minute(minute);
+            let mut out = Vec::new();
+            actor.decide(&env, &mut out);
+            for request in &out {
+                ev.apply_control_unchecked(&request.signal)
+                    .expect("actor dispatch must be valid for the EV");
+            }
+            let mut ports = hares_types::PortSlots::default();
+            ev.step(&env, std::time::Duration::from_secs(300), &mut ports)
+                .expect("EV step");
+            minute += 5;
+        }
+        ev.core_output()
+            .state
+            .soc
+            .expect("EV core output always reports SOC")
+            .get()
+    }
+
+    /// A Nightly strategy outside its off-peak window must not charge the
+    /// vehicle. Plugged in at 18:00 with the window opening at 22:00, the
+    /// strategy says "wait" for the whole 18:00-22:00 span, so the EV must
+    /// hold its plug-in SOC (0.5) through it. Today the actor dispatches
+    /// nothing when the strategy idles, and the equipment's BMS default
+    /// charges to full on every silent step — so SOC climbs through the
+    /// entire idle window, making Nightly indistinguishable from Immediate.
+    #[test]
+    fn idle_nightly_window_does_not_charge_equipment() {
+        let soc_after = run_actor_equipment_window(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.95,
+            },
+            18 * 60,
+            22 * 60,
+        );
+        assert!(
+            soc_after <= 0.51,
+            "Nightly 22:00-06:00 is idle from 18:00 to 22:00, so the EV must hold its \
+             plug-in SOC (0.5) through that window — instead it charged to {soc_after:.3}, \
+             meaning the actor's idle decision was silently overridden by the equipment's \
+             charge-to-full BMS default"
+        );
+    }
+
+    /// The same invariant for the SOC-gated policy class: LowSoc{0.15} at SOC
+    /// 0.5 is above its gate, so the strategy says "wait" — no charging may
+    /// occur. Today actor silence during the hold is filled by the
+    /// equipment's charge-to-full default, so LowSoc charges identically to
+    /// every other strategy.
+    #[test]
+    fn idle_low_soc_gate_does_not_charge_equipment() {
+        let soc_after = run_actor_equipment_window(
+            ChargingStrategy::LowSoc {
+                threshold: 0.15,
+                target_soc: 0.9,
+            },
+            18 * 60,
+            22 * 60,
+        );
+        assert!(
+            soc_after <= 0.51,
+            "SOC 0.5 is above LowSoc's configured 0.15 gate, so the EV must hold its \
+             plug-in SOC (0.5) while the gate holds — instead it charged to {soc_after:.3}, \
+             meaning the actor's idle decision was silently overridden by the equipment's \
+             charge-to-full BMS default"
+        );
+    }
+
+    /// The arrival step itself must carry a charging decision: the plug-in
+    /// dispatch is applied before the equipment steps this timestep, so if
+    /// the strategy's decision waited until the *next* step the EV would
+    /// charge one full step at rated power toward whatever setpoint was last
+    /// latched, outside whatever window the strategy configures. With a
+    /// Nightly 22:00-06:00 strategy and an 18:00 arrival, the arrival step
+    /// must dispatch the explicit hold alongside the plug-in — and the
+    /// plug-in must precede it, because the dwelling applies same-tier
+    /// dispatches FIFO and the hold is only meaningful once the vehicle is
+    /// connected.
+    #[test]
+    fn arrival_step_dispatches_strategy_hold_not_a_step_later() {
+        let mut actor = make_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut out = Vec::new();
+
+        // Roll today's event, depart at 08:00, drive through to 17:59.
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+        for step in 1..=119 {
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            out.clear();
+        }
+
+        // The 18:00 arrival step: 10 h away ends and the vehicle plugs in.
+        // Post-drive SOC (~0.85 from a 30 mi day) is far above the anxiety
+        // band, so nothing but the strategy's own decision can speak here.
+        out.clear();
+        actor.decide(&env_at_minute(18 * 60), &mut out);
+
+        let plug_in_pos = out.iter().position(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        let hold_pos = out.iter().position(is_explicit_hold);
+        assert!(
+            plug_in_pos.is_some(),
+            "arrival at 18:00 must dispatch the plug-in, got: {out:?}"
+        );
+        assert!(
+            hold_pos.is_some(),
+            "the arrival step itself must dispatch the strategy's decision — a hold outside \
+             the 22:00-06:00 window — not leave the equipment to one ungoverned step, got: {out:?}"
+        );
+        assert!(
+            plug_in_pos.unwrap() < hold_pos.unwrap(),
+            "the plug-in must precede the hold so the connection transition is in effect \
+             before the charging decision is applied, got: {out:?}"
+        );
+        assert!(
+            !out.iter().any(commands_charging),
+            "outside the window the arrival step must not command charging, got: {out:?}"
+        );
+    }
+
+    // ======= Actor/equipment integration: the ticket's completion bar =======
+
+    /// Test env at an exact minute of a given day (1-based) with a chosen
+    /// outdoor temperature. The fixed-date helpers delegate here.
+    fn env_at_day_minute_temp(day: u32, minute: u16, outdoor_temp_c: f64) -> EnvironmentState {
+        let hour = (minute / 60).min(23) as u8;
+        let min = minute % 60;
+        use chrono::{FixedOffset, TimeZone};
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let mut env = test_env()
+            .hour(hour)
+            .date(2026, 1, day)
+            .outdoor_temp(outdoor_temp_c)
+            .build();
+        env.current_time = tz
+            .with_ymd_and_hms(2026, 1, day, hour as u32, min as u32, 0)
+            .single()
+            .unwrap();
+        env
+    }
+
+    /// Build a seeded actor/equipment pair through the real Dwelling
+    /// construction path: the equipment's `EvConfig` carries the strategy
+    /// (exactly what an HPXML `Equipment["EV"]` override produces),
+    /// `actor_seed()` derives `ActorSeed::Ev` from it, and
+    /// `build_actors_from_seeds` builds the driver with the same hardcoded
+    /// driving parameters a Dwelling uses. The RNG is fixed so every run
+    /// rolls the identical driving-day pattern.
+    fn make_seeded_ev_driver(
+        strategy: ChargingStrategy,
+        initial_soc: f64,
+    ) -> (Box<dyn crate::Actor>, Box<dyn hares_equipment::Equipment>) {
+        use hares_equipment::Equipment as _;
+        use std::collections::HashMap;
+        let ev = make_hpxml_override_ev(initial_soc, Some(strategy));
+        let name = ev.descriptor().name.clone();
+        let equipment: Box<dyn hares_equipment::Equipment> = Box::new(ev);
+        let mut id_by_name = HashMap::new();
+        id_by_name.insert(name, EquipmentId(1));
+        let rng = seed_from_u64(42);
+        let mut actors = crate::dwelling::build_actors_from_seeds(
+            std::slice::from_ref(&equipment),
+            &[],
+            false, // no tariff — none of the strategies under test needs one
+            None,
+            96,
+            &id_by_name,
+            &rng,
+        );
+        assert_eq!(
+            actors.len(),
+            1,
+            "the seeded EV must produce exactly one driver actor"
+        );
+        (actors.pop().expect("exactly one actor"), equipment)
+    }
+
+    /// Step a seeded actor/equipment pair through `days` simulated days at
+    /// 15-minute resolution, mirroring the Dwelling's per-step order: the
+    /// actor decides against the previous step's committed equipment
+    /// output, dispatches apply FIFO, then the equipment steps. Returns
+    /// per-day hourly charging energy (kWh, home charging only — driving
+    /// and away steps draw zero port power) and the indices of days on
+    /// which a drive occurred.
+    fn run_seeded_profile(
+        strategy: ChargingStrategy,
+        initial_soc: f64,
+        days: usize,
+    ) -> (Vec<[f64; 24]>, Vec<usize>) {
+        let (mut actor, mut equipment) = make_seeded_ev_driver(strategy, initial_soc);
+        let equipment_id = EquipmentId(1);
+
+        let mut hourly: Vec<[f64; 24]> = vec![[0.0; 24]; days];
+        let mut driving_days = Vec::new();
+        let mut core = CoreOutput::default();
+        let mut out = Vec::new();
+
+        for (day, day_hours) in hourly.iter_mut().enumerate() {
+            let mut drove_today = false;
+            for quarter in 0..96u16 {
+                let minute = quarter * 15;
+                let hour = (minute / 60) as usize;
+                let mut env = env_at_day_minute_temp(day as u32 + 1, minute, 10.0);
+                env.time_res = chrono::Duration::minutes(15);
+                env.equipment_core.insert(equipment_id, core.clone());
+
+                out.clear();
+                actor.decide(&env, &mut out);
+                for req in &out {
+                    drove_today |= matches!(req.signal, ControlSignal::EvDrive { .. });
+                    equipment
+                        .apply_control_unchecked(&req.signal)
+                        .expect("driver dispatch must be valid for the EV");
+                }
+
+                let mut ports = hares_types::PortSlots::default();
+                equipment
+                    .step(&env, std::time::Duration::from_secs(900), &mut ports)
+                    .expect("EV step");
+                core = equipment.core_output().clone();
+                let power_kw = core.flows.electric_kw.map(|p| p.signed_kw()).unwrap_or(0.0);
+                if power_kw > 0.0 {
+                    day_hours[hour] += power_kw * 0.25;
+                }
+            }
+            if drove_today {
+                driving_days.push(day);
+            }
+        }
+        (hourly, driving_days)
+    }
+
+    /// Total charging energy in the given hours across all days.
+    fn energy_in_hours(profile: &[[f64; 24]], hours: &[usize]) -> f64 {
+        profile
+            .iter()
+            .map(|day| hours.iter().map(|h| day[*h]).sum::<f64>())
+            .sum()
+    }
+
+    /// First hour with non-zero charging energy after the 18:00 plug-in on
+    /// `day`, scanning that evening (18:00–24:00) and the following
+    /// morning (00:00–06:00) — a window starting after midnight (e.g.
+    /// 02:00) charges in the next calendar day's early hours. `None` means
+    /// no charging in that span (unobservable when `day` is the last
+    /// simulated day).
+    fn first_charging_hour_after_plugin(profile: &[[f64; 24]], day: usize) -> Option<usize> {
+        if let Some(h) = (18..24).find(|&h| profile[day][h] > 0.0) {
+            return Some(h);
+        }
+        profile
+            .get(day + 1)
+            .and_then(|next| (0..6).find(|&h| next[h] > 0.0))
+    }
+
+    /// The ticket's completion bar, part 1: two `Nightly` overrides
+    /// differing only in `off_peak_start_hour` must produce measurably
+    /// different hourly charging profiles — each run charges only inside
+    /// its own configured window, and the first charging hour after the
+    /// 18:00 plug-in shifts with the window start.
+    ///
+    /// Precondition (computed, not observed): the range-anxiety override
+    /// provably never fires. `anxiety_soc` = (30 mi + 20 mi buffer) ×
+    /// 0.3 kWh/mi × temp_mult(10 °C) / 60 kWh ≈ 0.278, and the vehicle never
+    /// drops below ~0.73 SOC (0.95 nightly target − 0.167 daily drain), so
+    /// perceived SOC never enters the band.
+    #[test]
+    fn nightly_start_hour_governs_hourly_charging_profile() {
+        let days = 12;
+        let nightly_at = |start: f64| ChargingStrategy::Nightly {
+            off_peak_start_hour: start,
+            off_peak_end_hour: 6.0,
+            target_soc: 0.95,
+        };
+        let (profile_a, drives_a) = run_seeded_profile(nightly_at(22.0), 0.9, days);
+        let (profile_b, drives_b) = run_seeded_profile(nightly_at(2.0), 0.9, days);
+
+        assert!(!drives_a.is_empty(), "fixture must contain driving days");
+        assert_eq!(
+            drives_a, drives_b,
+            "same RNG seed must roll the identical driving-day pattern for both runs"
+        );
+
+        // Well under one 15-minute charging step at rated power (1.8 kWh):
+        // numerical noise, not a charging event.
+        let eps = 0.05;
+        let in_window_a = |h: usize| !(6..22).contains(&h); // 22:00–06:00, wrapping midnight
+        let in_window_b = |h: usize| (2..6).contains(&h);
+
+        // (a) Charging energy outside each run's own window is zero, every
+        // simulated day — the strategy's window, not the BMS default,
+        // governs when the vehicle charges.
+        for (day, hours) in profile_a.iter().enumerate() {
+            let outside: f64 = hours
+                .iter()
+                .enumerate()
+                .filter(|(h, _)| !in_window_a(*h))
+                .map(|(_, e)| e)
+                .sum();
+            assert!(
+                outside < eps,
+                "Nightly 22:00–06:00, day {day}: {outside:.3} kWh charged \
+                 outside the configured window"
+            );
+        }
+        for (day, hours) in profile_b.iter().enumerate() {
+            let outside: f64 = hours
+                .iter()
+                .enumerate()
+                .filter(|(h, _)| !in_window_b(*h))
+                .map(|(_, e)| e)
+                .sum();
+            assert!(
+                outside < eps,
+                "Nightly 02:00–06:00, day {day}: {outside:.3} kWh charged \
+                 outside the configured window"
+            );
+        }
+
+        // (b) The two windows produce measurably different profiles: the
+        // 22:00 run charges in the late evening and not the early morning;
+        // the 02:00 run the reverse.
+        assert!(
+            energy_in_hours(&profile_a, &[22, 23]) > 1.0,
+            "the 22:00 run must charge in hours 22–23, got {:?}",
+            profile_a.iter().map(|d| (d[22], d[23])).collect::<Vec<_>>()
+        );
+        assert!(
+            energy_in_hours(&profile_b, &[2, 3, 4, 5]) > 1.0,
+            "the 02:00 run must charge in hours 02–05, got {:?}",
+            profile_b
+                .iter()
+                .map(|d| (d[2], d[3], d[4], d[5]))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            energy_in_hours(&profile_a, &[2, 3, 4, 5]) < eps,
+            "the 22:00 run must not charge in the 02:00 run's morning hours"
+        );
+        assert!(
+            energy_in_hours(&profile_b, &[22, 23]) < eps,
+            "the 02:00 run must not charge in the 22:00 run's evening hours"
+        );
+
+        // (b') On every driving day the first charging hour after the
+        // 18:00 plug-in is each run's own window start — a four-hour shift
+        // in the configuration produces a four-hour shift in the profile.
+        // Days without a simulated successor are excluded: a window that
+        // opens after midnight charges in the next calendar day's hours,
+        // which do not exist for the final day.
+        for &day in drives_a.iter().filter(|&&d| d + 1 < days) {
+            assert_eq!(
+                first_charging_hour_after_plugin(&profile_a, day),
+                Some(22),
+                "22:00 run, driving day {day}: first charging hour after plug-in"
+            );
+        }
+        for &day in drives_b.iter().filter(|&&d| d + 1 < days) {
+            assert_eq!(
+                first_charging_hour_after_plugin(&profile_b, day),
+                Some(2),
+                "02:00 run, driving day {day}: first charging hour after plug-in"
+            );
+        }
+    }
+
+    /// The ticket's completion bar, part 2: `LowSoc` differs from
+    /// `Immediate` — a different policy class (charge when SOC falls below
+    /// a threshold, versus charge on plug-in).
+    ///
+    /// Precondition (computed, not observed): the threshold is chosen so
+    /// the range-anxiety override provably never fires and the gate alone
+    /// governs, with margin on both sides of the gate. `anxiety_soc` ≈ 0.28
+    /// at 10 °C ((30 mi + 20 mi) × 0.325 kWh/mi × 1.11 / 60 kWh); the
+    /// one-day drain is ≈ 0.175 SOC (30 mi × 0.325 kWh/mi × 1.11 / 60 kWh).
+    /// LowSoc 0.65 with the 0.05 hysteresis band recharges at 0.60: the
+    /// first driving day's arrival SOC (0.9 − 0.175 ≈ 0.725) sits above
+    /// the 0.65 upper threshold (block, margin ≈ 0.075) and the second's
+    /// (≈ 0.550) below the 0.60 lower threshold (open, margin ≈ 0.05), so
+    /// one day's drive can never carry SOC from above the gate into the
+    /// anxiety band (0.60 ≫ 0.28 + 0.175). (The ticket's literal
+    /// `LowSoc 0.15` sits below the hardcoded anxiety band and remains
+    /// governed by the override — docs/tickets/132.)
+    #[test]
+    fn low_soc_gate_delays_charging_beyond_immediate() {
+        let days = 12;
+        let (immediate, drives_imm) =
+            run_seeded_profile(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.9, days);
+        let (low_soc, drives_low) = run_seeded_profile(
+            ChargingStrategy::LowSoc {
+                threshold: 0.65,
+                target_soc: 0.9,
+            },
+            0.9,
+            days,
+        );
+
+        assert!(
+            drives_low.len() >= 3,
+            "fixture precondition: at least 3 driving days in {days} days at \
+             event_day_ratio 0.8 (got {})",
+            drives_low.len()
+        );
+        assert_eq!(drives_imm, drives_low, "same RNG seed, same day pattern");
+
+        // Immediate: non-zero charging energy in the first hour after
+        // plug-in on the first driving day — charge-on-plug-in.
+        let first_drive = drives_imm[0];
+        assert!(
+            immediate[first_drive][18] > 0.0,
+            "Immediate must charge in the first hour after plug-in (driving day \
+             {first_drive}, hour 18), got {}",
+            immediate[first_drive][18]
+        );
+
+        // LowSoc: zero charging energy on the first driving day — the
+        // arrival SOC (≈ 0.725) is above the 0.65 gate, so the strategy
+        // holds instead of charging. Exactly the difference in policy
+        // class the ticket asks to be observable.
+        let first_day_total: f64 = low_soc[first_drive].iter().sum();
+        assert!(
+            first_day_total < 1e-9,
+            "LowSoc must not charge on the first driving day while SOC (≈ 0.725) is \
+             above its gate, got {first_day_total:.3} kWh"
+        );
+
+        // …and it charges on the second driving day, once the drain carries
+        // SOC below the gate's lower threshold (≈ 0.550 < 0.60) — beginning
+        // in the plug-in hour, gate-governed, not window-governed.
+        let second_drive = drives_low[1];
+        assert!(
+            low_soc[second_drive][18] > 0.0,
+            "LowSoc must charge in the plug-in hour of the second driving day, once \
+             SOC (≈ 0.550) has crossed below the gate (driving day {second_drive}), \
+             got {}",
+            low_soc[second_drive][18]
+        );
+
+        // Class-level contrast over the whole run: Immediate charges on
+        // every driving day; LowSoc rests on the days the gate holds, so it
+        // charges on strictly fewer days.
+        let charging_days = |profile: &[[f64; 24]]| {
+            profile
+                .iter()
+                .filter(|day| day.iter().any(|&e| e > 0.0))
+                .count()
+        };
+        let imm_days = charging_days(&immediate);
+        let low_days = charging_days(&low_soc);
+        assert!(
+            low_days < imm_days,
+            "LowSoc must charge on fewer days than Immediate (gate-governed rest \
+             days), got {low_days} vs {imm_days}"
+        );
+    }
+
+    // ======= Red-team: soc-floor override vs. the explicit-hold contract =======
+
+    /// A V2G soc-floor override must not deadlock the stack's own recovery.
+    /// At or below `min_soc`, `V2GExport` short-circuits the composer with
+    /// an idle override on every step, and under the explicit-hold contract
+    /// that idle dispatches a latching zero-power hold. The hold's only
+    /// release paths — a fresh `SOCTarget`/`EvSetReadyBy`, or disconnect —
+    /// never fire while the floor keeps short-circuiting, and only charging
+    /// raises SOC, so the hold pins the vehicle at the floor indefinitely
+    /// and the stack's own `SocTarget{1.0}` (the only vote in the stack
+    /// that ever wants to charge) is never consulted. The floor's meaning
+    /// is "do not export below this SOC" (the equipment enforces exactly
+    /// that in `compute_v2g_discharge`); before the explicit-hold contract
+    /// the idle override dispatched silence, which the equipment's BMS
+    /// default filled by recharging the vehicle — the floor path's only
+    /// recovery mechanism.
+    #[test]
+    fn v2g_soc_floor_override_does_not_deadlock_stack_target_recovery() {
+        let env = test_env().hour(19).build();
+        let ctx = DecisionContext {
+            current_soc: 0.25, // below the floor (0.3)
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 19 * 60,
+            next_departure_minute: Some(480),
+            time_res_minutes: 5.0,
+        };
+
+        let strategy = ChargingStrategy::V2G {
+            min_soc: 0.3,
+            max_export_kw: 5.0,
+            price_threshold: 0.20,
+        };
+        let mut composer =
+            ChargingComposer::new(build_preferences(&strategy, 7.2, 0.9, None, 288), "EV1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert!(
+            out.iter().any(commands_charging),
+            "V2G: a vehicle resting at/below its soc floor must still be able to recharge \
+             through its own SocTarget — the floor bans export, not charging. Instead the \
+             floor override's idle vote dispatched only a hold, which nothing ever lifts \
+             while the floor keeps short-circuiting the composer, got {out:?}"
+        );
+    }
+
+    /// The same deadlock for the V2H stack (`V2HDischarge`'s soc-floor
+    /// override short-circuiting `SocTarget{0.9}`): the floor bans
+    /// discharging the home below `min_soc`, not recharging the vehicle.
+    #[test]
+    fn v2h_soc_floor_override_does_not_deadlock_stack_target_recovery() {
+        let env = test_env().hour(19).build();
+        let ctx = DecisionContext {
+            current_soc: 0.25, // below the floor (0.3)
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 19 * 60,
+            next_departure_minute: Some(480),
+            time_res_minutes: 5.0,
+        };
+
+        let strategy = ChargingStrategy::V2H {
+            discharge_threshold_soc: 0.5,
+            min_soc: 0.3,
+        };
+        let mut composer =
+            ChargingComposer::new(build_preferences(&strategy, 7.2, 0.9, None, 288), "EV1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert!(
+            out.iter().any(commands_charging),
+            "V2H: a vehicle resting at/below its soc floor must still be able to recharge \
+             through its own SocTarget — the floor bans discharging to the home, not \
+             charging. Instead the floor override's idle vote dispatched only a hold, \
+             which nothing ever lifts while the floor keeps short-circuiting the \
+             composer, got {out:?}"
+        );
+    }
+
+    /// The physical consequence of the soc-floor hold, end to end: a V2G
+    /// vehicle that landed below its floor must recharge, not sit there.
+    /// Perceived SOC 0.25 is inside the anxiety band (~0.278 at 10 °C) but
+    /// the next departure (08:00, wrapped to tomorrow — 13 h away) gives the
+    /// urgency gate every reason to stand the override down, so the strategy
+    /// itself governs. Stepping the pair from 19:00 to 23:00, the vehicle
+    /// must climb back above its 0.3 floor; a hold leaves it frozen at the
+    /// plug-in SOC.
+    #[test]
+    fn v2g_vehicle_below_soc_floor_recovers_overnight() {
+        use hares_equipment::Equipment as _;
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
+            0.25,
+        );
+        let mut ev = make_hpxml_override_ev(0.25, None);
+
+        let mut minute = 19 * 60;
+        while minute < 23 * 60 {
+            let env = env_at_minute(minute);
+            let mut out = Vec::new();
+            actor.decide(&env, &mut out);
+            for request in &out {
+                ev.apply_control_unchecked(&request.signal)
+                    .expect("actor dispatch must be valid for the EV");
+            }
+            let mut ports = hares_types::PortSlots::default();
+            ev.step(&env, std::time::Duration::from_secs(300), &mut ports)
+                .expect("EV step");
+            minute += 5;
+        }
+
+        let soc_after = ev
+            .core_output()
+            .state
+            .soc
+            .expect("EV core output always reports SOC")
+            .get();
+        assert!(
+            soc_after > 0.3,
+            "a V2G vehicle below its 0.3 soc floor must recharge (the floor bans export, \
+             not charging; its own SocTarget{{1.0}} wants the pack full) — instead it sat \
+             at {soc_after:.3} for four hours, pinned by the floor override's latched hold"
+        );
+    }
+
+    /// With the floor no longer a composer override, the actor-side
+    /// protection is gone the moment the driver's belief goes stale: during
+    /// a plug-in session the actor never reconciles its perceived SOC, so a
+    /// driver believing 0.9 keeps voting export every step while the real
+    /// pack drains. The fix's own comment claims the equipment backstop
+    /// covers this ("the equipment independently enforces it ... via the
+    /// `min_soc` this preference places on its discharge setpoints") — the
+    /// vote-carried floor must survive the resolve fold and the
+    /// target-then-rate dispatch pair and stop the discharge at exactly the
+    /// strategy's floor. The floor here (0.5) sits deliberately above the
+    /// equipment's `v2g_soc_reserve` default (0.3): if the fold or either
+    /// dispatch ever drops the vote's `min_soc`, the equipment silently
+    /// falls back to the reserve and discharges straight through 0.5 —
+    /// which this test catches.
+    #[test]
+    fn discharge_floor_holds_when_stale_belief_keeps_voting_export() {
+        use hares_equipment::Equipment as _;
+        use hares_equipment::config::EquipmentConfig;
+        use hares_equipment::ev::EvConfig;
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.5,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
+            0.9, // stale belief: far above floor and threshold; never reconciled
+        );
+        let config = EquipmentConfig::from_typed(
+            "EV1".to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: 60.0,
+                charging_level: None,
+                max_charging_power_kw: 7.2,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: Some(0.55),
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: None,
+                v2l_soc_reserve: None,
+                v2l_max_discharge_kw: None,
+                v2g_enabled: Some(true),
+                v2g_soc_reserve: None, // default 0.3 — strictly below the 0.5 floor
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
+                cc_cv_transition_soc: None,
+                charging_priority: None,
+                discharge_respects_deadline: true,
+            },
+        )
+        .expect("typed EV config");
+        let mut ev = hares_equipment::ev::Ev::new(config.clone());
+        ev.init(&config, &env_at_minute(19 * 60))
+            .expect("EV init with valid config");
+
+        let mut min_soc_observed = 1.0_f64;
+        let mut minute = 19 * 60;
+        while minute < 20 * 60 {
+            let mut env = env_at_minute(minute);
+            env.price_signal = PriceSignal {
+                electricity_price: Some(0.50), // well above the 0.20 threshold
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            actor.decide(&env, &mut out);
+            for request in &out {
+                ev.apply_control_unchecked(&request.signal)
+                    .expect("actor dispatch must be valid for the EV");
+            }
+            let mut ports = hares_types::PortSlots::default();
+            ev.step(&env, std::time::Duration::from_secs(300), &mut ports)
+                .expect("EV step");
+            let soc = ev
+                .core_output()
+                .state
+                .soc
+                .expect("EV core output always reports SOC")
+                .get();
+            min_soc_observed = min_soc_observed.min(soc);
+            minute += 5;
+        }
+
+        assert!(
+            min_soc_observed < 0.55 - 1e-3,
+            "the export votes must actually discharge the pack for this test to mean \
+             anything — a rejected dispatch would freeze SOC and prove nothing, \
+             min soc observed {min_soc_observed:.4}"
+        );
+        assert!(
+            min_soc_observed >= 0.5 - 1e-6,
+            "a stale driver belief (0.9) voting export every step must not discharge the \
+             pack below the strategy's 0.5 soc floor — the vote-carried min_soc must reach \
+             the equipment through the resolve fold and bound the discharge; instead the \
+             pack sank to {min_soc_observed:.4} (the equipment's 0.3 reserve fallback is \
+             the only explanation for a floor below 0.5)"
+        );
+    }
+
+    /// The same stale-belief composition through the **V2L** leg: the
+    /// `V2HDischarge` floor comment claims the equipment enforces the
+    /// vote-carried floor in `compute_v2l_discharge`, but the fix's own V2L
+    /// landing test passes `min_soc: None` (reserve only) and no test walks
+    /// the vote's `min_soc` through the resolve fold and dispatch pair into
+    /// the V2L fast path (`v2g_enabled` absent, `v2l_enabled` set). The
+    /// floor (0.5) sits deliberately above the `v2l_soc_reserve` default
+    /// (0.2): if the fold or either dispatch drops the vote's `min_soc`,
+    /// the pack silently falls back to the reserve and discharges straight
+    /// through 0.5 — which this test catches.
+    #[test]
+    fn v2l_discharge_floor_holds_when_stale_belief_keeps_voting_discharge() {
+        use hares_equipment::Equipment as _;
+        use hares_equipment::config::EquipmentConfig;
+        use hares_equipment::ev::EvConfig;
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.5,
+            },
+            0.9, // stale belief: above the discharge threshold; never reconciled
+        );
+        let config = EquipmentConfig::from_typed(
+            "EV1".to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: 60.0,
+                charging_level: None,
+                max_charging_power_kw: 7.2,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: Some(0.55),
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: Some(true),
+                v2l_soc_reserve: None, // default 0.2 — strictly below the 0.5 floor
+                v2l_max_discharge_kw: None,
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+                power_factor: None,
+                charger_capacity_kva: None,
+                cc_cv_transition_soc: None,
+                charging_priority: None,
+                discharge_respects_deadline: true,
+            },
+        )
+        .expect("typed EV config");
+        let mut ev = hares_equipment::ev::Ev::new(config.clone());
+        ev.init(&config, &env_at_minute(19 * 60))
+            .expect("EV init with valid config");
+
+        let mut min_soc_observed = 1.0_f64;
+        let mut minute = 19 * 60;
+        while minute < 20 * 60 {
+            let mut env = env_at_minute(minute);
+            env.electrical = ElectricalSummary {
+                pv_generation_kw: 0.5,
+                base_load_kw: 4.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            actor.decide(&env, &mut out);
+            for request in &out {
+                ev.apply_control_unchecked(&request.signal)
+                    .expect("actor dispatch must be valid for the EV");
+            }
+            let mut ports = hares_types::PortSlots::default();
+            ev.step(&env, std::time::Duration::from_secs(300), &mut ports)
+                .expect("EV step");
+            let soc = ev
+                .core_output()
+                .state
+                .soc
+                .expect("EV core output always reports SOC")
+                .get();
+            min_soc_observed = min_soc_observed.min(soc);
+            minute += 5;
+        }
+
+        assert!(
+            min_soc_observed < 0.55 - 1e-3,
+            "the discharge votes must actually drain the pack for this test to mean \
+             anything — a rejected dispatch would freeze SOC and prove nothing, \
+             min soc observed {min_soc_observed:.4}"
+        );
+        assert!(
+            min_soc_observed >= 0.5 - 1e-6,
+            "a stale driver belief (0.9) voting discharge every step must not discharge the \
+             pack below the strategy's 0.5 soc floor — the vote-carried min_soc must reach \
+             compute_v2l_discharge through the resolve fold and bound the discharge; \
+             instead the pack sank to {min_soc_observed:.4} (the equipment's 0.2 v2l \
+              reserve fallback is the only explanation for a floor below 0.5)"
+        );
+    }
+
+    // ======= Red-team: stranded-drive accounting =======
+
+    /// A dispatched drive must deliver every kWh it dispatches — the
+    /// shortfall of a drive that exceeds the pack must not vanish silently.
+    /// The hold contract makes low-SOC departures reachable that the old
+    /// charge-to-full default never allowed: Nightly holds outside its
+    /// window, so a 07:55 plug-in at SOC 0.12 reaches the 08:00 departure
+    /// with 7.2 kWh against a 9.99 kWh (30 mi) drive day. The pre-fix
+    /// behavior dispatched the drive anyway and the equipment's `EvDrive`
+    /// guard rejected the tail — the dwelling logged warnings the actor
+    /// never read while the actor's belief subtracted the dispatched energy
+    /// regardless, and the profile reported mobility the pack never
+    /// delivered.
+    ///
+    /// The operator-directed model: a driver who cannot complete the trip
+    /// does not depart and drive until the pack dies mid-route — they stay
+    /// home and charge. The trip is cancelled, counted in `drive_cancelled`,
+    /// and the day self-heals (the overnight window recharges the vehicle
+    /// for the next departure). The finding's protective invariants hold by
+    /// construction: no drive step is dispatched that the equipment would
+    /// reject (none is dispatched at all), every dispatched kWh reaches the
+    /// pack, and the shortfall is reported, never silently dropped.
+    #[test]
+    fn drive_shortfall_is_accounted_not_silently_dropped() {
+        use hares_equipment::Equipment as _;
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            0.12, // 7.2 kWh usable against the day's 9.99 kWh drive
+        );
+        let mut ev = make_hpxml_override_ev(0.12, None);
+
+        // 07:55 plug-in (the urgency override tops the pack toward the band
+        // for the five minutes it has), the 08:00 departure decision, then
+        // the whole day and evening at 1-minute resolution through 75
+        // minutes of the 22:00 window — the self-heal.
+        let mut drive_signals = 0_usize;
+        let mut soc_at_cancellation = 0.0_f64;
+        let mut cancelled_seen = false;
+        let mut anxiety_active_first_step = None;
+        for step in 0..=(23 * 60 + 15 - 7 * 60 - 55) {
+            let env = env_at_minute(7 * 60 + 55 + step);
+            let mut out = Vec::new();
+            actor.decide(&env, &mut out);
+            for request in &out {
+                drive_signals += matches!(request.signal, ControlSignal::EvDrive { .. }) as usize;
+                ev.apply_control_unchecked(&request.signal)
+                    .expect("actor dispatch must be valid for the EV");
+            }
+            let mut ports = hares_types::PortSlots::default();
+            ev.step(&env, std::time::Duration::from_secs(60), &mut ports)
+                .expect("EV step");
+            if step == 0 {
+                anxiety_active_first_step = actor
+                    .telemetry()
+                    .and_then(|t| t.get("range_anxiety_active"));
+            }
+            if !cancelled_seen
+                && actor
+                    .telemetry()
+                    .and_then(|t| t.get("drive_cancelled"))
+                    .is_some_and(|c| c >= 1.0)
+            {
+                cancelled_seen = true;
+                soc_at_cancellation = ev
+                    .core_output()
+                    .state
+                    .soc
+                    .expect("EV core output always reports SOC")
+                    .get();
+            }
+        }
+
+        // The short driver is reported from the first plugged-in step: the
+        // band state is active before any departure decision.
+        assert_eq!(
+            anxiety_active_first_step,
+            Some(1.0),
+            "a driver below the anxiety band must be reported as short on the \
+             range_anxiety_active channel"
+        );
+
+        // The trip was cancelled, not driven on phantom energy: no drive
+        // dispatch existed for the equipment to reject, and the shortfall
+        // is counted, not silently dropped.
+        assert_eq!(
+            drive_signals, 0,
+            "a trip the pack cannot cover must not be driven — no EvDrive may be dispatched, \
+             or the profile reports mobility the pack never delivered"
+        );
+        assert!(
+            cancelled_seen,
+            "the cancelled trip must be counted in the drive_cancelled channel"
+        );
+        assert_eq!(
+            actor.telemetry().and_then(|t| t.get("drive_cancelled")),
+            Some(1.0),
+            "exactly one cancellation for one uncoverable departure"
+        );
+
+        // And the day self-heals: the vehicle stayed plugged in, and by
+        // 23:00 the Nightly window has recharged the pack well past the
+        // cancellation-time SOC — ready for the next day's trip.
+        let soc_late = ev
+            .core_output()
+            .state
+            .soc
+            .expect("EV core output always reports SOC")
+            .get();
+        assert!(
+            soc_late > soc_at_cancellation + 0.05,
+            "the cancelled day must self-heal: the overnight window must recharge the pack \
+             (SOC {soc_at_cancellation:.3} at cancellation → {soc_late:.3} by 23:00)"
+        );
+    }
+
+    /// A driver with away charging who arrives short of their usual amount
+    /// charges out back up to it — the full top-up, not the habitual
+    /// fraction — with the away session bounded at the usual target (a
+    /// top-up, not a fill-to-BMS-default). Arriving home at the usual
+    /// target, the evening's home cycle transfers nothing (the strategy
+    /// no-ops at target — the skip is emergent and exact).
+    #[test]
+    fn away_charger_short_of_usual_tops_up_out_to_usual_amount() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.away_charge_fraction = 0.3;
+        actor.away_charge_power_kw = 6.6;
+        let mut out = Vec::new();
+
+        // Roll event, depart, drive to completion. The day's ~9.99 kWh drive
+        // leaves the driver at ≈ 0.833 — short of the usual 0.9 — so the
+        // away recoup must be the full gap to usual (≈ 4.0 kWh), not the
+        // habitual 0.3 × 9.99 ≈ 3.0 kWh.
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+        for step in 1..=120 {
+            out.clear();
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            if matches!(actor.phase, DriverPhase::Away { .. }) {
+                break;
+            }
+        }
+        assert!(
+            matches!(actor.phase, DriverPhase::Away { .. }),
+            "precondition: the trip must complete into the Away phase"
+        );
+
+        // The deferred away-charge step: the session is bounded at the
+        // driver's usual amount.
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60 + 121), &mut out);
+        let has_away_bound = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+            )
+        });
+        assert!(
+            has_away_bound,
+            "the away session must be bounded at the usual amount (SOCTarget 0.9), got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+        let has_away_charge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::EvAwayCharge { power_kw } if (power_kw - 6.6).abs() < 0.01
+            )
+        });
+        assert!(
+            has_away_charge,
+            "the away charger must run at the configured power, got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+
+        // The belief credited the full top-up to the usual amount, not the
+        // habitual fraction: 0.833 + 4.0/60 ≈ 0.9, versus 0.833 + 3.0/60 ≈ 0.883.
+        assert!(
+            (actor.perceived_soc() - 0.9).abs() < 0.01,
+            "a driver short of the usual amount must be credited the full top-up to it, \
+             got {}",
+            actor.perceived_soc()
+        );
+    }
+
+    /// The `range_anxiety_active` channel reports the driver-is-short state
+    /// (perceived SOC below the anxiety band) whether or not the urgency
+    /// gate has fired — predictive state for evaluators.
+    #[test]
+    fn range_anxiety_active_reports_short_driver() {
+        // Below the band (0.2 < 0.2775), mid-day with plenty of time to the
+        // next departure — the override stands down but the driver is short.
+        let mut short_driver =
+            make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
+        plugged_in_step(&mut short_driver, 12 * 60);
+        assert_eq!(
+            short_driver
+                .telemetry()
+                .and_then(|t| t.get("range_anxiety_active")),
+            Some(1.0),
+            "a driver below the anxiety band must read as short, even while the urgency \
+             gate stands the override down"
+        );
+
+        // Above the band: not short.
+        let mut comfortable_driver =
+            make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.8);
+        plugged_in_step(&mut comfortable_driver, 12 * 60);
+        assert_eq!(
+            comfortable_driver
+                .telemetry()
+                .and_then(|t| t.get("range_anxiety_active")),
+            Some(0.0),
+            "a driver above the anxiety band must not read as short"
+        );
+    }
+
+    /// A cancelled trip counts exactly once: a simulation whose step grid
+    /// is not aligned to the departure minute can land a second step inside
+    /// the departure-minute window (`minute_matches` spans one time
+    /// resolution), and consuming the day's event on cancellation keeps the
+    /// same trip from being counted twice.
+    #[test]
+    fn cancelled_trip_counts_once_across_departure_window() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            0.12, // 7.2 kWh against the day's 9.99 kWh trip — uncoverable
+        );
+
+        // 5-minute resolution, steps at 08:00 and 08:03 — both inside the
+        // [08:00, 08:05) departure window.
+        let mut env = env_at_minute(8 * 60);
+        env.time_res = chrono::Duration::minutes(5);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let mut env = env_at_minute(8 * 60 + 3);
+        env.time_res = chrono::Duration::minutes(5);
+        actor.decide(&env, &mut out);
+
+        assert_eq!(
+            actor.telemetry().and_then(|t| t.get("drive_cancelled")),
+            Some(1.0),
+            "one uncoverable trip must count as exactly one cancellation, even when a \
+             second step lands inside the departure-minute window"
         );
     }
 }

@@ -121,6 +121,11 @@ pub struct Ev {
     away_charger_power_kw: f64,
     away_charge_actual_kw: f64,
     active_power_kw: f64,
+    /// Cumulative drive energy [kWh] dispatched by the driver actor but not
+    /// deliverable by the pack (a trip longer than the vehicle's remaining
+    /// range). Published as `DRIVE_SHORTFALL_KWH` so a drive shortfall is
+    /// observable output state, never silently dropped mobility.
+    drive_shortfall_kwh: f64,
 
     ready_soc: f64,
     ready_by_hour: Option<f64>,
@@ -356,6 +361,7 @@ impl Ev {
             away_charger_power_kw: 0.0,
             away_charge_actual_kw: 0.0,
             active_power_kw: 0.0,
+            drive_shortfall_kwh: 0.0,
             ready_soc: config.get_f64(KEY_READY_SOC).unwrap_or(soc_max),
             ready_by_hour: None,
             ready_by_soc: None,
@@ -589,10 +595,48 @@ impl Ev {
             }
         }
 
-        let target = self
-            .soc_target
-            .or(self.ready_by_soc)
-            .unwrap_or(self.ready_soc);
+        // A controller-set `soc_target` and a latched ready-by deadline
+        // target are two different contracts — "charge toward this
+        // ceiling" and "reach this SOC by departure_hour" — and which one
+        // wins when both are set is exactly what the configured
+        // `ChargingPriority` decides:
+        //
+        // - `DeadlineGuarantee` (the default): the deadline is the hard
+        //   contract — deadline enforcement deliberately outranks soft
+        //   controller limits (the same contract that lets an urgent
+        //   deadline charge through a latched zero-power hold). The
+        //   effective destination is the max of the two: a controller
+        //   target above the deadline's raises the destination, while one
+        //   below it (e.g. the driver actor's range-anxiety minimal top-up
+        //   at the anxiety band) cannot silently veto the deadline. With
+        //   a plain `.or()` here, a latched band target both shrank
+        //   `bms_ready_by_power`'s deficit basis (a maximally urgent
+        //   deadline recomputed its deficit against the band, concluded
+        //   "plenty of time", and commanded zero) and capped the early
+        //   return below the departure target — nothing charged while the
+        //   deadline went unmet.
+        //
+        // - `ExternalAuthority`: the external controller bears sole
+        //   responsibility for the departure SOC — "BMS deadline logic is
+        //   not applied" (the priority arm's own contract). The
+        //   controller's commanded destination therefore governs: it
+        //   shadows a deadline target latched earlier in the session,
+        //   exactly as its setpoint shadows the BMS's pacing, so a stale
+        //   higher deadline target must not silently raise where the
+        //   controller told the pack to stop.
+        //
+        // With no controller target set there is nothing to compete with
+        // the deadline's own target, which is the destination under both
+        // priorities.
+        let target = match (self.soc_target, self.ready_by_soc) {
+            (Some(controller), Some(deadline)) => match self.charging_priority {
+                ChargingPriority::DeadlineGuarantee => controller.max(deadline),
+                ChargingPriority::ExternalAuthority => controller,
+            },
+            (Some(controller), None) => controller,
+            (None, Some(deadline)) => deadline,
+            (None, None) => self.ready_soc,
+        };
         let soc_limit = {
             let mut limit = target;
             if let Some(min) = self.soc_target_min {
@@ -942,8 +986,13 @@ impl Ev {
         let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
         let capped = setpoint_magnitude.min(self.v2l_max_discharge_kw);
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        // Budget the cap in the DC domain the pack actually draws from —
+        // same reasoning as `compute_v2g_discharge`: the pack delivers the
+        // returned AC power at 1/charging_efficiency in DC, so the cap must
+        // be the available DC energy times the efficiency, or every floor
+        // landing overshoots by one step's (1/efficiency − 1).
         let available_kwh = (self.soc - effective_floor) * self.battery_capacity_kwh;
-        let max_discharge_kw = available_kwh / dt_hours;
+        let max_discharge_kw = available_kwh * self.charging_efficiency.max(0.01) / dt_hours;
         -(capped.min(max_discharge_kw).max(0.0))
     }
 
@@ -1017,8 +1066,15 @@ impl Ev {
         let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
         let capped = setpoint_magnitude.min(self.v2g_max_discharge_kw);
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        // Budget the cap in the DC domain the pack actually draws from:
+        // `apply_soc_and_thermal` converts the returned AC power to DC at
+        // 1/charging_efficiency, so an AC cap of available_kwh/dt would draw
+        // available_kwh/efficiency from the pack and land one step's
+        // (1/efficiency − 1) below the floor on every floor landing. The
+        // sustainable AC power for the available DC energy is that energy
+        // times the efficiency, spread over the step.
         let available_kwh = (self.soc - effective_floor) * self.battery_capacity_kwh;
-        let max_discharge_kw = available_kwh / dt_hours;
+        let max_discharge_kw = available_kwh * self.charging_efficiency.max(0.01) / dt_hours;
         -(capped.min(max_discharge_kw).max(0.0))
     }
 
@@ -1119,6 +1175,8 @@ impl Ev {
             .set(tk::CAPACITY_KWH_RATED, self.battery_capacity_kwh_rated);
         self.telemetry
             .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
+        self.telemetry
+            .set(tk::DRIVE_SHORTFALL_KWH, self.drive_shortfall_kwh);
         self.telemetry
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
         self.telemetry
@@ -1480,6 +1538,7 @@ impl Equipment for Ev {
                 last_daily_update_day: self.last_daily_update_day,
                 q_setpoint_kvar: self.q_setpoint_kvar,
                 power_factor: self.power_factor,
+                drive_shortfall_kwh: self.drive_shortfall_kwh,
             },
             Self::checkpoint_version(),
             "Ev",
@@ -1522,6 +1581,7 @@ impl Equipment for Ev {
         self.last_daily_update_day = cp.last_daily_update_day;
         self.q_setpoint_kvar = cp.q_setpoint_kvar;
         self.power_factor = cp.power_factor;
+        self.drive_shortfall_kwh = cp.drive_shortfall_kwh;
 
         // `battery_capacity_kwh_rated` is static config set by `init`, not
         // stored in the checkpoint (the caller must call `init` before
@@ -1569,7 +1629,9 @@ impl Equipment for Ev {
         // v2: EvCheckpoint gained the reactive-control fields.
         // v3: `q_setpoint_kvar` became Option<f64> (None = no var override;
         //     Some(0.0) is a commanded zero).
-        3
+        // v4: gained `drive_shortfall_kwh` (cumulative drive-energy
+        //     shortfall accounting; see the EvDrive arm in apply_signal).
+        4
     }
 
     fn validate_signal(&self, signal: &hares_types::ControlSignal) -> crate::Result<()> {
@@ -1689,6 +1751,14 @@ impl Equipment for Ev {
                 self.soc_target = Some((*target_soc).clamp(0.0, 1.0));
                 self.soc_target_min = *min_soc;
                 self.soc_target_max = *max_soc;
+                // A fresh charge target supersedes any zero-power hold
+                // dispatched during a prior idle window: without this clear,
+                // `compute_charging_power_kw` would keep consulting the
+                // latched `power_setpoint_kw` first and silently veto the
+                // new target ("never charges" instead of "always charges").
+                self.power_setpoint_kw = None;
+                self.power_setpoint_min_soc = None;
+                self.power_setpoint_max_soc = None;
             }
             ControlSignal::ReactiveSetpoint { kvar } => {
                 if !kvar.is_finite() {
@@ -1728,6 +1798,22 @@ impl Equipment for Ev {
                 if *state == EvConnectionState::Disconnected {
                     self.ready_by_hour = None;
                     self.ready_by_soc = None;
+                    // Disconnect ends the actor's charging session: drop any
+                    // latched setpoint and target so the next plug-in — home
+                    // or away — starts from the equipment's own configured
+                    // defaults instead of whatever the previous session left
+                    // behind. A latched zero-power hold would silently zero
+                    // away charging (the away arm consults the same
+                    // `power_setpoint_kw`); a stale home-side `soc_target`
+                    // would govern away charging by accident of whatever the
+                    // home strategy last set, not by design. No caller or
+                    // test relies on these surviving a plug cycle.
+                    self.power_setpoint_kw = None;
+                    self.power_setpoint_min_soc = None;
+                    self.power_setpoint_max_soc = None;
+                    self.soc_target = None;
+                    self.soc_target_min = None;
+                    self.soc_target_max = None;
                 }
             }
             ControlSignal::EvDrive { kwh } => {
@@ -1747,11 +1833,25 @@ impl Equipment for Ev {
                 }
                 let available_kwh = self.battery_capacity_kwh * self.soc;
                 if *kwh > available_kwh {
-                    return Err(HaresError::Control(format!(
-                        "EvDrive kwh ({kwh}) exceeds available energy ({available_kwh:.2} kWh)"
-                    )));
+                    // A finite drive exceeding the pack's remaining energy is
+                    // a physical situation — a trip longer than the
+                    // vehicle's range — not an invalid value: deliver what
+                    // the pack holds (SOC lands exactly at 0, never below)
+                    // and account the undeliverable remainder as observable
+                    // state (`DRIVE_SHORTFALL_KWH`), never as silently
+                    // dropped mobility. The driver actor clamps its trip to
+                    // the observed pack energy, so this path carries only
+                    // the residual — a mid-trip capacity-fade step, or a
+                    // driver with no live equipment observation. Invalid
+                    // values (non-finite, negative) are still rejected
+                    // loudly above; a rejected step would instead vanish
+                    // into a dwelling warning string while the day's
+                    // profile kept reporting the dispatched energy.
+                    self.drive_shortfall_kwh += *kwh - available_kwh;
+                    self.soc = 0.0;
+                } else {
+                    self.soc = (self.soc - *kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
                 }
-                self.soc = (self.soc - kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
             }
             ControlSignal::EvAwayCharge { power_kw } => {
                 if self.connection_state != EvConnectionState::AwayPluggedIn {
@@ -1788,6 +1888,12 @@ impl Equipment for Ev {
                 }
                 self.ready_by_hour = Some(*departure_hour);
                 self.ready_by_soc = Some(*target_soc);
+                // Same hold-clearing rule as `SOCTarget`: a ready-by target
+                // means "charge toward this by departure", which a latched
+                // zero-power hold from a prior idle window would veto.
+                self.power_setpoint_kw = None;
+                self.power_setpoint_min_soc = None;
+                self.power_setpoint_max_soc = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;

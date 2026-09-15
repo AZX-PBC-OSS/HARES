@@ -4,7 +4,8 @@ use chrono::Datelike;
 use hares_types::DepartureConstraint;
 
 use super::preference::{
-    ChargingPreference, Constraint, DecisionContext, PreferenceVote, needed_charge_hours_to_target,
+    ChargingPreference, Constraint, DecisionContext, PreferenceVote, minutes_until,
+    needed_charge_hours_to_target,
 };
 
 pub struct DepartureDeadline {
@@ -35,27 +36,23 @@ impl DepartureDeadline {
         needed_charge_hours_to_target(self.target_soc, self.efficiency, ctx)
     }
 
-    /// Minutes remaining until departure.
+    /// Minutes remaining until departure. Delegates to the shared
+    /// wraparound helper ([`super::preference::minutes_until`]) so every
+    /// time-to-departure measurement in the module uses one implementation.
     fn minutes_until_departure(&self, ctx: &DecisionContext, departure_minute: u32) -> f64 {
-        let dm = departure_minute as i32;
-        let cm = ctx.current_minute as i32;
-        let diff = dm - cm;
-        if diff > 0 {
-            diff as f64
-        } else {
-            (diff + 1440) as f64
-        }
+        minutes_until(ctx.current_minute, departure_minute)
     }
 
-    /// Resolve departure minute: prefer the actor-provided next_departure_minute
-    /// (which accounts for today's rolled event), fall back to schedule scan.
+    /// Resolve departure minute: the actor-provided next_departure_minute
+    /// (which accounts for today's rolled event), paired with today's
+    /// schedule entry for its target SOC. With no known departure today
+    /// (`next_departure_minute: None`) the preference is inactive: the actor
+    /// has already established there is no trip today, so a schedule entry
+    /// for this weekday must not invent a phantom departure to charge for.
     fn resolve_departure(&self, ctx: &DecisionContext) -> Option<(u32, f64)> {
-        if let Some(dep_min) = ctx.next_departure_minute {
-            let dc = self.find_today(ctx)?;
-            return Some((dep_min as u32, dc.target_soc));
-        }
+        let dep_min = ctx.next_departure_minute?;
         let dc = self.find_today(ctx)?;
-        Some((dc.departure_minute, dc.target_soc))
+        Some((u32::from(dep_min), dc.target_soc))
     }
 }
 
@@ -245,6 +242,16 @@ mod tests {
             "midnight wrap should give ~160 min remaining, got {minutes}"
         );
 
+        // Boundary: a departure minute equal to the current minute is the
+        // *next* day's departure (1440 min), not zero — zero would read as
+        // "no time left" and fire the urgency override at the exact minute
+        // the vehicle leaves.
+        let minutes_now = pref.minutes_until_departure(&ctx, 1400);
+        assert!(
+            (minutes_now - 1440.0).abs() < 1e-9,
+            "a departure at the current minute must wrap to a full day, got {minutes_now}"
+        );
+
         // Verify score doesn't return idle (there is time pressure)
         let vote = pref.score(&ctx);
         assert!(
@@ -381,7 +388,7 @@ mod tests {
         );
     }
 
-    // Finding 3: next_departure_minute overrides schedule
+    // Finding 3: next_departure_minute is the only departure source
     #[test]
     fn next_departure_minute_overrides_schedule_minute() {
         let env = TestEnvBuilder::new().hour(5).build();
@@ -397,9 +404,10 @@ mod tests {
             buffer_hours: 0.0,
         };
 
-        // Context B: next_departure_minute=None, falls back to schedule 480 (08:00)
-        // 180 min to departure (3h). temp at 10°C → effective_eff=0.811
-        // needed = 0.1*60/(7.2*0.811)≈1.03h, 3h > 1.03*1.2=1.24h → Inactive
+        // Context B: no known departure today (next_departure_minute=None).
+        // The schedule entry for this weekday must not invent a phantom
+        // departure — the preference resolves to Inactive with no urgency
+        // computation at all.
         let ctx_b = DecisionContext {
             current_soc: 0.8,
             capacity_kwh: 60.0,
@@ -434,7 +442,29 @@ mod tests {
         );
         assert!(
             matches!(result_b, Constraint::Inactive),
-            "fallback to schedule minute=480 (3h away) should be Inactive"
+            "no known departure today (next_departure_minute=None) must leave the preference Inactive"
+        );
+
+        // Context C: no known departure today, but the *schedule's* minute is
+        // imminent — 07:45 against the 08:00 schedule entry (25 min left,
+        // needed ≈ 1.03 h ≫ 25 min, so the pre-fix static-schedule fallback
+        // fired an urgency Override here). The schedule entry must not invent
+        // a phantom departure to charge for: the actor has already
+        // established there is no trip today.
+        let ctx_c = DecisionContext {
+            current_soc: 0.8,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 465, // 07:45
+            next_departure_minute: None,
+            time_res_minutes: 1.0,
+        };
+        assert!(
+            matches!(pref.constraint(&ctx_c), Constraint::Inactive),
+            "an imminent schedule minute must not invent a phantom departure when \
+             the actor has no known trip today (next_departure_minute=None)"
         );
     }
 
