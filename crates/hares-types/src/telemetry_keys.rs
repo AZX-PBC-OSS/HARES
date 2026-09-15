@@ -499,6 +499,15 @@ pub const AWAY_CHARGE_POWER_KW: &str = "away_charge_power_kw";
 /// scope: internal
 pub const CAPACITY_KWH: &str = "capacity_kwh";
 
+/// Cumulative EV drive energy [kWh] dispatched by the driver actor but not
+/// deliverable by the pack (a trip longer than the vehicle's remaining
+/// range). The equipment delivers what the pack holds and accounts the
+/// undeliverable remainder here, so a drive shortfall is observable output
+/// state — never silently dropped mobility.
+///
+/// scope: internal
+pub const DRIVE_SHORTFALL_KWH: &str = "drive_shortfall_kwh";
+
 /// Rated (beginning-of-life) pack capacity [kWh]. Held constant from
 /// initialization; paired with `CAPACITY_KWH` (the degraded usable capacity)
 /// so downstream observers and the capacity-degradation invariant can verify
@@ -1199,6 +1208,7 @@ mod tests {
             CAPACITY_KWH,
             CAPACITY_KWH_RATED,
             FUEL_ECONOMY_KWH_PER_MI,
+            DRIVE_SHORTFALL_KWH,
             // PV
             DC_POWER_KW,
             IRRADIANCE_W_M2,
@@ -1459,6 +1469,7 @@ mod tests {
             CAPACITY_KWH,
             CAPACITY_KWH_RATED,
             FUEL_ECONOMY_KWH_PER_MI,
+            DRIVE_SHORTFALL_KWH,
             // PV
             DC_POWER_KW,
             IRRADIANCE_W_M2,

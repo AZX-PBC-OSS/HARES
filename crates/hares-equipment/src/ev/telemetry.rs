@@ -5,7 +5,7 @@ use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAU
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
-    let mut t = Telemetry::with_capacity(19);
+    let mut t = Telemetry::with_capacity(20);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
@@ -21,6 +21,7 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::CAPACITY_KWH, DEFAULT_CAPACITY_KWH);
     t.insert(tk::CAPACITY_KWH_RATED, DEFAULT_CAPACITY_KWH);
     t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+    t.insert(tk::DRIVE_SHORTFALL_KWH, 0.0);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
     t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -105,6 +106,13 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FUEL_ECONOMY_KWH_PER_MI.to_string(),
             unit: "kWh/mi".to_string(),
             description: "EV fuel economy for actor trip planning".to_string(),
+        },
+        TelemetryField {
+            name: tk::DRIVE_SHORTFALL_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "Cumulative drive energy dispatched but not deliverable by the pack \
+                         (trip longer than remaining range); accounted, never silently dropped"
+                .to_string(),
         },
         TelemetryField {
             name: tk::DR_POWER_FRACTION.to_string(),

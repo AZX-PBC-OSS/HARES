@@ -1519,7 +1519,7 @@ impl PyDwelling {
     }
 
     pub fn load_state(&self, state: &[u8]) -> PyResult<()> {
-        let checkpoint = serde_json::from_slice(state).map_err(to_py_err_display)?;
+        let checkpoint = DwellingCheckpoint::deserialize_gated(state).map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
         dwelling.load_checkpoint(checkpoint).map_err(to_py_err)
     }
@@ -1532,8 +1532,7 @@ impl PyDwelling {
     }
 
     pub fn restore_building_state(&self, state: &[u8]) -> PyResult<()> {
-        let checkpoint: DwellingCheckpoint =
-            serde_json::from_slice(state).map_err(to_py_err_display)?;
+        let checkpoint = DwellingCheckpoint::deserialize_gated(state).map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
         dwelling
             .restore_building_state(&checkpoint)

@@ -83,7 +83,7 @@ use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
 use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
-use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
+use crate::checkpoint::{ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -4150,7 +4150,13 @@ impl Dwelling {
             actor_states: self
                 .actors
                 .iter()
-                .map(|a| a.save_state().map(|blob| (a.name().to_string(), blob)))
+                .map(|a| {
+                    a.save_state().map(|blob| ActorStateCheckpoint {
+                        name: a.name().to_string(),
+                        schema_version: a.checkpoint_version(),
+                        blob,
+                    })
+                })
                 .collect::<std::result::Result<Vec<_>, HaresError>>()?,
             prior_electrical_summary: self.prior_electrical_summary.clone(),
         })
@@ -4216,16 +4222,60 @@ impl Dwelling {
             .restore_from_payload(&cp.fluid_states)
             .map_err(|err| HaresError::Envelope(format!("restore fluid state failed: {err}")))?;
 
-        // Restore actor decision-state.
+        // Restore actor decision-state. The saved schema version is checked
+        // against the live actor's `checkpoint_version()` before `load_state`
+        // runs, so a blob written against a different snapshot schema is
+        // rejected here with a version-mismatch error naming the actor —
+        // not as a postcard decode failure from inside `load_state`.
         let mut restored_count = 0usize;
-        let cp_actor_map: std::collections::HashMap<&str, &[u8]> = cp
+        let cp_actor_map: std::collections::HashMap<&str, &ActorStateCheckpoint> = cp
             .actor_states
             .iter()
-            .map(|(name, blob)| (name.as_str(), blob.as_slice()))
+            .map(|state| (state.name.as_str(), state))
             .collect();
         for actor in self.actors.iter_mut() {
-            if let Some(blob) = cp_actor_map.get(actor.name()) {
-                actor.load_state(blob)?;
+            if let Some(state) = cp_actor_map.get(actor.name()) {
+                let expected = actor.checkpoint_version();
+                if state.schema_version != expected {
+                    return Err(HaresError::Io(format!(
+                        "checkpoint actor schema version mismatch: actor='{}', blob={}, expected={}",
+                        actor.name(),
+                        state.schema_version,
+                        expected
+                    )));
+                }
+                // An empty blob is the "no mutable state" convention (see
+                // `Actor::save_state`) — but only the actor knows whether it
+                // has state. For a stateful actor, an empty blob can only be
+                // truncation or corruption: truncation predates the version
+                // stamp, so the gate above cannot catch it, and
+                // `load_state`'s empty-blob no-op would silently discard the
+                // checkpointed decision-state (the EV driver would resume on
+                // a full-SOC belief, home phase, and re-seeded RNG) while the
+                // restore reports success. The rule: an empty blob is valid
+                // only for an actor that also *saves* empty — probed against
+                // the live actor, whose `save_state` is unconditionally
+                // non-empty for every stateful implementation and empty for
+                // every stateless one.
+                if state.blob.is_empty() {
+                    let saves_empty =
+                        actor
+                            .save_state()
+                            .map(|blob| blob.is_empty())
+                            .map_err(|e| {
+                                HaresError::Io(format!(
+                                    "checkpoint cannot verify empty state blob for actor '{}': {e}",
+                                    actor.name()
+                                ))
+                            })?;
+                    if !saves_empty {
+                        return Err(HaresError::Io(format!(
+                            "checkpoint actor state blob for '{}' is empty but the actor has persistent state — truncated or corrupted checkpoint",
+                            actor.name()
+                        )));
+                    }
+                }
+                actor.load_state(&state.blob)?;
                 restored_count += 1;
             }
         }
@@ -6888,7 +6938,10 @@ fn check_ev_rng_stream_no_collision(
 ///
 /// Pure function for testability -- takes equipment, existing actors,
 /// tariff availability, price schedule, and returns new built-in actors.
-fn build_actors_from_seeds(
+/// `pub(crate)` so integration tests outside this module can exercise the
+/// real seed → actor construction path (e.g. the EV driver's actor/equipment
+/// contract tests) rather than re-deriving the arm's wiring by hand.
+pub(crate) fn build_actors_from_seeds(
     equipment: &[Box<dyn Equipment>],
     existing_actors: &[Box<dyn Actor>],
     has_tariff: bool,
@@ -10655,6 +10708,53 @@ occupancy = 1.0
         }
     }
 
+    // Actor with checkpointable mutable state, published as telemetry so a
+    // checkpoint round-trip can be asserted through the dwelling's public
+    // `telemetry()` surface rather than by reaching into the actor.
+    struct StatefulStubActor {
+        name: String,
+        counter: u32,
+        telemetry: Telemetry,
+    }
+    impl StatefulStubActor {
+        fn new(name: &str, counter: u32) -> Self {
+            let mut telemetry = Telemetry::default();
+            telemetry.insert("counter", counter as f64);
+            Self {
+                name: name.to_string(),
+                counter,
+                telemetry,
+            }
+        }
+    }
+    impl crate::Actor for StatefulStubActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn telemetry(&self) -> Option<&Telemetry> {
+            Some(&self.telemetry)
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+        }
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            postcard::to_allocvec(&self.counter)
+                .map_err(|e| HaresError::Io(format!("StatefulStubActor save_state: {e}")))
+        }
+        fn load_state(&mut self, data: &[u8]) -> std::result::Result<(), HaresError> {
+            if data.is_empty() {
+                return Ok(());
+            }
+            self.counter = postcard::from_bytes(data)
+                .map_err(|e| HaresError::Io(format!("StatefulStubActor load_state: {e}")))?;
+            self.telemetry.insert("counter", self.counter as f64);
+            Ok(())
+        }
+    }
+
     // Actor that always reports unhealthy, used to verify that the dwelling
     // health check catches actor errors after decide().
     struct UnhealthyStubActor {
@@ -12448,6 +12548,462 @@ master_seed = 0
         assert!(
             result.is_ok(),
             "save_checkpoint should succeed on minimal dwelling"
+        );
+    }
+
+    #[test]
+    fn checkpoint_actor_state_round_trips_with_schema_version() {
+        // An actor's mutable decision-state must survive a dwelling
+        // checkpoint round-trip, and the checkpoint must record the actor's
+        // snapshot schema version beside the blob so restore can gate on it.
+        let toml_path = unique_temp_toml("actor_state_round_trip");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 7)))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        let actor_state = checkpoint
+            .actor_states
+            .iter()
+            .find(|s| s.name == "StatefulActor")
+            .expect("checkpoint must carry the actor's state");
+        assert_eq!(
+            actor_state.schema_version, 1,
+            "the actor's checkpoint_version() must be recorded beside its blob"
+        );
+
+        // Restore into a second dwelling whose same-named actor holds
+        // different state — the saved blob must win.
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 0)))
+            .unwrap();
+        dwelling_b
+            .load_checkpoint(checkpoint)
+            .expect("load checkpoint");
+
+        let counter = dwelling_b
+            .telemetry()
+            .actor_telemetry
+            .get("StatefulActor")
+            .and_then(|channels| channels.get("counter"))
+            .copied();
+        assert_eq!(
+            counter,
+            Some(7.0),
+            "actor state must be restored from the checkpoint blob (visible via actor telemetry)"
+        );
+    }
+
+    #[test]
+    fn checkpoint_actor_schema_version_mismatch_rejected_with_named_error() {
+        // A blob written against a different actor snapshot schema must be
+        // rejected at the checkpoint boundary with a version-mismatch error
+        // naming the actor and both versions — not surface as a postcard
+        // decode failure from inside the actor's load_state.
+        let toml_path = unique_temp_toml("actor_version_mismatch");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 7)))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let mut checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        // Tamper: pretend the blob was written by a schema generation the
+        // live actor no longer understands.
+        checkpoint
+            .actor_states
+            .iter_mut()
+            .find(|s| s.name == "StatefulActor")
+            .expect("checkpoint must carry the actor's state")
+            .schema_version = 2;
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 0)))
+            .unwrap();
+
+        let err = dwelling_b
+            .load_checkpoint(checkpoint)
+            .expect_err("version mismatch must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("actor schema version mismatch")
+                && msg.contains("StatefulActor")
+                && msg.contains("blob=2")
+                && msg.contains("expected=1"),
+            "error must name the actor and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialize"),
+            "the rejection must come from the version gate, not a postcard decode failure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_truncated_stateful_blob_must_not_restore_as_silent_success() {
+        // A stateful actor's empty blob passes the schema-version gate (the
+        // recorded version matches — truncation predates the stamp), so the
+        // only thing between a truncated/corrupt checkpoint and a silent
+        // partial restore is `load_state`'s empty-blob early return. That
+        // guard exists for the "no mutable state" convention, but a stateful
+        // actor handed an empty blob keeps its freshly-constructed decision
+        // state while the restore reports success — the checkpoint's state
+        // is silently discarded and the resumed run diverges from the
+        // original with no error naming the loss.
+        let toml_path = unique_temp_toml("actor_blob_truncated");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 7)))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let mut checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        let state = checkpoint
+            .actor_states
+            .iter_mut()
+            .find(|s| s.name == "StatefulActor")
+            .expect("checkpoint must carry the actor's state");
+        assert!(
+            !state.blob.is_empty(),
+            "precondition: a stateful actor saves a non-empty blob"
+        );
+        state.blob = Vec::new();
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(StatefulStubActor::new("StatefulActor", 0)))
+            .unwrap();
+
+        let err = dwelling_b.load_checkpoint(checkpoint).expect_err(
+            "a truncated stateful blob must not restore as silent success — the \
+                 empty-blob guard turns it into a no-op and the dwelling continues on \
+                 freshly-constructed decision-state with the restore reporting Ok",
+        );
+        assert!(
+            err.to_string().contains("StatefulActor"),
+            "the rejection must name the actor whose blob was lost; got: {err}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_stateless_actor_empty_blob_restores_cleanly() {
+        // The other side of the empty-blob rule: "actors with no mutable
+        // state contribute an empty blob" is the `Actor::save_state`
+        // convention, and the truncation gate must not over-reject it. A
+        // stateless actor (trait-default `save_state` → empty blob, default
+        // `load_state` → no-op) must round-trip through the dwelling
+        // checkpoint unchanged.
+        let toml_path = unique_temp_toml("actor_stateless_round_trip");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(StubActor {
+                name: "StatelessActor".to_string(),
+            }))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        let state = checkpoint
+            .actor_states
+            .iter()
+            .find(|s| s.name == "StatelessActor")
+            .expect("checkpoint must carry the stateless actor's entry");
+        assert!(
+            state.blob.is_empty(),
+            "precondition: a stateless actor saves an empty blob"
+        );
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(StubActor {
+                name: "StatelessActor".to_string(),
+            }))
+            .unwrap();
+
+        dwelling_b
+            .load_checkpoint(checkpoint)
+            .expect("a stateless actor's empty blob is the no-state convention, not truncation");
+    }
+
+    // Actor whose `save_state` fails, to drive the empty-blob probe's error
+    // arm in `load_checkpoint`.
+    struct FailingProbeActor {
+        name: String,
+    }
+    impl crate::Actor for FailingProbeActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+        }
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            Err(HaresError::Control(
+                "simulated serialization failure".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn checkpoint_empty_blob_probe_failure_rejected_with_named_error() {
+        // The empty-blob rule's third arm: when the checkpoint entry's blob
+        // is empty, the restore probes the live actor's `save_state` to
+        // tell "stateless convention" from "truncated stateful blob" — and
+        // a probe that itself fails must be a named rejection, not an
+        // unwrap/panic or a silent pass. (Saved with a stateless stub of
+        // the same name so the checkpoint legitimately carries an empty
+        // blob; the load side substitutes the failing-probe actor.)
+        let toml_path = unique_temp_toml("actor_blob_probe_failure");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(StubActor {
+                name: "ProbeActor".to_string(),
+            }))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+        let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        assert!(
+            checkpoint
+                .actor_states
+                .iter()
+                .find(|s| s.name == "ProbeActor")
+                .expect("checkpoint must carry the actor's entry")
+                .blob
+                .is_empty(),
+            "precondition: the saved blob is empty"
+        );
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(FailingProbeActor {
+                name: "ProbeActor".to_string(),
+            }))
+            .unwrap();
+
+        let err = dwelling_b.load_checkpoint(checkpoint).expect_err(
+            "a failing empty-blob probe must reject the restore, not panic or silently pass",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot verify"),
+            "the rejection must name the probe failure; got: {err}"
+        );
+        assert!(
+            msg.contains("ProbeActor"),
+            "the rejection must name the actor whose blob could not be verified; got: {err}"
+        );
+    }
+
+    // An actor whose statefulness is time-varying: constructed with a
+    // non-empty state that legitimately drains to empty on the first
+    // decide. Its checkpoint blob is empty because the state is *currently*
+    // empty — the "no mutable state" convention's letter is satisfied even
+    // though its spirit (a stateless actor) is not.
+    struct DrainingStateActor {
+        name: String,
+        counter: u32,
+        telemetry: Telemetry,
+    }
+    impl DrainingStateActor {
+        fn new(name: &str, counter: u32) -> Self {
+            let mut telemetry = Telemetry::default();
+            telemetry.insert("counter", counter as f64);
+            Self {
+                name: name.to_string(),
+                counter,
+                telemetry,
+            }
+        }
+    }
+    impl crate::Actor for DrainingStateActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn telemetry(&self) -> Option<&Telemetry> {
+            Some(&self.telemetry)
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+            self.counter = 0;
+            self.telemetry.insert("counter", 0.0);
+        }
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            if self.counter == 0 {
+                return Ok(Vec::new());
+            }
+            postcard::to_allocvec(&self.counter)
+                .map_err(|e| HaresError::Io(format!("DrainingStateActor save_state: {e}")))
+        }
+        fn load_state(&mut self, data: &[u8]) -> std::result::Result<(), HaresError> {
+            if data.is_empty() {
+                return Ok(());
+            }
+            self.counter = postcard::from_bytes(data)
+                .map_err(|e| HaresError::Io(format!("DrainingStateActor load_state: {e}")))?;
+            self.telemetry.insert("counter", self.counter as f64);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn checkpoint_drained_state_actor_must_not_resume_on_fresh_state() {
+        // The empty-blob rule's fourth arm — the misuse shape the probe's
+        // ownership rule does not model: an actor whose `save_state` is
+        // empty *at save time* (the state legitimately drained) but
+        // non-empty on the freshly-constructed restore-time actor. The
+        // probe cannot distinguish this from truncation, and the
+        // empty-blob `load_state` no-op would silently keep the fresh
+        // state — contradicting the checkpoint, which says the state is
+        // drained. Whatever the resolution (reject, or restore the drained
+        // state), the restore must not report success while the actor
+        // carries state the checkpoint says it does not have.
+        let toml_path = unique_temp_toml("actor_drained_state");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a
+            .add_actor(Box::new(DrainingStateActor::new("DrainActor", 5)))
+            .unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let mut checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        let state = checkpoint
+            .actor_states
+            .iter_mut()
+            .find(|s| s.name == "DrainActor")
+            .expect("checkpoint must carry the actor's entry");
+        assert!(
+            state.blob.is_empty(),
+            "precondition: the drained actor legitimately saves an empty blob"
+        );
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b
+            .add_actor(Box::new(DrainingStateActor::new("DrainActor", 5)))
+            .unwrap();
+
+        match dwelling_b.load_checkpoint(checkpoint) {
+            Ok(()) => {
+                let counter = dwelling_b
+                    .telemetry()
+                    .actor_telemetry
+                    .get("DrainActor")
+                    .and_then(|channels| channels.get("counter"))
+                    .copied();
+                assert_eq!(
+                    counter,
+                    Some(0.0),
+                    "a successful restore must leave the actor in the checkpointed \
+                     (drained) state, not the freshly-constructed state"
+                );
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("DrainActor"),
+                    "if the restore rejects the empty blob, the rejection must name \
+                     the actor; got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ev_driver_v1_snapshot_blob_rejected_by_named_version_gate() {
+        // `EvDriverActor`'s snapshot schema is version 2 (the
+        // `DriverPhase::{Driving, Away}` plan payload). A blob stamped v1 —
+        // as written by a pre-change build — must be rejected at the
+        // checkpoint boundary with the named mismatch error, not accepted
+        // into a postcard decode that fails (or silently misdecodes)
+        // inside `load_state`. The stub-actor gate tests above exercise
+        // the gate mechanism but would still pass if this actor's
+        // `checkpoint_version()` override were dropped back to the trait
+        // default of 1 — this test pins the real actor's participation.
+        let toml_path = unique_temp_toml("ev_driver_v1_blob");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let make_driver = || {
+            Box::new(EvDriverActor::new(
+                "EvDriver:EV1",
+                "EV1",
+                hares_types::equipment::ChargingStrategy::Immediate { target_soc: 0.9 },
+                hares_types::PlugInPolicy::Always,
+                ScheduleSource::Constant(30.0),
+                ScheduleSource::Constant(480.0),
+                ScheduleSource::Constant(600.0),
+                None,
+                0.8,
+                0.3,
+                60.0,
+                7.2,
+                30.0,
+                20.0,
+                0.0,
+                6.6,
+                ChaCha8Rng::seed_from_u64(42),
+            )) as Box<dyn crate::Actor>
+        };
+
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
+        dwelling_a.add_actor(make_driver()).unwrap();
+        dwelling_a.step().expect("step succeeds");
+
+        let mut checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+        let entry = checkpoint
+            .actor_states
+            .iter_mut()
+            .find(|s| s.name == "EvDriver:EV1")
+            .expect("checkpoint must carry the EV driver's state");
+        assert_eq!(
+            entry.schema_version, 2,
+            "the EV driver snapshot schema is version 2 (plan-carrying phases)"
+        );
+        // Tamper: pretend the blob was written by a v1 build.
+        entry.schema_version = 1;
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
+        dwelling_b.add_actor(make_driver()).unwrap();
+
+        let err = dwelling_b
+            .load_checkpoint(checkpoint)
+            .expect_err("a v1 EV driver blob must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("actor schema version mismatch")
+                && msg.contains("EvDriver:EV1")
+                && msg.contains("blob=1")
+                && msg.contains("expected=2"),
+            "error must name the actor and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialize"),
+            "the rejection must come from the version gate, not a postcard decode failure; got: {msg}"
         );
     }
 

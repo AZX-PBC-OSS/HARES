@@ -526,7 +526,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     let actor_names: Vec<&str> = checkpoint
         .actor_states
         .iter()
-        .map(|(name, _)| name.as_str())
+        .map(|state| state.name.as_str())
         .collect();
     if !actor_names.contains(&"TestOccupant") {
         failures.push("checkpoint missing TestOccupant actor state".to_string());
