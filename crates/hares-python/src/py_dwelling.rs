@@ -685,6 +685,44 @@ impl PyDwelling {
         })
     }
 
+    /// Per-phase wall-clock split of the work done so far, behind the `profiling`
+    /// feature (`maturin develop --release --features profiling`). A flat dict of
+    /// seconds plus the memory high-water mark; zero-valued when the feature is
+    /// compiled out (with a `note` key saying so). Goes through the crate's own
+    /// acquire discipline: a fatal-error dwelling refuses, and lock poison surfaces as
+    /// the same error type every other method raises.
+    pub fn profiling_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let d = pyo3::types::PyDict::new(py);
+        #[cfg(feature = "profiling")]
+        {
+            // acquire discipline: a fatal-error dwelling refuses, and lock poison
+            // surfaces as the same error type every other method raises.
+            let p = self.acquire()?.profiling_summary();
+            d.set_item("note", "profiling feature enabled; timings are real")?;
+            d.set_item("envelope_solve_s", p.envelope_solve.as_secs_f64())?;
+            d.set_item("hvac_s", p.hvac.as_secs_f64())?;
+            d.set_item("water_heater_s", p.water_heater.as_secs_f64())?;
+            d.set_item("schedule_load_s", p.schedule_load.as_secs_f64())?;
+            d.set_item("io_s", p.io.as_secs_f64())?;
+            d.set_item("other_s", p.other.as_secs_f64())?;
+            d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
+            d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
+        }
+        #[cfg(not(feature = "profiling"))]
+        {
+            d.set_item("note", "built without the 'profiling' feature; all timings zero")?;
+            d.set_item("envelope_solve_s", 0.0)?;
+            d.set_item("hvac_s", 0.0)?;
+            d.set_item("water_heater_s", 0.0)?;
+            d.set_item("schedule_load_s", 0.0)?;
+            d.set_item("io_s", 0.0)?;
+            d.set_item("other_s", 0.0)?;
+            d.set_item("memory_high_water_kb", 0)?;
+            d.set_item("hot_path_alloc_violations", 0)?;
+        }
+        Ok(d.into())
+    }
+
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
