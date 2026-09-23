@@ -48,8 +48,16 @@ fn config(days: i64, fixture: &PathBuf, weather: &PathBuf) -> DwellingConfig {
 
 #[cfg(feature = "profiling")]
 fn main() {
-    let days: i64 = std::env::args().nth(1).unwrap_or_else(|| "45".to_string()).parse().unwrap();
-    let reps: usize = std::env::args().nth(2).unwrap_or_else(|| "3".to_string()).parse().unwrap();
+    let days: i64 = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "45".to_string())
+        .parse()
+        .unwrap();
+    let reps: usize = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "3".to_string())
+        .parse()
+        .unwrap();
 
     // crates/hares-core -> crates -> repo root
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -87,7 +95,10 @@ fn main() {
         ("other", acc.other),
         ("water_heater", acc.water_heater),
     ] {
-        eprintln!("  {name:15} {:>8.1} ms/run", d.as_secs_f64() * 1e3 / reps as f64);
+        eprintln!(
+            "  {name:15} {:>8.1} ms/run",
+            d.as_secs_f64() * 1e3 / reps as f64
+        );
     }
 }
 
