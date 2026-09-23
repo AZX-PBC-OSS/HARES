@@ -451,15 +451,27 @@ impl DrCompliance {
         let DispatchTarget::ByName(name) = target else {
             return false;
         };
+        // allowed: dispatch targets are name-keyed and equipment_telemetry
+        // is the only environment channel reachable by name (equipment_core
+        // is EquipmentId-keyed and this actor holds no name→id mapping), so
+        // resolving the target's telemetry channel requires this read.
         let Some(telem) = env.equipment_telemetry.get(name.as_ref()) else {
             return false;
         };
+        // allowed: defrost_active remains telemetry-only until CoreOutput
+        // gains a defrost field — CoreState has none, and rejecting
+        // PowerLimit/TurnOff during an active defrost cycle must not wait
+        // for one.
         if telem.get(tk::DEFROST_ACTIVE) == Some(1.0)
             && matches!(action, DrAction::PowerLimit { .. } | DrAction::TurnOff)
         {
             return true;
         }
         if matches!(action, DrAction::TurnOff) {
+            // allowed: tank_avg_temp_c remains telemetry-only until
+            // CoreOutput gains a tank temperature field — CoreState has
+            // none, and water-heater freeze protection must not wait for
+            // one.
             if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C) {
                 if tank_temp.is_finite() && tank_temp < WH_FREEZE_THRESHOLD_C {
                     return true;

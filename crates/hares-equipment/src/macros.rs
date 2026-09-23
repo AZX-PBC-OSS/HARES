@@ -74,6 +74,22 @@ macro_rules! delegate_equipment {
                 self.$inner.rename(name)
             }
 
+            fn set_equipment_id(&mut self, id: hares_types::EquipmentId) -> $crate::Result<()> {
+                self.$inner.set_equipment_id(id)
+            }
+
+            fn is_initialized(&self) -> bool {
+                self.$inner.is_initialized()
+            }
+
+            fn mark_initialized(&mut self) {
+                self.$inner.mark_initialized()
+            }
+
+            fn unmark_initialized(&mut self) {
+                self.$inner.unmark_initialized()
+            }
+
             fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
                 self.$inner.ideal_target()
             }

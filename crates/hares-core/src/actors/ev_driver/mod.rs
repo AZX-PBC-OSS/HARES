@@ -462,6 +462,12 @@ impl EvDriverActor {
                 .and_then(|id| env.equipment_core.get(&id))
                 .and_then(|co| co.flows.electric_kw)
                 .map(|p| p.signed_kw()),
+            // allowed: away charge power is telemetry-only by design — while
+            // AwayPluggedIn the equipment zeroes its residential
+            // active_power_kw (the away charger is off-site from the
+            // dwelling's electrical balance), so core_output's
+            // electric_kw cannot carry it; equipment_telemetry is the only
+            // channel that does, and it is name-keyed.
             DriverPhase::Away { .. } => env
                 .equipment_telemetry
                 .get(self.target_name())
@@ -560,20 +566,6 @@ impl EvDriverActor {
             DispatchTarget::ByName(n) => n,
             DispatchTarget::ByEndUse(_) => unreachable!("EvDriverActor always targets by name"),
         }
-    }
-
-    pub fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
-        self.equipment_id = match equipment_id_by_name.get(self.target_name()) {
-            Some(id) => Some(*id),
-            None => {
-                tracing::warn!(
-                    equipment = %self.target_name(),
-                    actor = "EvDriverActor",
-                    "Equipment name not found in registry — actor will operate without SOC feedback"
-                );
-                None
-            }
-        };
     }
 
     /// Roll a daily event for a new day if needed.
@@ -715,6 +707,11 @@ impl EvDriverActor {
     /// driver's belief when nothing is observable (no equipment is
     /// registered, so nothing can reject a dispatch).
     fn observed_pack_kwh(&self, env: &EnvironmentState) -> f64 {
+        // allowed: capacity_kwh is the equipment's degradation-adjusted
+        // pack capacity, telemetry-only (CoreOutput has no capacity
+        // field); the same contract the dwelling's EV-capacity invariant
+        // checker reads it under. equipment_telemetry is name-keyed, so
+        // the lookup is by the dispatch target's name.
         let capacity = env
             .equipment_telemetry
             .get(self.target_name())
@@ -891,16 +888,36 @@ impl EvDriverActor {
         soc < anxiety_soc
     }
 
-    /// Emit the range-anxiety charging override if the next trip would strand
-    /// the driver. Returns `true` (and pushes a charging `SOCTarget`) when the
-    /// override fired, `false` otherwise.
+    /// The range-anxiety charging override for this step — a minimal-charge
+    /// `SOCTarget` at the anxiety band — when the next trip would strand the
+    /// driver, or `None` when the override does not fire.
     ///
-    /// Three conditions, in order:
+    /// Four conditions, in order:
     ///
     /// 1. `needs_range_anxiety_override` — perceived SOC is below the
     ///    anxiety band (the next trip plus the range-anxiety buffer).
     ///
-    /// 2. An urgency gate, when today's trip is known: the override exists to
+    /// 2. The strategy's own resolved target for this step (the composer's
+    ///    in-window plan, read via `last_resolved_target_soc`) is at or
+    ///    above the band, **the plan's effective ceiling cannot stop below
+    ///    the band** (the resolved `max_soc` cap, defaulting to the target
+    ///    itself when the plan carries none), **and the resolved plan
+    ///    actually charges toward it** (the resolved rate is absent — a
+    ///    target-only plan, which charges at the equipment's own rate — or
+    ///    positive): the band is already covered, the strategy governs, and
+    ///    the override stands down. A resolved rate that is zero or negative
+    ///    means the plan is holding or *discharging* — a rate-bearing
+    ///    strategy (TouAware at peak price, V2G exporting) can pair a
+    ///    ceiling at or above the band with a discharge rate, and the pack
+    ///    is then being driven away from the band, not toward it; a resolved
+    ///    `max_soc` under the band is the same geometry in the cap
+    ///    dimension — the equipment halts charging at the cap while the
+    ///    target reads high. Either way, standing down silently disables the
+    ///    backstop the ticket names ("at minimum the range-anxiety backstop
+    ///    charges an empty pack"). `None` target means no target to protect
+    ///    (outside the window, a rate-only plan, an idle hold) and the
+    ///    override proceeds to the urgency gate.
+    /// 3. An urgency gate, when today's trip is known: the override exists to
     ///    prevent stranding, not to preempt the driver's configured strategy
     ///    whenever SOC happens to sit inside the band. When the known
     ///    departure leaves enough time to reach the band — with
@@ -910,7 +927,7 @@ impl EvDriverActor {
     ///    today there is no "later" to defer to, so the override fires on the
     ///    band condition alone.
     ///
-    /// 3. The target is the band itself — a *minimal* charge to the next
+    /// 4. The target is the band itself — a *minimal* charge to the next
     ///    trip plus a safe reserve, not a charge to full: a driver who is
     ///    short tops up just enough to make the trip safely, then their
     ///    usual pattern takes over again (the strategy's own target governs
@@ -924,26 +941,54 @@ impl EvDriverActor {
     ///
     /// `Schedule` tier — the EV driver is a schedule-level actor; this override is
     /// a pre-defined operational rule, not a user or grid action.
-    fn maybe_push_range_anxiety_override(
+    fn range_anxiety_override_request(
         &self,
         env: &EnvironmentState,
         current_minute: u16,
-        out: &mut Vec<DispatchRequest>,
-    ) -> bool {
+    ) -> Option<DispatchRequest> {
         if !self.needs_range_anxiety_override(env) {
-            return false;
+            return None;
         }
         let (anxiety_soc, _) = self.anxiety_band(env);
+        // The strategy's own resolved target for this step governs when it
+        // already covers the band, the plan cannot stop below the band, AND
+        // the resolved plan charges toward it: pre-empting a higher active
+        // target with a lower one charges less than the driver configured
+        // for zero safety gain. The rate check is what makes "charges toward
+        // it" true — a target-only plan (rate `None`) charges toward the
+        // target at the equipment's own rate, and a positive rate charges
+        // explicitly, but a zero or negative rate holds or discharges. The
+        // cap check is what makes "cannot stop below" true — a resolved
+        // `max_soc` under the band halts charging at the cap while the
+        // target reads high, so the effective ceiling is the cap, not the
+        // target; a plan with no cap defaults the ceiling to the target,
+        // which the first clause already proved covers the band. `None`
+        // target (outside the window, a rate-only plan, an idle hold) means
+        // no target to protect and the override proceeds to the urgency
+        // gate.
+        if let Some(strategy_target) = self.composer.last_resolved_target_soc()
+            && strategy_target >= anxiety_soc
+            && self
+                .composer
+                .last_resolved_power_kw()
+                .is_none_or(|power| power > 0.0)
+            && self
+                .composer
+                .last_resolved_max_soc()
+                .is_none_or(|cap| cap >= anxiety_soc)
+        {
+            return None;
+        }
         if let Some(event) = self.todays_event {
             let hours_left =
                 minutes_until(current_minute, u32::from(event.departure_minute)) / 60.0;
             let ctx = self.decision_context(env, current_minute);
             let needed = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx);
             if hours_left >= needed * 1.2 {
-                return false;
+                return None;
             }
         }
-        out.push(DispatchRequest {
+        Some(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal: ControlSignal::SOCTarget {
                 target_soc: anxiety_soc.clamp(0.0, 1.0),
@@ -951,8 +996,7 @@ impl EvDriverActor {
                 max_soc: None,
             },
             priority: PriorityTier::Schedule,
-        });
-        true
+        })
     }
 
     /// Build the per-step decision context for **dispatch**: `current_soc`
@@ -1011,24 +1055,36 @@ impl EvDriverActor {
     }
 
     /// Evaluate the composer per-step while plugged in at home.
+    ///
+    /// Precedence: the composer's plan for this step is resolved *first*, so
+    /// the range-anxiety override's decision
+    /// (`range_anxiety_override_request`) compares against the strategy's
+    /// own active target instead of pre-empting it blind. Path exclusivity
+    /// is preserved exactly: a step's charging dispatch comes from either
+    /// the override (the composer's signals for that step are dropped) or
+    /// the composer (already appended below) — never both, never neither.
     fn evaluate_charging(
         &mut self,
         env: &EnvironmentState,
         current_minute: u16,
         out: &mut Vec<DispatchRequest>,
     ) {
-        // Range anxiety override: if the next trip would strand the driver,
-        // top up minimally to the anxiety band regardless of strategy. The
-        // override returns before reaching the composer, so it records the
-        // estimate for its own target (the band) in place of the
-        // strategy-plan fold refreshed at step start.
-        if self.maybe_push_range_anxiety_override(env, current_minute, out) {
+        let ctx = self.decision_context(env, current_minute);
+        let composer_start = out.len();
+        self.composer.evaluate(&ctx, out);
+
+        if let Some(request) = self.range_anxiety_override_request(env, current_minute) {
+            // The override pre-empts the composer for this step: drop the
+            // composer's dispatches and keep only the override's
+            // minimal-charge plan.
+            out.truncate(composer_start);
+            out.push(request);
+            // The override records the estimate for its own target (the
+            // band) in place of the strategy-plan fold refreshed at step
+            // start.
             self.record_anxiety_plan_hours(env, current_minute);
             return;
         }
-
-        let ctx = self.decision_context(env, current_minute);
-        self.composer.evaluate(&ctx, out);
 
         tracing::trace!(
             actor = %self.name,
@@ -1064,6 +1120,20 @@ impl Actor for EvDriverActor {
 
     fn dispatch_target_name(&self) -> Option<&str> {
         Some(self.target_name())
+    }
+
+    fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
+        self.equipment_id = match equipment_id_by_name.get(self.target_name()) {
+            Some(id) => Some(*id),
+            None => {
+                tracing::warn!(
+                    equipment = %self.target_name(),
+                    actor = "EvDriverActor",
+                    "Equipment name not found in registry — actor will operate without SOC feedback"
+                );
+                None
+            }
+        };
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
@@ -1446,6 +1516,7 @@ fn phase_as_f64(phase: DriverPhase) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::preference::PreferenceVote;
     use super::*;
     use crate::actor::testing::test_env;
     use hares_types::{
@@ -2108,9 +2179,22 @@ mod tests {
         );
 
         // Below the anxiety threshold: the override fires and its own
-        // target (the anxiety band) drives the estimate.
-        let mut actor =
-            make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.15);
+        // target (the anxiety band) drives the estimate. The strategy is a
+        // Nightly window (22:00–06:00) so the 12:00 step sits outside it:
+        // the composer resolves no target, and the range-anxiety override —
+        // which under the precedence rule only pre-empts when no active
+        // strategy target already covers the band — governs. (With an
+        // in-window Immediate 0.9 the strategy's own target would stand the
+        // override down by design: pre-empting 0.9 with the band charges
+        // less than configured for zero safety gain.)
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            0.15,
+        );
         actor.event_day_ratio = 0.0;
         actor.todays_event = None;
         let mut env = env_at_minute(12 * 60);
@@ -2589,7 +2673,18 @@ mod tests {
     /// number while the equipment charges a different plan.
     #[test]
     fn needed_charge_hours_under_anxiety_reports_minimal_band_plan() {
-        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
+        // Nightly window (22:00–06:00): the 07:45 step is outside it, so the
+        // composer resolves no target and the override governs — under the
+        // precedence rule an in-window strategy target ≥ band (e.g.
+        // Immediate 0.9) would stand the override down by design.
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            0.2,
+        );
 
         // 07:45 on a driving day (departure 08:00) at the 22 °C efficiency
         // baseline; SOC 0.2 sits below the anxiety band and time to
@@ -2636,7 +2731,15 @@ mod tests {
     #[test]
     fn needed_charge_hours_under_anxiety_on_non_driving_day_reports_minimal_band_plan() {
         let mut actor = make_actor_with_event_ratio(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
+            // Nightly window (22:00–06:00): the 12:00 step is outside it, so
+            // the composer resolves no target and the override governs —
+            // under the precedence rule an in-window strategy target ≥ band
+            // would stand the override down by design.
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
             0.0, // never a driving day
             42,
         );
@@ -2756,7 +2859,18 @@ mod tests {
     /// describes a session that will not happen.
     #[test]
     fn needed_charge_hours_under_anxiety_reports_observed_gap_not_belief() {
-        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.2);
+        // Nightly window (22:00–06:00): the 07:45 step is outside it, so the
+        // composer resolves no target and the override governs — under the
+        // precedence rule an in-window strategy target ≥ band would stand
+        // the override down by design.
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            0.2,
+        );
 
         // 07:45 on a driving day (departure 08:00) at the 22 °C baseline;
         // belief 0.2 sits below the anxiety band (0.2665 — the day's rolled
@@ -4122,8 +4236,16 @@ mod tests {
     fn non_driving_day_range_anxiety_emits_soc_target() {
         // Actor: 30 mi/day expected, 20 mi buffer, 0.3 kWh/mi, 60 kWh battery.
         // anxiety_soc ≈ 0.278 at 10°C. SOC 0.15 < 0.278 → should trigger.
+        // Nightly window (22:00–06:00): the 08:00 step is outside it, so the
+        // composer resolves no target and the override governs — under the
+        // precedence rule an in-window strategy target ≥ band would stand
+        // the override down by design.
         let mut actor = make_actor(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
             PlugInPolicy::Always,
             42,
         );
@@ -4146,6 +4268,342 @@ mod tests {
             has_soc_target,
             "non-driving day with low SOC: decide() must emit the minimal SOCTarget(band) via range anxiety, got: {:?}",
             out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+    }
+
+    /// The precedence rule's stand-down side: when the driver is short
+    /// (perceived SOC below the anxiety band) but the strategy's own
+    /// resolved target for the step already covers the band, the override
+    /// must NOT pre-empt it — dispatching the band target instead of a
+    /// higher configured target charges less than the driver asked for,
+    /// for zero safety gain. The composer's plan is the step's dispatch
+    /// (path exclusivity: never both).
+    ///
+    /// Not reachable through real assembly (working observation reconciles
+    /// the belief far above the band before anxiety can trigger), so the
+    /// vehicle is this actor-level harness with a hand-set belief — the
+    /// defect under test is the actor's precedence logic, not assembly
+    /// identity.
+    #[test]
+    fn range_anxiety_stands_down_when_strategy_target_covers_band() {
+        // Immediate is always in-window: the composer resolves target 0.9,
+        // far above the ~0.25 non-driving-day band at 10 °C.
+        let mut actor =
+            make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.15);
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        let mut env = env_at_minute(12 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.15);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        // The composer's higher target is the step's charging dispatch...
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 1e-9
+            )),
+            "with the strategy target (0.9) covering the band, the strategy's own plan must be dispatched, got {out:?}"
+        );
+        // ...and the override's minimal band target must not also appear —
+        // a step's charging dispatch comes from exactly one path.
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            !out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - band).abs() < 1e-9
+            )),
+            "the range-anxiety override must stand down when the strategy's own target covers the band (band = {band}), got {out:?}"
+        );
+    }
+
+    /// The stand-down rule keys on the composer's resolved *target* SOC.
+    /// But a rate-bearing strategy (TouAware) can resolve a target far
+    /// above the band while simultaneously resolving a *discharge* rate at
+    /// peak price: the pack is then not being charged toward that target —
+    /// it is being driven away from the band. "The band is already covered"
+    /// is false on such a step, so the range-anxiety override — whose job is
+    /// to top a short pack up to the band — must still fire. Standing down
+    /// silently disables the backstop the ticket names ("at minimum the
+    /// range-anxiety backstop charges an empty pack") on a pack below the
+    /// band.
+    #[test]
+    fn range_anxiety_must_fire_when_strategy_target_is_not_backed_by_charging() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            0.15,
+        );
+        let prices: Vec<f64> = (0..24).map(|i| 0.10 + i as f64 * 0.01).collect();
+        actor = actor.with_price_schedule(prices.clone().into(), 24);
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut env = env_at_minute(23 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(prices[23]),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - band).abs() < 1e-9
+            )),
+            "with the pack below the anxiety band and the strategy discharging at peak \
+             price, the range-anxiety override must fire and dispatch the band target; \
+             the strategy's nominal 0.9 target does not cover the band while its resolved \
+             rate is negative. got {out:?}"
+        );
+        assert!(
+            !out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
+            )),
+            "the same step must not discharge a pack already below the anxiety band, \
+             got {out:?}"
+        );
+    }
+
+    /// The rate condition's positive arm: a strategy actively charging
+    /// toward its own band-covering target (TouAware at a cheap price —
+    /// target 0.9 from the stack, rate +max from the price vote) must keep
+    /// the override stood down, and the composer's positive-rate plan must
+    /// dispatch on that step (path exclusivity: the strategy governs). A
+    /// transposed comparison (`< 0.0`) would fire the override on exactly
+    /// this step and preempt an in-progress charge with the lower band
+    /// target.
+    #[test]
+    fn range_anxiety_stands_down_when_strategy_actively_charges_toward_its_target() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            0.15,
+        );
+        let prices: Vec<f64> = (0..24).map(|i| 0.10 + i as f64 * 0.01).collect();
+        actor = actor.with_price_schedule(prices.clone().into(), 24);
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // Minute 0 carries the schedule's minimum price — strictly at or
+        // below the charge threshold, so the price vote resolves a
+        // positive charge rate.
+        let mut env = env_at_minute(0);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(prices[0]),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            !out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - band).abs() < 1e-9
+            )),
+            "the strategy is charging toward its own 0.9 target at a cheap price — \
+             the override must not preempt it with the band target, got {out:?}"
+        );
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+            )),
+            "the composer's positive-rate charge plan must dispatch on the step \
+             the override stands down (the strategy governs), got {out:?}"
+        );
+    }
+
+    /// The rate condition's zero boundary (`> 0.0`, not `>= 0.0`). No real
+    /// strategy stack resolves a band-covering target paired with an
+    /// exactly-zero rate (SolarTracking, the only zero-rate emitter, is
+    /// stacked only with DepartureDeadline, whose target requires a
+    /// today-event — which either arms the urgency gate or flips the
+    /// departure vote to a positive-rate override), so the boundary is
+    /// pinned with fixed-vote preferences — the same synthetic-preference
+    /// pattern the composer's own tests use — constructing exactly the
+    /// resolution under test: target 0.9 (covers the band) + rate 0.0 (a
+    /// hold). A zero-rate hold does not charge toward the target, so the
+    /// band is NOT covered and the override must fire; a `>= 0.0`
+    /// regression silently stands the backstop down on holds.
+    struct FixedVotePref(PreferenceVote);
+    impl ChargingPreference for FixedVotePref {
+        fn score(&mut self, _: &DecisionContext) -> PreferenceVote {
+            self.0.clone()
+        }
+        fn name(&self) -> &'static str {
+            "fixed_vote_test"
+        }
+    }
+
+    #[test]
+    fn range_anxiety_fires_when_strategy_target_is_paired_with_a_zero_rate_hold() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.composer = ChargingComposer::new(
+            vec![
+                Box::new(FixedVotePref(PreferenceVote {
+                    target_soc: Some(0.9),
+                    power_kw: None,
+                    departure_hour: None,
+                    min_soc: None,
+                    max_soc: None,
+                    score: 1.0,
+                    label: "test:target",
+                })),
+                Box::new(FixedVotePref(PreferenceVote {
+                    target_soc: None,
+                    power_kw: Some(0.0),
+                    departure_hour: None,
+                    min_soc: None,
+                    max_soc: None,
+                    score: 1.5,
+                    label: "test:zero_hold",
+                })),
+            ],
+            actor.target_name(),
+        );
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(12 * 60), &mut out);
+
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - band).abs() < 1e-9
+            )),
+            "the resolved plan holds at exactly zero rate — the pack is not being \
+             driven toward the 0.9 target, so the band is not covered and the \
+             override must fire (the rate boundary is > 0, not >= 0), got {out:?}"
+        );
+    }
+
+    /// A strategy target at or above the anxiety band whose resolved vote
+    /// caps the pack BELOW the band (`max_soc` — the composer's
+    /// most-restrictive upper-bound fold) is not "covered": the equipment
+    /// stops charging at the cap while the target reads high — the same
+    /// "pack held away from the band" geometry the rate-backing check
+    /// exists for, in the dimension the check does not read. The override
+    /// must fire; standing down strands the driver on a pack capped below
+    /// the next trip's need.
+    #[test]
+    fn range_anxiety_fires_when_strategy_target_caps_below_the_band_via_max_soc() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.composer = ChargingComposer::new(
+            vec![Box::new(FixedVotePref(PreferenceVote {
+                target_soc: Some(0.9),
+                power_kw: None,
+                departure_hour: None,
+                min_soc: None,
+                max_soc: Some(0.1),
+                score: 1.0,
+                label: "test:sub_band_cap",
+            }))],
+            actor.target_name(),
+        );
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(12 * 60), &mut out);
+
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, max_soc, .. }
+                    if (target_soc - band).abs() < 1e-9
+                        && max_soc.is_none_or(|cap| cap >= band)
+            )),
+            "a target of 0.9 capped by max_soc = 0.1 charges only to 0.1 — below \
+             the band ({band}) — so the band is not covered and the override \
+             must fire; standing down strands the driver, got {out:?}"
+        );
+    }
+
+    /// The cap condition's stand-down boundary: a resolved cap that sits
+    /// between the band and the target (a price-tier ceiling of 0.5 over a
+    /// 0.9 target on a pack at 0.15 with a ~0.28 band) still covers the
+    /// band — the pack charges to 0.5, comfortably above the next trip's
+    /// need — so the strategy's own plan governs and the override must
+    /// stand down. An over-broad cap check (`cap >= target`, or firing on
+    /// any cap at all) would preempt the strategy's charge every step and
+    /// lock the pack at the minimal band target instead.
+    #[test]
+    fn range_anxiety_stands_down_when_the_resolved_cap_still_covers_the_band() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.composer = ChargingComposer::new(
+            vec![Box::new(FixedVotePref(PreferenceVote {
+                target_soc: Some(0.9),
+                power_kw: None,
+                departure_hour: None,
+                min_soc: None,
+                max_soc: Some(0.5),
+                score: 1.0,
+                label: "test:band_covering_cap",
+            }))],
+            actor.target_name(),
+        );
+        actor.event_day_ratio = 0.0;
+        actor.todays_event = None;
+        actor.estimated_soc = 0.15;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(12 * 60), &mut out);
+
+        let band = anxiety_band_non_driving_day_at_10c();
+        assert!(
+            !out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - band).abs() < 1e-9
+            )),
+            "a cap of 0.5 over a 0.9 target still charges past the band ({band}) — \
+             the strategy's plan covers the band and the override must stand \
+             down, got {out:?}"
+        );
+        assert!(
+            out.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, max_soc, .. }
+                    if (target_soc - 0.9).abs() < 1e-9
+                        && max_soc.is_some_and(|cap| (cap - 0.5).abs() < 1e-9)
+            )),
+            "on stand-down the composer's own capped plan must dispatch — the \
+             ceiling (0.9) and its cap (0.5) both reaching the equipment — \
+             got {out:?}"
         );
     }
 
@@ -4189,9 +4647,16 @@ mod tests {
     fn non_driving_day_anxiety_charges_for_next_driving_day() {
         // Regression: PlugInPolicy::LowSoc with a non-driving day at low SOC
         // must charge the battery so the driver is not stranded on the
-        // following driving day.
+        // following driving day. Nightly window (22:00–06:00): the Day-1
+        // 08:00 step is outside it, so the composer resolves no target and
+        // the override governs — under the precedence rule an in-window
+        // strategy target ≥ band would stand the override down by design.
         let mut actor = make_actor(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
             PlugInPolicy::LowSoc { threshold: 0.5 },
             42,
         );
@@ -4223,7 +4688,23 @@ mod tests {
         actor.current_day_ordinal = -1;
         actor.event_day_ratio = 1.0;
 
-        let day2_out = drive_cycle_and_charge_step(&mut actor);
+        // Depart, drive, arrive, then step inside the Nightly window
+        // (22:30) where the strategy's own target governs.
+        let mut out = Vec::new();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+        for step in 1..=600 {
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            out.clear();
+            if matches!(actor.phase, DriverPhase::HomePluggedIn) {
+                break;
+            }
+        }
+        assert!(
+            matches!(actor.phase, DriverPhase::HomePluggedIn),
+            "precondition: the actor must be home and plugged in before the evening step"
+        );
+        let day2_out = plugged_in_step(&mut actor, 22 * 60 + 30);
 
         // Range anxiety should NOT have fired — started Day 2 at full SOC.
         let has_anxiety = day2_out.iter().any(|r| {

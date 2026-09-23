@@ -25,7 +25,8 @@ use hares_physics::water_density_kg_m3;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::wh_config::TanklessWaterHeaterConfig;
-use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
+use crate::config::{constructor_equipment_id, equipment_id_from_config};
+use crate::hvac::helpers::zone_id_from_config_or_default;
 
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
@@ -118,7 +119,7 @@ impl TanklessWH {
 
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Tankless Water Heater"),
@@ -212,7 +213,13 @@ impl TanklessWH {
         let c = config.require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")?;
         c.validate()?;
 
-        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        // Preserve-when-absent: an absent `equipment_id` key keeps the
+        // descriptor's existing (assembly-injected) identity instead of
+        // clobbering it — `None` from the tri-state reader means "not
+        // configured here", not "unassigned".
+        if let Some(id) = equipment_id_from_config(config)? {
+            self.descriptor.id = EquipmentId(id);
+        }
         self.descriptor.zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
         self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
@@ -307,6 +314,10 @@ impl Equipment for TanklessWH {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

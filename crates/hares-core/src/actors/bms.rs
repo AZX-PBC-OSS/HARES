@@ -126,24 +126,6 @@ impl BatteryManagementActor {
         &self.bms_mode
     }
 
-    pub fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
-        let battery_name = match &self.dispatch_target {
-            DispatchTarget::ByName(n) => n.as_ref(),
-            DispatchTarget::ByEndUse(_) => return,
-        };
-        self.equipment_id = match equipment_id_by_name.get(battery_name) {
-            Some(id) => Some(*id),
-            None => {
-                tracing::warn!(
-                    equipment = %battery_name,
-                    actor = "BatteryManagementActor",
-                    "Equipment name not found in registry — actor will operate without SOC feedback"
-                );
-                None
-            }
-        };
-    }
-
     fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
         let id = self.equipment_id?;
         env.equipment_core
@@ -1022,6 +1004,24 @@ impl Actor for BatteryManagementActor {
             DispatchTarget::ByName(n) => Some(n.as_ref()),
             DispatchTarget::ByEndUse(_) => None,
         }
+    }
+
+    fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
+        let battery_name = match &self.dispatch_target {
+            DispatchTarget::ByName(n) => n.as_ref(),
+            DispatchTarget::ByEndUse(_) => return,
+        };
+        self.equipment_id = match equipment_id_by_name.get(battery_name) {
+            Some(id) => Some(*id),
+            None => {
+                tracing::warn!(
+                    equipment = %battery_name,
+                    actor = "BatteryManagementActor",
+                    "Equipment name not found in registry — actor will operate without SOC feedback"
+                );
+                None
+            }
+        };
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

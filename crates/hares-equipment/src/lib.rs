@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
-    EquipmentDescriptor, GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration,
-    PortSlots, ensure_signal_supported,
+    EquipmentDescriptor, EquipmentId, GridExportRule, HaresError, OperatingMode, PlugInPolicy,
+    PortDeclaration, PortSlots, ensure_signal_supported,
 };
 
 #[cfg(feature = "observe")]
@@ -73,7 +73,8 @@ pub enum ActorSeed {
 
 pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{
-    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation, resolve_zip,
+    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation,
+    constructor_equipment_id, equipment_id_from_config, resolve_zip,
 };
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
@@ -110,6 +111,31 @@ pub use water_heater::wh_config::{
 
 /// Equipment-layer result type.
 pub type Result<T> = std::result::Result<T, HaresError>;
+
+/// Guard-checked identity write shared by every [`Equipment::set_equipment_id`]
+/// implementation: rejects the write once the equipment has been registered
+/// with a dwelling (the post-registration mutation guard, the same contract
+/// the LUT setters enforce), then stamps the descriptor's id.
+///
+/// `initialized` is the implementor's [`Equipment::is_initialized`] flag —
+/// passed explicitly because `descriptor()` returns a shared reference, so
+/// the write itself must reach the concrete descriptor field in the impl
+/// body. One home for the guard-and-write so the contract cannot drift
+/// across the fifty-odd implementations.
+pub fn apply_identity_write(
+    initialized: bool,
+    descriptor: &mut EquipmentDescriptor,
+    id: EquipmentId,
+) -> Result<()> {
+    if initialized {
+        return Err(HaresError::InvalidState(format!(
+            "equipment '{}' is already initialized; its id cannot change",
+            descriptor.name
+        )));
+    }
+    descriptor.id = id;
+    Ok(())
+}
 
 /// Piecewise-linear temperature derate: returns 0.0 at or below `temp_min`,
 /// 1.0 at or above `temp_max`, and linearly interpolates between.
@@ -166,6 +192,27 @@ pub trait Equipment: Send + Sync {
     /// names. Equipment types that store `EquipmentDescriptor` as a field
     /// should set `self.descriptor.name = name`.
     fn rename(&mut self, name: String);
+
+    /// Assign this equipment's dwelling-issued identity by updating its
+    /// descriptor `id`.
+    ///
+    /// Called by `Dwelling::add_equipment` / `Dwelling::replace_equipment`
+    /// before registration: unassigned equipment (descriptor id `0`, the
+    /// unassigned sentinel) receives the dwelling's next never-reused id,
+    /// and an explicitly-set id is collision-checked against the equipment
+    /// already in the dwelling. The write happens before
+    /// [`Self::mark_initialized`], so a correct implementation never sees
+    /// the post-registration guard fire from this path.
+    ///
+    /// Implementations should be one line delegating to
+    /// [`crate::apply_identity_write`]: it enforces the initialization
+    /// guard (rejecting post-registration identity mutation, the same
+    /// T-0534 contract as the LUT setters) and stamps the descriptor.
+    /// `Dwelling` verifies the write landed with an equality check on
+    /// `descriptor().id`, so a body that writes nothing, the wrong field,
+    /// or a value other than the one handed to it fails registration with
+    /// a typed error.
+    fn set_equipment_id(&mut self, id: EquipmentId) -> Result<()>;
 
     /// Version of this equipment's postcard checkpoint format.
     /// Override when the checkpoint struct for this equipment changes shape.
@@ -598,6 +645,10 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+            crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -731,6 +782,51 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    /// `delegate_equipment!` must forward the initialization-lifecycle
+    /// guard methods and the identity setter to the wrapped inner equipment
+    /// — the macro used to forward none of the guard methods, so every
+    /// wrapper type (GasGenerator, FuelCell, the four heat-pump heater
+    /// newtypes) silently reported `false`/no-op regardless of its inner
+    /// type's guard state. The production inner types use the trait
+    /// defaults (behaviorally identical either way), so the regression is
+    /// proven with a guard-tracking inner: the wrapper's mark/is roundtrip
+    /// only works if the calls actually reach the inner equipment.
+    struct WrappedMock {
+        inner: MockEquipment,
+    }
+    delegate_equipment!(WrappedMock, inner);
+
+    #[test]
+    fn delegate_equipment_forwards_guard_methods_and_identity_to_inner() {
+        let mut wrapper = WrappedMock {
+            inner: MockEquipment::new(ControlCapabilities::POWER_SETPOINT),
+        };
+        assert!(!wrapper.is_initialized());
+        wrapper.mark_initialized();
+        assert!(
+            wrapper.is_initialized(),
+            "mark_initialized through the wrapper must reach the inner equipment's guard flag"
+        );
+        wrapper.unmark_initialized();
+        assert!(
+            !wrapper.is_initialized(),
+            "unmark_initialized through the wrapper must reach the inner equipment's guard flag"
+        );
+        // The identity setter forwards too — and the guard it consults is
+        // the inner's (now down), so the write lands.
+        wrapper
+            .set_equipment_id(EquipmentId(9))
+            .expect("identity write through the wrapper must land");
+        assert_eq!(wrapper.descriptor().id, EquipmentId(9));
+        // With the inner's guard back up, the forwarded setter must reject —
+        // the guard check runs on the inner, not on a wrapper-level default.
+        wrapper.mark_initialized();
+        assert!(
+            wrapper.set_equipment_id(EquipmentId(10)).is_err(),
+            "the forwarded setter must consult the inner equipment's guard flag"
+        );
     }
 
     #[test]
@@ -1217,6 +1313,9 @@ mod tests {
             }
             fn rename(&mut self, name: String) {
                 self.descriptor.name = name;
+            }
+            fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+                crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
             }
             fn ports(&self) -> &[PortDeclaration] {
                 &self.ports

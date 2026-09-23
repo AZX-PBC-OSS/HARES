@@ -20,14 +20,13 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        apply_heating_control_unchecked, compute_and_write_ebm_telemetry, equipment_id_from_config,
-        lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
-        zone_id_from_config_or_default,
+        apply_heating_control_unchecked, compute_and_write_ebm_telemetry, lookup_zone,
+        outage_forces_off, register_ebm_telemetry_keys, zone_id_from_config_or_default,
     },
 };
 use super::constants::{
-    DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_EQUIPMENT_ID,
-    DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
+    DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_ER_HARD_LOCKOUT_TIME_S,
+    DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
     DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S,
     DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C, MAX_OAT_SUPPLEMENTAL_C,
@@ -37,6 +36,7 @@ use super::defrost::{
     DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostStrategy, evaluate_defrost,
 };
 use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
+use crate::config::constructor_equipment_id;
 use hares_physics::biquadratic::biquadratic;
 use hares_physics::ground::SourceTemperature;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
@@ -403,6 +403,10 @@ impl Equipment for HeatPumpHeaterCore {
         self.descriptor.name = name;
     }
 
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }
@@ -505,7 +509,7 @@ impl HeatPumpHeaterCore {
 
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_HEATING,
                 equipment_type: Cow::Borrowed(equipment_type),

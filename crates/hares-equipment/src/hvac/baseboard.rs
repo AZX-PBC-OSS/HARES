@@ -24,10 +24,11 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone, outage_forces_off,
+        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
         register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
     },
 };
+use crate::config::constructor_equipment_id;
 
 pub struct ElectricBaseboard {
     descriptor: EquipmentDescriptor,
@@ -72,7 +73,7 @@ impl ElectricBaseboard {
     pub fn new(config: EquipmentConfig) -> Self {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Baseboard"),
@@ -124,6 +125,10 @@ impl Equipment for ElectricBaseboard {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

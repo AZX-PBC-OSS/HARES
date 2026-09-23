@@ -783,7 +783,7 @@ pub(crate) fn merged_equipment_config(
         && let Value::Object(base) = data
     {
         let mut merged = base.clone();
-        apply_equipment_overrides(&mut merged, overrides, &spec.name);
+        apply_equipment_overrides(&mut merged, overrides, &spec.name)?;
         // Peel the reserved "zip" override object out of the merged map
         // before typed deserialization so #[serde(deny_unknown_fields)]
         // payloads never see it; it is merged field-wise into the sidecar.
@@ -813,7 +813,7 @@ pub(crate) fn merged_equipment_config(
     }
 
     let mut merged = spec.parameters.clone();
-    apply_equipment_overrides(&mut merged, overrides, &spec.name);
+    apply_equipment_overrides(&mut merged, overrides, &spec.name)?;
     // Raw equipment honor the reserved "zip" override object too, for
     // consistency with typed equipment: it is merged field-wise over the
     // spec's zip_params base and folded back into `zip_params`, which
@@ -840,16 +840,44 @@ pub(crate) fn merged_equipment_config(
     Ok(equipment_config_from_spec(&merged_spec))
 }
 
-fn apply_equipment_overrides(base: &mut Map<String, Value>, overrides: &Value, name: &str) {
+fn apply_equipment_overrides(
+    base: &mut Map<String, Value>,
+    overrides: &Value,
+    name: &str,
+) -> Result<()> {
     let Value::Object(root) = overrides else {
-        return;
+        return Ok(());
     };
+    // `equipment_id` is reserved: ids are assigned by the dwelling assembly
+    // (and auto-assigned by `add_equipment`), never configurable. The check
+    // sits on the override *delta* — not the merged result, whose base
+    // already carries the assembly-injected id — so a user-supplied id is
+    // rejected here, loudly, instead of being silently clobbered by the
+    // injection or silently overriding it. A wildcard ("all"/"*") form
+    // would assign one id to every equipment and is covered by the same
+    // check.
+    for (source, obj) in [
+        ("all", root.get("all")),
+        ("*", root.get("*")),
+        (name, root.get(name)),
+    ] {
+        if let Some(Value::Object(fields)) = obj
+            && fields.contains_key("equipment_id")
+        {
+            return Err(HaresError::Equipment(format!(
+                "equipment '{name}': the 'equipment_id' field in the '{source}' \
+                 override is rejected — equipment ids are assigned by the \
+                 dwelling, not configurable; remove the field"
+            )));
+        }
+    }
     if let Some(Value::Object(all)) = root.get("all").or_else(|| root.get("*")) {
         hares_io::hpxml::nested_update(base, all);
     }
     if let Some(Value::Object(eq)) = root.get(name) {
         hares_io::hpxml::nested_update(base, eq);
     }
+    Ok(())
 }
 
 /// Map a boundary's interior or exterior zone to a solver zone index.

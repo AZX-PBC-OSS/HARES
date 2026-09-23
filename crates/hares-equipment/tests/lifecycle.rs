@@ -2,15 +2,21 @@
 //!
 //! Tests the cross-equipment contract: every Equipment implementor must
 //! satisfy the full lifecycle -- init, apply_control, step, telemetry,
-//! save_state, load_state -- through the Equipment trait boundary, not via
-//! type-specific internals.
+//! save_state, load_state, plus the dwelling-mediated identity write --
+//! through the Equipment trait boundary, not via type-specific internals.
 //!
-//! Phase 2 gate: grows as each equipment type lands. Each new equipment type
-//! must add a `test_equipment_lifecycle` call here.
+//! Phase 2 gate: grows as each equipment type lands. Each new equipment
+//! type must add an `assert_equipment_lifecycle` call here.
 //!
 //! NOTE: Type-specific physics assertions (setpoint tracking, efficiency curves,
 //! etc.) live in the per-equipment test files. This harness only tests the
 //! trait contract and the cross-layer port accumulation pipeline.
+//!
+//! NOTE: exhaustive per-population coverage (every registered type, not the
+//! hand-maintained list below) lives in `tests/equipment_identity_config.rs`
+//! and `tests/registry_coverage.rs`, which iterate `CANONICAL_EQUIPMENT_NAMES`.
+//! This file's hand-maintained list covers the deeper lifecycle assertions
+//! that need per-type valid/invalid control signals.
 
 mod common;
 
@@ -74,6 +80,26 @@ fn assert_equipment_lifecycle(
         !desc.telemetry_fields.is_empty(),
         "descriptor.telemetry_fields must be non-empty after init for '{}'",
         desc.name
+    );
+
+    // 1b. The dwelling-mediated identity write must land in the descriptor:
+    //     `Dwelling::add_equipment` hands the equipment its id through
+    //     `set_equipment_id` and then verifies exactly this, so every
+    //     implementor's write must take. Pre-registration the guard is down,
+    //     so the write must succeed and stick.
+    let identity_probe_id = hares_types::EquipmentId(4242);
+    let identity_probe_name = desc.name.clone();
+    equipment
+        .set_equipment_id(identity_probe_id)
+        .unwrap_or_else(|e| {
+            panic!(
+                "set_equipment_id must succeed pre-registration for '{identity_probe_name}': {e}"
+            )
+        });
+    assert_eq!(
+        equipment.descriptor().id,
+        identity_probe_id,
+        "set_equipment_id must land in the descriptor for '{identity_probe_name}'"
     );
 
     // 2. apply_control with valid signal must succeed.

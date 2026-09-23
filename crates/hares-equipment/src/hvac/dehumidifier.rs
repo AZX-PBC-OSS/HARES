@@ -23,9 +23,8 @@ use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
     DEFAULT_ENERGY_FACTOR_CURVE, DEFAULT_WATER_REMOVAL_CURVE, RATED_DB_C, RATED_RH,
 };
-use super::helpers::{
-    equipment_id_from_config, zone_id_from_config, zone_id_from_config_or_default,
-};
+use super::helpers::{zone_id_from_config, zone_id_from_config_or_default};
+use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
 // Water density assumed as 1.0 kg/L (constant approximation).
 // EnergyPlus ZoneDehumidifier.cc:723 uses RhoH2O(max(InletAirTemp - 11.0, 1.0))
@@ -173,7 +172,7 @@ impl Dehumidifier {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::DEHUMIDIFIER,
                 equipment_type: Cow::Borrowed("Dehumidifier"),
@@ -528,6 +527,10 @@ impl Equipment for Dehumidifier {
         self.descriptor.name = name;
     }
 
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }
@@ -537,8 +540,13 @@ impl Equipment for Dehumidifier {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        let equipment_id = equipment_id_from_config(config)?;
-        self.descriptor.id = EquipmentId(equipment_id);
+        // Preserve-when-absent, matching the water-heater and generator init
+        // re-assignment sites: an absent `equipment_id` key must not clobber
+        // the descriptor's existing (assembly-injected) identity back to the
+        // unassigned sentinel.
+        if let Some(id) = equipment_id_from_config(config)? {
+            self.descriptor.id = EquipmentId(id);
+        }
         let new_zone = zone_id_from_config(config);
         let explicit = new_zone.is_some();
         #[cfg(any(debug_assertions, feature = "check_invariants"))]

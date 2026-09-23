@@ -54,8 +54,8 @@ use hares_io::{
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
     SimulationConfig, StreamingRecorder, WeatherTimeSeries, build_schema,
     end_use_electric_power_column, equipment_name_to_end_use, extract_unit_from_name, has_soc,
-    is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv, parse_hpxml,
-    parse_schedule_csv, parse_weather,
+    is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv,
+    is_reserved_output_column_name, parse_hpxml, parse_schedule_csv, parse_weather,
 };
 
 use hares_physics::constants::{
@@ -70,10 +70,11 @@ use hares_types::ControlCapabilities;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::validate_port_core_electrical_consistency;
 use hares_types::{
-    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, CustomAccumulator, DomainSolver,
+    ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, FluidAccumulator,
+    GridState, HaresError, HumidityAccumulator, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalAccumulator, ThermalCategory, ZoneId,
+    ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
     validate_fluid_type_consistency,
 };
 #[cfg(test)]
@@ -83,7 +84,9 @@ use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
 use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
-use crate::checkpoint::{ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint};
+use crate::checkpoint::{
+    ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
+};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -161,6 +164,42 @@ fn create_equipment_from_spec(
             name, ochre_class,
         ))
     })
+}
+
+/// Entrance-1 unassigned-id rejection, diagnosing *why* the sentinel
+/// `EquipmentId(0)` reached the door: the constitution's loud-errors rule
+/// requires the error to name the field, the value received, and the
+/// expected form — "its config channel did not deliver one" is true only
+/// for the absent case, and misdirects a user who wrote a malformed value
+/// (or an explicit 0) to delete the field instead of correcting it.
+/// Re-uses the assignment pass's classifier
+/// (`hares_io::hpxml::equipment::explicit_equipment_id`) so the diagnosis
+/// and the pass's leave-untouched decision can never disagree.
+fn unassigned_equipment_id_rejection(spec: &hares_io::EquipmentSpec, name: &str) -> HaresError {
+    use hares_io::hpxml::equipment::{ExplicitEquipmentId, explicit_equipment_id};
+    let prefix = format!(
+        "equipment '{name}' has an unassigned equipment id (0): ids are \
+         assigned by the dwelling assembly and are not configurable; "
+    );
+    match explicit_equipment_id(spec) {
+        ExplicitEquipmentId::Malformed(value) => HaresError::Equipment(format!(
+            "{prefix}its config channel delivered a malformed equipment_id \
+             ({value}) — equipment_id must be a non-negative integer within \
+             u32 range; correct or remove the field"
+        )),
+        ExplicitEquipmentId::Valid(0) => HaresError::Equipment(format!(
+            "{prefix}its config channel explicitly delivered the unassigned \
+             sentinel equipment_id 0; remove the field"
+        )),
+        ExplicitEquipmentId::Valid(delivered) => HaresError::Equipment(format!(
+            "{prefix}its config channel delivered equipment_id {delivered} but \
+             its constructor did not apply it — the equipment's `Equipment` \
+             implementation ignores the identity config channel"
+        )),
+        ExplicitEquipmentId::Absent => {
+            HaresError::Equipment(format!("{prefix}its config channel did not deliver one"))
+        }
+    }
 }
 
 /// Core result type for dwelling operations.
@@ -321,6 +360,19 @@ fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[Box<dyn Equip
 
 /// Build column index maps for each equipment piece using instance-qualified
 /// names (matching `hares_io::output::columns::instance_qualified_names`).
+/// Schema membership rule, single home for the column-map builder and
+/// record_step's column invariants: an equipment is schema-known iff the
+/// schema emitted its unconditional per-equipment column under its own
+/// name (verbosity ≥ 1 always emits `{name} Electric Power (kW)`), and
+/// that column is not one of the reserved aggregate names — an equipment
+/// named "Total" must not read the aggregate column as evidence of its
+/// own membership.
+fn is_schema_known_equipment(column_index: &HashMap<String, usize>, name: &str) -> bool {
+    let membership_column = format!("{name} {ELECTRIC_POWER_SUFFIX}");
+    column_index.contains_key(&membership_column)
+        && !is_reserved_output_column_name(&membership_column)
+}
+
 fn build_equipment_column_map(
     equipment: &[Box<dyn Equipment>],
     column_index: &HashMap<String, usize>,
@@ -343,6 +395,34 @@ fn build_equipment_column_map(
             } else {
                 base.clone()
             };
+            // `expected` holds only for equipment the schema was built from.
+            // The column map is re-derived against a FROZEN column index
+            // whenever rows have been recorded (mid-run add/remove/replace),
+            // and equipment that joined after the schema was frozen has no
+            // columns in it — by design ("missing values, never misattributed
+            // ones"). Demanding its columns would panic here; instead it gets
+            // an empty map. Equipment the schema DOES know must resolve every
+            // applicable column — a miss there is a real schema/map drift.
+            // Membership is EXACT — the schema's unconditional
+            // `{name} Electric Power (kW)` column at verbosity ≥ 1 — not a
+            // name-prefix match: a mid-run equipment whose name is a
+            // word-boundary prefix of another equipment's name ("Electric"
+            // vs "Electric Resistance Water Heater") must not inherit the
+            // other instance's columns as evidence of its own. It also
+            // excludes the RESERVED aggregate namespace via the shared
+            // membership rule (`is_schema_known_equipment`).
+            let in_schema = is_schema_known_equipment(column_index, &name);
+            // A schema-known equipment resolves — and demands — every
+            // applicable column; a schema-unknown one claims NOTHING, not
+            // even a column that happens to exist under its name (the
+            // reserved aggregates are exactly that case: present in the
+            // index, never this equipment's own).
+            let resolve = |col_name: &str, min_verbosity: u8| -> Option<usize> {
+                if !in_schema {
+                    return None;
+                }
+                resolve_col(col_name, column_index, &name, verbosity >= min_verbosity)
+            };
             // Shared predicate with build_schema: the schema emits a
             // "{name} Gas Power (therms/hour)" column iff this returns true,
             // so resolving with the same predicate guarantees every emitted
@@ -353,65 +433,30 @@ fn build_equipment_column_map(
             let is_hp_heater = is_heat_pump_heater(&desc.name);
             let has_soc = has_soc(&desc.name);
 
-            let electric_power = resolve_col(
-                &format!("{name} {ELECTRIC_POWER_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 1,
-            );
+            let electric_power = resolve(&format!("{name} {ELECTRIC_POWER_SUFFIX}"), 1);
             let gas_power = if has_gas {
-                resolve_col(
-                    &format!("{name} {GAS_POWER_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 1,
-                )
+                resolve(&format!("{name} {GAS_POWER_SUFFIX}"), 1)
             } else {
                 None
             };
-            let mode = resolve_col(
-                &format!("{name} {MODE_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 3,
-            );
+            let mode = resolve(&format!("{name} {MODE_SUFFIX}"), 3);
             let setpoint = if is_hvac {
-                resolve_col(
-                    &format!("{name} {SETPOINT_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 3,
-                )
+                resolve(&format!("{name} {SETPOINT_SUFFIX}"), 3)
             } else {
                 None
             };
             let soc = if has_soc {
-                resolve_col(
-                    &format!("{name} {SOC_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 3,
-                )
+                resolve(&format!("{name} {SOC_SUFFIX}"), 3)
             } else {
                 None
             };
             let capacity = if is_hvac {
-                resolve_col(
-                    &format!("{name} {CAPACITY_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {CAPACITY_SUFFIX}"), 7)
             } else {
                 None
             };
             let cop = if is_hvac {
-                resolve_col(
-                    &format!("{name} {COP_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {COP_SUFFIX}"), 7)
             } else {
                 None
             };
@@ -419,110 +464,61 @@ fn build_equipment_column_map(
             // (mirroring the unconditional Electric Power column): gas
             // equipment with electric parasitics (blower fans, circulation
             // pumps, draft inducers) emits reactive power too.
-            let reactive = resolve_col(
-                &format!("{name} {REACTIVE_POWER_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 5,
-            );
-            let pf = resolve_col(
-                &format!("{name} {POWER_FACTOR_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 5,
-            );
-            let energy_kwh = resolve_col(
-                &format!("{name} {ENERGY_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 4,
-            );
-            let schedule = resolve_col(
-                &format!("{name} {SCHEDULE_SUFFIX}"),
-                column_index,
-                &name,
-                verbosity >= 7,
-            );
+            let reactive = resolve(&format!("{name} {REACTIVE_POWER_SUFFIX}"), 5);
+            let pf = resolve(&format!("{name} {POWER_FACTOR_SUFFIX}"), 5);
+            let energy_kwh = resolve(&format!("{name} {ENERGY_SUFFIX}"), 4);
+            let schedule = resolve(&format!("{name} {SCHEDULE_SUFFIX}"), 7);
             let defrost_state = if is_hp_heater {
-                resolve_col(
-                    &format!("{name} {DEFROST_STATE_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {DEFROST_STATE_SUFFIX}"), 7)
             } else {
                 None
             };
             let er_power = if is_hp_heater {
-                resolve_col(
-                    &format!("{name} {ER_POWER_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {ER_POWER_SUFFIX}"), 7)
             } else {
                 None
             };
             let shr = if is_cooling {
-                resolve_col(
-                    &format!("{name} {SHR_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {SHR_SUFFIX}"), 7)
             } else {
                 None
             };
             let speed = if is_hvac {
-                resolve_col(
-                    &format!("{name} {SPEED_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {SPEED_SUFFIX}"), 7)
             } else {
                 None
             };
             let fan_power = if is_hvac {
-                resolve_col(
-                    &format!("{name} {FAN_POWER_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {FAN_POWER_SUFFIX}"), 7)
             } else {
                 None
             };
             let main_power = if is_hvac {
-                resolve_col(
-                    &format!("{name} {MAIN_POWER_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {MAIN_POWER_SUFFIX}"), 7)
             } else {
                 None
             };
             let runtime_fraction = if is_hvac {
-                resolve_col(
-                    &format!("{name} {RUNTIME_FRACTION_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {RUNTIME_FRACTION_SUFFIX}"), 7)
             } else {
                 None
             };
             let latent_gains = if is_cooling {
-                resolve_col(
-                    &format!("{name} {LATENT_GAINS_SUFFIX}"),
-                    column_index,
-                    &name,
-                    verbosity >= 7,
-                )
+                resolve(&format!("{name} {LATENT_GAINS_SUFFIX}"), 7)
             } else {
                 None
             };
+            // `HVAC Duct Losses (W)` is a GLOBAL aggregate column, not a
+            // per-equipment one: record_step accumulates every equipment's
+            // duct-loss telemetry into the same row slot (`row[idx] +=`),
+            // and its debug invariant demands the column for every
+            // equipment at verbosity ≥ 5. It therefore resolves for ANY
+            // equipment when the schema carries it — including equipment
+            // added after the schema froze, whose per-equipment columns are
+            // missing by design but whose duct contribution must still
+            // count toward the aggregate (gating it on `in_schema` would
+            // panic the debug invariant and silently undercount the
+            // aggregate in release builds).
             let duct_losses =
                 resolve_col(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5);
 
@@ -564,6 +560,83 @@ fn build_equipment_column_map(
                 duct_losses,
                 v8_columns,
             }
+        })
+        .collect()
+}
+
+/// Derive output `EquipmentSpec`s from live equipment descriptors — the
+/// spec-shaped view the schema-facing column helpers consume. Positional:
+/// one spec per equipment, in vector order.
+fn equipment_descriptor_specs(equipment: &[Box<dyn Equipment>]) -> Vec<hares_io::EquipmentSpec> {
+    equipment
+        .iter()
+        .map(|eq| {
+            let d = eq.descriptor();
+            hares_io::EquipmentSpec {
+                instance_name: None,
+                name: d.name.clone(),
+                fuel_type: d.fuel,
+                parameters: Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            }
+        })
+        .collect()
+}
+
+/// Resolve each spec's EndUse aggregate electric-power column index —
+/// positional, one entry per spec in vector order (`record_step` zips it
+/// against the equipment vector, accumulating every member's power into
+/// its end-use's single column). The positional contract is why the map
+/// must be re-derived whenever the equipment vector changes mid-run: a
+/// remove that shifts the vector would otherwise leave every survivor
+/// writing into its departed neighbour's end-use aggregate. Shared by
+/// assembly, the fresh-schema rebuild, and the frozen-schema
+/// re-derivation so the three cannot drift.
+fn build_end_use_aggregate_indices(
+    specs: &[hares_io::EquipmentSpec],
+    column_index: &HashMap<String, usize>,
+) -> Vec<Option<usize>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let end_use = equipment_name_to_end_use(&spec.name);
+            let col_name = end_use_electric_power_column(&end_use);
+            column_index.get(&col_name).copied()
+        })
+        .collect()
+}
+
+/// Resolve each actor's telemetry columns against the output column
+/// index: `(key, index)` entry lists, one per actor, in actor order.
+/// Actors without telemetry get an empty entry list — the positional
+/// `zip` against the actor vector in `record_step` requires a per-actor
+/// entry regardless. Shared by both `refresh_equipment_caches` branches
+/// (the fresh-schema rebuild and the frozen-schema re-derivation) so the
+/// two derivations cannot drift; pre-resolving also keeps the per-step
+/// `format!("actor:{name}:{key}")` out of the hot path.
+fn build_actor_column_map(
+    actors: &[Box<dyn Actor>],
+    column_index: &HashMap<String, usize>,
+) -> Vec<Vec<(String, usize)>> {
+    actors
+        .iter()
+        .map(|actor| {
+            let Some(tel) = actor.telemetry() else {
+                return Vec::new();
+            };
+            let actor_name = actor.name();
+            let mut entries = Vec::with_capacity(tel.0.len());
+            for key in tel.0.keys() {
+                let col_name = format!("actor:{actor_name}:{key}");
+                if let Some(&idx) = column_index.get(&col_name) {
+                    entries.push((key.clone(), idx));
+                }
+            }
+            entries
         })
         .collect()
 }
@@ -1395,6 +1468,13 @@ pub struct Dwelling {
     pub failed: bool,
     equipment: Vec<Box<dyn Equipment>>,
     equipment_id_by_name: HashMap<String, EquipmentId>,
+    /// Next never-reused equipment id for `add_equipment` /
+    /// `replace_equipment` auto-assignment. Monotonic: advanced past every
+    /// id that enters the equipment vector (assembly-assigned or
+    /// caller-explicit), never decremented — `remove_equipment` frees no
+    /// ids. Guarantees auto-assignment can never collide with an id already
+    /// in the vector.
+    next_equipment_id: u32,
     pub thermal_solver: ThermalSolver,
     pub humidity_solver: HumiditySolver,
     pub electrical_solver: ElectricalSolver,
@@ -2192,6 +2272,15 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // names so the duplicate-detection pass below sees distinct names.
     hares_io::hpxml::equipment::assign_instance_names(&mut equipment_specs);
 
+    // Dwelling-assigned equipment identity: inject a unique id into each
+    // spec's config channel (raw parameters / typed payload) before
+    // construction, so every `EquipmentId`-keyed structure in the dwelling
+    // — `equipment_core`, `equipment_id_by_name`, `prev_equipment_modes` —
+    // addresses equipment individually instead of collapsing onto a single
+    // shared id. Assembly-time only: blueprint callers can add specs after
+    // parse, so the population is not final until here.
+    hares_io::hpxml::equipment::assign_equipment_ids(&mut equipment_specs);
+
     // Equipment names whose loads are handled outside the registry (e.g. directly in the
     // simulation loop) -- silently skip them rather than emitting a warning.
     const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
@@ -2211,6 +2300,21 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         let sub_rng = derive_sub_rng(&rng, RNG_STREAM_EVENT_LOAD_BASE + rng_event_stream_idx);
         rng_event_stream_idx += 1;
         let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
+
+        // Entrance-1 identity validation runs before `init` — and therefore
+        // before the non-critical init-failure skip below — so an unassigned
+        // id (a malformed explicit `equipment_id` the constructor stamped as
+        // the sentinel, an explicit 0, or an injection write that did not
+        // land) fails the build loudly on every config channel. Placed after
+        // `init` it would instead surface as an init error, and non-critical
+        // equipment is dropped on init errors — a dwelling built `Ok` with
+        // the equipment silently missing.
+        if eq.descriptor().id.0 == 0 {
+            return Err(unassigned_equipment_id_rejection(
+                spec,
+                &eq.descriptor().name,
+            ));
+        }
 
         let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
         setpoints_reconciled_by_equipment.insert(
@@ -2250,6 +2354,15 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         }
     }
     let mut equipment_id_by_name = HashMap::with_capacity(equipment.len());
+    // Entrance-1 identity validation, beside the name check it mirrors: no
+    // two equipment share an id, and the unassigned sentinel 0 never
+    // survives into the vector. The constructor's stamp is already checked
+    // before `init` in the loop above; this check guards the init
+    // re-assignment sites, which take their id from the same config channel
+    // and must never write the sentinel back — checked at the door, not
+    // assumed, because the config channel is written by a pre-pass whose
+    // landing is one config write away from being wrong.
+    let mut id_first_owner: HashMap<EquipmentId, String> = HashMap::with_capacity(equipment.len());
     for eq in &equipment {
         let desc = eq.descriptor();
         if equipment_id_by_name
@@ -2261,7 +2374,35 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
                 desc.name
             )));
         }
+        if desc.id.0 == 0 {
+            // The pre-init check above already rejected every id-0 entrance
+            // cause it can diagnose from the spec, so reaching this net means
+            // an init re-assignment site wrote the sentinel despite the
+            // channel delivering a valid id — an internal invariant break,
+            // reported as such rather than as a config problem.
+            return Err(HaresError::Equipment(format!(
+                "equipment '{}' has an unassigned equipment id (0) after init: \
+                 an init re-assignment site wrote the sentinel — equipment ids \
+                 are assigned by the dwelling assembly and are not configurable",
+                desc.name
+            )));
+        }
+        if let Some(first_owner) = id_first_owner.insert(desc.id, desc.name.clone()) {
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment id {:?}: equipment '{}' and '{}' share it \
+                 — every equipment in a dwelling must be individually addressable",
+                desc.id, first_owner, desc.name
+            )));
+        }
     }
+    // The never-reused id counter starts past every id that entered through
+    // assembly, so post-construction `add_equipment` auto-assignment can
+    // never hand out an id already in the vector.
+    let next_equipment_id = equipment
+        .iter()
+        .map(|eq| eq.descriptor().id.0)
+        .max()
+        .map_or(1, |max| max.saturating_add(1));
 
     let mut declarations: Vec<PortDeclaration> = Vec::new();
     for eq in &equipment {
@@ -2384,14 +2525,19 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     } else {
         Vec::new()
     };
-    let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
-        .iter()
-        .map(|spec| {
-            let end_use = equipment_name_to_end_use(&spec.name);
-            let col_name = end_use_electric_power_column(&end_use);
-            output_column_index.get(&col_name).copied()
-        })
-        .collect();
+    // Positional against the surviving `equipment` vector — not the spec
+    // list it was built from: a non-critical init failure drops specs
+    // between the two (and the schema, built from the full spec list,
+    // still emits every end-use column), so the map must follow the
+    // vector record_step actually zips it against.
+    let end_use_aggregate_indices: Vec<Option<usize>> = if config.sim_config.write_output {
+        build_end_use_aggregate_indices(
+            &equipment_descriptor_specs(&equipment),
+            &output_column_index,
+        )
+    } else {
+        Vec::new()
+    };
     let zone_types = environment.zone_types().to_vec();
     let zone_caches = build_zone_column_caches(
         &initial_env.zones,
@@ -2426,6 +2572,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         test_hvac_negative_energy_failure: false,
         equipment,
         equipment_id_by_name,
+        next_equipment_id,
         thermal_solver: solvers.thermal,
         humidity_solver: solvers.humidity,
         electrical_solver: solvers.electrical,
@@ -3246,6 +3393,16 @@ impl Dwelling {
     /// Duplicate equipment names are rejected with an error — the caller
     /// must provide unique names. This matches the construction-time check
     /// that enforces name uniqueness during dwelling build.
+    ///
+    /// Identity contract (mirrors assembly's entrance validation): the
+    /// unassigned sentinel id 0 never survives into the equipment vector —
+    /// unassigned equipment receives the dwelling's next never-reused id —
+    /// and an explicitly-set id that collides with equipment already in the
+    /// dwelling is rejected, naming both. The identity write is verified
+    /// (the descriptor must report exactly the assigned id) before the
+    /// equipment joins the vector, so a broken `set_equipment_id`
+    /// implementation fails registration loudly instead of collapsing
+    /// every `EquipmentId`-keyed map onto a shared id.
     pub fn add_equipment(&mut self, mut eq: Box<dyn Equipment>) -> Result<()> {
         let name = eq.descriptor().name.clone();
         if self.equipment.iter().any(|e| e.descriptor().name == name) {
@@ -3254,11 +3411,148 @@ impl Dwelling {
                 name
             )));
         }
+        self.assign_equipment_identity(&mut eq, &name, None)?;
+        // Entrance validation, mirroring the assembly boundary: a declared
+        // zone must exist in the environment model (the thermal solver's
+        // wiring is built from env zones — a contribution to an unknown zone
+        // would be silently dropped), and once stepping has begun the frozen
+        // port-slot table must already carry an accumulator for every
+        // declared port. Both run before the push so a rejected equipment
+        // never joins the vector.
+        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        if self.clock.current_step > 0 {
+            self.ensure_ports_satisfied(eq.as_ref())?;
+        }
         // Mark the equipment as initialized so post-registration LUT mutation
         // via the Equipment trait setters is rejected (T-0534).
         eq.mark_initialized();
         self.equipment.push(eq);
         self.refresh_equipment_caches();
+        Ok(())
+    }
+
+    /// Assign and validate one equipment's identity before it joins the
+    /// equipment vector — the shared entrance logic of `add_equipment` and
+    /// `replace_equipment`.
+    ///
+    /// - Unassigned (descriptor id 0, whether never set or explicitly
+    ///   zeroed — same meaning): auto-assign the dwelling's next
+    ///   never-reused id.
+    /// - Explicit non-zero id: rejected if it collides with an id already
+    ///   in the vector (skipping `replace_name`'s evictee on the replace
+    ///   path, whose id leaves with it; the add path passes `None` and
+    ///   exempts nobody).
+    /// - The write is guard-checked inside the equipment (`set_equipment_id`
+    ///   rejects post-registration mutation) and lands **before**
+    ///   `mark_initialized`, so the authorized path never trips the guard.
+    ///   A write that would not change the id (the explicit path, where the
+    ///   descriptor already holds the collision-checked value) is skipped —
+    ///   otherwise the guard would refuse the *re*-registration of a removed
+    ///   equipment, which still carries the initialized mark from its first
+    ///   registration while being in no dwelling at the moment of the write.
+    /// - Postcondition: `descriptor().id` must equal the assigned value
+    ///   exactly — equality subsumes non-zero (assigned ids start at 1) and
+    ///   uniqueness (the counter never issues an in-use id), and catches a
+    ///   body that wrote nothing, the wrong field, or a wrong-but-plausible
+    ///   value the counter cannot have advanced past.
+    fn assign_equipment_identity(
+        &mut self,
+        eq: &mut Box<dyn Equipment>,
+        name: &str,
+        replace_name: Option<&str>,
+    ) -> Result<()> {
+        let requested = eq.descriptor().id;
+        let assigned = if requested.0 == 0 {
+            // Auto-assign from the never-reused counter, skipping any id
+            // already in the vector. The counter is monotonic past every id
+            // it issued and every explicit id that could advance it, so the
+            // skip is normally zero iterations — the single id that can be
+            // in use at the counter is an explicit `u32::MAX` (a checked
+            // advance cannot pass it, so the counter stays below), and the
+            // skip hands the auto-assign the next genuinely free id instead
+            // of re-issuing the in-use boundary value. Exhaustion (every id
+            // from here to u32::MAX in use) is a loud typed error, never a
+            // silent duplicate.
+            let mut candidate = self.next_equipment_id;
+            while self
+                .equipment
+                .iter()
+                .any(|e| e.descriptor().id.0 == candidate)
+            {
+                candidate = candidate.checked_add(1).ok_or_else(|| {
+                    HaresError::Equipment(format!(
+                        "equipment '{name}': no free equipment id — the never-reused \
+                         id counter is exhausted at u32::MAX and every remaining id \
+                         is already in use; the dwelling cannot accept more equipment"
+                    ))
+                })?;
+            }
+            EquipmentId(candidate)
+        } else {
+            // The exemption applies ONLY on the replace path: there it
+            // excludes exactly the evictee (names are unique), whose id
+            // leaves the vector with the swap. The add path has no
+            // evictee, so `None` must exempt nobody — every incumbent
+            // holding the requested id collides. (Falling back to an
+            // empty-string name comparison would exempt an incumbent named
+            // "", letting a second equipment join on its id and collapse
+            // every EquipmentId-keyed map.)
+            let collides_with = self.equipment.iter().find(|e| {
+                e.descriptor().id == requested
+                    && replace_name.is_none_or(|evictee| e.descriptor().name.as_str() != evictee)
+            });
+            if let Some(existing) = collides_with {
+                return Err(HaresError::Equipment(format!(
+                    "duplicate equipment id {:?}: equipment '{}' cannot join \
+                     a dwelling that already has '{}' on that id — ids are \
+                     dwelling-assigned; omit the explicit id and the dwelling \
+                     will assign one",
+                    requested,
+                    name,
+                    existing.descriptor().name
+                )));
+            }
+            requested
+        };
+        // Write only when the id actually changes. On the explicit path the
+        // descriptor already holds `assigned` (requested == assigned), so the
+        // call would be a no-op whose only possible effect is a spurious
+        // guard trip: an equipment being *re*-registered after
+        // `remove_equipment` still carries the initialized mark its first
+        // registration applied, and `apply_identity_write` reads that stale
+        // mark as "registered" and refuses — loudly breaking the public
+        // remove → re-add flow for guard-tracking types (EV, Battery). At
+        // this moment the box is in no dwelling, so the guard's invariant
+        // (no identity mutation while registered) is not engaged. The
+        // postcondition below still verifies the landing on the paths that
+        // write.
+        if eq.descriptor().id != assigned {
+            eq.set_equipment_id(assigned).map_err(|err| {
+                HaresError::Equipment(format!(
+                    "equipment '{name}': identity assignment rejected: {err}"
+                ))
+            })?;
+        }
+        if eq.descriptor().id != assigned {
+            return Err(HaresError::Equipment(format!(
+                "equipment '{name}': identity write did not take the assigned id \
+                 {assigned:?} (descriptor still reports {:?}) — check its \
+                 `Equipment::set_equipment_id` implementation",
+                eq.descriptor().id
+            )));
+        }
+        // Advance the counter past every entering id — auto-assigned or
+        // explicit — so it never reissues an id already in the vector.
+        // Checked, not saturating: an explicit `u32::MAX` cannot be advanced
+        // past (saturating would pin the counter ON the in-use MAX id, and
+        // the next auto-assign would silently re-issue it — the duplicate
+        // this contract exists to make impossible). When the advance
+        // overflows, the counter stays where it is; the auto-assign skip
+        // loop above is what keeps the boundary safe.
+        if let Some(next) = assigned.0.checked_add(1) {
+            self.next_equipment_id = self.next_equipment_id.max(next);
+        }
         Ok(())
     }
 
@@ -3318,36 +3612,237 @@ impl Dwelling {
     /// Replaces equipment by name with new equipment, returning the old equipment.
     ///
     /// Returns `Err` if no equipment with the given name exists.
+    ///
+    /// Identity and registration mirror [`Self::add_equipment`]: the
+    /// replacement's unassigned sentinel id 0 never survives (it is
+    /// auto-assigned), an explicit id may not collide with any *other*
+    /// equipment (the evictee's id leaves with it), the identity write is
+    /// verified, the replacement's name may not collide with any surviving
+    /// equipment's (the evictee's own name is exempt — replace-in-kind),
+    /// and the replacement is `mark_initialized`-guarded on registration
+    /// like any other equipment in the vector.
     pub fn replace_equipment(
         &mut self,
         name: &str,
-        new_equipment: Box<dyn Equipment>,
+        mut new_equipment: Box<dyn Equipment>,
     ) -> Result<Box<dyn Equipment>> {
         let pos = self
             .equipment
             .iter()
             .position(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
+        let new_name = new_equipment.descriptor().name.clone();
+        // The name contract mirrors `add_equipment`'s duplicate-name
+        // rejection, with the evictee exempt: a replacement may keep the
+        // replaced equipment's own name (replace-in-kind), but a name held
+        // by any *surviving* equipment would collapse `equipment_id_by_name`
+        // (a last-wins `collect()`) and misbind every name-keyed snapshot
+        // lookup — the observation-misbinding class the identity contract
+        // exists to prevent, through a public, Python-reachable entrance.
+        // Checked before identity assignment, mirroring `add_equipment`'s
+        // ordering, so a rejected name never enters the vector.
+        if self
+            .equipment
+            .iter()
+            .enumerate()
+            .any(|(i, e)| i != pos && e.descriptor().name == new_name)
+        {
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment name '{new_name}' is not allowed: it is held by \
+                 a surviving equipment — a replacement may reuse only the replaced \
+                 equipment's own name"
+            )));
+        }
+        self.assign_equipment_identity(&mut new_equipment, &new_name, Some(name))?;
+        // Same entrance validation as `add_equipment`, checked before the
+        // swap so a rejected replacement never enters the vector.
+        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        validate_equipment_zones(new_equipment.ports(), &env_zone_ids)?;
+        if self.clock.current_step > 0 {
+            self.ensure_ports_satisfied(new_equipment.as_ref())?;
+        }
+        new_equipment.mark_initialized();
         let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
         self.refresh_equipment_caches();
         Ok(old)
     }
 
+    /// Monotonic pre-step port-slot rebuild: the layout
+    /// [`PortSlots::from_declarations`] derives from the live declarations,
+    /// extended with every accumulator kind the previous table already
+    /// carried. Never drops coverage (the envelope solvers step against
+    /// env-zone thermal/humidity accumulators regardless of which equipment
+    /// currently declares them — e.g. after `clear_equipment`), and never
+    /// reuses the previous accumulators' *values* — before the first step
+    /// the table is pure layout.
+    fn rebuild_port_slots(declarations: &[PortDeclaration], previous: &PortSlots) -> PortSlots {
+        let mut rebuilt = PortSlots::from_declarations(declarations);
+        for acc in &previous.thermal {
+            if !rebuilt.thermal.iter().any(|t| t.zone == acc.zone) {
+                rebuilt.thermal.push(ThermalAccumulator::new(acc.zone));
+            }
+        }
+        for acc in &previous.humidity {
+            if !rebuilt.humidity.iter().any(|h| h.zone == acc.zone) {
+                rebuilt.humidity.push(HumidityAccumulator::new(acc.zone));
+            }
+        }
+        for acc in &previous.fluid {
+            if !rebuilt.fluid.iter().any(|f| {
+                f.loop_id == acc.loop_id
+                    && f.fluid_type == acc.fluid_type
+                    && f.node_id == acc.node_id
+            }) {
+                rebuilt.fluid.push(FluidAccumulator::with_node(
+                    acc.loop_id,
+                    acc.fluid_type,
+                    acc.node_id,
+                ));
+            }
+        }
+        for acc in &previous.custom {
+            if !rebuilt.custom.iter().any(|c| c.domain_id == acc.domain_id) {
+                rebuilt.custom.push(CustomAccumulator::new(acc.domain_id));
+            }
+        }
+        rebuilt
+    }
+
+    /// Post-step port-slot guard for post-construction equipment changes.
+    ///
+    /// Before the first step, `refresh_equipment_caches` rebuilds the
+    /// port-slot table outright, so every declaration is satisfied by
+    /// construction. Once stepping has begun the table is frozen (per-step
+    /// accumulator state and solver wiring are live), so equipment joining
+    /// mid-run must declare only ports the frozen table already carries an
+    /// accumulator for — an unsatisfied declaration means the equipment's
+    /// contributions to that zone/loop/domain would be silently miswired or
+    /// dropped, which is rejected here, loudly, naming the equipment and the
+    /// orphaned port, instead.
+    fn ensure_ports_satisfied(&self, eq: &dyn Equipment) -> Result<()> {
+        for decl in eq.ports() {
+            let satisfied = match decl.port_type {
+                // Singletons: always present via `PortSlots::default` parts.
+                hares_types::PortType::Electrical | hares_types::PortType::Fuel => true,
+                hares_types::PortType::Thermal => decl
+                    .zone
+                    .is_some_and(|z| self.ports.thermal.iter().any(|t| t.zone == z)),
+                hares_types::PortType::Humidity => decl
+                    .zone
+                    .is_some_and(|z| self.ports.humidity.iter().any(|h| h.zone == z)),
+                hares_types::PortType::Fluid => {
+                    match (decl.loop_id, decl.fluid_type) {
+                        (Some(loop_id), Some(fluid_type)) => {
+                            let node_id = decl.fluid_node_id.unwrap_or(hares_types::FluidNodeId(0));
+                            self.ports.fluid.iter().any(|f| {
+                                f.loop_id == loop_id
+                                    && f.fluid_type == fluid_type
+                                    && f.node_id == node_id
+                            })
+                        }
+                        // A declaration without loop/type is inert; the
+                        // assembly-time validation is its home.
+                        (None, _) | (_, None) => true,
+                    }
+                }
+                hares_types::PortType::Custom => decl
+                    .domain_id
+                    .is_some_and(|d| self.ports.custom.iter().any(|c| c.domain_id == d)),
+            };
+            if !satisfied {
+                return Err(HaresError::Equipment(format!(
+                    "equipment '{}' declares a {:?} port (zone={:?}, loop={:?}, \
+                     domain={:?}) with no accumulator in the dwelling's port-slot \
+                     table, and the table is frozen because stepping has begun \
+                     (step {}): its contributions through that port would be \
+                     silently miswired or dropped. Add the equipment before the \
+                     first step, or declare it against a zone/loop/domain the \
+                     dwelling already carries.",
+                    eq.descriptor().name,
+                    decl.port_type,
+                    decl.zone,
+                    decl.loop_id,
+                    decl.domain_id,
+                    self.clock.current_step
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Refreshes internal caches after equipment list modification.
     ///
-    /// Rebuilds execution order, dispatch targets, and -- if no rows have been
-    /// recorded yet -- the output schema, column index, equipment column map,
-    /// and streaming recorder so that dynamically added equipment appears in
-    /// simulation output.
+    /// Rebuilds execution order, dispatch targets, the name→id map, and --
+    /// if no rows have been recorded yet -- the output schema, column index,
+    /// equipment column map, and streaming recorder so that dynamically
+    /// added equipment appears in simulation output, plus the port-slot
+    /// table itself while no step has run (see the comment at the rebuild
+    /// site for why stepping pins the table).
     pub fn refresh_equipment_caches(&mut self) {
         self.equipment_id_by_name = self
             .equipment
             .iter()
             .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
             .collect();
+        // Re-resolve every actor's equipment binding against the rebuilt
+        // name→id map. The cached binding goes stale on any equipment
+        // identity change — a replacement equipment receives a new
+        // never-reused id, and an actor registered before its equipment
+        // existed had no binding at all — and a stale binding silently
+        // reads the old id's core output: the observation-misbinding class
+        // this dwelling's identity contract exists to prevent. Runs only
+        // on equipment/actor changes, never per step, so the map clone is
+        // off the hot path.
+        let id_by_name = self.equipment_id_by_name.clone();
+        for actor in &mut self.actors {
+            actor.resolve_equipment_id(&id_by_name);
+        }
+        // Seed the environment snapshot for equipment whose id is not yet
+        // in `equipment_core` — equipment entering the vector mid-run (add,
+        // replace) has no entry until its first step completes, leaving
+        // actors reading its output blind for that step and tripping the
+        // start-of-step core-entry invariant. The equipment's own current
+        // `core_output()` is the truthful value (identical to what the
+        // end-of-step snapshot will write); the end-of-step retain drops
+        // ids that have since left the vector.
+        for eq in &self.equipment {
+            let id = eq.descriptor().id;
+            self.latest_env
+                .equipment_core
+                .entry(id)
+                .or_insert_with(|| eq.core_output().clone());
+        }
         self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
+
+        // Rebuild the port-slot table from the live equipment's declarations
+        // while no step has run. `PortSlots::from_declarations` otherwise runs
+        // only at assembly, so equipment added after construction (`add_equipment`,
+        // `replace_equipment` — every Python `add_*` call) declared ports
+        // against a table that predates it: contributions to zones, loops, or
+        // domains the table never allocated were silently miswired or
+        // dropped. Before the first step the rebuild is safe — the table is
+        // pure layout, no accumulator state has meaning yet — and it is
+        // monotonic: coverage the previous table already had is preserved
+        // (the envelope solvers step against env-zone accumulators even in a
+        // dwelling whose equipment was cleared), while every newly declared
+        // port gains its accumulator. After the first step the table cannot
+        // be rebuilt (per-step accumulator state and solver wiring are
+        // live), so post-step adds are instead guarded by
+        // [`Self::ensure_ports_satisfied`] at the entrance, which rejects an
+        // equipment whose declarations the frozen table cannot satisfy
+        // instead of letting its contributions vanish.
+        if self.clock.current_step == 0 {
+            let declarations: Vec<PortDeclaration> = self
+                .equipment
+                .iter()
+                .flat_map(|eq| eq.ports())
+                .copied()
+                .collect();
+            self.ports = Self::rebuild_port_slots(&declarations, &self.ports);
+            self.rollback_ports = Self::rebuild_port_slots(&declarations, &self.rollback_ports);
+        }
 
         // Rebuild output schema so dynamically added equipment and actors get columns.
         // Only safe before any rows have been recorded; mid-simulation schema
@@ -3361,24 +3856,7 @@ impl Dwelling {
                 .map_or(0, StreamingRecorder::total_rows)
                 == 0
         {
-            let specs: Vec<hares_io::EquipmentSpec> = self
-                .equipment
-                .iter()
-                .map(|eq| {
-                    let d = eq.descriptor();
-                    hares_io::EquipmentSpec {
-                        instance_name: None,
-                        name: d.name.clone(),
-                        fuel_type: d.fuel,
-                        parameters: Map::new(),
-                        zip_params: None,
-                        typed_config: None,
-                        system_id: None,
-                        related_hvac_idref: None,
-                        primary_role: None,
-                    }
-                })
-                .collect();
+            let specs = equipment_descriptor_specs(&self.equipment);
 
             let mut schema = build_schema(
                 &specs,
@@ -3435,54 +3913,12 @@ impl Dwelling {
                 &self.output_column_index,
                 self.output_verbosity,
             );
-            self.end_use_aggregate_indices = {
-                // Rebuild using the specs derived from current equipment descriptors.
-                let specs: Vec<hares_io::EquipmentSpec> = self
-                    .equipment
-                    .iter()
-                    .map(|eq| {
-                        let d = eq.descriptor();
-                        hares_io::EquipmentSpec {
-                            instance_name: None,
-                            name: d.name.clone(),
-                            fuel_type: d.fuel,
-                            parameters: Map::new(),
-                            zip_params: None,
-                            typed_config: None,
-                            system_id: None,
-                            related_hvac_idref: None,
-                            primary_role: None,
-                        }
-                    })
-                    .collect();
-                specs
-                    .iter()
-                    .map(|spec| {
-                        let end_use = equipment_name_to_end_use(&spec.name);
-                        let col_name = end_use_electric_power_column(&end_use);
-                        self.output_column_index.get(&col_name).copied()
-                    })
-                    .collect()
-            };
+            self.end_use_aggregate_indices =
+                build_end_use_aggregate_indices(&specs, &self.output_column_index);
 
-            // Pre-resolve actor telemetry column indices; avoids format!() per step.
-            self.actor_column_map.clear();
-            self.actor_column_map.reserve(self.actors.len());
-            for actor in &self.actors {
-                if let Some(tel) = actor.telemetry() {
-                    let actor_name = actor.name();
-                    let mut entries = Vec::with_capacity(tel.0.len());
-                    for key in tel.0.keys() {
-                        let col_name = format!("actor:{}:{}", actor_name, key);
-                        if let Some(&idx) = self.output_column_index.get(&col_name) {
-                            entries.push((key.clone(), idx));
-                        }
-                    }
-                    self.actor_column_map.push(entries);
-                } else {
-                    self.actor_column_map.push(Vec::new());
-                }
-            }
+            // Pre-resolve actor telemetry column indices (shared with the
+            // frozen-schema branch below — one derivation, no drift).
+            self.actor_column_map = build_actor_column_map(&self.actors, &self.output_column_index);
 
             #[cfg(feature = "observe")]
             {
@@ -3611,6 +4047,29 @@ impl Dwelling {
                     ));
                 }
             }
+        } else if self.write_output {
+            // Rows are already recorded: the schema and column index are
+            // frozen with the output file, but the *positional* per-equipment,
+            // per-actor, and end-use-aggregate column maps must still track
+            // the live vectors. Without this re-derivation, a mid-run equipment
+            // or actor remove/reorder left the maps desynced from the vectors,
+            // and record_step's positional `zip`s silently wrote one entity's
+            // values into another's columns (a mid-run add silently
+            // truncated instead). The maps resolve columns by NAME against
+            // the frozen index, so surviving entities keep their own columns
+            // and entities with no columns (added after recording began) get
+            // empty maps — visible as missing values, never misattributed
+            // ones.
+            self.equipment_column_map = build_equipment_column_map(
+                &self.equipment,
+                &self.output_column_index,
+                self.output_verbosity,
+            );
+            self.end_use_aggregate_indices = build_end_use_aggregate_indices(
+                &equipment_descriptor_specs(&self.equipment),
+                &self.output_column_index,
+            );
+            self.actor_column_map = build_actor_column_map(&self.actors, &self.output_column_index);
         }
     }
 
@@ -4116,7 +4575,14 @@ impl Dwelling {
         let mut equipment_states = Vec::with_capacity(self.equipment.len());
         for eq in &self.equipment {
             match eq.save_state() {
-                Ok(state) => equipment_states.push(state),
+                Ok(blob) => {
+                    let desc = eq.descriptor();
+                    equipment_states.push(EquipmentStateCheckpoint {
+                        name: desc.name.clone(),
+                        equipment_id: desc.id.0,
+                        blob,
+                    });
+                }
                 Err(e) => {
                     #[cfg(feature = "observe")]
                     tracing::error!(
@@ -4184,8 +4650,37 @@ impl Dwelling {
                 self.equipment.len()
             )));
         }
-        for (eq, state) in self.equipment.iter_mut().zip(cp.equipment_states) {
-            eq.load_state(&state)?;
+        // Equipment state restores are identity-keyed, not positional: each
+        // saved blob carries the equipment's name and id, and both must
+        // match the live equipment before the blob reaches `load_state`.
+        // A spec reorder between save and restore (or any other identity
+        // drift) fails here, naming both sides — under the positional `zip`
+        // this replaced, the same situation silently loaded one equipment's
+        // state into another (wrong SOC, wrong temperatures, no error).
+        let cp_equipment_map: HashMap<&str, &EquipmentStateCheckpoint> = cp
+            .equipment_states
+            .iter()
+            .map(|state| (state.name.as_str(), state))
+            .collect();
+        for eq in self.equipment.iter_mut() {
+            let desc = eq.descriptor();
+            let Some(&state) = cp_equipment_map.get(desc.name.as_str()) else {
+                return Err(HaresError::Io(format!(
+                    "checkpoint missing equipment state for '{}': the dwelling \
+                     and the checkpoint were built from different equipment sets",
+                    desc.name
+                )));
+            };
+            if state.equipment_id != desc.id.0 {
+                return Err(HaresError::Io(format!(
+                    "checkpoint equipment id mismatch for '{}': checkpoint id={}, \
+                     dwelling id={} — the equipment set or its order changed between \
+                     save and restore, and loading state positionally would hand one \
+                     equipment another's state",
+                    desc.name, state.equipment_id, desc.id.0
+                )));
+            }
+            eq.load_state(&state.blob)?;
         }
 
         self.thermal_solver
@@ -4394,6 +4889,19 @@ impl Dwelling {
                 .get(&desc.name)
                 .copied()
                 .expect("invariant: equipment_id_by_name is built from this equipment set");
+            // Identity desync invariant: the name→id map is built at
+            // registration and rebuilt only by `refresh_equipment_caches`,
+            // while equipment-side consumers read `descriptor().id` live. A
+            // divergence here means some code path mutated an equipment's
+            // id after registration — reintroducing the I-06 misbinding
+            // (every id-keyed lookup addressing the wrong equipment). No
+            // public API can reach it; this assert catches any future
+            // internal mutator.
+            debug_assert_eq!(
+                id, desc.id,
+                "equipment '{}' id drifted from its registered identity",
+                desc.name
+            );
             self.latest_env
                 .equipment_core
                 .insert(id, eq.core_output().clone());
@@ -4723,9 +5231,14 @@ impl Dwelling {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             // After the first step, every equipment instance must have a core
-            // output in the environment. Missing entries after checkpoint
-            // restore indicate that snapshot_equipment_state was not called in
-            // load_checkpoint.
+            // output entry in the environment: actors observe equipment through
+            // these id-keyed entries, and a missing entry means the equipment
+            // is unobservable (the no-observation sentinel) for the rest of
+            // the run. Known causes this assert guards against: an identity
+            // refresh that failed to seed a newly entered equipment's entry,
+            // and a checkpoint restore that skipped the post-restore
+            // snapshot. A tolerated equipment-step failure is NOT a cause —
+            // the last committed entry is retained, not dropped.
             if self.clock.current_step() > 0 {
                 for eq in &self.equipment {
                     let desc = eq.descriptor();
@@ -4736,8 +5249,10 @@ impl Dwelling {
                     debug_assert!(
                         self.latest_env.equipment_core.contains_key(&id),
                         "equipment_core missing entry for equipment '{}' (id={:?}) \
-                         at start of step {}; checkpoint restore must call \
-                         snapshot_equipment_state",
+                         at start of step {}: every active equipment must be \
+                         observable — check the identity-refresh seeding and \
+                         the checkpoint-restore snapshot (tolerated step \
+                         failures retain the last committed entry)",
                         desc.name,
                         id,
                         self.clock.current_step(),
@@ -5827,6 +6342,32 @@ impl Dwelling {
             accum.record_from_state(&self.latest_env.zones, &self.equipment);
         }
 
+        // Equipment-mode interest baseline: capture the snapshot generation
+        // the actors just observed — the map as it stands BEFORE this step's
+        // end-of-step population overwrites it — so the next step's
+        // `EquipmentModeChange` comparison sees two distinct generations
+        // (current = this step's snapshot, prev = the one before). The
+        // previous shape captured AFTER the population, storing the new
+        // snapshot itself: the comparison then read the map against a copy
+        // of itself and the interest never fired on any real transition —
+        // a registered interest whose trigger never fires is the "silence
+        // is not a decision" failure in its purest form. The zone-temperature
+        // interests keep the same one-generation-behind contract via the
+        // `prior_zone_temps`/`prev_zone_temps` shift register below;
+        // equipment modes need only the single previous generation, so a
+        // pre-population capture is the whole mechanism. Mid-run adds still
+        // fire on first observation: the identity refresh seeds the joining
+        // equipment's `equipment_core` entry between steps, after this
+        // capture, so the joining step's comparison reads `Some(mode)`
+        // against a `prev` that lacks the id.
+        self.prev_equipment_modes.clear();
+        self.prev_equipment_modes.extend(
+            self.latest_env
+                .equipment_core
+                .iter()
+                .map(|(&id, co)| (id, co.state.operating_mode)),
+        );
+
         // Snapshot end-of-timestep equipment state into latest_env so that the
         // NEXT step's actors see the freshest committed state for every
         // equipment that stepped this timestep. Snapshot runs AFTER all
@@ -5864,6 +6405,12 @@ impl Dwelling {
                 .get(&desc.name)
                 .copied()
                 .expect("invariant: equipment_id_by_name is built from this equipment set");
+            // Identity desync invariant — see `snapshot_equipment_state`.
+            debug_assert_eq!(
+                id, desc.id,
+                "equipment '{}' id drifted from its registered identity",
+                desc.name
+            );
             self.latest_env
                 .equipment_core
                 .insert(id, eq.core_output().clone());
@@ -6008,13 +6555,6 @@ impl Dwelling {
             self.prev_zone_temps.insert(zone.id, zone.temperature_c);
         }
         self.prev_price_signal = self.latest_env.price_signal.clone();
-        self.prev_equipment_modes.clear();
-        self.prev_equipment_modes.extend(
-            self.latest_env
-                .equipment_core
-                .iter()
-                .map(|(&id, co)| (id, co.state.operating_mode)),
-        );
 
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
         // because the electrical balance check reads self.ports.electrical.load_power_w
@@ -6091,40 +6631,52 @@ impl Dwelling {
                 let is_hvac = is_hvac_or_wh(name);
                 let is_cooling = is_cooling_equipment(name);
                 let is_hp_heater = is_heat_pump_heater(name);
+                // The type-gated verbosity-7 invariants demand PER-EQUIPMENT
+                // telemetry columns, which exist only for equipment the
+                // schema was built from. A mid-run add after the schema froze
+                // is schema-unknown (empty column map by design — missing
+                // values, never misattributed ones), so demanding its
+                // per-equipment columns here would panic the debug build and
+                // inflate `unresolved_column_count` in observe builds for a
+                // documented contract, not a drift. The one exception is the
+                // global `HVAC Duct Losses (W)` aggregate below: it resolves
+                // for ANY equipment (every equipment's duct telemetry
+                // accumulates into one slot), so its demand stays ungated.
+                let schema_known = is_schema_known_equipment(&self.output_column_index, name);
                 // Telemetry-based columns: assert index is Some when expected.
                 #[cfg(feature = "observe")]
                 {
-                    if is_hp_heater && v >= 7 && cols.defrost_state.is_none() {
+                    if schema_known && is_hp_heater && v >= 7 && cols.defrost_state.is_none() {
                         self.unresolved_column_count += 1;
                     }
-                    if is_hp_heater && v >= 7 && cols.er_power.is_none() {
+                    if schema_known && is_hp_heater && v >= 7 && cols.er_power.is_none() {
                         self.unresolved_column_count += 1;
                     }
-                    if is_cooling && v >= 7 && cols.shr.is_none() {
+                    if schema_known && is_cooling && v >= 7 && cols.shr.is_none() {
                         self.unresolved_column_count += 1;
                     }
-                    if is_cooling && v >= 7 && cols.latent_gains.is_none() {
+                    if schema_known && is_cooling && v >= 7 && cols.latent_gains.is_none() {
                         self.unresolved_column_count += 1;
                     }
-                    if is_hvac && v >= 7 && cols.fan_power.is_none() {
+                    if schema_known && is_hvac && v >= 7 && cols.fan_power.is_none() {
                         self.unresolved_column_count += 1;
                     }
-                    if is_hvac && v >= 7 && cols.runtime_fraction.is_none() {
+                    if schema_known && is_hvac && v >= 7 && cols.runtime_fraction.is_none() {
                         self.unresolved_column_count += 1;
                     }
                     if v >= 5 && cols.duct_losses.is_none() {
                         self.unresolved_column_count += 1;
                     }
                 }
-                if is_hp_heater && v >= 7 {
+                if schema_known && is_hp_heater && v >= 7 {
                     debug_assert!(cols.defrost_state.is_some());
                     debug_assert!(cols.er_power.is_some());
                 }
-                if is_cooling && v >= 7 {
+                if schema_known && is_cooling && v >= 7 {
                     debug_assert!(cols.shr.is_some());
                     debug_assert!(cols.latent_gains.is_some());
                 }
-                if is_hvac && v >= 7 {
+                if schema_known && is_hvac && v >= 7 {
                     debug_assert!(cols.fan_power.is_some());
                     debug_assert!(cols.runtime_fraction.is_some());
                 }
@@ -7119,258 +7671,8 @@ mod tests {
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn strip_strings_and_comments(src: &str) -> String {
-        let mut out = String::with_capacity(src.len());
-        let bytes = src.as_bytes();
-        let mut i = 0usize;
-
-        while i < bytes.len() {
-            match bytes[i] {
-                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                    out.push(' ');
-                    out.push(' ');
-                    i += 2;
-                    while i < bytes.len() && bytes[i] != b'\n' {
-                        out.push(' ');
-                        i += 1;
-                    }
-                }
-                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                    out.push(' ');
-                    out.push(' ');
-                    i += 2;
-                    let mut depth = 1usize;
-                    while i < bytes.len() && depth > 0 {
-                        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                            out.push(' ');
-                            out.push(' ');
-                            i += 2;
-                            depth += 1;
-                            continue;
-                        }
-                        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                            out.push(' ');
-                            out.push(' ');
-                            i += 2;
-                            depth = depth.saturating_sub(1);
-                            continue;
-                        }
-                        if bytes[i] == b'\n' {
-                            out.push('\n');
-                        } else {
-                            out.push(' ');
-                        }
-                        i += 1;
-                    }
-                }
-                b'r' => {
-                    let mut j = i + 1;
-                    while j < bytes.len() && bytes[j] == b'#' {
-                        j += 1;
-                    }
-                    if j < bytes.len() && bytes[j] == b'"' {
-                        let hashes = j - (i + 1);
-                        for _ in i..=j {
-                            out.push(' ');
-                        }
-                        i = j + 1;
-                        loop {
-                            if i >= bytes.len() {
-                                break;
-                            }
-                            if bytes[i] == b'"' {
-                                let mut matches_hashes = true;
-                                for h in 0..hashes {
-                                    if i + 1 + h >= bytes.len() || bytes[i + 1 + h] != b'#' {
-                                        matches_hashes = false;
-                                        break;
-                                    }
-                                }
-                                if matches_hashes {
-                                    out.push(' ');
-                                    for _ in 0..hashes {
-                                        out.push(' ');
-                                    }
-                                    i += 1 + hashes;
-                                    break;
-                                }
-                            }
-                            if bytes[i] == b'\n' {
-                                out.push('\n');
-                            } else {
-                                out.push(' ');
-                            }
-                            i += 1;
-                        }
-                    } else {
-                        out.push('r');
-                        i += 1;
-                    }
-                }
-                b'"' => {
-                    out.push(' ');
-                    i += 1;
-                    while i < bytes.len() {
-                        match bytes[i] {
-                            b'\\' if i + 1 < bytes.len() => {
-                                out.push(' ');
-                                out.push(' ');
-                                i += 2;
-                            }
-                            b'"' => {
-                                out.push(' ');
-                                i += 1;
-                                break;
-                            }
-                            b'\n' => {
-                                out.push('\n');
-                                i += 1;
-                            }
-                            _ => {
-                                out.push(' ');
-                                i += 1;
-                            }
-                        }
-                    }
-                }
-                b'\'' => {
-                    out.push(' ');
-                    i += 1;
-                    while i < bytes.len() {
-                        match bytes[i] {
-                            b'\\' if i + 1 < bytes.len() => {
-                                out.push(' ');
-                                out.push(' ');
-                                i += 2;
-                            }
-                            b'\'' => {
-                                out.push(' ');
-                                i += 1;
-                                break;
-                            }
-                            b'\n' => {
-                                out.push('\n');
-                                i += 1;
-                            }
-                            _ => {
-                                out.push(' ');
-                                i += 1;
-                            }
-                        }
-                    }
-                }
-                c => {
-                    if c.is_ascii() {
-                        out.push(c as char);
-                    } else {
-                        out.push(' ');
-                    }
-                    i += 1;
-                }
-            }
-        }
-
-        out
-    }
-
-    fn find_matching_brace(src: &str, open_brace: usize) -> Option<usize> {
-        let bytes = src.as_bytes();
-        let mut depth = 1usize;
-        let mut i = open_brace + 1;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Some(i + 1);
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
-
-    fn find_excluded_test_module_spans(sanitized: &str) -> Vec<(usize, usize)> {
-        let bytes = sanitized.as_bytes();
-        let mut spans = Vec::new();
-        let mut i = 0usize;
-        let mut pending_cfg_test_attr = false;
-
-        while i < bytes.len() {
-            if bytes[i].is_ascii_whitespace() {
-                i += 1;
-                continue;
-            }
-
-            if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'[' {
-                let mut j = i + 2;
-                while j < bytes.len() && bytes[j] != b']' {
-                    j += 1;
-                }
-                if j < bytes.len() {
-                    let attr = &sanitized[i + 2..j];
-                    let compact: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
-                    if compact.contains("cfg(test)")
-                        || compact.contains("cfg(any(test,")
-                        || compact.contains("cfg(all(test,")
-                    {
-                        pending_cfg_test_attr = true;
-                    }
-                    i = j + 1;
-                    continue;
-                }
-            }
-
-            if i + 2 < bytes.len()
-                && &sanitized[i..i + 3] == "mod"
-                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
-                && (i + 3 == bytes.len()
-                    || !bytes[i + 3].is_ascii_alphanumeric() && bytes[i + 3] != b'_')
-            {
-                let mut j = i + 3;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                let name_start = j;
-                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                    j += 1;
-                }
-                if name_start == j {
-                    pending_cfg_test_attr = false;
-                    i += 3;
-                    continue;
-                }
-                let module_name = &sanitized[name_start..j];
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'{' {
-                    if (module_name == "tests" || pending_cfg_test_attr)
-                        && let Some(end) = find_matching_brace(sanitized, j)
-                    {
-                        spans.push((i, end));
-                        i = end;
-                        pending_cfg_test_attr = false;
-                        continue;
-                    }
-                    pending_cfg_test_attr = false;
-                } else if j < bytes.len() && bytes[j] == b';' {
-                    pending_cfg_test_attr = false;
-                }
-            } else {
-                pending_cfg_test_attr = false;
-            }
-
-            i += 1;
-        }
-
-        spans.sort_unstable_by_key(|(start, _)| *start);
-        spans
-    }
+    use syn::spanned::Spanned;
+    use syn::visit::Visit;
 
     fn collect_rs_files(root: &PathBuf, out: &mut Vec<PathBuf>) {
         let read_dir = fs::read_dir(root)
@@ -7393,46 +7695,233 @@ mod tests {
         }
     }
 
-    fn offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
-        let mut line = 1usize;
-        let mut col = 1usize;
-        for (idx, ch) in src.char_indices() {
-            if idx >= offset {
-                break;
-            }
-            if ch == '\n' {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        (line, col)
+    /// Guards the no-string-telemetry-reads contract for `hares-core`'s
+    /// production code: telemetry maps are string-keyed, so a production
+    /// `.get` on a telemetry channel must carry an explicit `// allowed:`
+    /// comment naming why the value is not yet a typed `CoreOutput` field
+    /// (the established reason shape: "remains telemetry-only until
+    /// CoreOutput gains a <field> field"). A raw read has no static
+    /// guarantee the key exists, and every value that crosses the boundary
+    /// untyped stays untyped; the per-site comment is the contract that
+    /// keeps the escape hatch deliberate and reviewable.
+    ///
+    /// Detection is AST-based (`syn`), matching the sibling guard tests in
+    /// `hares-equipment/tests/*_guard.rs`. This guard previously sanitized
+    /// source text and brace-balanced `mod tests` spans by hand, which broke
+    /// on any construct the byte scanner did not model: an apostrophe in a
+    /// lifetime (`&'static str`) was treated as a char-literal opener and
+    /// swallowed the text up to the next apostrophe, unbalancing the file's
+    /// braces so the test-module span never resolved — the guard then
+    /// reported test helpers as production violations, and the same
+    /// swallowing silently hid real production reads. Parsing the file
+    /// makes both exclusion and detection structural: lifetimes, char
+    /// literals, and formatting cannot perturb them.
+    ///
+    /// Reach, stated honestly: `syn` sees no tokens inside macro bodies
+    /// (`macro_rules!` expansions, `quote!` output), so a banned read that
+    /// exists only in macro-generated code is invisible here — the same
+    /// limitation the sibling guards carry.
+    struct TelemetryReadGuard<'src> {
+        /// Path label (relative to the crate root) for violation messages.
+        rel: String,
+        /// Raw source split into lines for allowlist lookups
+        /// (`lines[n - 1]` is line `n`, 1-based like span locations).
+        lines: Vec<&'src str>,
+        violations: Vec<String>,
     }
 
-    fn is_in_span(offset: usize, spans: &[(usize, usize)]) -> bool {
-        spans
-            .iter()
-            .any(|(start, end)| offset >= *start && offset < *end)
+    impl<'src> TelemetryReadGuard<'src> {
+        fn new(rel: String, raw: &'src str) -> Self {
+            Self {
+                rel,
+                lines: raw.lines().collect(),
+                violations: Vec::new(),
+            }
+        }
+
+        fn line(&self, one_based: usize) -> Option<&'src str> {
+            one_based
+                .checked_sub(1)
+                .and_then(|idx| self.lines.get(idx).copied())
+        }
+
+        /// Whether the read starting on `line` carries an explicit
+        /// contract: a `// allowed:` comment on the read's own line, on the
+        /// line after it (comments inside a `match`/`if` block the read
+        /// heads), or in the contiguous `//` lines directly above it
+        /// (leading comments on the statement) — the positions the
+        /// established allowlist comments occupy.
+        fn is_allowlisted(&self, line: usize) -> bool {
+            if self
+                .line(line)
+                .is_some_and(|text| text.contains("// allowed:"))
+                || self
+                    .line(line + 1)
+                    .is_some_and(|text| text.contains("// allowed:"))
+            {
+                return true;
+            }
+            let mut above = line.saturating_sub(1);
+            while above >= 1 {
+                match self.line(above) {
+                    Some(text) if text.trim_start().starts_with("//") => {
+                        if text.contains("// allowed:") {
+                            return true;
+                        }
+                        above -= 1;
+                    }
+                    // A non-comment line ends the statement's leading
+                    // comments.
+                    _ => break,
+                }
+            }
+            false
+        }
     }
 
-    fn has_allowlist_comment(raw: &str, line_start: usize, line_end: usize) -> bool {
-        let line_text = &raw[line_start..line_end];
-        if line_text.contains("// allowed:") {
-            return true;
+    /// A telemetry-channel identifier: `telemetry`/`telem`, or a channel
+    /// field ending in `_telemetry`/`_telem` (`equipment_telemetry`,
+    /// `actor_telemetry`).
+    fn is_telemetry_ident(ident: &syn::Ident) -> bool {
+        let name = ident.to_string();
+        name == "telemetry"
+            || name == "telem"
+            || name.ends_with("_telemetry")
+            || name.ends_with("_telem")
+    }
+
+    /// Whether a `.get(..)` receiver is a telemetry channel: a terminal
+    /// telemetry identifier (`actor.telemetry`, `env.equipment_telemetry`,
+    /// a local `telemetry` binding, a `telemetry()` call) or a tuple-field
+    /// `.0` channel. Any other receiver shape is by definition not a
+    /// telemetry channel — the negative answer, not a swallowed variant.
+    fn receiver_is_telemetry_channel(receiver: &syn::Expr) -> bool {
+        match receiver {
+            syn::Expr::Field(field) => match &field.member {
+                syn::Member::Named(ident) => is_telemetry_ident(ident),
+                syn::Member::Unnamed(index) => index.index == 0,
+            },
+            syn::Expr::MethodCall(call) => is_telemetry_ident(&call.method),
+            syn::Expr::Path(path) => path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| is_telemetry_ident(&segment.ident)),
+            syn::Expr::Paren(paren) => receiver_is_telemetry_channel(&paren.expr),
+            _ => false,
+        }
+    }
+
+    /// A `#[cfg(test)]`-family attribute: `cfg(test)`, `cfg(any(test, ..))`,
+    /// `cfg(all(test, ..))`. The token-text substring match is the same
+    /// heuristic the sibling guards use; it can only err toward exemption
+    /// (a configuration literally containing the substring "test" is
+    /// misread as test gating), never toward a false violation.
+    fn is_cfg_test_attr(attr: &syn::Attribute) -> bool {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string().contains("test"))
+    }
+
+    /// Whether an item is test code: a module named `tests` (the
+    /// convention this crate follows even where the attribute is absent),
+    /// or any item gated by a `#[cfg(test)]`-family attribute.
+    fn item_is_test_code(node: &syn::Item) -> bool {
+        let (attrs, is_tests_module) = match node {
+            syn::Item::Const(item) => (&item.attrs, false),
+            syn::Item::Enum(item) => (&item.attrs, false),
+            syn::Item::ExternCrate(item) => (&item.attrs, false),
+            syn::Item::Fn(item) => (&item.attrs, false),
+            syn::Item::ForeignMod(item) => (&item.attrs, false),
+            syn::Item::Impl(item) => (&item.attrs, false),
+            syn::Item::Macro(item) => (&item.attrs, false),
+            syn::Item::Mod(item) => (&item.attrs, item.ident == "tests"),
+            syn::Item::Static(item) => (&item.attrs, false),
+            syn::Item::Struct(item) => (&item.attrs, false),
+            syn::Item::Trait(item) => (&item.attrs, false),
+            syn::Item::TraitAlias(item) => (&item.attrs, false),
+            syn::Item::Type(item) => (&item.attrs, false),
+            syn::Item::Union(item) => (&item.attrs, false),
+            syn::Item::Use(item) => (&item.attrs, false),
+            // `syn::Item` is #[non_exhaustive]: unknown or future variants
+            // carry no attributes this guard can read, so they can only be
+            // treated as non-test-gated — the visitor still descends into
+            // them, which errs toward scanning, never toward silently
+            // skipping code.
+            _ => return false,
+        };
+        is_tests_module || attrs.iter().any(is_cfg_test_attr)
+    }
+
+    /// The same `#[cfg(test)]` gating for items inside `impl` blocks
+    /// (e.g. test-helper methods on production types).
+    fn impl_item_is_test_code(node: &syn::ImplItem) -> bool {
+        let attrs = match node {
+            syn::ImplItem::Const(item) => &item.attrs,
+            syn::ImplItem::Fn(item) => &item.attrs,
+            syn::ImplItem::Macro(item) => &item.attrs,
+            syn::ImplItem::Type(item) => &item.attrs,
+            // `syn::ImplItem` is #[non_exhaustive]: same rule as
+            // `item_is_test_code` — unknown variants are descended into,
+            // never silently skipped.
+            _ => return false,
+        };
+        attrs.iter().any(is_cfg_test_attr)
+    }
+
+    /// The same `#[cfg(test)]` gating for items inside `trait` definitions.
+    fn trait_item_is_test_code(node: &syn::TraitItem) -> bool {
+        let attrs = match node {
+            syn::TraitItem::Const(item) => &item.attrs,
+            syn::TraitItem::Fn(item) => &item.attrs,
+            syn::TraitItem::Macro(item) => &item.attrs,
+            // `syn::TraitItem` is #[non_exhaustive]: same rule as
+            // `item_is_test_code` — unknown variants are descended into,
+            // never silently skipped.
+            _ => return false,
+        };
+        attrs.iter().any(is_cfg_test_attr)
+    }
+
+    impl<'ast> Visit<'ast> for TelemetryReadGuard<'_> {
+        /// Test code is exempt — structurally: modules named `tests`,
+        /// `#[cfg(test)]`-gated items, and the same gating on impl/trait
+        /// items. The exemption this visitor implements is the mechanism
+        /// that previously broke (hand-balanced spans), so it is pinned by
+        /// `telemetry_read_guard_flags_and_excludes_by_syntax` below.
+        fn visit_item(&mut self, node: &'ast syn::Item) {
+            if !item_is_test_code(node) {
+                syn::visit::visit_item(self, node);
+            }
         }
 
-        if line_end >= raw.len() {
-            return false;
+        fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+            if !impl_item_is_test_code(node) {
+                syn::visit::visit_impl_item(self, node);
+            }
         }
-        let next_start = line_end + 1;
-        if next_start >= raw.len() {
-            return false;
+
+        fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+            if !trait_item_is_test_code(node) {
+                syn::visit::visit_trait_item(self, node);
+            }
         }
-        let next_end = raw[next_start..]
-            .find('\n')
-            .map_or(raw.len(), |p| next_start + p);
-        raw[next_start..next_end].contains("// allowed:")
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "get" && receiver_is_telemetry_channel(&node.receiver) {
+                let start = node.span().start();
+                if !self.is_allowlisted(start.line) {
+                    let snippet = self.line(start.line).unwrap_or_default().trim();
+                    self.violations.push(format!(
+                        "{}:{}:{}: telemetry string read in `{}`",
+                        self.rel,
+                        start.line,
+                        start.column + 1,
+                        snippet
+                    ));
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
     }
 
     #[test]
@@ -7441,44 +7930,25 @@ mod tests {
         let mut files = Vec::new();
         collect_rs_files(&src_root, &mut files);
         files.sort();
+        assert!(
+            !files.is_empty(),
+            "guard found no source files under {src_root:?} — is it scanning the right tree?"
+        );
 
-        let banned_patterns = [
-            "telemetry().get(",
-            "telemetry.get(",
-            "telem.get(",
-            ".0.get(",
-        ];
         let mut hits = Vec::new();
-
-        for path in files {
-            let raw = fs::read_to_string(&path)
+        for path in &files {
+            let raw = fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("failed reading {}: {e}", path.display()));
-            let sanitized = strip_strings_and_comments(&raw);
-            let excluded_spans = find_excluded_test_module_spans(&sanitized);
-
-            for pattern in banned_patterns {
-                for (idx, _) in sanitized.match_indices(pattern) {
-                    if is_in_span(idx, &excluded_spans) {
-                        continue;
-                    }
-                    let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
-                    let line_end = raw[idx..].find('\n').map_or(raw.len(), |p| idx + p);
-                    let line_text = &raw[line_start..line_end];
-                    if has_allowlist_comment(&raw, line_start, line_end) {
-                        continue;
-                    }
-                    let (line, col) = offset_to_line_col(&raw, idx);
-                    let rel = path
-                        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                        .unwrap_or(&path)
-                        .display()
-                        .to_string();
-                    hits.push(format!(
-                        "{rel}:{line}:{col}: found `{pattern}` in `{}`",
-                        line_text.trim()
-                    ));
-                }
-            }
+            let parsed = syn::parse_file(&raw)
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+            let rel = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(path.as_path())
+                .display()
+                .to_string();
+            let mut guard = TelemetryReadGuard::new(rel, &raw);
+            guard.visit_file(&parsed);
+            hits.extend(guard.violations);
         }
 
         assert!(
@@ -7488,7 +7958,82 @@ mod tests {
         );
     }
 
+    /// The guard must not be vacuous and its test-code exemption must not
+    /// be blind. Synthetic source pins every arm: production reads on all
+    /// four receiver shapes flag; `other.get`, `telemetry.insert`, and
+    /// `telemetry[0].get` do not; `// allowed:` contracts hold on the
+    /// read's own line, the next line, and as leading comments; `mod
+    /// tests` and `#[cfg(test)]` functions are exempt. The `&'static str`
+    /// inside the test module is load-bearing: the hand-rolled scanner
+    /// this guard replaced false-positived exactly there (its apostrophe
+    /// arm swallowed the text to the next `'`, unbalancing the brace
+    /// match, so the test-module span never resolved); parsing makes the
+    /// exemption immune to lifetimes and char literals.
+    #[test]
+    fn telemetry_read_guard_flags_and_excludes_by_syntax() {
+        let src = r#"
+fn production_reads() {
+    let a = telemetry.get("charge_kw");
+    let b = eq.telemetry().get(tk::SOC);
+    let c = env.equipment_telemetry.get(name);
+    let d = channel.0.get("k");
+}
+fn permitted_shapes() {
+    let ok1 = other.get("k");
+    telemetry.insert("k", 1.0);
+    let ok2 = telemetry[0].get("k");
+}
+fn allowlisted_same_line() {
+    let a = telemetry.get("k"); // allowed: same-line contract.
+}
+fn allowlisted_next_line() {
+    let b = telemetry.get("k");
+    // allowed: next-line contract.
+}
+fn allowlisted_leading_comment() {
+    // allowed: leading-comment contract.
+    let c = eq
+        .telemetry()
+        .get("k");
+}
+mod tests {
+    const LABEL: &'static str = "charge_kw";
+    fn helper() {
+        let t = telemetry.get(LABEL);
+    }
+}
+#[cfg(test)]
+fn cfg_gated_helper() {
+    let t = telemetry.get("charge_kw");
+}
+"#;
+        let parsed = syn::parse_file(src).expect("synthetic guard source parses");
+        let mut guard = TelemetryReadGuard::new("synthetic.rs".to_string(), src);
+        guard.visit_file(&parsed);
+
+        assert_eq!(
+            guard.violations.len(),
+            4,
+            "exactly the four production telemetry reads must flag (telemetry.get, \
+             telemetry().get, equipment_telemetry.get, .0.get); permitted receiver \
+             shapes, allowlisted reads, and test code must not: {:?}",
+            guard.violations
+        );
+    }
+
     fn replace_equipment_for_test(dwelling: &mut Dwelling, equipment: Vec<Box<dyn Equipment>>) {
+        // Keep the never-reused id counter monotonic across the swap: advance
+        // past every entering id (never reuse — same contract as
+        // `add_equipment`), but never lower it, so ids issued before the
+        // swap cannot be reissued even if the new vector's max id is lower.
+        let entering_max = equipment
+            .iter()
+            .map(|eq| eq.descriptor().id.0)
+            .max()
+            .unwrap_or(0);
+        if let Some(next) = entering_max.checked_add(1) {
+            dwelling.next_equipment_id = dwelling.next_equipment_id.max(next);
+        }
         dwelling.equipment = equipment;
         dwelling.equipment_id_by_name = dwelling
             .equipment
@@ -7540,7 +8085,13 @@ mod tests {
         fn new(name: &str, capabilities: ControlCapabilities) -> Self {
             Self {
                 descriptor: EquipmentDescriptor {
-                    id: EquipmentId(1),
+                    // Unassigned sentinel: when this stub joins a dwelling
+                    // through `add_equipment`, the dwelling auto-assigns its
+                    // never-reused id — the same path every Python-side
+                    // `add_*` equipment takes. A hard-coded explicit id
+                    // would collide with the dwelling's assembly-assigned
+                    // ids (they start at 1).
+                    id: EquipmentId(0),
                     name: name.to_string(),
                     end_use: EndUse::OTHER,
                     equipment_type: Cow::Borrowed("TestEquipment"),
@@ -7585,6 +8136,13 @@ mod tests {
 
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -7726,6 +8284,13 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -7850,6 +8415,13 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -7961,6 +8533,13 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -8056,6 +8635,13 @@ mod tests {
 
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -8185,6 +8771,13 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -8302,6 +8895,13 @@ mod tests {
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -8413,6 +9013,13 @@ mod tests {
 
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -9363,6 +9970,13 @@ occupancy = 1.0
 
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -10645,6 +11259,12 @@ occupancy = 1.0
         }
         fn rename(&mut self, name: String) {
             self.inner.rename(name);
+        }
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.inner.set_equipment_id(id)
         }
         fn ports(&self) -> &[PortDeclaration] {
             self.inner.ports()
@@ -13033,6 +13653,16 @@ master_seed = 0
             fn rename(&mut self, name: String) {
                 self.descriptor.name = name;
             }
+            fn set_equipment_id(
+                &mut self,
+                id: EquipmentId,
+            ) -> std::result::Result<(), hares_types::HaresError> {
+                hares_equipment::apply_identity_write(
+                    self.is_initialized(),
+                    &mut self.descriptor,
+                    id,
+                )
+            }
             fn ports(&self) -> &[PortDeclaration] {
                 &self.ports
             }
@@ -13201,6 +13831,13 @@ master_seed = 0
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -13307,6 +13944,13 @@ master_seed = 0
             self.descriptor.name = name;
         }
 
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -13406,6 +14050,13 @@ master_seed = 0
 
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -14507,6 +15158,58 @@ master_seed = 42
 
     // ── Telemetry-to-Column Mapping Tests ──
 
+    /// The `in_schema` scoping of the `expected` predicate does not silence
+    /// the drift check: for equipment the schema KNOWS (membership = the
+    /// schema's unconditional `{name} Electric Power (kW)` column), a
+    /// missing applicable column at its verbosity still panics in debug
+    /// builds. Only schema-unknown equipment — added after the schema froze,
+    /// carrying no columns by design — are exempt.
+    #[test]
+    #[should_panic(expected = "expected output column 'Battery SOC (-)' for equipment 'Battery'")]
+    fn build_equipment_column_map_still_panics_on_schema_drift_for_known_equipment() {
+        let mut eq = TestEquipment::new("Battery", ControlCapabilities::empty());
+        eq.descriptor.end_use = EndUse::BATTERY;
+        eq.descriptor.fuel = FuelType::Electric;
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        // A schema-known equipment: the index carries its membership column
+        // (Electric Power, emitted unconditionally at verbosity ≥ 1) and its
+        // Mode column, but not the SOC column its name class demands at
+        // verbosity 3 — drift for a known equipment must stay loud.
+        let mut column_index = HashMap::new();
+        column_index.insert("Battery Electric Power (kW)".to_string(), 0usize);
+        column_index.insert("Battery Mode (-)".to_string(), 1usize);
+        let _ = build_equipment_column_map(&equipment, &column_index, 3);
+    }
+
+    /// An equipment whose name shadows a reserved aggregate column ("Total")
+    /// must claim NOTHING from a column index that carries the aggregate —
+    /// not even the column that exists under its own name. Claiming it would
+    /// make record_step's later per-equipment write silently replace the
+    /// dwelling's total; and treating the aggregate's presence as membership
+    /// would panic on the absent Mode column. Both faces are pinned here:
+    /// no claim, no panic.
+    #[test]
+    fn column_map_claims_nothing_for_an_equipment_name_shadowing_the_aggregate_column() {
+        let eq = TestEquipment::new("Total", ControlCapabilities::empty());
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        // The index carries only the level-0 aggregate — the exact state a
+        // frozen schema presents to a mid-run equipment named "Total".
+        let mut column_index = HashMap::new();
+        column_index.insert("Total Electric Power (kW)".to_string(), 0usize);
+        let col_map = build_equipment_column_map(&equipment, &column_index, 3);
+        let cols = &col_map[0];
+        assert!(
+            cols.electric_power.is_none(),
+            "an equipment named 'Total' must not claim the aggregate \
+             'Total Electric Power (kW)' column as its own"
+        );
+        assert!(
+            cols.mode.is_none(),
+            "the aggregate's presence must not be read as schema membership — \
+             the absent Mode column must not panic"
+        );
+    }
+
     /// At verbosity 7, all per-equipment column indices for applicable equipment
     /// types are resolved to `Some`.
     #[test]
@@ -14994,6 +15697,85 @@ master_seed = 42
         assert!(
             reactive_col.metadata().get("unit_source").is_none(),
             "reactive power column should not get unit_source when equipment declares no kVAR field"
+        );
+    }
+
+    /// Interest-filtering state must stay per-equipment: `prev_equipment_modes`
+    /// is `EquipmentId`-keyed and `equipment_mode_changed` attributes a mode
+    /// change to the actor's target equipment by comparing against this map.
+    /// Under the pre-I-06 identity collapse every equipment shared id 0, the
+    /// map collapsed to a single entry, and every actor's target was compared
+    /// against the *wrong* equipment's previous mode (spurious or missed
+    /// wakeups). Built through the real assembly path (`from_toml_config` →
+    /// `build_from_blueprint` → the id-injection pass), not hand-injected ids.
+    #[test]
+    fn prev_equipment_modes_has_one_entry_per_equipment_after_step() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-test-modes-{nanos}.toml"));
+            path
+        };
+        fs::write(
+            &toml_path,
+            r#"building_id = 998
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+[materials]
+wall_r_value_m2_k_w = 2.8
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+[schedule]
+occupancy = 1.0
+[event_load]
+active_power_kw = 1.5
+event_probability = 1.0
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = fs::remove_file(&toml_path);
+
+        assert!(
+            dwelling.equipment.len() >= 2,
+            "precondition: the synthetic dwelling must assemble multiple equipment \
+             for the map-collapse check to bite, got {}",
+            dwelling.equipment.len()
+        );
+        dwelling.step().expect("first step succeeds");
+        assert_eq!(
+            dwelling.prev_equipment_modes.len(),
+            dwelling.latest_env.equipment_core.len(),
+            "the mode-change map is rebuilt from equipment_core each step — it must \
+             carry one entry per stepped equipment, not collapse onto shared ids"
+        );
+        assert_eq!(
+            dwelling.prev_equipment_modes.len(),
+            dwelling.equipment.len(),
+            "every equipment in the vector must be individually keyed in \
+             prev_equipment_modes so mode changes attribute to the right equipment"
         );
     }
 

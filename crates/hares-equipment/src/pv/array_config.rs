@@ -232,18 +232,6 @@ impl PvArraySpec {
     }
 }
 
-pub(super) fn parse_u32_from_f64(v: Option<f64>) -> Option<u32> {
-    let raw = v?;
-    if !raw.is_finite() || raw < 0.0 || raw > (u32::MAX as f64) {
-        return None;
-    }
-    let rounded = raw.round();
-    if (rounded - raw).abs() > 1e-6 {
-        return None;
-    }
-    Some(rounded as u32)
-}
-
 pub(super) fn normalize_azimuth(mut azimuth_deg: f64) -> f64 {
     azimuth_deg = azimuth_deg.rem_euclid(360.0);
     if azimuth_deg == 360.0 {

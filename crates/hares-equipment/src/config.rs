@@ -22,6 +22,73 @@ pub struct SetpointReconciliation {
 /// Common config key for equipment ID in `ConfigPayload::Raw` payloads.
 /// Typed configs carry this as a struct field instead.
 pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
+
+/// Tri-state `equipment_id` resolution from either payload kind — the single
+/// home for equipment-identity config reads.
+///
+/// Returns:
+/// - `Ok(None)` — the key is absent (the caller decides the default:
+///   constructors stamp the unassigned sentinel `0`; init re-assignment
+///   sites preserve the descriptor's current id);
+/// - `Ok(Some(id))` — the key is present and valid (non-negative integer
+///   within `u32` range); `Some(0)` is the *explicit* unassigned sentinel,
+///   distinct from absence;
+/// - `Err` — the key is present but malformed (non-finite, negative,
+///   fractional, or above `u32::MAX`), as a typed equipment error naming
+///   the value.
+///
+/// Reads the `Raw` payload's map first (custom-equipment adapter path), then
+/// the `Typed` payload's JSON object (where the dwelling assembly injects the
+/// id and where `#[serde(flatten)]`-ed heat-pump configs expose
+/// `common.equipment_id` at the top level), so both payload kinds resolve
+/// identity through this one function.
+pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<Option<u32>> {
+    let raw = config
+        .get_f64(KEY_EQUIPMENT_ID)
+        .or_else(|| match &config.payload {
+            ConfigPayload::Typed { data, .. } => {
+                data.get(KEY_EQUIPMENT_ID).and_then(|v| v.as_f64())
+            }
+            ConfigPayload::Raw { .. } => None,
+        });
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "invalid equipment_id value {value} for equipment '{}': \
+             must be a non-negative integer within u32 range",
+            config.name
+        )));
+    }
+    Ok(Some(value as u32))
+}
+
+/// Descriptor id for an infallible constructor to stamp from its config:
+/// the configured id when present and valid, else the unassigned sentinel
+/// `0`.
+///
+/// A malformed value also maps to the sentinel: `new()` constructors cannot
+/// return errors, and the sentinel never silently survives into a dwelling —
+/// assembly validation rejects id `0` outright, and `Dwelling::add_equipment`
+/// auto-assigns over it (under which equipment ids are dwelling-assigned
+/// rather than configurable). The typed-error arm of
+/// [`equipment_id_from_config`] is the contract error-returning `init()`
+/// boundaries use.
+pub fn constructor_equipment_id(config: &EquipmentConfig) -> u32 {
+    match equipment_id_from_config(config) {
+        Ok(id) => id.unwrap_or(0),
+        Err(err) => {
+            tracing::warn!(
+                equipment = %config.name,
+                error = %err,
+                "malformed equipment_id in config; stamping the unassigned sentinel 0 \
+                 (rejected by dwelling assembly, auto-assigned by add_equipment)"
+            );
+            0
+        }
+    }
+}
 /// Common config key for zone ID in `ConfigPayload::Raw` payloads.
 /// Typed configs carry this as a struct field instead.
 pub const KEY_ZONE_ID: &str = "zone_id";
@@ -620,6 +687,104 @@ mod tests {
         fn equipment_type_name() -> &'static str {
             "OtherEquipment"
         }
+    }
+
+    // ── equipment_id tri-state reader ─────────────────────────────────
+
+    fn raw_id_cfg(id: Option<f64>) -> EquipmentConfig {
+        let mut data = HashMap::new();
+        if let Some(id) = id {
+            data.insert("equipment_id".to_string(), ConfigValue::Float(id));
+        }
+        EquipmentConfig::raw("test".to_string(), "Test".to_string(), data)
+    }
+
+    fn typed_id_cfg(id: Option<u32>) -> EquipmentConfig {
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct IdConfig {
+            equipment_id: Option<u32>,
+        }
+        impl EquipmentTypedConfig for IdConfig {
+            fn equipment_type_name() -> &'static str {
+                "IdConfig"
+            }
+        }
+        EquipmentConfig::from_typed(
+            "test".to_string(),
+            "Test".to_string(),
+            IdConfig { equipment_id: id },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn equipment_id_from_config_absent_is_none_on_both_payload_kinds() {
+        for cfg in [raw_id_cfg(None), typed_id_cfg(None)] {
+            assert_eq!(
+                super::equipment_id_from_config(&cfg).unwrap(),
+                None,
+                "absent equipment_id must read as Ok(None) — distinguishable from an \
+                 explicit 0 so preserve-when-absent init sites keep the descriptor's id"
+            );
+        }
+    }
+
+    #[test]
+    fn equipment_id_from_config_present_reads_id_on_both_payload_kinds() {
+        // Explicit 0 is *present* (the unassigned sentinel), not absent.
+        for (cfg, expected) in [
+            (raw_id_cfg(Some(0.0)), Some(0)),
+            (raw_id_cfg(Some(7.0)), Some(7)),
+            (typed_id_cfg(Some(0)), Some(0)),
+            (typed_id_cfg(Some(7)), Some(7)),
+        ] {
+            assert_eq!(
+                super::equipment_id_from_config(&cfg).unwrap(),
+                expected,
+                "present valid equipment_id must read through from either payload kind"
+            );
+        }
+    }
+
+    #[test]
+    fn equipment_id_from_config_malformed_is_typed_error_on_both_payload_kinds() {
+        for (label, cfg) in [
+            ("raw fractional", raw_id_cfg(Some(3.5))),
+            ("raw negative", raw_id_cfg(Some(-1.0))),
+            ("raw beyond u32", raw_id_cfg(Some((u32::MAX as f64) + 1.0))),
+            ("raw NaN", raw_id_cfg(Some(f64::NAN))),
+        ] {
+            let err = super::equipment_id_from_config(&cfg);
+            assert!(
+                err.is_err(),
+                "{label}: malformed equipment_id must be a typed error, got {:?}",
+                err.unwrap()
+            );
+        }
+        // Typed payloads carry `Option<u32>` fields, so serde rejects
+        // malformed values at deserialization; the JSON-level reader sees
+        // only well-formed numbers — the raw-payload arm above is the
+        // reachable malformed channel, and the reader holds the same line
+        // for both so the contract cannot drift.
+        let mut typed = typed_id_cfg(Some(7));
+        if let ConfigPayload::Typed { data, .. } = &mut typed.payload {
+            data["equipment_id"] = serde_json::json!(3.5);
+        }
+        assert!(
+            super::equipment_id_from_config(&typed).is_err(),
+            "typed fractional equipment_id (injected at the JSON layer) must be a typed error"
+        );
+    }
+
+    #[test]
+    fn constructor_equipment_id_maps_absent_and_malformed_to_the_sentinel() {
+        assert_eq!(super::constructor_equipment_id(&raw_id_cfg(None)), 0);
+        assert_eq!(super::constructor_equipment_id(&raw_id_cfg(Some(7.0))), 7);
+        // Malformed maps to the sentinel: constructors are infallible, and
+        // the sentinel is rejected by dwelling assembly (or auto-assigned
+        // by add_equipment) — never silently a live id.
+        assert_eq!(super::constructor_equipment_id(&raw_id_cfg(Some(3.5))), 0);
     }
 
     #[test]

@@ -119,7 +119,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
         "EV".to_string(),
         EvConfig {
             equipment_id: raw
-                .get(KEY_EQUIPMENT_ID)
+                .get(crate::config::KEY_EQUIPMENT_ID)
                 .and_then(crate::config::ConfigValue::as_f64)
                 .map(|value| value as u32),
             capacity_kwh,

@@ -17,8 +17,8 @@ mod lut;
 pub mod shading;
 pub mod soiling;
 
+use array_config::normalize_azimuth;
 pub use array_config::{ArrayType, ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
-use array_config::{normalize_azimuth, parse_u32_from_f64};
 pub use config::PvConfig;
 use lut::{InterpolationMethod, PvLut};
 
@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
-use crate::config::KEY_EQUIPMENT_ID;
+use crate::config::constructor_equipment_id;
 
 /// Nominal operating cell temperature for SAM PVWatts v8 open-rack (array_type=0).
 ///
@@ -264,7 +264,7 @@ pub struct PV {
 impl PV {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let id = parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0);
+        let id = constructor_equipment_id(&config);
         let (arrays, mut init_error) = if config.is_typed() {
             (vec![], None)
         } else {
@@ -1561,6 +1561,10 @@ impl Equipment for PV {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 }
 

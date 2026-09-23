@@ -6,7 +6,6 @@ use crate::config::EquipmentTypedConfig;
 
 use hares_types::{ChargingLevel, ChargingPriority, ChargingStrategy, PlugInPolicy};
 
-pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(crate) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";
 pub(super) const KEY_BATTERY_CAPACITY_HPXML_KWH: &str = "BatteryCapacity";
 pub(crate) const KEY_CHARGING_LEVEL: &str = "charging_level";

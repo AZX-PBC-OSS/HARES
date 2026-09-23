@@ -116,21 +116,6 @@ pub fn lookup_zone(
         .ok_or_else(|| HaresError::Equipment(format!("zone {zone_id:?} not found")))
 }
 
-pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<u32> {
-    let Some(raw) = config
-        .get_f64("equipment_id")
-        .or_else(|| typed_f64(config, "equipment_id"))
-    else {
-        return Ok(0);
-    };
-    if !raw.is_finite() || raw < 0.0 || raw.fract() != 0.0 || raw > u32::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid equipment_id value {raw}"
-        )));
-    }
-    Ok(raw as u32)
-}
-
 fn typed_f64(config: &EquipmentConfig, key: &str) -> Option<f64> {
     match &config.payload {
         ConfigPayload::Typed { data, .. } => data.get(key).and_then(|v| v.as_f64()),
@@ -568,9 +553,9 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, compute_and_write_ebm_telemetry, equipment_id_from_config,
-        loop_id_from_config, parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys,
-        resolve_duct_dse, zone_id_from_config, zone_id_from_config_or_default,
+        DuctDseContext, compute_and_write_ebm_telemetry, loop_id_from_config, parse_fuel_type,
+        parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, zone_id_from_config,
+        zone_id_from_config_or_default,
     };
 
     #[test]
@@ -637,7 +622,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(equipment_id_from_config(&gas_furnace).unwrap(), 42);
+        assert_eq!(
+            crate::config::equipment_id_from_config(&gas_furnace).unwrap(),
+            Some(42)
+        );
         assert_eq!(
             zone_id_from_config(&gas_furnace),
             Some(hares_types::ZoneId(7))

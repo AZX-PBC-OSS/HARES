@@ -49,17 +49,12 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::constructor_equipment_id;
 use crate::protocol_bridge::handler::{EquipmentCommand, ProtocolHandler};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub use config::ProtocolBridgeConfig;
 pub use handler::JsonHandler;
-
-// ---------------------------------------------------------------------------
-// Const
-// ---------------------------------------------------------------------------
-
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
 
 // ---------------------------------------------------------------------------
 // Checkpoint
@@ -112,10 +107,7 @@ pub struct ProtocolBridge {
 impl ProtocolBridge {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let equipment_id = config
-            .get_f64(KEY_EQUIPMENT_ID)
-            .map(|v| v as u32)
-            .unwrap_or(0);
+        let equipment_id = constructor_equipment_id(&config);
 
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id),
@@ -196,6 +188,10 @@ impl Equipment for ProtocolBridge {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn ports(&self) -> &[PortDeclaration] {

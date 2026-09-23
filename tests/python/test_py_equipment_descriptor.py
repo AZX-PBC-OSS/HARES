@@ -216,3 +216,22 @@ class TestIdField:
         for desc in descriptors:
             assert isinstance(desc.id, int), "id should be an integer"
             assert desc.id >= 0, "id should be non-negative"
+
+    def test_descriptor_ids_are_assigned_not_the_shared_sentinel(self, dwelling):
+        # Equipment ids are assigned by the dwelling assembly: every
+        # equipment carries a distinct non-zero id. The unassigned sentinel
+        # is 0 — if descriptors share it, every EquipmentId-keyed map in the
+        # dwelling collapses to one entry and observation actors (the EV
+        # driver, the battery management actor) read the wrong equipment's
+        # state.
+        descriptors = dwelling.equipment_descriptors()
+        ids = [desc.id for desc in descriptors]
+
+        assert len(ids) > 1, "fixture must assemble multiple equipment for uniqueness to bite"
+        assert all(i != 0 for i in ids), (
+            f"no descriptor may report the unassigned sentinel 0, got {ids}"
+        )
+        assert len(set(ids)) == len(ids), (
+            "descriptor ids must be unique so EquipmentId-keyed lookups "
+            f"address the right equipment, got {ids}"
+        )

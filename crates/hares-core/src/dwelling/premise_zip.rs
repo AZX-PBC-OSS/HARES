@@ -250,6 +250,12 @@ mod tests {
         fn rename(&mut self, _name: String) {
             unimplemented!()
         }
+        fn set_equipment_id(
+            &mut self,
+            id: hares_types::EquipmentId,
+        ) -> hares_equipment::Result<()> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
         fn apply_signal(
             &mut self,
             _signal: &hares_types::ControlSignal,

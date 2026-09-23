@@ -138,19 +138,6 @@ pub(crate) fn parse_u16(config: &EquipmentConfig, key: &str) -> crate::Result<Op
     Ok(Some(value as u16))
 }
 
-pub(crate) fn parse_u32(config: &EquipmentConfig, key: &str) -> crate::Result<u32> {
-    let value = config
-        .get_f64(key)
-        .or_else(|| typed_f64(config, key))
-        .unwrap_or(0.0);
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid integer value for key {key}: {value}"
-        )));
-    }
-    Ok(value as u32)
-}
-
 pub(crate) fn parse_usize(config: &EquipmentConfig, key: &str) -> crate::Result<Option<usize>> {
     let value = match config.get_f64(key).or_else(|| typed_f64(config, key)) {
         Some(value) => value,

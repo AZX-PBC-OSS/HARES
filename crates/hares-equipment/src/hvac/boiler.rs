@@ -23,11 +23,11 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, equipment_id_from_config, lookup_zone,
-        loop_id_from_config, outage_forces_off, register_ebm_telemetry_keys,
-        update_heating_control, zone_id_from_config_or_default,
+        compute_and_write_ebm_telemetry, lookup_zone, loop_id_from_config, outage_forces_off,
+        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
     },
 };
+use crate::config::constructor_equipment_id;
 
 use hares_physics::constants::cp_j_kg_k;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
@@ -169,7 +169,7 @@ impl ElectricBoiler {
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Boiler"),
@@ -227,6 +227,10 @@ impl Equipment for ElectricBoiler {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {
@@ -515,7 +519,7 @@ impl GasBoiler {
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Boiler"),
@@ -609,6 +613,10 @@ impl Equipment for GasBoiler {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

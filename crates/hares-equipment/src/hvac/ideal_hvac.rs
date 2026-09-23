@@ -28,10 +28,9 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{
-        equipment_id_from_config, register_ebm_telemetry_keys, zone_id_from_config_or_default,
-    },
+    helpers::{register_ebm_telemetry_keys, zone_id_from_config_or_default},
 };
+use crate::config::constructor_equipment_id;
 
 /// Biquadratic curve pair (capacity + EIR) with shared input bounds.
 /// Encapsulates the temperature-correction curves used by the non-ideal
@@ -159,7 +158,7 @@ impl IdealHvac {
     pub fn new(config: EquipmentConfig) -> Self {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Ideal HVAC"),
@@ -340,6 +339,10 @@ impl Equipment for IdealHvac {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

@@ -314,6 +314,10 @@ impl Equipment for StepOrderSpy {
         self.descriptor.name = name;
     }
 
+    fn set_equipment_id(&mut self, id: EquipmentId) -> hares_equipment::Result<()> {
+        hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &[]
     }

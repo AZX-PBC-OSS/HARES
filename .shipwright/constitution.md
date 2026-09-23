@@ -76,6 +76,15 @@ When two decoupled components communicate by dispatch — an actor sending contr
 - **Latched receiver state must have a clearing rule.** If a dispatched setpoint persists until overwritten, define exactly which later signals supersede it and which lifecycle events (disconnect, reset) clear it. A hold that latches without a clearing rule trades "always acts" for "never acts" — the opposite failure mode by the same mechanism.
 - **Test the receiver's observable state, not the sender's silence.** A test asserting "nothing was dispatched" proves nothing about what the receiver did. Assert the downstream effect (energy consumed, state held, transition made) across the boundary. "The sender asserted nothing" is not equivalent to "nothing happened."
 
+### Identity is assigned at the boundary, never defaulted into use
+
+When components are keyed by an identity — an id, a name, an index — that identity must be assigned and validated at the assembly boundary where the keyed population is built. A constructor-level default (`id = 0`, empty name) that nothing is obligated to overwrite collapses every identity-keyed map to a single entry, silently: every lookup "succeeds" and returns the wrong component (I-06: every equipment in a real dwelling build was `EquipmentId(0)`, so `equipment_core` held one entry and the EV driver read a plug load's output as its own battery's SOC — the vehicle was healthy; the observation was cross-wired).
+
+- **Sentinel defaults must not survive the entrance.** Validate uniqueness and non-default at every entrance where a component joins a keyed population; auto-assign from a never-reused counter when the caller supplied none; reject collisions with a typed error. A defaulted identity is assigned, never silently shared.
+- **The identity write is verified, not assumed.** When the boundary assigns identity through a setter, check the postcondition (the component now holds the assigned value) before admitting it. A no-op setter body must fail registration loudly, not pass.
+- **Regression tests for wiring bugs go through the real assembly path.** Unit tests that hand-build the structures the assembly would build (assigning ids manually) are blind to exactly the defects the assembly introduces. Build through the public entry point and assert the population-level invariant (one entry per component, every component individually addressable).
+- **A safety net that depends on the channel it monitors is not a safety net.** A check that only runs when observation succeeds (e.g. a divergence warning gated on `actual_soc.is_some()`) is blind to observation failure — the failure mode it exists to catch. Monitors must detect the *absence* of expected input, not merely anomalous values, and telemetry that silently falls back to an internal estimate masks the misbinding it should expose.
+
 ### Fix the class of bug, not the instance
 
 Every ticket identifies a specific instance of a problem. The fix must address the entire class. Before writing code, ask: does this same issue appear anywhere else?

@@ -908,7 +908,7 @@ impl Generator {
     #[must_use]
     pub fn new(config: EquipmentConfig, kind: GeneratorKind) -> Self {
         let typed = config.typed::<GeneratorConfig>().ok();
-        let equipment_id = typed.as_ref().and_then(|c| c.equipment_id).unwrap_or(0);
+        let equipment_id = crate::config::constructor_equipment_id(&config);
         let zone = typed.as_ref().and_then(|c| c.zone_id).map(ZoneId);
         let fuel = typed
             .as_ref()
@@ -1147,7 +1147,13 @@ impl Generator {
         if let Some(fuel_type) = c.fuel_type {
             self.descriptor.fuel = fuel_type;
         }
-        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        // Preserve-when-absent: an absent `equipment_id` key keeps the
+        // descriptor's existing (assembly-injected) identity instead of
+        // clobbering it — `None` from the tri-state reader means "not
+        // configured here", not "unassigned".
+        if let Some(id) = crate::config::equipment_id_from_config(config)? {
+            self.descriptor.id = EquipmentId(id);
+        }
         self.descriptor.zone = c.zone_id.map(ZoneId);
         self.rated_power_kw = c.rated_power_kw;
         self.capacity_min_kw = c.capacity_min_kw;
@@ -2046,6 +2052,10 @@ impl Equipment for Generator {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 }
 

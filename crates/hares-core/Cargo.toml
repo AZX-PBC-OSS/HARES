@@ -44,6 +44,8 @@ hares-fleet = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 libc = "0.2"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [[test]]
 name = "regression"

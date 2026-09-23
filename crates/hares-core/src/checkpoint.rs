@@ -14,7 +14,35 @@ use serde::{Deserialize, Serialize};
 /// carrying a per-actor schema version, and `EvDriverSnapshot` gained the
 /// `drive_cancelled` counter in the same change — checkpoints written by
 /// v6 builds are rejected by the version gate in [`DwellingCheckpoint::load`].
-pub const CHECKPOINT_VERSION: u32 = 7;
+///
+/// v8: `equipment_states` entries became [`EquipmentStateCheckpoint`]
+/// records carrying the equipment's name and id, and restore validates
+/// both against the live equipment — checkpoints written by v7 builds
+/// (positionally-indexed opaque blobs) are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 8;
+
+/// One equipment's checkpointed state, identity-keyed.
+///
+/// `name` and `equipment_id` are recorded from the equipment's descriptor
+/// at save time and both are validated on restore: state is matched to
+/// equipment by name, and the id must agree. A spec reorder between save
+/// and restore (or any other identity drift) is then a typed error naming
+/// both sides — never state silently loading into the wrong equipment,
+/// which is what the positional `zip` this record replaced could do (and
+/// did, invisibly, for any reordered equipment set).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EquipmentStateCheckpoint {
+    /// Equipment instance name, matched against `descriptor().name` on
+    /// restore.
+    pub name: String,
+    /// Equipment id at save time, matched against `descriptor().id` on
+    /// restore. Ids are deterministic from spec order, so an id mismatch
+    /// is direct evidence the equipment set or its order changed between
+    /// save and restore.
+    pub equipment_id: u32,
+    /// Opaque state blob from `Equipment::save_state()`.
+    pub blob: Vec<u8>,
+}
 
 /// One actor's checkpointed decision-state.
 ///
@@ -47,7 +75,11 @@ pub struct DwellingCheckpoint {
     pub format_version: u32,
     pub bldg_id: i64,
     pub timestep_index: u64,
-    pub equipment_states: Vec<Vec<u8>>,
+    /// Per-equipment state, identity-keyed. Each entry carries the
+    /// equipment's name and id alongside its opaque state blob; restore
+    /// matches by name and validates the id before handing the blob to
+    /// `Equipment::load_state` (see [`EquipmentStateCheckpoint`]).
+    pub equipment_states: Vec<EquipmentStateCheckpoint>,
     pub rng_state: [u8; 32],
     pub envelope_state: Vec<f64>,
     /// Per-zone humidity ratios. Each entry is `(ZoneId, humidity_ratio)`.
@@ -179,7 +211,9 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint};
+    use super::{
+        ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
+    };
     use hares_types::{ElectricalSummary, ZoneId};
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
@@ -204,7 +238,11 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
-            equipment_states: vec![vec![1, 2, 3]],
+            equipment_states: vec![EquipmentStateCheckpoint {
+                name: "EV".into(),
+                equipment_id: 3,
+                blob: vec![1, 2, 3],
+            }],
             rng_state: [42; 32],
             envelope_state: vec![1.0, 2.0],
             humidity_states: vec![(ZoneId(1), 0.005)],
@@ -229,6 +267,12 @@ mod tests {
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded, cp);
+        // The identity fields must survive the round-trip — they are what
+        // restore validates against, so a serialization that dropped them
+        // would silently regress restore to positional matching.
+        assert_eq!(loaded.equipment_states[0].name, "EV");
+        assert_eq!(loaded.equipment_states[0].equipment_id, 3);
+        assert_eq!(loaded.equipment_states[0].blob, vec![1, 2, 3]);
     }
 
     #[test]

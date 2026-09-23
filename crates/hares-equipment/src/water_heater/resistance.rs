@@ -22,9 +22,8 @@ use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
-use crate::hvac::helpers::{
-    equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
-};
+use crate::config::{constructor_equipment_id, equipment_id_from_config};
+use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config_or_default};
 
 /// Element priority control mode for dual-element electric resistance water heaters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -171,7 +170,7 @@ impl ResistanceWH {
 
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Resistance Water Heater"),
@@ -311,7 +310,13 @@ impl ResistanceWH {
             );
         }
 
-        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        // Preserve-when-absent: an absent `equipment_id` key keeps the
+        // descriptor's existing (assembly-injected) identity instead of
+        // clobbering it — `None` from the tri-state reader means "not
+        // configured here", not "unassigned".
+        if let Some(id) = equipment_id_from_config(config)? {
+            self.descriptor.id = EquipmentId(id);
+        }
         let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
         self.descriptor.zone = zone;
         self.descriptor.zone_type = c.zone_type.clone();
@@ -436,6 +441,10 @@ impl Equipment for ResistanceWH {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

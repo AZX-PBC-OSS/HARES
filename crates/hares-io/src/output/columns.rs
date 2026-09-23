@@ -440,11 +440,32 @@ pub fn build_schema(
     ));
 
     // Compute instance-qualified names once for all verbosity levels that need them.
-    let names = if verbosity >= 1 && !equipment_list.is_empty() {
+    let mut names = if verbosity >= 1 && !equipment_list.is_empty() {
         instance_qualified_names(equipment_list)
     } else {
         Vec::new()
     };
+    // Reserved-namespace filter: a name whose per-equipment column would be
+    // a reserved aggregate column (an equipment literally named "Total")
+    // gets NO per-equipment columns at any verbosity — emitting one would
+    // duplicate the aggregate's field name, and a name-keyed column index
+    // collapses duplicates, leaving the advertised aggregate column as the
+    // one never written. `is_reserved_output_column_name` documents the
+    // contract; the equipment's values are missing, never misattributed.
+    names.retain(|(name, _)| {
+        let member = format!("{name} {ELECTRIC_POWER_SUFFIX}");
+        let shadowed = is_reserved_output_column_name(&member);
+        if shadowed {
+            tracing::warn!(
+                equipment = %name,
+                column = %member,
+                "equipment name shadows a reserved aggregate output column; no \
+                 per-equipment output columns are emitted for it (its values are \
+                 missing, never misattributed)"
+            );
+        }
+        !shadowed
+    });
 
     if verbosity >= 1 {
         for (name, fuel) in &names {
@@ -907,6 +928,33 @@ pub fn build_schema(
     );
 
     Schema::new_with_metadata(fields, metadata)
+}
+
+/// Whether `name` is a **reserved** output column — one the schema emits
+/// independently of any equipment instance, whose name nevertheless sits
+/// verbatim in the per-equipment `{name} {suffix}` namespace.
+///
+/// The reserved occupants of that namespace are the level-0 aggregate
+/// totals (an equipment named `"Total"` would produce the per-equipment
+/// column `"Total Electric Power (kW)"` — the aggregate's own name) and the
+/// per-end-use aggregates (an equipment named `"HVAC Heating End Use"`
+/// would produce `"HVAC Heating End Use Electric Power (kW)"`). Both sets
+/// are recognized through their existing single homes — the `LEVEL_0_COLUMNS`
+/// const and [`parse_end_use_electric_power_column`] — so this predicate
+/// cannot drift from the emission sites.
+///
+/// The contract it enforces, shared by `build_schema` and the dwelling's
+/// equipment column map: an equipment whose per-equipment column name is
+/// reserved gets **no** per-equipment output columns — the schema does not
+/// emit them (a duplicate field name would collapse in the name-keyed
+/// column index) and the column map claims none (a claim would make
+/// `record_step`'s later per-equipment write silently replace the
+/// aggregate). Its values are missing, never misattributed; its energy
+/// still reaches the totals and end-use aggregates through the port/core
+/// outputs those columns are computed from.
+#[must_use]
+pub fn is_reserved_output_column_name(name: &str) -> bool {
+    LEVEL_0_COLUMNS.contains(&name) || parse_end_use_electric_power_column(name).is_some()
 }
 
 /// Returns column names that should be present at a given verbosity level
@@ -1921,6 +1969,94 @@ mod tests {
                 "display_name_to_end_use_key('{display}') round-trip failed for {expected_key}"
             );
         }
+    }
+
+    /// `is_reserved_output_column_name` flags exactly the schema's
+    /// non-per-equipment columns that occupy the per-equipment
+    /// `{name} {suffix}` namespace: the level-0 aggregate totals and the
+    /// per-end-use aggregates. Per-equipment columns and fixed columns
+    /// outside that namespace (zone/setpoint/context columns) are not
+    /// reserved — the membership test in the dwelling's column map must
+    /// keep resolving them.
+    #[test]
+    fn is_reserved_output_column_name_flags_the_aggregate_namespace() {
+        for reserved in [
+            "Total Electric Power (kW)",
+            "Total Gas Power (therms/hour)",
+            "Total Reactive Power (kVAR)",
+            "HVAC Heating End Use Electric Power (kW)",
+            "Other End Use Electric Power (kW)",
+        ] {
+            assert!(
+                is_reserved_output_column_name(reserved),
+                "'{reserved}' is a reserved aggregate column occupying the \
+                 per-equipment namespace"
+            );
+        }
+        for not_reserved in [
+            "Clothes Washer Electric Power (kW)",
+            "EV Mode (-)",
+            "Total Mode (-)",
+            "Total Energy (kWh)",
+            "Outdoor Dry Bulb (C)",
+            "HVAC Duct Losses (W)",
+            "Scheduled Heating Setpoint (C)",
+        ] {
+            assert!(
+                !is_reserved_output_column_name(not_reserved),
+                "'{not_reserved}' is not a reserved column — the per-equipment \
+                 membership test must not exclude it"
+            );
+        }
+    }
+
+    /// An equipment named "Total" shadows the level-0 aggregate column
+    /// name: the schema must emit that name exactly once (the aggregate) and
+    /// no other per-equipment columns for that name at any verbosity — a
+    /// duplicate field name collapses in the name-keyed column index, and
+    /// the advertised aggregate column becomes the one never written. The
+    /// equipment's end-use aggregate is still emitted: its energy keeps
+    /// counting toward the aggregates computed from port/core outputs.
+    #[test]
+    fn build_schema_emits_no_per_equipment_columns_for_a_name_shadowing_an_aggregate() {
+        let specs = vec![make_spec("Total", FuelType::Electric)];
+        let schema = build_schema(&specs, 8, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|&&n| n == "Total Electric Power (kW)")
+                .count(),
+            1,
+            "the aggregate column name must appear exactly once (the \
+             level-0 aggregate), got: {names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|&&n| n == "Total Reactive Power (kVAR)")
+                .count(),
+            1,
+            "the reactive aggregate must appear exactly once — the \
+             per-equipment reactive column for the shadowing name would be a \
+             duplicate, got: {names:?}"
+        );
+        for shadowed in [
+            "Total Mode (-)",
+            "Total Energy (kWh)",
+            "Total Power Factor (-)",
+        ] {
+            assert!(
+                !names.contains(&shadowed),
+                "no per-equipment column may be emitted for the shadowing \
+                 name, got: {names:?}"
+            );
+        }
+        assert!(
+            names.contains(&"Other End Use Electric Power (kW)"),
+            "the shadowing equipment's end-use aggregate must still be \
+             emitted, got: {names:?}"
+        );
     }
 
     /// `end_use_electric_power_column` returns column names that are distinct

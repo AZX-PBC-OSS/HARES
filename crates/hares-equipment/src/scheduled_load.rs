@@ -16,13 +16,12 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::constructor_equipment_id;
 use crate::schedule_helpers::{
-    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
-    parse_usize, parse_zone_id, restore_schedule_source_state,
+    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
+    parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-
-use crate::config::KEY_EQUIPMENT_ID;
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
 const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
 const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
@@ -175,7 +174,7 @@ impl ScheduledLoad {
         }
 
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use,
             equipment_type: Cow::Borrowed(equipment_type),
@@ -438,6 +437,10 @@ impl Equipment for ScheduledLoad {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn ports(&self) -> &[PortDeclaration] {

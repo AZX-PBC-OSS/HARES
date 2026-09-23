@@ -19,8 +19,8 @@ use crate::{Equipment, EquipmentConfig};
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::heating_config::HvacSetpointConfig;
-use super::super::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
-use super::constants::DEFAULT_EQUIPMENT_ID;
+use super::super::helpers::zone_id_from_config_or_default;
+use crate::config::constructor_equipment_id;
 
 /// MSHP crankcase heater: 15 W rated, activates at or below 0 °C.
 /// Distinct from central AC default (50 W / 12.8 °C) per OCHRE conventions.
@@ -62,7 +62,7 @@ impl HpCooler {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
@@ -223,6 +223,10 @@ impl Equipment for HpCooler {
         self.descriptor.name = name;
     }
 
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }
@@ -353,7 +357,7 @@ impl GshpCooler {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed("GSHP Cooler"),
@@ -492,6 +496,10 @@ impl Equipment for GshpCooler {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {
@@ -762,7 +770,7 @@ impl WshpCooler {
         let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed("WSHP Cooler"),
@@ -898,6 +906,10 @@ impl Equipment for WshpCooler {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn zone_id_explicit(&self) -> bool {

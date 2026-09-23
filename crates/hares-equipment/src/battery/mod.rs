@@ -39,7 +39,7 @@ pub use hares_types::BatteryLutType;
 // Config keys
 // ---------------------------------------------------------------------------
 
-use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
+use crate::config::{KEY_ZONE_ID, constructor_equipment_id};
 #[cfg(test)]
 pub(crate) const KEY_CAPACITY_KWH: &str = "capacity_kwh";
 #[cfg(test)]
@@ -426,10 +426,7 @@ pub struct Battery {
 impl Battery {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let equipment_id = config
-            .get_f64(KEY_EQUIPMENT_ID)
-            .map(|v| v as u32)
-            .unwrap_or(0);
+        let equipment_id = constructor_equipment_id(&config);
         let zone = config.get_f64(KEY_ZONE_ID).map(|v| ZoneId(v as u16));
 
         let mut ports = vec![PortDeclaration::electrical()];
@@ -2023,6 +2020,10 @@ impl Equipment for Battery {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 }
 

@@ -25,7 +25,8 @@ pub use columns::{
     end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
     expected_columns_at_verbosity, extract_unit_from_name, fuel_reports_gas_power_column, has_soc,
     is_compressor_equipment, is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh,
-    is_pv, parse_end_use_electric_power_column, parse_end_use_electric_power_column_key,
+    is_pv, is_reserved_output_column_name, parse_end_use_electric_power_column,
+    parse_end_use_electric_power_column_key,
 };
 pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,

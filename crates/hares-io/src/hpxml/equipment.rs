@@ -2,6 +2,7 @@
 
 use serde_json::{Map, Value, json};
 
+use hares_equipment::ConfigPayload;
 use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
 use hares_types::FuelType;
 
@@ -302,6 +303,124 @@ fn set_indirect_tank_boiler_loop_id(
 
 pub fn canonical_instance_namer(name: &str, count: usize) -> String {
     format!("{name} #{count}")
+}
+
+/// Config key for the dwelling-assigned equipment id — the same key every
+/// equipment constructor reads through `hares_equipment::config`'s readers,
+/// so the injection flows through the channel constructors already trust
+/// instead of adding a second identity carrier.
+use hares_equipment::config::KEY_EQUIPMENT_ID;
+
+/// A spec's explicitly-configured `equipment_id`, classified — the pass's
+/// counterpart of the tri-state reader in `hares_equipment::config`, and
+/// the classifier the dwelling's entrance rejection re-uses to diagnose
+/// *why* an unassigned id reached the door.
+///
+/// - `Absent` — the key is missing on both channels: the pass assigns the
+///   next id.
+/// - `Valid(id)` — a clean `u32`-shaped value: preserved, and the counter
+///   advances past it.
+/// - `Malformed(value)` — present but not `u32`-shaped (negative,
+///   fractional, non-numeric, out of range), carrying the received value:
+///   **left untouched** by the pass so the dwelling's assembly validation
+///   rejects the build loudly (the constructor's reader maps it to the
+///   unassigned sentinel, and the entrance rejects id 0, naming the
+///   received value) — never silently overwritten with an assigned id,
+///   the constitution's loud-errors rule for unrecognised values.
+///
+/// Reads the raw `parameters` channel first, then the typed payload's JSON
+/// object (where `#[serde(flatten)]`-ed heat-pump configs expose
+/// `common.equipment_id` at the top level).
+pub enum ExplicitEquipmentId {
+    Absent,
+    Valid(u32),
+    Malformed(serde_json::Value),
+}
+
+/// Classify a spec's explicitly-configured `equipment_id`, if any, from
+/// either config channel. See [`ExplicitEquipmentId`] for the contract.
+pub fn explicit_equipment_id(spec: &EquipmentSpec) -> ExplicitEquipmentId {
+    let json_as_u32 = |v: &Value| v.as_u64().and_then(|raw| u32::try_from(raw).ok());
+    let classify = |v: &Value| match v {
+        // `null` is how a typed config serializes `Option<u32>::None` (the
+        // unset field), and how it lands in the spec's parameters mirror —
+        // absent, not malformed: classifying it as malformed would leave
+        // every unset typed spec unassigned.
+        Value::Null => ExplicitEquipmentId::Absent,
+        other => match json_as_u32(other) {
+            Some(id) => ExplicitEquipmentId::Valid(id),
+            None => ExplicitEquipmentId::Malformed(other.clone()),
+        },
+    };
+    if let Some(value) = spec.parameters.get(KEY_EQUIPMENT_ID) {
+        return classify(value);
+    }
+    let Some(cfg) = &spec.typed_config else {
+        return ExplicitEquipmentId::Absent;
+    };
+    let ConfigPayload::Typed { data, .. } = &cfg.payload else {
+        return ExplicitEquipmentId::Absent;
+    };
+    match data.get(KEY_EQUIPMENT_ID) {
+        Some(value) => classify(value),
+        None => ExplicitEquipmentId::Absent,
+    }
+}
+
+/// Write `id` into both of a spec's config channels: the raw `parameters`
+/// map (the base for raw-equipment config derivation) and, for typed specs,
+/// the typed payload's JSON object (the base for typed derivation and the
+/// channel every constructor reads through
+/// `hares_equipment::config::equipment_id_from_config`).
+fn set_spec_equipment_id(spec: &mut EquipmentSpec, id: u32) {
+    spec.parameters
+        .insert(KEY_EQUIPMENT_ID.to_string(), json!(id));
+    if let Some(cfg) = &mut spec.typed_config
+        && let hares_equipment::ConfigPayload::Typed { data, .. } = &mut cfg.payload
+        && let Some(obj) = data.as_object_mut()
+    {
+        // A typed payload whose data is not an object cannot deserialize
+        // into its typed struct anyway; leaving the id unwritten there means
+        // construction stamps the unassigned sentinel and assembly
+        // validation rejects the build — loud, not silent.
+        obj.insert(KEY_EQUIPMENT_ID.to_string(), json!(id));
+    }
+}
+
+/// Assign each spec a unique dwelling equipment id through the config
+/// channel its constructor already reads, starting from 1.
+///
+/// Called from dwelling assembly only — not at parse time — because
+/// blueprint callers can add specs after parsing (`add_equipment_spec`) and
+/// the set of equipment that will be instantiated is only known once the
+/// assembly begins. Specs that already carry an explicit id keep it, and
+/// the counter advances past every explicit id so a later auto-assignment
+/// can never collide with one. A *malformed* present id (negative,
+/// fractional, non-numeric) is left untouched — the constructor's reader
+/// maps it to the unassigned sentinel and assembly validation rejects the
+/// build loudly, never a silent substitution. Ids are therefore sparse by
+/// design (dropped non-critical equipment leaves gaps); the invariants are
+/// uniqueness, non-zero, and determinism from spec order — never
+/// contiguity.
+pub fn assign_equipment_ids(specs: &mut [EquipmentSpec]) {
+    let mut next_id: u32 = 1;
+    for spec in specs.iter_mut() {
+        match explicit_equipment_id(spec) {
+            ExplicitEquipmentId::Valid(existing) => {
+                next_id = next_id.max(existing.saturating_add(1));
+            }
+            ExplicitEquipmentId::Absent => {
+                set_spec_equipment_id(spec, next_id);
+                next_id = next_id.saturating_add(1);
+            }
+            // Left untouched: the constructor's reader maps a malformed
+            // value to the unassigned sentinel and assembly validation
+            // rejects the build loudly, naming the received value — the
+            // documented contract. Assigning here would silently substitute
+            // a valid id for a config error.
+            ExplicitEquipmentId::Malformed(_) => {}
+        }
+    }
 }
 
 pub fn assign_instance_names(specs: &mut [EquipmentSpec]) {

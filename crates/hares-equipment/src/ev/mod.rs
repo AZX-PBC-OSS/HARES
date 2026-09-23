@@ -16,6 +16,7 @@ use hares_types::{
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
+use crate::config::constructor_equipment_id;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub mod catalog;
@@ -204,7 +205,7 @@ impl Ev {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(config.get_f64(KEY_EQUIPMENT_ID).unwrap_or_default() as u32),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name.clone(),
             end_use: EndUse::EV,
             equipment_type: Cow::Borrowed("EV"),
@@ -1989,6 +1990,10 @@ impl Equipment for Ev {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 }
 

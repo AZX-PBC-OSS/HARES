@@ -18,15 +18,14 @@ use serde::{Deserialize, Serialize};
 
 use hares_physics::units::power_kw_to_w;
 
+use crate::config::constructor_equipment_id;
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
-    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
-    parse_usize, parse_zone_id, restore_schedule_source_state,
+    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
+    parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 use hares_types::zip::{ResolvedZip, ZipLoad};
-
-use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
 const KEY_MASTER_SEED: &str = "master_seed";
 const KEY_N_UNITS: &str = "n_units";
@@ -311,7 +310,7 @@ impl EventBasedLoad {
     pub fn new(config: EquipmentConfig) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed("EventBasedLoad"),
@@ -568,6 +567,10 @@ impl Equipment for EventBasedLoad {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -923,7 +926,7 @@ impl WetAppliance {
     pub fn new(config: EquipmentConfig, name: &'static str) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
+            id: EquipmentId(constructor_equipment_id(&config)),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed(name),
@@ -1224,6 +1227,10 @@ impl Equipment for WetAppliance {
 
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
     fn ports(&self) -> &[PortDeclaration] {

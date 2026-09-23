@@ -14,6 +14,36 @@ pub struct ChargingComposer {
     scratch: Vec<PreferenceVote>,
     dispatch_target: DispatchTarget,
     last_action: String,
+    /// The `target_soc` the most recent `evaluate` resolved — from the
+    /// winning constraint-override vote, or the highest-scored
+    /// target-bearing vote on the scored path. `None` when the resolution
+    /// carried no target (an idle hold, a rate-only vote, or no
+    /// preferences). This is decision *input* for the actor's
+    /// range-anxiety precedence check ("stand down when the strategy's own
+    /// target already covers the anxiety band"), not a dispatch record —
+    /// the dispatched signals are whatever `evaluate` wrote to `out`.
+    last_resolved_target_soc: Option<f64>,
+    /// The `power_kw` the most recent `evaluate` resolved (the folded
+    /// most-conservative rate across scored votes, or the override vote's
+    /// rate). `None` when the resolution carried no rate — a target-only
+    /// plan, whose equipment charges toward the target at its own rate.
+    /// Read by the actor's range-anxiety precedence check: a resolved
+    /// *target* at or above the anxiety band only means "the band is
+    /// covered" when the resolved *rate* is not actively discharging or
+    /// holding at zero — a rate-bearing strategy (TouAware at peak price,
+    /// V2G exporting) can pair a high ceiling with a negative rate, and
+    /// the pack is then being driven *away* from the band, not toward it.
+    last_resolved_power_kw: Option<f64>,
+    /// The `max_soc` the most recent `evaluate` resolved (the folded
+    /// most-restrictive upper bound across scored votes, or the override
+    /// vote's cap). `None` when the resolution carried no cap — the plan's
+    /// ceiling is then the resolved target itself. Read by the actor's
+    /// range-anxiety precedence check: a resolved target at or above the
+    /// anxiety band only means "the band is covered" when the plan cannot
+    /// stop below it — a cap under the band (a V2G reserve, a price-tier
+    /// ceiling) halts charging at the cap while the target reads high, so
+    /// the pack is being held away from the band, not driven toward it.
+    last_resolved_max_soc: Option<f64>,
     last_needed_charge_hours: f64,
 }
 
@@ -24,12 +54,37 @@ impl ChargingComposer {
             scratch: Vec::with_capacity(8),
             dispatch_target: DispatchTarget::ByName(Arc::from(target_name)),
             last_action: String::new(),
+            last_resolved_target_soc: None,
+            last_resolved_power_kw: None,
+            last_resolved_max_soc: None,
             last_needed_charge_hours: f64::INFINITY,
         }
     }
 
     pub fn last_action(&self) -> &str {
         &self.last_action
+    }
+
+    /// The `target_soc` the most recent [`Self::evaluate`] resolved, if any
+    /// (see the field's doc for the exact resolution rule). Read by the
+    /// EV driver actor's range-anxiety override to decide precedence
+    /// against the strategy's own active target.
+    pub fn last_resolved_target_soc(&self) -> Option<f64> {
+        self.last_resolved_target_soc
+    }
+
+    /// The `power_kw` the most recent [`Self::evaluate`] resolved, if any
+    /// (see the field's doc). `None` means the plan carried no rate — the
+    /// equipment charges toward the resolved target at its own rate.
+    pub fn last_resolved_power_kw(&self) -> Option<f64> {
+        self.last_resolved_power_kw
+    }
+
+    /// The `max_soc` cap the most recent [`Self::evaluate`] resolved, if any
+    /// (see the field's doc). `None` means the plan carried no cap — its
+    /// effective ceiling is the resolved target itself.
+    pub fn last_resolved_max_soc(&self) -> Option<f64> {
+        self.last_resolved_max_soc
     }
 
     /// Whether the SocGate preference (if present) currently allows charging.
@@ -96,6 +151,9 @@ impl ChargingComposer {
                 self.last_action.push_str(pref.name());
                 self.last_action.push(':');
                 self.last_action.push_str(vote.label);
+                self.last_resolved_target_soc = vote.target_soc;
+                self.last_resolved_power_kw = vote.power_kw;
+                self.last_resolved_max_soc = vote.max_soc;
                 self.emit_vote(ctx, &vote, out);
                 return;
             }
@@ -117,6 +175,9 @@ impl ChargingComposer {
         if self.scratch.is_empty() {
             self.last_action.clear();
             self.last_action.push_str("idle:no_preferences");
+            self.last_resolved_target_soc = None;
+            self.last_resolved_power_kw = None;
+            self.last_resolved_max_soc = None;
             return;
         }
 
@@ -124,6 +185,9 @@ impl ChargingComposer {
         self.last_action.clear();
         self.last_action.push_str("resolved:");
         self.last_action.push_str(resolved.label);
+        self.last_resolved_target_soc = resolved.target_soc;
+        self.last_resolved_power_kw = resolved.power_kw;
+        self.last_resolved_max_soc = resolved.max_soc;
         self.emit_vote(ctx, &resolved, out);
     }
 

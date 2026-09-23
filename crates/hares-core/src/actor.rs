@@ -12,10 +12,11 @@
 //! 3. **Equipment receives signals and adjusts internal operational state**.
 //! 4. **Config is separate from control signals.** Config sets up equipment at init time.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
-use hares_types::{EnvironmentState, HaresError, Telemetry, ZoneId};
+use hares_types::{EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId};
 
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
@@ -55,6 +56,24 @@ pub trait Actor: Send + Sync + 'static {
     fn dispatch_target_name(&self) -> Option<&str> {
         None
     }
+
+    /// Re-resolve this actor's equipment binding against the dwelling's
+    /// live name→id map.
+    ///
+    /// Called by the dwelling on every identity refresh — actor
+    /// registration, and any equipment add/remove/replace — so an actor
+    /// bound to equipment by name always reads its equipment's *current*
+    /// `EquipmentId`. Without the re-resolution, an actor's cached id goes
+    /// stale the moment its target equipment is replaced (the replacement
+    /// receives a new never-reused id) and the actor silently reads the
+    /// old id's core output — the observation-misbinding class this
+    /// dwelling's identity contract exists to prevent. The map lookup
+    /// missing is the documented "operate without SOC feedback" mode,
+    /// recoverable on a later refresh once the named equipment exists.
+    ///
+    /// Default: no-op — actors that are not bound to exactly one equipment
+    /// by name have nothing to resolve.
+    fn resolve_equipment_id(&mut self, _equipment_id_by_name: &HashMap<String, EquipmentId>) {}
 
     /// Declares what state changes this actor cares about.
     ///
