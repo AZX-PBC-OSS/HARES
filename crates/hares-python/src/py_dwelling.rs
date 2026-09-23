@@ -710,7 +710,10 @@ impl PyDwelling {
         }
         #[cfg(not(feature = "profiling"))]
         {
-            d.set_item("note", "built without the 'profiling' feature; all timings zero")?;
+            d.set_item(
+                "note",
+                "built without the 'profiling' feature; all timings zero",
+            )?;
             d.set_item("envelope_solve_s", 0.0)?;
             d.set_item("hvac_s", 0.0)?;
             d.set_item("water_heater_s", 0.0)?;
