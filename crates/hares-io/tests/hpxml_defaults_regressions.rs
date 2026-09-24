@@ -1,0 +1,472 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::json;
+
+use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+use hares_equipment::hvac::cooling_config::DehumidifierConfig;
+use hares_io::defaults::DefaultsStore;
+use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::equipment::resolve_equipment;
+use hares_io::hpxml::validation::validate_hpxml_schema;
+use hares_io::hpxml::{BoundaryType, HpxmlError, ZoneType, parse_hpxml_str};
+
+fn fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
+}
+
+fn read_fixture(name: &str) -> String {
+    fs::read_to_string(fixture_root().join(name)).expect("fixture should be readable")
+}
+
+fn repo_defaults() -> DefaultsStore {
+    let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .parent()
+        .expect("repo root")
+        .join("defaults");
+    DefaultsStore::load(&defaults_dir).expect("load defaults")
+}
+
+fn minimal_hpxml_with_systems(systems_xml: &str) -> String {
+    format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      {systems_xml}
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+    )
+}
+
+#[test]
+fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
+    let building = parse_hpxml_str(&read_fixture("base.xml")).expect("base fixture should parse");
+
+    assert_eq!(
+        building.residential_facility_type.as_deref(),
+        Some("single-family detached"),
+        "fixture residential facility type should not be silently dropped"
+    );
+    assert_eq!(building.floors_above_grade, Some(1.0));
+
+    let conditioned = building
+        .zones
+        .iter()
+        .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+        .expect("conditioned zone expected");
+    let floor_area_m2 = conditioned
+        .floor_area_m2
+        .expect("conditioned area expected");
+    let volume_m3 = building
+        .conditioned_volume_m3
+        .expect("conditioned volume expected");
+    let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+
+    let expected_floor_area_m2 = (2700.0 * 0.092_903_04) * 0.5;
+    let expected_volume_m3 = 21600.0 * 0.028_316_846_592;
+    let expected_ceiling_height_m = 8.0 * 0.3048;
+
+    assert!(
+        (floor_area_m2 - expected_floor_area_m2).abs() < 0.01,
+        "Conditioned zone area should use HPXML/OCHRE imperial defaults and basement split"
+    );
+    assert!(
+        (volume_m3 - expected_volume_m3).abs() < 0.01,
+        "ConditionedBuildingVolume without explicit units must use HPXML/OCHRE imperial default"
+    );
+    assert!(
+        (ceiling_height_m - expected_ceiling_height_m).abs() < 0.01,
+        "ceiling height derived from fixture should remain aligned with the 8 ft OCHRE sample"
+    );
+}
+
+#[test]
+fn windows_physical_properties_fixture_preserves_explicit_fields_without_synthetic_defaults() {
+    let building = parse_building(&read_fixture(
+        "base-enclosure-windows-physical-properties.xml",
+    ))
+    .expect("window fixture should parse");
+
+    assert_eq!(
+        building.windows.len(),
+        4,
+        "fixture coverage changed unexpectedly"
+    );
+
+    for window in &building.windows {
+        assert!(
+            window.u_factor_w_m2_k.is_none(),
+            "window {} should not silently invent a U-factor when HPXML omitted it",
+            window.id
+        );
+        assert!(
+            window.shgc.is_none(),
+            "window {} should not silently invent an SHGC when HPXML omitted it",
+            window.id
+        );
+        assert!(
+            (window.interior_shading_fraction - 0.70).abs() < f64::EPSILON,
+            "window {} should preserve explicit summer shading coefficient",
+            window.id
+        );
+        assert!(
+            (window.winter_shading_fraction - 0.85).abs() < f64::EPSILON,
+            "window {} should preserve explicit winter shading coefficient",
+            window.id
+        );
+        assert!(
+            (window.fraction_operable - 0.67).abs() < f64::EPSILON,
+            "window {} should preserve explicit FractionOperable",
+            window.id
+        );
+        assert_eq!(window.attached_to_wall_id.as_deref(), Some("Wall1"));
+    }
+}
+
+#[test]
+fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
+    let building = parse_hpxml_str(&read_fixture("base-foundation-basement-garage.xml"))
+        .expect("garage fixture should parse");
+
+    assert!(
+        building
+            .zones
+            .iter()
+            .any(|zone| matches!(zone.zone_type, ZoneType::Garage)),
+        "garage zone should be created from explicit garage adjacencies"
+    );
+    assert!(
+        building
+            .zones
+            .iter()
+            .any(|zone| matches!(zone.zone_type, ZoneType::Foundation)),
+        "foundation zone should be created from explicit basement foundation data"
+    );
+
+    let wall_to_garage = building
+        .boundaries
+        .iter()
+        .find(|boundary| {
+            boundary.id == "Wall3" && matches!(boundary.boundary_type, BoundaryType::Wall)
+        })
+        .expect("Wall3 should exist in garage fixture");
+    assert!(
+        matches!(wall_to_garage.interior_zone, Some(ZoneType::Foundation)),
+        "Wall3 interior adjacency should stay mapped to the conditioned basement/foundation zone"
+    );
+    assert!(
+        matches!(wall_to_garage.exterior_zone, Some(ZoneType::Garage)),
+        "Wall3 exterior adjacency should stay mapped to garage rather than defaulting to outdoor"
+    );
+}
+
+#[test]
+fn missing_conditioned_floor_area_fails_schema_validation_instead_of_defaulting() {
+    let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <NumberofConditionedFloors>2</NumberofConditionedFloors>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let err = validate_hpxml_schema(xml).expect_err("schema validation must fail");
+    assert!(
+        err.message.contains("ConditionedFloorArea"),
+        "missing ConditionedFloorArea must fail loudly, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
+    let cases = [
+        (
+            "heating",
+            r#"<Systems><HVAC><HeatingSystem><HeatingSystemFuel>natural gas</HeatingSystemFuel></HeatingSystem></HVAC></Systems>"#,
+            "HeatingSystemType",
+        ),
+        (
+            "cooling",
+            r#"<Systems><HVAC><CoolingSystem><CoolingSystemFuel>electricity</CoolingSystemFuel></CoolingSystem></HVAC></Systems>"#,
+            "CoolingSystemType",
+        ),
+        (
+            "heat pump",
+            r#"<Systems><HVAC><HeatPump><HeatingCapacity>24000</HeatingCapacity></HeatPump></HVAC></Systems>"#,
+            "HeatPumpType",
+        ),
+    ];
+
+    for (label, systems_xml, missing_field) in cases {
+        let xml = minimal_hpxml_with_systems(systems_xml);
+        let building = parse_building(&xml).expect("minimal fixture should parse");
+        let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+        match missing_field {
+            "HeatingSystemType" | "CoolingSystemType" => {
+                // Empty/missing HVAC type tags are now skipped gracefully
+                // (valid ResStock 2025.1 buildings with portable heaters, no central HVAC)
+                let specs = result.expect("empty HVAC type should be skipped, not rejected");
+                assert!(
+                    specs
+                        .iter()
+                        .all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
+                    "{label}: no HVAC equipment should be generated from empty type tag"
+                );
+            }
+            _ => {
+                let err = result.expect_err(
+                    "resolve_equipment must fail when required HVAC type tags are absent",
+                );
+                match err {
+                    HpxmlError::Parse(message) => assert!(
+                        message.to_string().contains(missing_field),
+                        "{label} case should mention missing {missing_field}, got: {message}"
+                    ),
+                    other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
+    let mut building =
+        parse_hpxml_str(&read_fixture("base.xml")).expect("base fixture should parse");
+    // OCHRE `base.xml` omits Site/Latitude and Site/Longitude; inject plausible
+    // Denver, CO coordinates so the ASHRAE 152 duct-DSE computation can run
+    // without triggering the no-silent-defaults guard.
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("base fixture equipment should resolve with repo defaults");
+
+    let furnace = specs
+        .iter()
+        .find(|spec| spec.name == "Gas Furnace")
+        .expect("gas furnace spec should exist");
+    assert!(
+        furnace.typed_config.is_some(),
+        "Gas Furnace should resolve to a typed config rather than silently degrading to raw params"
+    );
+
+    let air_conditioner = specs
+        .iter()
+        .find(|spec| spec.name == "Air Conditioner")
+        .expect("air conditioner spec should exist");
+    assert!(
+        air_conditioner.typed_config.is_some(),
+        "Air Conditioner should resolve to a typed config rather than silently degrading to raw params"
+    );
+
+    let water_heater = specs
+        .iter()
+        .find(|spec| spec.name == "Electric Resistance Water Heater")
+        .expect("water heater spec should exist");
+    assert!(
+        water_heater.typed_config.is_some(),
+        "water heater should resolve to a typed config with defaults applied"
+    );
+}
+
+// Regression test for ticket 082: HPXML <Capacity> is in US liquid pints/day and must be
+// converted to L/day using exactly 0.473176473 (1 US liquid pint = 0.473176473 L).
+// The fixture has <Capacity>40.0</Capacity> → expected 40 × 0.473176473 = 18.92705892 L/day.
+#[test]
+fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
+    let mut building = parse_hpxml_str(&read_fixture("base-appliances-dehumidifier.xml"))
+        .expect("dehumidifier fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("dehumidifier fixture equipment should resolve");
+
+    let dehumidifier_spec = specs
+        .iter()
+        .find(|s| s.name == "Dehumidifier")
+        .expect("Dehumidifier spec should be present in resolved equipment");
+
+    let typed_config = dehumidifier_spec
+        .typed_config
+        .as_ref()
+        .expect("Dehumidifier should resolve to a typed config");
+
+    let cfg: DehumidifierConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to DehumidifierConfig");
+
+    // HPXML fixture has <Capacity>40.0</Capacity> (pints/day, per HPXML schema annotation).
+    // Correct conversion: 40.0 × 0.473_176_473 = 18.92705892 L/day.
+    // If the factor were accidentally changed (e.g. swapped with gallons: 3.785), this fails.
+    let expected_l_day = 40.0 * 0.473_176_473;
+    let actual_l_day = cfg
+        .capacity_liters_per_day
+        .expect("capacity_liters_per_day must be populated from HPXML Capacity");
+
+    assert!(
+        (actual_l_day - expected_l_day).abs() < 1e-6,
+        "Dehumidifier capacity pints→liters conversion is wrong: \
+         expected {expected_l_day:.6} L/day (40 pints × 0.473176473), got {actual_l_day:.6} L/day"
+    );
+}
+
+#[test]
+fn central_ac_seer_18_two_stage_populates_per_stage_data() {
+    let systems_xml = r#"
+    <Systems>
+      <HVAC>
+        <HVACPlant>
+          <CoolingSystem>
+            <SystemIdentifier id='AC1'/>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingSystemFuel>electricity</CoolingSystemFuel>
+            <CoolingCapacity>36000.0</CoolingCapacity>
+            <CompressorType>two stage</CompressorType>
+            <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            <AnnualCoolingEfficiency>
+              <Units>SEER</Units>
+              <Value>18.0</Value>
+            </AnnualCoolingEfficiency>
+            <SensibleHeatFraction>0.73</SensibleHeatFraction>
+          </CoolingSystem>
+        </HVACPlant>
+        <HVACControl>
+          <SystemIdentifier id='Ctrl1'/>
+          <SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>
+          <SetpointTempCoolingSeason>78.0</SetpointTempCoolingSeason>
+        </HVACControl>
+      </HVAC>
+    </Systems>"#;
+
+    let xml = minimal_hpxml_with_systems(systems_xml);
+    let mut building = parse_building(&xml).expect("AC fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("AC equipment should resolve");
+
+    let ac_spec = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("Air Conditioner spec should be present");
+
+    let typed_config = ac_spec
+        .typed_config
+        .as_ref()
+        .expect("Air Conditioner should resolve to a typed config");
+
+    let cfg: CentralAirConditionerConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to CentralAirConditionerConfig");
+
+    assert!(
+        cfg.number_of_speeds > 1,
+        "two-stage compressor should yield number_of_speeds > 1, got {}",
+        cfg.number_of_speeds
+    );
+
+    let stage_caps = cfg
+        .stage_capacities_w
+        .as_ref()
+        .expect("stage_capacities_w should be populated from CSV multi-speed parameters");
+    assert_eq!(
+        stage_caps.len(),
+        cfg.number_of_speeds as usize,
+        "stage_capacities_w length should match number_of_speeds"
+    );
+    assert!(
+        stage_caps.iter().all(|&c| c > 0.0),
+        "all per-stage capacities should be > 0"
+    );
+}
+
+#[test]
+fn central_ac_seer_22_fallback_4_speed_populates_per_stage_data() {
+    // SEER > 21 without explicit CompressorType → fallback heuristic assigns
+    // 4 speeds, and multi-speed CSV entries should populate per-stage data.
+    let systems_xml = r#"
+    <Systems>
+      <HVAC>
+        <HVACPlant>
+          <CoolingSystem>
+            <SystemIdentifier id='AC2'/>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingSystemFuel>electricity</CoolingSystemFuel>
+            <CoolingCapacity>48000.0</CoolingCapacity>
+            <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            <AnnualCoolingEfficiency>
+              <Units>SEER</Units>
+              <Value>22.0</Value>
+            </AnnualCoolingEfficiency>
+            <SensibleHeatFraction>0.73</SensibleHeatFraction>
+          </CoolingSystem>
+        </HVACPlant>
+        <HVACControl>
+          <SystemIdentifier id='Ctrl2'/>
+          <SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>
+          <SetpointTempCoolingSeason>78.0</SetpointTempCoolingSeason>
+        </HVACControl>
+      </HVAC>
+    </Systems>"#;
+
+    let xml = minimal_hpxml_with_systems(systems_xml);
+    let mut building = parse_building(&xml).expect("AC 4-speed fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("AC 4-speed equipment should resolve");
+
+    let ac_spec = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("Air Conditioner spec should be present");
+
+    let typed_config = ac_spec
+        .typed_config
+        .as_ref()
+        .expect("Air Conditioner should resolve to a typed config");
+
+    let cfg: CentralAirConditionerConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to CentralAirConditionerConfig");
+
+    assert_eq!(
+        cfg.number_of_speeds, 4,
+        "SEER 22 without CompressorType should fall back to 4 speeds"
+    );
+
+    let stage_caps = cfg
+        .stage_capacities_w
+        .as_ref()
+        .expect("stage_capacities_w should be populated for 4-speed AC");
+    assert_eq!(stage_caps.len(), 4);
+    assert!(stage_caps.iter().all(|&c| c > 0.0));
+
+    let stage_eirs = cfg
+        .stage_eirs
+        .as_ref()
+        .expect("stage_eirs should be populated for 4-speed AC");
+    assert_eq!(stage_eirs.len(), 4);
+}

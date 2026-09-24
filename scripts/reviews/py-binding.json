@@ -1,0 +1,70 @@
+{
+  "category": "py-binding",
+  "description": "Python bindings: PyO3 crate exposing config, dwelling, equipment, control, fleet, tariff, weather, and actor APIs to Python",
+  "reviews": [
+    {
+      "id": "py-binding-01",
+      "slug": "py-config-binding",
+      "title": "Python config binding: completeness, type conversion safety, error handling",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_config.rs crates/hares-python/src/conversions.rs",
+      "prompt": "Verify that all configuration fields accessible from the Rust Config struct are also exposed to Python through the py_config binding. Audit type conversions between Python types and Rust types: every f64-to-i32 truncation must be intentional and range-checked to prevent silent data loss. Check that Python exceptions are raised (not panics) when Python code provides invalid config values — malformed HPXML paths, out-of-range numeric parameters, missing required fields, or type mismatches between Python and Rust expectations. Verify that a TOML config file can be loaded in Python, round-tripped through the Rust config parser, and serialized back to TOML with no field loss or value corruption. Check that optional config fields correctly translate to Rust Option types and that Python None maps to Rust None without panicking. Validate that config mutation from Python (e.g., overriding a schedule or setpoint) correctly propagates through to the Rust config object before simulation start."
+    },
+    {
+      "id": "py-binding-02",
+      "slug": "py-dwelling-binding",
+      "title": "Python dwelling binding: lifecycle, step execution, state access",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_dwelling.rs crates/hares-python/src/py_enums.rs",
+      "prompt": "The Dwelling lifecycle exposed to Python must support: construction (new) -> initialization (run) -> repeated stepping (step) -> shutdown (drop). Verify that stepping an uninitialized dwelling raises an appropriate Python exception rather than panicking. Check that step() correctly advances the simulation by one timestep, updating all internal state and returning telemetry. Verify that PyO3 GIL handling is correct for long-running simulations: GIL must be released during Rust computation to allow Python threading, and re-acquired only when returning results to Python. Assess whether py_enums.rs covers all Rust enums that Python code needs to reference — simulation status, equipment types, signal types, thermal categories, control modes. Any enum variant missing from py_enums.rs forces Python users to use magic integer constants. Test that dwelling shutdown (drop via Python GC or explicit close) correctly releases all resources including file handles, solver memory, and RNG state."
+    },
+    {
+      "id": "py-binding-03",
+      "slug": "py-equipment-binding",
+      "title": "Python equipment binding: descriptor, mutation, LUT injection",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_equipment.rs",
+      "prompt": "Verify that Python code can create and register custom equipment models via the PyEquipment binding, supplying an equipment descriptor with type, name, and parameters. Check that LUT (look-up table) injection is robust: LUTs must have correct dimensions matching the equipment model's expected input dimensionality, value ranges must be validated to prevent NaN generation during interpolation, axis breakpoints must be strictly monotonically increasing, and out-of-bounds access must be handled gracefully (clamp or error, not panic). Verify the ordering of equipment mutations vs initialization — mutations applied after init() must either be rejected (equipment state is frozen post-init) or applied to a mutable pre-init state. Check that equipment parameters set via Python descriptors correctly propagate through to the Rust equipment model's configuration. Test that registering duplicate equipment names or unsupported equipment types produces clear Python exceptions with actionable error messages."
+    },
+    {
+      "id": "py-binding-04",
+      "slug": "py-control-binding",
+      "title": "Python control binding: signal construction, dispatch, compat",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_control.rs",
+      "prompt": "Verify that Python code can construct every control signal variant: setpoint temperatures (heating and cooling), power limits (absolute watts), load fractions (0.0-1.0), mode overrides (auto/heat/cool/off/schedule), price signals (numeric $/kWh), DR event start/end, and ideal capacity targets. Check that the dispatch API exposed to Python is consistent with the Rust ControlDispatcher — same method names, parameter order, and return types. Verify that priority tiers are correctly mapped: when multiple signals target the same equipment, the highest-priority signal wins according to the documented tiering (safety override > DR event > user override > schedule > economic). Assess OCHRE compatibility: test that control signals constructed in Python following OCHRE's signal routing patterns (e.g., thermostat setpoint from OCHRE's dwelling controller) are correctly translated and dispatched to HARES equipment. Any Python-constructed signal with an invalid value (e.g., negative absolute power limit) must raise Python ValueError, not panic."
+    },
+    {
+      "id": "py-binding-05",
+      "slug": "py-fleet-binding",
+      "title": "Python fleet binding: parallel execution, progress, aggregation",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_fleet.rs crates/hares-fleet/src/fleet.rs",
+      "prompt": "The fleet binding exposes Rayon-based parallel execution of multiple dwellings to Python. Verify that parallel execution is safe with respect to the Python GIL: Rust code must release the GIL before entering parallel sections, and Python callbacks invoked from within parallel sections must be properly guarded. Check that progress callbacks report completion (dwellings finished, timesteps completed, wall-clock time) and that callback invocation is correctly threaded — callbacks must not be dropped or duplicated under high parallelism. Verify that fleet aggregation results returned to Python are in a usable format (Arrow RecordBatch or Polars DataFrame) with correctly typed columns (not all string or all float64). Check that Fleet.shutdown() correctly cleans up all dwelling resources including file handles, solver memory, and weather data without leaking memory or leaving dangling references. Assess whether the fleet supports heterogeneous dwellings (different building types/hpxml within the same fleet run) or only homogeneous cohorts."
+    },
+    {
+      "id": "py-binding-06",
+      "slug": "py-tariff-binding",
+      "title": "Python tariff binding: URDB parsing, evaluation, billing",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_tariff.rs crates/hares-tariff/src/",
+      "prompt": "Verify that Python code can load URDB (Utility Rate Database) JSON tariffs via the py_tariff binding, parsing rate structures including fixed charges, energy charges ($/kWh), demand charges ($/kW), and time-of-use period definitions. Check that billing calculation is correct: energy cost = sum(consumption_kWh * rate_$_per_kWh) for each TOU period, demand charge = max_demand_kW * demand_rate_$_per_kW, plus fixed monthly charges. Demand charges must use the correct averaging interval (typically 15-minute or 60-minute) and must compute the billing-demand properly (e.g., max of rolling window, not instantaneous). Verify that tariff evaluation is idempotent: calling evaluate() on the same load profile twice produces identical billing results with no internal state corruption. Check that tiered rates (increasing marginal cost as consumption increases) and seasonal rate schedules (summer vs winter, peak vs off-peak) are correctly applied. Test edge cases: zero consumption should produce zero variable charges but may include fixed charges; negative net consumption (PV export) must be handled according to net metering rules."
+    },
+    {
+      "id": "py-binding-07",
+      "slug": "py-weather-binding",
+      "title": "Python weather binding: EPW/PSM3/TMY3 parsing from Python",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_weather.rs",
+      "prompt": "Verify that Python code can load weather data in all three supported formats: EPW (EnergyPlus Weather), PSM3 (NREL Physical Solar Model v3), and TMY3 (Typical Meteorological Year 3). Check that weather data resampling (e.g., from hourly to sub-hourly timesteps) is accessible from Python and correctly interpolates solar irradiance (linear for temperature, constant for irradiance components within each hour). Verify that location metadata — latitude, longitude, timezone, elevation, site name — are correctly exposed to Python as read-only properties. Assess whether Python-loaded weather data correctly integrates with dwelling configuration: can the Python user pass a PyWeather object into DwellingConfig and have timestep data correctly served? Test that weather data query by timestep index returns the correct slice (not off-by-one at year boundaries, not incorrect at midnight transitions). Check error handling for corrupt weather files, missing mandatory fields, and files with inconsistent record counts across data columns."
+    },
+    {
+      "id": "py-binding-08",
+      "slug": "py-actor-binding",
+      "title": "Python actor binding: custom actor implementation from Python",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_actor.rs crates/hares-core/src/actor.rs",
+      "prompt": "Python code can implement a custom Actor by subclassing a Python base class that wraps the Rust Actor trait. Verify that Python->Rust callback invocation is safe: the Rust engine calls actor.update() which invokes Python code, requiring proper GIL acquisition and release. Check that the Python actor has access to all necessary dwelling state through a read-only view: zone temperatures, humidity, equipment status flags, telemetry outputs, weather data, and internal gains. Verify that Python actor execution time is accounted for in the timestep budget — a slow Python actor must not cause the simulation to miss real-time deadlines in co-simulation mode. Check that Python actor errors (exceptions raised during update()) propagate correctly to the Rust caller: the simulation must either abort with a descriptive error message or enter an error state, not silently continue with stale actor output. Test that multiple Python actors can be registered in the same dwelling with correct execution ordering (actor priority/registry position). Assess memory safety: Python actor objects must not be garbage-collected while the Rust engine holds a reference, and Rust must not access freed Python memory after actor drop."
+    }
+  ]
+}

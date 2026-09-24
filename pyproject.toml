@@ -1,0 +1,89 @@
+[build-system]
+requires = ["maturin>=1.15.0,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ochre_next"
+version = "0.1.0"
+description = "HARES: High-performance Agent-based Residential Energy Simulation"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "numpy>=2.5.3",
+    "polars>=1.44.2",
+    "pyarrow>=25.0.1",
+]
+license = {text = "BSD-3-Clause"}
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+sam = ["NREL-PySAM>=7.1.1"]
+pybamm = ["pybamm>=26.8.0.0"]
+resstock = ["boto3>=1.43.93", "httpx>=0.28.1"]
+helics = ["helics>=3.6.1"]
+rl = ["gymnasium>=1.3.0"]
+notebook = ["marimo>=0.24.2", "plotly>=7.0.0"]
+ochre = [
+    "xmltodict>=1.0.4",
+]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "maturin>=1.15.0",
+    "ruff>=0.16.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "maturin>=1.15.0",
+    "ruff>=0.16.7",
+    "psychrolib>=2.5.0",
+    "numpy>=2.5.3",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.4.0",
+]
+ochre = [
+    "boto3>=1.43.93",
+    "click>=8.5.0",
+    "fastparquet>=2026.5.0",
+    "matplotlib>=3.11.2",
+    "nrel-pysam>=7.1.1",
+    "numba>=0.67.0",
+    "pandas>=2.0,<3.0",
+    "pint>=0.24,<0.25",
+    "psychrolib>=2.5.0",
+    "pvlib>=0.15.2",
+    "pyarrow>=25.0.1",
+    "python-dateutil>=2.9.0.post0",
+    "pytz>=2026.3",
+    "rainflow>=3.2.0",
+    "scipy>=1.18.1",
+    "xmltodict>=1.0.4",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "ochre_next._hares"
+manifest-path = "crates/hares-python/Cargo.toml"
+include = [
+    {path = "defaults/**", format = ["sdist", "wheel"]},
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+addopts = "-n auto -m 'not slow and not ochre'"
+markers = [
+    "slow: marks tests as slow (run with '-m slow' or '--run-slow')",
+    "ochre: requires the ochre dependency group (xmltodict, pvlib, ...) (run with '-m \"slow or ochre\"')",
+]

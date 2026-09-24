@@ -1,0 +1,70 @@
+{
+  "category": "wiring",
+  "description": "Cross-cutting wiring and attribute consistency: port naming, thermal/electrical/humidity/fuel/fluid connections, telemetry, schedules, and unit integrity",
+  "reviews": [
+    {
+      "id": "wiring-01",
+      "slug": "port-naming-consistency",
+      "title": "Port name and declaration consistency across equipment, solver, and actors",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/",
+      "files": "crates/hares-types/src/ports.rs crates/hares-equipment/src/ports.rs crates/hares-envelope/src/thermal_solver/ports.rs",
+      "prompt": "Perform a full audit of every PortDeclaration string used across the codebase. Equipment models declare the ports they will produce (PortDeclaration); solvers and actors declare the ports they consume. Trace every port name string from declaration through accumulation to consumption. Identify orphaned ports: port names declared by equipment but never accumulated by any consumer (dead code that silently produces unused output). Identify missing ports: port names that solvers or actors expect to consume but that no equipment ever declares (runtime errors or zero-filled inputs with no warning). Identify naming inconsistencies: the same logical port (e.g., 'zone_1_thermal_gain') spelled differently in different crates ('Zone1Thermal', 'zone_1_thermal', 'thermal_gain_zone_1') causing silent mismatches. Classify every port name as 'connected' (declared, accumulated, consumed), 'orphaned' (declared but unconsumed), or 'missing' (consumed but undeclared). This is an exhaustive string-matching audit; every discrepancy is a potential bug."
+    },
+    {
+      "id": "wiring-02",
+      "slug": "thermal-zone-routing",
+      "title": "Thermal contribution zone routing: every equipment output reaches correct zone",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/",
+      "files": "crates/hares-types/src/ports.rs crates/hares-core/src/dwelling/mod.rs crates/hares-envelope/src/thermal_solver/ports.rs",
+      "prompt": "For every equipment model that produces thermal output, trace the full routing path: equipment emits PortContribution::Thermal {zone, sensible_gain_w, radiant_gain_w, latent_gain_w, category} -> port slot accumulator adds contribution to zonal totals -> thermal solver receives per-zone sensible and latent loads. Verify that the zone index in the PortContribution matches the correct thermal zone in the dwelling — no equipment writes to zone 0 when it should write to zone 1 (off-by-one), and no equipment writes to a zone index larger than the number of zones in the dwelling. Check that equipment with no zone assignment does not silently write to zone 0 (None must be handled, not defaulted). Verify duct-loss routing: duct heat loss (conduction to surrounding air) must be routed to the correct zone (the zone where the duct is physically located, which may be an unconditioned attic/basement or a conditioned zone). Check water heater jacket loss routing: standby losses conducted through the water heater jacket must be added to the thermal load of the zone where the water heater is located. Verify that equipment in unconditioned spaces (attic, crawlspace, garage) correctly routes its thermal losses to the appropriate zone (possibly a pseudo-zone or the outdoor environment if the unconditioned space is not explicitly modeled)."
+    },
+    {
+      "id": "wiring-03",
+      "slug": "electrical-power-accumulation",
+      "title": "Electrical power accumulation: generation vs load sign conventions",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py vendors/EnergyPlus/src/EnergyPlus/ElectricPowerServiceManager.cc",
+      "files": "crates/hares-types/src/ports.rs crates/hares-core/src/dwelling/mod.rs",
+      "prompt": "Verify that electrical sign conventions are consistent across all equipment. Generation sources (PV, battery discharge to grid, V2G) must use negative electrical power (power exported from the building). Loads (HVAC compressor, resistance heat, water heater elements, EV charging, lighting, appliances) must use positive electrical power (power consumed by the building). Battery charging is positive (consuming grid power), battery discharging is negative (exporting). Net building power = sum(all electrical contributions), and this value must match what would be measured at the utility meter. Verify that reactive power aggregates correctly: inductive loads (motors in compressors, fans, pumps) produce positive reactive power (lagging power factor). Check that the ZIP model (constant impedance, constant current, constant power) produces correct complex power: S = P + jQ where P and Q components from each ZIP contribution must combine correctly. Assess sign consistency at cross-equipment boundaries: when PV generates and battery charges simultaneously, the net power must be PV_export + battery_import = neg + pos, and must not double-count or cancel incorrectly. Compare against EnergyPlus's ElectricPowerServiceManager sign conventions for consistency."
+    },
+    {
+      "id": "wiring-04",
+      "slug": "humidity-solver-coupling",
+      "title": "Humidity solver coupling: thermal->humidity latent payload alignment",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/HumidityManager.cc",
+      "files": "crates/hares-envelope/src/humidity_solver.rs crates/hares-envelope/src/thermal_solver/stepping.rs crates/hares-core/src/dwelling/mod.rs",
+      "prompt": "Verify the coupling between the thermal and humidity solvers. The thermal solver produces a per-zone latent payload: [zone_id, q_latent_w (total latent gain from equipment and occupants), m_dot_inf_kg_s (infiltration mass flow rate), w_outdoor (outdoor humidity ratio), energy_balance_residual_w]. The humidity solver consumes this payload to compute the zone humidity ratio evolution. Check that the reading order in the humidity solver exactly matches the writing order from the thermal solver — any mismatch causes a silent data swap (e.g., interpreting m_dot_inf as w_outdoor). Verify that humidity clamping is physically consistent: if the humidity ratio would exceed saturation, the solver must clamp to the saturation humidity ratio at the zone temperature, and the clamping must not create a mass imbalance (the energy associated with condensation must be accounted for as latent heat release). Check that the humidity solver correctly handles the case where latent gains are zero (dry equipment, no occupancy), infiltration is zero (tight building), and the zone simply tracks the outdoor humidity ratio. Verify that moisture adsorption/desorption by building materials (buffering) is either modeled or explicitly documented as not modeled with justification."
+    },
+    {
+      "id": "wiring-05",
+      "slug": "equipment-telemetry-correctness",
+      "title": "Equipment telemetry: verify all reported values physically correct",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc",
+      "files": "crates/hares-types/src/telemetry.rs crates/hares-types/src/telemetry_keys.rs crates/hares-core/src/telemetry.rs",
+      "prompt": "Audit every telemetry field reported by equipment models for physical correctness. Verify units: power in Watts (not kW), energy in Joules or kWh (consistent across all equipment), temperature in Celsius, flow rate in kg/s, pressure in Pa. Check that reported power and energy values are consistent with the port accumulations — the energy telemetry for a timestep must equal the average power * timestep duration, and cumulative energy must be the sum of per-timestep energy (not independently computed). Verify COP for heat pumps: heating COP = heat_output_w / electrical_input_w, cooling COP (or EER) = cooling_output_w / electrical_input_w — reported values must be within physically possible ranges (COP 1.5-5.0 for air-source, 3.0-6.0 for ground-source). Verify EER for air conditioners: typically 8-14 (Btu/Wh) or 2.3-4.1 (W/W) depending on unit convention. Degradation for batteries: reported capacity degradation must be monotonically increasing, must never exceed initial capacity, and must match the degradation model (cycle-based, calendar-based, or hybrid). SOC for EV: must stay within [0.0, 1.0] and must be updated at each timestep. Verify that no telemetry field contains NaN (from division by zero in COP calculation), infinity (from unbounded extrapolation), or physically impossible values (negative absolute temperature, SOC > 1.0)."
+    },
+    {
+      "id": "wiring-06",
+      "slug": "schedule-resolution-pipeline",
+      "title": "Schedule resolution pipeline: HPXML -> schedule source -> runtime evaluation",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py",
+      "files": "crates/hares-io/src/schedule.rs crates/hares-io/src/schedule_resolve.rs crates/hares-core/src/environment.rs",
+      "prompt": "Trace the schedule resolution pipeline end-to-end: HPXML schedule extension parameters (schedule type, values, units) parse into a ScheduleSource representation (hourly or sub-hourly values with day-type and month multipliers), which is indexed and stored for runtime lookup. At each timestep, the runtime environment evaluates the schedule for the current datetime and zone, applying month-of-year multipliers, day-of-week/weekend/holiday multipliers, and hour-of-day values. Verify that duty cycle fractions are correctly stored (as a fraction 0.0-1.0, not as a percentage 0-100) and correctly applied (multiply rated power by fraction, not by percentage). Check that month, weekday, weekend, and holiday multipliers are correctly combined: they should multiply (month_multiplier * day_type_multiplier * hour_value) not add or replace. Assess whether stochastic schedule generation preserves expected energy: over many realizations, the mean total energy delivered must equal the deterministic schedule's energy, within the tolerance defined by the schedule variance parameters. Verify that schedule lookup at timestep boundaries produces the correct value: the schedule for timestep T at time t should be the value for the interval [t, t+dt), not [t-dt, t). Check for off-by-one errors at midnight, month boundaries, Feb 29, and daylight saving transitions."
+    },
+    {
+      "id": "wiring-07",
+      "slug": "fluid-loop-port-wiring",
+      "title": "Fluid loop port wiring: water heater <-> hydronic heating loop connectivity",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/WaterHeater.py vendors/EnergyPlus/src/EnergyPlus/Plant/",
+      "files": "crates/hares-types/src/fluid.rs crates/hares-envelope/src/fluid_solver.rs crates/hares-equipment/src/water_heater/mod.rs",
+      "prompt": "Verify fluid loop connectivity through the port system. Each fluid-based equipment contributes PortContribution::Fluid {loop_id, flow_rate_kg_s, supply_temp_c, return_temp_c, fluid_type} to a specific fluid loop identified by loop_id. Trace the fluid connections: a boiler contributes hot water at supply_temp_c to a hydronic heating loop, which circulates through radiators/baseboards and returns cooler water at return_temp_c. A water heater receives cold water from the mains and supplies hot water to domestic hot water draws — verify that the draw profile's flow rate and the incoming cold water temperature (from the weather/ground model) are correctly applied. An HPWH (heat pump water heater) has an additional compressor loop: the heat pump extracts heat from the surrounding zone air, which must be modeled as a negative thermal load (cooling) on that zone. Verify that the fluid solver receives all contributions for each loop_id, sums flow rates and computes the mixed temperature (flow-weighted average of supply temperatures), and correctly handles the case where multiple equipment serve the same fluid loop (e.g., a boiler and a solar thermal collector both supplying a hydronic loop). Check that fluid_type (Water, WaterGlycol, Refrigerant) is correctly propagated and used for fluid property lookups (density, specific heat, viscosity)."
+    },
+    {
+      "id": "wiring-08",
+      "slug": "unit-consistency-cross-crate",
+      "title": "Unit consistency across crate boundaries: W, kW, C, kg/s, m3, Pa, kPa",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/units.py vendors/EnergyPlus/src/EnergyPlus/Data/",
+      "files": "All crates",
+      "prompt": "Perform a systematic audit of unit consistency across all crate boundaries. The primary concern is silent unit mismatches: function A in crate X emits values in Watts, but function B in crate Y interprets them as kW. Use the following strategy: scan for unit-denoting suffixes in variable names (_w, _kw, _c, _k, _f, _kg_s, _g_s, _kpa, _pa, _m3_s, _l_s) and trace each across crate boundaries to verify the suffix is accurate. Temperature: verify that all temperatures are in Celsius internally — Kelvin would cause freezing point offsets, Fahrenheit would cause entirely wrong physics. Pressure: verify consistent use of Pa vs kPa — atmospheric pressure is ~101325 Pa or ~101.325 kPa; a missed factor of 1000 is catastrophic. Mass flow: verify kg/s throughout — L/s requires density conversion (1 L/s of water ≈ 1 kg/s at standard conditions). Check that any unit conversion at crate boundaries is explicit: functions named with _to_kw, from_w_to_kw, etc. that wrap value conversion, not implicit. Identify any place where a numeric literal (e.g., 3600.0 for seconds-to-hours) is used as a unit conversion without documentation — these are high-risk for off-by-factor errors. Report all suspected unit mismatches found."
+    }
+  ]
+}

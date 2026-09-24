@@ -1,0 +1,133 @@
+//! HPWH compressor control logic, COP/capacity curve evaluation, and condenser heat distribution.
+
+use serde::{Deserialize, Serialize};
+
+/// Mutual exclusion mode between compressor and backup resistance elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ElementHpControlMode {
+    /// Compressor and backup elements cannot run simultaneously.
+    /// When the compressor is on, the backup element is locked out, and vice versa.
+    /// Compressor gets priority when neither is currently running.
+    #[default]
+    MutuallyExclusive,
+    /// Both compressor and backup elements can operate at the same time.
+    Simultaneous,
+}
+
+pub(super) const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH-specific default)
+pub(super) const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_725.0; // 500 W electrical × 3.45 COP
+/// Default nominal HPWH COP used to scale the biquadratic COP curve when no
+/// explicit COP/UEF is provided in config.
+///
+/// This matches the standard OCHRE HPWH default class used in parity tests.
+pub(super) const DEFAULT_RATED_COP: f64 = 3.45;
+pub(super) const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
+pub(super) const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
+/// Standard EnergyPlus/OCHRE HPWH COP biquadratic curve (GE GeoSpring class).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 474.
+pub(super) const DEFAULT_COP_CURVE: [f64; 6] =
+    [1.0132, 0.0436, 0.0000117, -0.01113, 0.00003688, -0.000498];
+/// Standard EnergyPlus/OCHRE HPWH capacity curve (GE GeoSpring / A.O. Smith class).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 473.
+pub(super) const DEFAULT_CAPACITY_CURVE: [f64; 6] =
+    [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145];
+/// Low-power HPWH COP biquadratic curve (distinct compressor family).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+///
+/// **HARES divergence from OCHRE:** OCHRE's HPXML import uses an exact-equality
+/// `UEF == 4.9` sentinel tied to one specific 120V ResStock product and applies
+/// these coefficients as a hard switch. HARES generalizes to a continuous
+/// UEF-based compressor-class transition with smooth blending — this coefficient
+/// set represents a physically-distinct low-power compressor family, not a single
+/// product SKU.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 470 (low-power COP).
+pub(super) const DEFAULT_LOW_POWER_COP_CURVE: [f64; 6] =
+    [1.1332, 0.063, -0.0000979, -0.00972, -0.0000214, -0.000686];
+/// Low-power HPWH capacity biquadratic curve (distinct compressor family).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py line 469 (low-power capacity).
+pub(super) const DEFAULT_LOW_POWER_CAPACITY_CURVE: [f64; 6] =
+    [0.813, 0.0160, 0.000537, 0.0020319, -0.0000860, -0.0000686];
+pub(super) const DEFAULT_ZONE_TEMP_BOUNDS_C: (f64, f64) = (5.0, 45.0);
+pub(super) const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
+/// OCHRE-compatible ambient temperature lockout range (°C) -- standard HPWH.
+///
+/// Source values in Fahrenheit: lower = 45°F, upper = 110°F.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 614-616.
+/// Conversion formula: (°F − 32) × 5/9. These are const expressions, not
+/// function calls, so they evaluate at compile time.
+// 45°F → (45 - 32) × 5/9 = 7.222...°C
+pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = (45.0 - 32.0) * 5.0 / 9.0;
+// 110°F → (110 - 32) × 5/9 = 43.333...°C
+pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = (110.0 - 32.0) * 5.0 / 9.0;
+/// Widened ambient temperature lockout range (°C) for low-power HPWH.
+///
+/// Source values in Fahrenheit: lower = 37°F, upper = 145°F.
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 612-613.
+// 37°F → (37 - 32) × 5/9 = 2.777...°C
+pub(super) const DEFAULT_LOW_POWER_MIN_AMBIENT_TEMP_C: f64 = (37.0 - 32.0) * 5.0 / 9.0;
+// 145°F → (145 - 32) × 5/9 = 62.777...°C
+pub(super) const DEFAULT_LOW_POWER_MAX_AMBIENT_TEMP_C: f64 = (145.0 - 32.0) * 5.0 / 9.0;
+/// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
+pub(super) const DEFAULT_SHR: f64 = 0.88;
+/// Fraction of compressor waste heat that exits the building envelope.
+pub(super) const DEFAULT_LOST_HEAT_FRACTION: f64 = 0.0;
+/// Evaporator fan power (W); added to electrical consumption when compressor runs.
+pub(super) const DEFAULT_FAN_POWER_W: f64 = 35.0;
+/// Standby parasitic power (W); drawn when compressor is off.
+/// OCHRE WaterHeater.py:457: `HPWH Parasitics (W)` default 1 W.
+pub(super) const DEFAULT_PARASITIC_POWER_W: f64 = 1.0;
+/// Resistance backup element efficiency (fraction). Default 1.0 = 100% electric→heat.
+pub(super) const DEFAULT_BACKUP_EFFICIENCY: f64 = 1.0;
+/// Minimum compressor on-time (s) before an Off transition is allowed.
+pub(super) const DEFAULT_MIN_ON_TIME_S: f64 = 600.0;
+/// OCHRE condenser heat distribution weights for 12-node tanks.
+/// Indices map to tank nodes 0–11 (top=0, bottom=11).
+/// Values: [0, 0, 0, 0, 0, 5, 10, 15, 20, 25, 30, 5] / 110.
+pub(super) const OCHRE_12NODE_CONDENSER_WEIGHTS: [f64; 12] = [
+    0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 5.0,
+];
+
+/// Build a `(node, power_w)` injection list from condenser weights and total heat.
+///
+/// Weights need not be pre-normalized; they are normalized internally. If the
+/// weight sum is zero the heat is concentrated at the bottom (last) node.
+pub(super) fn build_heat_injections(
+    weights: &[f64],
+    q_w: f64,
+    n_nodes: usize,
+) -> Vec<(usize, f64)> {
+    if q_w == 0.0 {
+        return vec![];
+    }
+    let weight_sum: f64 = weights.iter().sum();
+    if weight_sum <= 0.0 {
+        return vec![(n_nodes.saturating_sub(1), q_w)];
+    }
+    weights
+        .iter()
+        .enumerate()
+        .filter(|&(node, &w)| w > 0.0 && node < n_nodes)
+        .map(|(node, &w)| (node, q_w * w / weight_sum))
+        .collect()
+}
+
+/// Default condenser heat distribution weights for a tank with `n_nodes` nodes.
+///
+/// For 12-node tanks, returns the OCHRE-calibrated distribution (bottom-biased).
+/// For other node counts, concentrates all heat at the bottom half of the tank
+/// (nodes at or above index `n_nodes / 2`), matching OCHRE's general convention
+/// that condenser heat enters the lower portion of the tank.
+pub(super) fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
+    if n_nodes == 12 {
+        return OCHRE_12NODE_CONDENSER_WEIGHTS.to_vec();
+    }
+    // For generic node counts: place 100% weight on the condenser node (n_nodes / 2).
+    let mut weights = vec![0.0_f64; n_nodes];
+    if n_nodes > 0 {
+        weights[n_nodes / 2] = 1.0;
+    }
+    weights
+}

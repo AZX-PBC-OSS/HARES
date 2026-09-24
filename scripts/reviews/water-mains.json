@@ -1,0 +1,38 @@
+{
+  "category": "water-mains",
+  "description": "Water mains temperature model",
+  "reviews": [
+    {
+      "id": "wm-01",
+      "slug": "deg-per-day-source-verification",
+      "title": "DEG_PER_DAY=0.986 source verification (Burch-Christensen 2007) and divergence analysis from 360/365.25=0.9856",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/water_mains.rs:16",
+      "prompt": "Verify the DEG_PER_DAY constant (0.986) against the Burch-Christensen 2007 paper. Note that 360/365.25 = 0.9856 differs from 0.986. Determine the source of the 0.986 value and quantify the impact of this 0.04% difference on annual water mains temperature predictions."
+    },
+    {
+      "id": "wm-02",
+      "slug": "water-mains-model-constants",
+      "title": "Verify all 5 model constants (OFFSET_F=6F, RATIO_BASE=0.4, RATIO_SLOPE=0.01, LAG_BASE=35, LAG_SLOPE=1.0) against Burch-Christensen 2007 paper",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/water_mains.rs:21-36",
+      "prompt": "Verify all 5 water mains model constants — OFFSET_F (6F), RATIO_BASE (0.4), RATIO_SLOPE (0.01), LAG_BASE (35 days), LAG_SLOPE (1.0) — against the original Burch-Christensen 2007 paper calibrated for the contiguous United States. Confirm each constant matches the published values."
+    },
+    {
+      "id": "wm-03",
+      "slug": "southern-hemisphere-phase-sign",
+      "title": "Southern hemisphere phase sign verification: sign=-1 for Northern, +1 for Southern hemisphere",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/water_mains.rs:102-105",
+      "prompt": "Verify the southern hemisphere phase sign logic: sign = -1 for Northern hemisphere, +1 for Southern hemisphere. Confirm this inverts the seasonal temperature lag correctly (i.e., peak water temperature occurs in February in the Southern hemisphere, not August)."
+    },
+    {
+      "id": "wm-04",
+      "slug": "arctic-ratio-clamping",
+      "title": "Ratio clamping at arctic temperatures — verify clamping produces flat behavior (not inverted seasons) when t_avg < -24°C",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/water_mains.rs:98",
+      "prompt": "Verify ratio clamping behavior at extreme cold temperatures. When t_avg falls below -24°C, the unclamped ratio goes negative. Confirm that the clamping logic produces flat (zero-amplitude) behavior rather than inverted seasons. Test at t_avg values of -20°C, -24°C, -30°C, and -40°C."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "category": "solver",
+  "description": "Solver gaps — electrical, fluid, and envelope LUT solver correctness and standalone operation",
+  "reviews": [
+    {
+      "id": "solver-01",
+      "slug": "electrical-solver-standalone",
+      "title": "Electrical domain solver: ZIP model, voltage dependency, complex power",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/ElectricPowerServiceManager.cc",
+      "files": "crates/hares-envelope/src/electrical_solver.rs",
+      "prompt": "ZIP model (z*v^2 + i*v + p) correctly implemented? Complex power (P, Q, S, PF) correct? Generation and load aggregation with correct sign conventions? Voltage range [0.9, 1.1] pu? The ZIP model decomposes electrical loads into constant impedance (Z), constant current (I), and constant power (P) fractions. Verify that the polynomial evaluation P = P_nominal * (Z_pct * v^2 + I_pct * v + P_pct) is implemented with the correct voltage normalization (v = V_actual / V_nominal) and that the three coefficients sum to 1.0. Apparent power S must be computed as sqrt(P^2 + Q^2) and power factor PF as P/S with appropriate sign conventions for leading vs. lagging. Generation (PV, battery discharge) must use negative power convention for injection into the bus, while loads use positive power convention — verify that the algebraic sum of all connected equipment at each electrical node correctly represents net power into the grid. Voltage must be constrained to the ANSI C84.1 Range A of [0.9, 1.05] pu or the wider [0.9, 1.1] pu for modeling purposes; the solver must either reject or clamp out-of-range voltages. Verify that the solver can operate standalone (without the full simulation loop) for unit testing of electrical circuit configurations."
+    },
+    {
+      "id": "solver-02",
+      "slug": "fluid-solver-standalone",
+      "title": "Fluid domain solver: loop resolution, temperature propagation, mass conservation",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/Plant/",
+      "files": "crates/hares-envelope/src/fluid_solver.rs crates/hares-types/src/fluid.rs",
+      "prompt": "Hydronic loops resolved with mass balance and temperature propagation? Multiple equipment on same loop? Supply/return temperatures consistent? No unphysical temperatures. The fluid solver must resolve hydronic (water, water-glycol) loops by solving for mass flow rates at each branch and node while maintaining mass conservation: the sum of flows into any node must equal the sum of flows out. For loops with multiple equipment connected in parallel (e.g., a boiler and a heat pump both feeding the same distribution loop), verify that flow splitting between branches is computed correctly based on branch resistances or pump curves, not arbitrary equal-split assumptions. Temperature propagation along the loop must follow the flow direction: the temperature at the outlet of a heat source must be warmer than its inlet by the correct delta-T computed from Q = m_dot * cp * delta_T. Supply and return temperatures at the loop level must be physically consistent: the supply temperature leaving the plant must be the highest temperature in the loop for heating mode, and the return temperature must be the lowest (after heat has been extracted by the distribution system). Unphysical temperatures — below freezing for pure water loops without freeze protection, above boiling at atmospheric pressure, or exceeding material limits — must be detected and reported as errors."
+    },
+    {
+      "id": "solver-03",
+      "slug": "envelope-lut-precomputed",
+      "title": "Envelope LUT precomputed RC path: correctness and performance",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/envelope.py",
+      "files": "crates/hares-io/src/envelope_lut.rs crates/hares-envelope/src/boundary_rc.rs",
+      "prompt": "LUT-generated RC networks equivalent to full computation? Parameter ranges adequate? Interpolation correct for off-grid values? LUT path does not bypass validation. The lookup table (LUT) approach precomputes RC network parameters for envelope constructions to avoid recomputing material-layer-to-RC conversions at runtime. Verify that the LUT-generated RC parameters (resistances, capacitances) are numerically equivalent to the full computation path within a tolerance of 1e-6 relative error for all test cases. The LUT must cover an adequate range of construction parameters: wall insulation R-values from 0 to R-60, window U-factors from 0.2 to 7.0 W/m²·K, thermal mass levels from lightweight to massive. For parameter values that fall between LUT grid points, verify that interpolation (linear, bilinear, or multilinear as appropriate) produces physically correct intermediate values rather than extrapolating outside the grid bounds or producing step discontinuities at grid boundaries. The LUT path must not bypass validation that the full computation path performs — in particular, verify that the LUT path still checks that computed R-values are positive, capacitances are non-negative, and that the resulting RC network is numerically stable."
+    }
+  ]
+}

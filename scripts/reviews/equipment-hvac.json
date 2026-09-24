@@ -1,0 +1,118 @@
+{
+  "category": "equipment-hvac",
+  "description": "HVAC equipment models: furnaces, heat pumps, AC, boilers, baseboards, dehumidifiers, thermostats, duct distribution",
+  "reviews": [
+    {
+      "id": "equip-hvac-01",
+      "slug": "furnace-fuel-thermal-duct-dse",
+      "title": "Furnace fuel/thermal balance with duct DSE interaction",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/furnace.rs crates/hares-equipment/src/hvac/duct_distribution.rs crates/hares-equipment/src/hvac/hvac_core.rs",
+      "prompt": "Furnace models apply duct distribution system efficiency (DSE) as a multiplier on delivered heating, but the thermal coupling between duct losses and the zone energy balance may double-count or miss interactions when ducts are located in conditioned vs unconditioned space. Verify that furnace output heat is correctly partitioned into zone-delivered fraction (via DSE) and duct-loss-to-zone fraction (for ducts in conditioned space). Compare against OCHRE HVAC.py DSE application ordering."
+    },
+    {
+      "id": "equip-hvac-02",
+      "slug": "boiler-hydronic-loop-integration",
+      "title": "Boiler hydronic loop flow rate and return temperature integration",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/boiler.rs crates/hares-equipment/src/hvac/hvac_core.rs",
+      "prompt": "Boiler model uses a default boiler flow rate and return temperature when not specified in HPXML. These defaults are not documented with source citations and may not reflect typical residential hydronic design (180F supply, 20F delta-T). Check whether the boiler applies the hydronic loop thermal capacitance to the zone air heat balance correctly, and whether the default flow rate and return temperature are physically consistent with typical baseboard/radiator sizing."
+    },
+    {
+      "id": "equip-hvac-03",
+      "slug": "hp-defrost-cycle-tracker",
+      "title": "Heat pump defrost cycle tracker edge cases",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/heat_pump/defrost.rs crates/hares-equipment/src/hvac/heat_pump/heater.rs crates/hares-equipment/src/hvac/heat_pump.rs",
+      "prompt": "The discrete defrost cycle tracker in defrost.rs accumulates frost and triggers defrost based on outdoor temperature and runtime. Edge cases: what happens when outdoor temperature oscillates around the frost threshold? Does the frost accumulator reset correctly across thermostat cycles? Does a long off-period (e.g., spring shoulder season) correctly reset accumulated frost, or does the model defrost immediately on first heating call after a week of inactivity? Compare against OCHRE defrost logic."
+    },
+    {
+      "id": "equip-hvac-04",
+      "slug": "ac-shr-latent-degradation",
+      "title": "AC sensible heat ratio and latent degradation parameters",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/air_conditioner.rs crates/hares-equipment/src/hvac/latent_degradation.rs crates/hares-equipment/src/hvac/ac_config.rs crates/hares-equipment/src/hvac/coil_physics.rs",
+      "prompt": "The AC model's sensible heat ratio (SHR) and latent degradation coefficient are parsed from HPXML but may use default values when absent. Verify that the latent degradation model correctly applies the coil bypass factor and apparatus dew point method, and that the SHR defaults are appropriate for different AC types (single-speed vs variable-speed, dry climate vs humid climate). Compare against OCHRE HVAC.py latent degradation parameters and EnergyPlus cooling coil SHR model."
+    },
+    {
+      "id": "equip-hvac-05",
+      "slug": "electric-baseboard-bypass",
+      "title": "Electric baseboard bypass verification: no efficiency loss pathway",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/baseboard.rs crates/hares-equipment/src/hvac/hvac_core.rs",
+      "prompt": "Electric baseboard heaters should have 100% conversion efficiency with all electrical input appearing as convective/radiant heat in the zone. Verify that the baseboard model does not inadvertently apply a distribution efficiency, duct loss, or part-load degradation factor. Also check that baseboard radiant fraction is applied correctly to the envelope solver's radiant/convective split. Compare OCHRE's electric resistance model to ensure no hidden efficiency derating."
+    },
+    {
+      "id": "equip-hvac-06",
+      "slug": "thermostat-fsm-edge-cases",
+      "title": "Thermostat FSM edge cases: hysteresis, min cycle time, schedule transitions",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/thermostat.rs crates/hares-equipment/src/hvac/air_conditioner.rs crates/hares-equipment/src/hvac/heat_pump/heater.rs",
+      "prompt": "The ThermostatFsm in thermostat.rs manages mode transitions with hysteresis, minimum cycle time, and schedule setpoint overrides. Edge cases to check: what happens when the schedule setpoint changes mid-timestep? Does the min_cycle_time guard correctly prevent short-cycling when outdoor temperature changes rapidly? What about simultaneous heating and cooling calls in dual-fuel systems? Compare transition logic against OCHRE thermostat FSM."
+    },
+    {
+      "id": "equip-hvac-07",
+      "slug": "duct-heat-fraction-basement-dedup",
+      "title": "Duct heat fraction basement routing: deduplication of duct zone heat injection",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/duct_distribution.rs crates/hares-equipment/src/hvac/furnace.rs crates/hares-equipment/src/hvac/heat_pump.rs",
+      "prompt": "When ducts are located in a basement or crawlspace that is also a modeled thermal zone, the duct heat loss fraction should inject heat into that zone's air node. Verify that duct losses are not double-counted — once via the DSE multiplier reducing delivered heat, and again via explicit duct loss injection to the zone. Check that supply and return duct losses are handled symmetrically and that the duct location-to-zone mapping is deterministic and not fragile."
+    },
+    {
+      "id": "equip-hvac-08",
+      "slug": "multi-speed-biquadratic-interleaving",
+      "title": "Multi-speed biquadratic curve interleaving across compressor speeds",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/heat_pump/heater.rs crates/hares-equipment/src/hvac/heat_pump/cooler.rs crates/hares-physics/src/biquadratic.rs crates/hares-equipment/src/hvac/default_curves.rs",
+      "prompt": "Multi-speed heat pumps use biquadratic performance curves indexed by compressor speed. Verify that the curve selection logic correctly handles the case where speed-count mismatches between capacity and EIR curves, and that extrapolation beyond the highest/lowest speed is clamped or flagged rather than silently producing physically impossible COP values. Check default curve bounds in default_curves.rs against manufacturer performance data ranges."
+    },
+    {
+      "id": "equip-hvac-09",
+      "slug": "ideal-hvac-back-solve",
+      "title": "Ideal HVAC back-solve correctness: capacity vs load matching",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/ideal_hvac.rs crates/hares-equipment/src/hvac/hvac_core.rs",
+      "prompt": "The ideal HVAC model back-solves the required capacity to exactly meet the zone load each timestep. Verify that this back-solve correctly accounts for the thermal coupling between equipment output and zone temperature — the load itself depends on the equipment output because injected heat changes the zone temperature within the timestep. Check whether the ideal model iterates to convergence or uses a one-shot estimate. Compare against OCHRE IdealLoads model."
+    },
+    {
+      "id": "equip-hvac-10",
+      "slug": "dehumidifier-model-completeness",
+      "title": "Dehumidifier model completeness: capacity curves, energy factor, water removal",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/dehumidifier.rs crates/hares-equipment/src/hvac/dehumidifier_defaults.rs",
+      "prompt": "The dehumidifier model uses capacity curves that are always identity-mapped (dehumidifier.rs). Check whether the model correctly handles: energy factor vs integrated energy factor, water removal rate vs rated capacity at different inlet air conditions, and the thermal impact of dehumidifier reject heat on the zone air balance. Compare against OCHRE dehumidifier model and EnergyPlus ZoneHVAC:Dehumidifier for missing features."
+    },
+    {
+      "id": "equip-hvac-11",
+      "slug": "speed-control-modes-completeness",
+      "title": "Speed control modes completeness: staging, variable-speed, coil selection",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/speed_control.rs crates/hares-equipment/src/hvac/staging.rs crates/hares-equipment/src/hvac/heat_pump_config.rs",
+      "prompt": "HARES supports multiple speed control modes (single-speed, multi-speed, variable-speed) but the mode selection logic and staging rules in speed_control.rs and staging.rs need verification for edge cases. Check: does the staging logic correctly handle the transition between backup heat staging and heat pump staging? Does variable-speed mode correctly interpolate between speed levels or does it snap to discrete speeds? Compare OCHRE speed control and staging hierarchy."
+    },
+    {
+      "id": "equip-hvac-12",
+      "slug": "hvac-equivalent-battery-dr",
+      "title": "HVAC equivalent battery model for demand response",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/equivalent_battery.rs crates/hares-equipment/src/hvac/air_conditioner.rs crates/hares-equipment/src/hvac/heat_pump.rs",
+      "prompt": "The equivalent battery model for HVAC demand response computes a virtual state-of-charge based on zone temperature deviation from setpoint. Verify that the equivalent battery capacity correctly tracks the building's thermal capacitance and that the charge/discharge power limits respect the HVAC system's actual capacity constraints. Check for energy conservation: does the equivalent battery's energy balance match the actual thermal energy stored in the building mass across DR events?"
+    },
+    {
+      "id": "equip-hvac-13",
+      "slug": "room-ac-vs-central-ac",
+      "title": "Room AC vs central AC differences: SHR, fan power, control logic",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/air_conditioner.rs crates/hares-equipment/src/hvac/ac_config.rs crates/hares-equipment/src/hvac/cooling_config.rs",
+      "prompt": "HPXML distinguishes room AC (window units, through-the-wall) from central AC with different efficiency metrics, fan power conventions, and distribution assumptions. Verify that HARES applies the correct differences: room AC does not use duct DSE, room AC fan power is included in EER/CEER rating, and room AC SHR defaults may differ from central AC. Check that room AC adopts the ideal thermostat target correctly."
+    },
+    {
+      "id": "equip-hvac-14",
+      "slug": "startup-capacity-degradation-ramp",
+      "title": "Startup capacity degradation ramp (Winkler 2011) implementation",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-equipment/src/hvac/air_conditioner.rs crates/hares-equipment/src/hvac/heat_pump/heater.rs crates/hares-equipment/src/hvac/heat_pump/cooler.rs crates/hares-equipment/src/hvac/hvac_core.rs",
+      "prompt": "Startup capacity degradation per Winkler 2011 reduces delivered capacity for the first few minutes after compressor start. Verify that the ramp correctly resets across thermostat cycles: does a brief off period trigger a full restart degradation, or is the degradation proportional to off-time? Check that variable-speed systems apply startup degradation only at minimum speed, not at all speeds. Compare OCHRE HVAC.py startup transient model."
+    }
+  ]
+}

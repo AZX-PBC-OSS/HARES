@@ -1,0 +1,76 @@
+[workspace]
+members = [
+    "crates/hares-types",
+    "crates/hares-physics",
+    "crates/hares-envelope",
+    "crates/hares-control",
+    "crates/hares-equipment",
+    "crates/hares-io",
+    "crates/hares-core",
+    "crates/hares-fleet",
+    "crates/hares-tariff",
+    "crates/hares-python",
+]
+default-members = [
+    "crates/hares-types",
+    "crates/hares-physics",
+    "crates/hares-envelope",
+    "crates/hares-control",
+    "crates/hares-equipment",
+    "crates/hares-io",
+    "crates/hares-core",
+    "crates/hares-tariff",
+    "crates/hares-fleet",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+license = "BSD-3-Clause"
+repository = "https://github.com/AZX-PBC-OSS/HARES"
+
+[workspace.dependencies]
+# Internal crates
+hares-types = { path = "crates/hares-types" }
+hares-physics = { path = "crates/hares-physics" }
+hares-envelope = { path = "crates/hares-envelope" }
+hares-control = { path = "crates/hares-control" }
+hares-equipment = { path = "crates/hares-equipment" }
+hares-io = { path = "crates/hares-io" }
+hares-core = { path = "crates/hares-core" }
+hares-tariff = { path = "crates/hares-tariff" }
+hares-fleet = { path = "crates/hares-fleet" }
+
+# External dependencies
+nalgebra = "0.34"
+arrow = "58"
+parquet = "58"
+pyo3 = "0.28"
+uom = "0.38"
+rayon = "1.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+chrono-tz = "0.10"
+# Coordinate -> IANA timezone lookup (Natural Earth tz polygons). Used by the
+# site-location resolver to derive a civil UTC offset from lat/lon when neither
+# the HPXML nor the weather file supplies one.
+tzf-rs = "1.3"
+quick-xml = "0.39"
+rand = "0.10"
+rand_chacha = "0.10"
+rand_distr = "0.6"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+thiserror = "2"
+bitflags = "2"
+toml = "1"
+numpy = "0.28"
+postcard = { version = "1", features = ["alloc", "use-crc"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+sha2 = "0.10"
+crc = "3"
+proptest = "1"
+strum = { version = "0.26", features = ["derive"] }
+regex = "1"

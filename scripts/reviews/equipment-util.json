@@ -1,0 +1,30 @@
+{
+  "category": "equipment-util",
+  "description": "Equipment utility functions: N-dimensional interpolation, schedule helpers, and equipment trait macros",
+  "reviews": [
+    {
+      "id": "equip-util-01",
+      "slug": "nd-interpolation",
+      "title": "N-dimensional interpolation correctness and boundary handling",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/ndinterp.rs",
+      "prompt": "Verify that multilinear interpolation on N-dimensional grids (4-D for heat pumps, 6-D for some detailed models) is mathematically correct. For rectilinear grids where each axis has monotonic breakpoints, multi-linear interpolation must produce results identical to sequential 1-D linear interpolation along each axis in any order (commutative property). Boundary handling: when a query point falls outside the grid bounds, extrapolation must either clamp to the nearest boundary value (safe for physics) or return NaN (safe for detecting model inadequacy), but must not produce unbounded extrapolation that yields unphysical values (negative COP, infinite power). Verify grid search efficiency: for large grids with thousands of breakpoints per axis, the interpolation should use binary search (O(log n)) per axis rather than linear scan (O(n)), and should cache the last-used index per axis (hunting) for temporal coherence in simulation where consecutive query points are close. Test degenerate grids: single point per dimension (all query points return the single value), two points per dimension (simple linear interpolation), and highly anisotropic grids (many points in one axis, few in another). Check that the interpolation handles mixed unit axes correctly — e.g., one axis in Celsius, another in kg/s, and the table values in Watts."
+    },
+    {
+      "id": "equip-util-02",
+      "slug": "schedule-helpers",
+      "title": "Schedule evaluation helpers: duty cycle, stochastic, interpolation",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py",
+      "files": "crates/hares-equipment/src/schedule_helpers.rs crates/hares-io/src/schedule.rs",
+      "prompt": "Verify that schedule evaluation helpers correctly process duty cycle fractions into equipment on/off patterns. A duty cycle of 0.4 must produce the equipment being on for 40% of the timestep, with the total energy matching the rated power * duty_cycle * timestep_duration. Check that duty cycle rounding (fractional minutes in a timestep) does not accumulate error over multi-hour or multi-day periods — total runtime over the simulation must equal the specified fraction within acceptable tolerance. Assess stochastic schedule generation: for schedules with randomized components (e.g., water draw events), verify that the expected energy over many realizations matches the specified schedule's mean, and that variance is consistent with the schedule's specification (not under- or over-dispersed). Check interpolation correctness for sub-hourly timesteps: hourly schedule values must be correctly interpolated (usually piecewise-constant for schedules like equipment availability, linear for schedules like setpoint temperature) to the simulation's actual timestep duration. Verify that schedule day-type selection (weekday vs weekend vs holiday) correctly follows the calendar, including month boundaries, leap years, and daylight saving transitions where applicable."
+    },
+    {
+      "id": "equip-util-03",
+      "slug": "equipment-macros",
+      "title": "Equipment macros: code generation correctness and error messages",
+      "vendor_refs": "vendors/OCHRE/",
+      "files": "crates/hares-equipment/src/macros.rs",
+      "prompt": "Verify that the equipment-related proc macros or macro_rules! macros produce correct trait implementations for all equipment types. Each equipment model must implement the Equipment trait with init(), step(), port_contributions(), and telemetry() methods — macros must generate these implementations without silent omissions (e.g., default implementations that do nothing or return empty vectors when equipment should produce output). Check that macro error messages are helpful: when macro usage is incorrect (wrong parameter types, missing required fields, incompatible attribute combinations), the compiler error must point to the macro invocation site with a descriptive message about what's wrong, not produce an inscrutable error deep in generated code. Verify that generated code is free of silent default-forgetting — if an equipment type has a field in its struct, the macro must either use it in a trait method or emit a warning. Check that all equipment types using macros have consistent behavior: the same port naming conventions, the same telemetry field ordering, and the same error handling patterns. Assess whether macros are unit-tested: can macro-generated code be compiled in a test harness that verifies trait implementations compile and produce expected behavior for trivial parameter sets?"
+    }
+  ]
+}

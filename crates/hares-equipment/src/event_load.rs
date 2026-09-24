@@ -1,0 +1,4541 @@
+//! Event-driven (stochastic) load equipment model.
+
+use std::borrow::Cow;
+use std::time::Duration;
+
+use chrono::Datelike;
+
+use hares_types::{
+    BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
+    CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
+    HeatTransferDirection, OperatingMode, PortContribution, PortDeclaration, PortSlots,
+    ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+};
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+
+use hares_physics::units::power_kw_to_w;
+
+use crate::config::constructor_equipment_id;
+use crate::hvac::helpers::parse_fuel_type;
+use crate::schedule_helpers::{
+    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
+    parse_zone_id, restore_schedule_source_state,
+};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
+use hares_types::zip::{ResolvedZip, ZipLoad};
+const KEY_BUILDING_ID: &str = "building_id";
+const KEY_MASTER_SEED: &str = "master_seed";
+const KEY_N_UNITS: &str = "n_units";
+const KEY_ACTIVE_POWER_KW: &str = "active_power_kw";
+const KEY_ACTIVE_DURATION_S: &str = "active_duration_s";
+const KEY_COOLDOWN_DURATION_S: &str = "cooldown_duration_s";
+const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
+const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
+const KEY_PHASE_LEN: &str = "phase_len";
+const KEY_EVENT_WINDOW_SOURCE: &str = "event_window_source";
+const KEY_EVENT_WINDOW_SCHEDULE_COL: &str = "event_window_schedule_col";
+const KEY_EVENT_PROBABILITY_SOURCE: &str = "event_probability_source";
+const KEY_EVENT_PROBABILITY_SCHEDULE_COL: &str = "event_probability_schedule_col";
+const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
+
+const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
+const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
+const KEY_DRYER_TYPE: &str = "dryer_type";
+
+#[derive(Clone, Debug, PartialEq)]
+struct ExtractedEvent {
+    start_step: usize,
+    end_step: usize,
+    power_kw: f64,
+}
+
+/// Extract deterministic events from a kW time series.
+/// Contiguous non-zero regions become events with averaged power.
+/// Mirrors OCHRE's `EventBasedLoad.extract_events()`.
+fn extract_events_from_kw_series(kw_series: &[f64]) -> Vec<ExtractedEvent> {
+    let mut events = Vec::new();
+    let mut i = 0;
+    while i < kw_series.len() {
+        if kw_series[i] > 0.0 {
+            let start = i;
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            while i < kw_series.len() && kw_series[i] > 0.0 {
+                sum += kw_series[i];
+                count += 1;
+                i += 1;
+            }
+            events.push(ExtractedEvent {
+                start_step: start,
+                end_step: i,
+                power_kw: sum / count as f64,
+            });
+        } else {
+            i += 1;
+        }
+    }
+    events
+}
+
+/// Expected mean power [kW] of a deterministic event-replay load: total
+/// event energy divided by the schedule length. `None` when no kW series
+/// was extracted (stochastic event scheduling has no static expectation).
+///
+/// `month_multipliers` is the runtime channel `update_outputs` applies on
+/// top of every replay draw. It changes what is computable without
+/// timestamps: a uniform scale (all twelve equal, including the all-zero
+/// and all-identity cases) scales the series mean exactly, but a *partial*
+/// scale (multipliers differing by month) makes the honest expectation
+/// depend on which month each replay step falls in — unknowable from the
+/// series alone — so the expectation is `None` ("not computable without
+/// simulation") rather than the unscaled mean the premise aggregation
+/// would use as this equipment's weight.
+fn expected_event_mean_power_kw(
+    events: &[ExtractedEvent],
+    schedule_len: usize,
+    month_multipliers: Option<[f64; 12]>,
+) -> Option<crate::ExpectedMeanPower> {
+    if schedule_len == 0 {
+        return None;
+    }
+    let energy_over_schedule = events
+        .iter()
+        .map(|e| e.power_kw * (e.end_step - e.start_step) as f64)
+        .sum::<f64>();
+    let unscaled = energy_over_schedule / schedule_len as f64;
+    let scaled = match month_multipliers {
+        None => unscaled,
+        Some(m) => {
+            let (min, max) = m
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(*v), hi.max(*v))
+                });
+            if (max - min).abs() < 1e-12 {
+                // Uniform across months: the scale applies to every replay
+                // step equally, so the mean scales exactly (all-zero → 0).
+                unscaled * min
+            } else {
+                // Partial seasonal scaling: which month each replay step
+                // falls in is not derivable from the series.
+                return None;
+            }
+        }
+    };
+    if scaled.is_finite() {
+        Some(crate::ExpectedMeanPower::Kw(scaled))
+    } else {
+        None
+    }
+}
+
+const PHASE_POWER_PREFIX_A: &str = "phase_";
+const PHASE_POWER_SUFFIX_A: &str = "_power_kw";
+const PHASE_DURATION_PREFIX_A: &str = "phase_";
+const PHASE_DURATION_SUFFIX_A: &str = "_duration_s";
+
+const PHASE_POWER_PREFIX_B: &str = "cycle_phase_";
+const PHASE_POWER_SUFFIX_B: &str = "_power_kw";
+const PHASE_DURATION_PREFIX_B: &str = "cycle_phase_";
+const PHASE_DURATION_SUFFIX_B: &str = "_duration_s";
+
+const PHASE_WATER_DRAW_PREFIX_A: &str = "phase_";
+const PHASE_WATER_DRAW_SUFFIX_A: &str = "_has_water_draw";
+const PHASE_WATER_DRAW_PREFIX_B: &str = "cycle_phase_";
+const PHASE_WATER_DRAW_SUFFIX_B: &str = "_has_water_draw";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum ForcedMode {
+    Idle,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum EventPhase {
+    Idle,
+    Active,
+    Cooldown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct EventBasedLoadState {
+    phase: EventPhase,
+    remaining_phase_s: f64,
+    load_fraction: f64,
+    forced_mode: Option<ForcedMode>,
+    rng_seed: [u8; 32],
+    rng_draws: u64,
+    event_window_source_state: ScheduleSourceState,
+    event_probability_source_state: ScheduleSourceState,
+    delay_remaining_s: f64,
+    event_cursor: usize,
+    current_step: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct WetApplianceState {
+    active: bool,
+    phase_index: usize,
+    elapsed_in_phase_s: f64,
+    load_fraction: f64,
+    forced_mode: Option<ForcedMode>,
+    hot_water_draw_rate_kg_s: f64,
+    rng_seed: [u8; 32],
+    rng_draws: u64,
+    event_window_source_state: ScheduleSourceState,
+    event_probability_source_state: ScheduleSourceState,
+    delay_remaining_s: f64,
+    event_cursor: usize,
+    current_step: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CyclePhase {
+    power_kw: f64,
+    duration_s: f64,
+    has_water_draw: bool,
+}
+
+/// Clothes dryer type: vented (exhausts moisture to outdoors) vs
+/// unvented condenser (recovers latent heat as sensible gain in the zone).
+///
+/// HPXML 4.2 §3.8.2: ClothesDryer/Vented (boolean) + ClothesDryer/FuelType
+/// determine the physics path.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+enum DryerType {
+    VentedElectric,
+    VentedGas,
+    UnventedCondenser,
+}
+
+/// Event-based stochastic load with an Idle -> Active -> Cooldown cycle.
+pub struct EventBasedLoad {
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    telemetry: Telemetry,
+    core_output: CoreOutput,
+    fuel_type: FuelType,
+
+    event_window_source: ScheduleSource,
+    event_probability_source: ScheduleSource,
+
+    active_power_kw: f64,
+    active_duration_s: f64,
+    cooldown_duration_s: f64,
+    sensible_gain_fraction: f64,
+    latent_gain_fraction: f64,
+    month_multipliers: Option<[f64; 12]>,
+
+    phase: EventPhase,
+    remaining_phase_s: f64,
+    load_fraction: f64,
+    forced_mode: Option<ForcedMode>,
+    /// Per-step absolute power override set by `PowerSetpoint`. Cleared after each step.
+    power_setpoint_override: Option<f64>,
+    delay_remaining_s: f64,
+
+    rng_seed: [u8; 32],
+    rng_draws: u64,
+    rng: ChaCha8Rng,
+
+    /// Pre-extracted deterministic events from schedule kW series.
+    extracted_events: Vec<ExtractedEvent>,
+    /// Index of the next event to check.
+    event_cursor: usize,
+    /// Current simulation step counter.
+    current_step: usize,
+    /// Length of the schedule for wrapping.
+    schedule_len: usize,
+
+    /// Full ZIP model (real + reactive) resolved via
+    /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
+    /// scales the event draw at the bus voltage). `ZipLoad::constant_power()`
+    /// (the pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ResolvedZip,
+}
+
+/// Multi-phase wet appliance cycle with stochastic starts.
+pub struct WetAppliance {
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    telemetry: Telemetry,
+    core_output: CoreOutput,
+    fuel_type: FuelType,
+
+    event_window_source: ScheduleSource,
+    event_probability_source: ScheduleSource,
+
+    phases: Vec<CyclePhase>,
+    n_units: f64,
+    sensible_gain_fraction: f64,
+    latent_gain_fraction: f64,
+    month_multipliers: Option<[f64; 12]>,
+    /// None for non-dryer appliances (washer, dishwasher); `Some` for dryers.
+    dryer_type: Option<DryerType>,
+
+    active: bool,
+    phase_index: usize,
+    elapsed_in_phase_s: f64,
+    load_fraction: f64,
+    forced_mode: Option<ForcedMode>,
+    delay_remaining_s: f64,
+
+    hot_water_draw_rate_kg_s: f64,
+
+    rng_seed: [u8; 32],
+    rng_draws: u64,
+    rng: ChaCha8Rng,
+
+    /// Pre-extracted deterministic events from schedule kW series.
+    extracted_events: Vec<ExtractedEvent>,
+    /// Index of the next event to check.
+    event_cursor: usize,
+    /// Current simulation step counter.
+    current_step: usize,
+    /// Length of the schedule for wrapping.
+    schedule_len: usize,
+
+    /// Full ZIP model (real + reactive) resolved via
+    /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
+    /// scales the event draw at the bus voltage). `ZipLoad::constant_power()`
+    /// (the pf = 0 sentinel) when the class has no ZIP configured.
+    zip: ResolvedZip,
+}
+
+impl EventBasedLoad {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let equipment_name = config.name.clone();
+        let descriptor = EquipmentDescriptor {
+            id: EquipmentId(constructor_equipment_id(&config)),
+            name: equipment_name,
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("EventBasedLoad"),
+            zone: parse_zone_id(&config),
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::LOAD_FRACTION
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::POWER_SETPOINT
+                | ControlCapabilities::EVENT_DELAY,
+            core_capabilities: CoreCapabilities::ELECTRIC,
+            telemetry_fields: event_load_telemetry_fields(),
+            zone_type: None,
+        };
+        let ports = ports_for_zone(descriptor.zone);
+        let rng_seed = derive_rng_seed(&config);
+        Self {
+            descriptor,
+            ports,
+            telemetry: default_event_load_telemetry(),
+            core_output: CoreOutput::default(),
+            fuel_type: FuelType::Electric,
+            event_window_source: ScheduleSource::Constant(1.0),
+            event_probability_source: ScheduleSource::Constant(1.0),
+            active_power_kw: 0.0,
+            active_duration_s: 0.0,
+            cooldown_duration_s: 0.0,
+            sensible_gain_fraction: 0.0,
+            latent_gain_fraction: 0.0,
+            month_multipliers: None,
+            phase: EventPhase::Idle,
+            remaining_phase_s: 0.0,
+            load_fraction: 1.0,
+            forced_mode: None,
+            power_setpoint_override: None,
+            delay_remaining_s: 0.0,
+            rng_seed,
+            rng_draws: 0,
+            rng: ChaCha8Rng::from_seed(rng_seed),
+            extracted_events: Vec::new(),
+            event_cursor: 0,
+            current_step: 0,
+            schedule_len: 0,
+            zip: ResolvedZip::governing(ZipLoad::constant_power()),
+        }
+    }
+
+    fn maybe_start_event(&mut self, window_open: bool, probability: f64) {
+        if self.phase != EventPhase::Idle {
+            return;
+        }
+        if self.delay_remaining_s > 0.0 {
+            return;
+        }
+        let should_start = match self.forced_mode {
+            Some(ForcedMode::Idle) => false,
+            Some(ForcedMode::Active) => true,
+            None => {
+                if !window_open {
+                    false
+                } else {
+                    let p = probability.clamp(0.0, 1.0);
+                    if p <= 0.0 {
+                        false
+                    } else if p >= 1.0 {
+                        true
+                    } else {
+                        self.rng_draws = self.rng_draws.saturating_add(1);
+                        self.rng.random::<f64>() < p
+                    }
+                }
+            }
+        };
+
+        if should_start {
+            self.phase = EventPhase::Active;
+            self.remaining_phase_s = self.active_duration_s;
+        }
+    }
+
+    fn apply_overrides(&mut self) {
+        match self.forced_mode {
+            Some(ForcedMode::Idle) => {
+                self.phase = EventPhase::Idle;
+                self.remaining_phase_s = 0.0;
+            }
+            Some(ForcedMode::Active) => {
+                self.phase = EventPhase::Active;
+                if self.remaining_phase_s <= 0.0 {
+                    self.remaining_phase_s = self.active_duration_s;
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn advance_phase_timer(&mut self, dt_s: f64) {
+        if dt_s <= 0.0 || matches!(self.forced_mode, Some(ForcedMode::Active)) {
+            return;
+        }
+
+        let mut remaining_dt = dt_s;
+        while remaining_dt > 0.0 {
+            match self.phase {
+                EventPhase::Idle => break,
+                EventPhase::Active => {
+                    if self.remaining_phase_s > remaining_dt {
+                        self.remaining_phase_s -= remaining_dt;
+                        break;
+                    }
+                    remaining_dt -= self.remaining_phase_s.max(0.0);
+                    if self.cooldown_duration_s > 0.0 {
+                        self.phase = EventPhase::Cooldown;
+                        self.remaining_phase_s = self.cooldown_duration_s;
+                    } else {
+                        self.phase = EventPhase::Idle;
+                        self.remaining_phase_s = 0.0;
+                    }
+                }
+                EventPhase::Cooldown => {
+                    if self.remaining_phase_s > remaining_dt {
+                        self.remaining_phase_s -= remaining_dt;
+                        break;
+                    }
+                    remaining_dt -= self.remaining_phase_s.max(0.0);
+                    self.phase = EventPhase::Idle;
+                    self.remaining_phase_s = 0.0;
+                }
+            }
+        }
+    }
+
+    fn update_outputs(
+        &mut self,
+        ports: &mut PortSlots,
+        month_scale: f64,
+        voltage_pu: f64,
+        bus_energized: bool,
+    ) -> std::result::Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        crate::config::debug_assert_zip_sums(&self.zip, "EventBasedLoad", &self.descriptor.name);
+
+        let active_now = self.phase == EventPhase::Active && bus_energized;
+        // PowerSetpoint overrides the configured active_power_kw for this step,
+        // but only when the equipment is actually in an active event phase.
+        // OCHRE gates p_setpoint on self.mode == "On".
+        let active_power_kw = if active_now {
+            let base_kw = if !self.extracted_events.is_empty()
+                && self.event_cursor < self.extracted_events.len()
+            {
+                self.extracted_events[self.event_cursor].power_kw
+            } else {
+                self.active_power_kw
+            };
+            self.power_setpoint_override
+                .take()
+                .unwrap_or(base_kw * self.load_fraction.max(0.0) * month_scale)
+        } else {
+            self.power_setpoint_override = None;
+            0.0
+        };
+
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel {
+            power_kw_to_w(active_power_kw)
+        } else {
+            0.0
+        };
+        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
+
+        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
+            self.zip.apply(raw_electric_kw, voltage_pu)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Thermal gains come from all input energy regardless of fuel type.
+        // Use the same W value sent to the electrical port to avoid a redundant
+        // kW→W conversion at the electrical↔thermal boundary.
+        let active_power_w = power_kw_to_w(electric_power_kw);
+        let gain_source_w = active_power_w + fuel_consumption_w;
+        let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
+        let latent_gain_w = gain_source_w * self.latent_gain_fraction;
+
+        if electric_power_kw != 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w,
+                reactive_power_kvar,
+            })?;
+        }
+
+        if fuel_consumption_w > 0.0 {
+            ports.accumulate(&PortContribution::Fuel {
+                fuel_type: self.fuel_type,
+                consumption_w: fuel_consumption_w,
+            })?;
+        }
+
+        if let Some(zone) = self.descriptor.zone
+            && (sensible_gain_w != 0.0 || latent_gain_w != 0.0)
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w,
+                category: ThermalCategory::InternalGain,
+            })?;
+        }
+
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
+        self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
+                reactive_power_kvar: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::REACTIVE)
+                    .then_some(reactive_power_kvar),
+                fuel_w: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::FUEL)
+                    .then_some(FuelPower {
+                        fuel_type: self.fuel_type,
+                        consumption_w: fuel_consumption_w.max(0.0),
+                    }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
+        Ok(())
+    }
+}
+
+impl Equipment for EventBasedLoad {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        let (window_source, probability_source) = parse_event_schedule_sources(config)?;
+        self.event_window_source = window_source;
+        self.event_probability_source = probability_source;
+
+        self.active_power_kw = parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0);
+        self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
+        self.cooldown_duration_s =
+            parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
+        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
+        // Unlike the prior silent 0.0 default, this must be specified explicitly —
+        // a missing gain fraction at an init boundary is a configuration error.
+        self.sensible_gain_fraction = config
+            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
+            .or_else(|| config.get_f64("frac_sensible"))
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
+                    self.descriptor.name
+                ))
+            })?;
+        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
+        self.latent_gain_fraction = config
+            .get_f64(KEY_LATENT_GAIN_FRACTION)
+            .or_else(|| config.get_f64("frac_latent"))
+            .unwrap_or(0.0);
+
+        if self.sensible_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not exceed 1.0",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.latent_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "latent_gain_fraction ({}) must not be negative",
+                self.latent_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
+                self.sensible_gain_fraction,
+                self.latent_gain_fraction,
+                self.sensible_gain_fraction + self.latent_gain_fraction
+            )));
+        }
+
+        // Resolve the canonical ZIP model (sidecar -> class defaults ->
+        // constant power) and validate the coefficient-sum invariants.
+        let class_name = config.ochre_class.as_str();
+        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+            tracing::warn!(
+                equipment_type = class_name,
+                instance = %self.descriptor.name,
+                "no type-specific ZIP coefficients; reactive power will be zero",
+            );
+        }
+        self.zip = crate::config::resolve_zip(config);
+        crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = class_name,
+            instance = %self.descriptor.name,
+            zp = self.zip.zp,
+            ip = self.zip.ip,
+            pp = self.zip.pp,
+            zq = self.zip.zq,
+            iq = self.zip.iq,
+            pq = self.zip.pq,
+            pf = self.zip.pf,
+            "resolved ZIP coefficients",
+        );
+
+        self.month_multipliers = parse_month_multipliers(config)?;
+
+        self.fuel_type = match config.get_str("fuel_type") {
+            None => FuelType::Electric,
+            Some(raw) => parse_fuel_type(Some(raw))
+                .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
+        };
+        self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+            | if self.zip.pf != 0.0 {
+                // pf = 0.0 is the "no reactive ZIP configured" sentinel; any
+                // nonzero pf (including 1.0, which yields Q = 0 exactly)
+                // declares REACTIVE.
+                CoreCapabilities::REACTIVE
+            } else {
+                CoreCapabilities::empty()
+            }
+            | if has_combustion_fuel(self.fuel_type) {
+                CoreCapabilities::FUEL
+            } else {
+                CoreCapabilities::empty()
+            };
+
+        self.phase = EventPhase::Idle;
+        self.remaining_phase_s = 0.0;
+        self.load_fraction = 1.0;
+        self.forced_mode = None;
+        self.power_setpoint_override = None;
+        self.delay_remaining_s = 0.0;
+        self.telemetry = default_event_load_telemetry();
+        self.core_output = CoreOutput::default();
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration::fuel());
+        }
+
+        self.rng_seed = derive_rng_seed(config);
+        self.rng_draws = 0;
+        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+
+        // If a kW time series was provided, pre-extract events for deterministic replay.
+        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
+            self.extracted_events = extract_events_from_kw_series(kw_series);
+            self.schedule_len = kw_series.len();
+            self.event_cursor = 0;
+            self.current_step = 0;
+        } else {
+            self.extracted_events = Vec::new();
+            self.schedule_len = 0;
+            self.event_cursor = 0;
+            self.current_step = 0;
+        }
+        Ok(())
+    }
+
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
+        match self.phase {
+            EventPhase::Idle => OperatingMode::Off,
+            EventPhase::Active => OperatingMode::On,
+            EventPhase::Cooldown => OperatingMode::Off,
+        }
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        self.apply_overrides();
+
+        // Grid outage (de-energized bus): no power, no gains, but time and
+        // schedule state keep advancing. The event cursor passes completed
+        // events, current_step increments, delay_remaining_s decrements, and
+        // phase timers run. Cycles that fall during the outage are missed, not
+        // deferred. Islanded homes keep an energized bus and are not affected.
+        // See docs/outage-behavior.md.
+        let bus_energized = env.grid.bus_energized();
+
+        let dt_s = dt.as_secs_f64();
+        if self.delay_remaining_s > 0.0 {
+            self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
+        }
+
+        if !self.extracted_events.is_empty() {
+            // Deterministic schedule-driven mode.
+            let step = self.current_step % self.schedule_len.max(1);
+
+            // Advance cursor past completed events.
+            while self.event_cursor < self.extracted_events.len()
+                && self.extracted_events[self.event_cursor].end_step <= step
+            {
+                self.event_cursor += 1;
+            }
+            // Wrap cursor when schedule wraps.
+            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
+                self.event_cursor = 0;
+            }
+
+            // Check if current step is within the current event.
+            let in_event = self.event_cursor < self.extracted_events.len() && {
+                let ev = &self.extracted_events[self.event_cursor];
+                step >= ev.start_step && step < ev.end_step
+            };
+
+            if in_event {
+                self.phase = EventPhase::Active;
+                self.remaining_phase_s = dt_s;
+            } else {
+                self.phase = EventPhase::Idle;
+            }
+
+            self.current_step += 1;
+        } else {
+            // Stochastic fallback (no schedule data).
+            let window_open = self.event_window_source.value_at(env)? > 0.0;
+            let probability = self.event_probability_source.value_at(env)?;
+            self.maybe_start_event(window_open, probability);
+        }
+
+        let month_scale = self
+            .month_multipliers
+            .map(|m| m[env.current_time.month0() as usize])
+            .unwrap_or(1.0);
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
+
+        if self.extracted_events.is_empty() {
+            self.advance_phase_timer(dt_s);
+        }
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
+        Some(self.zip)
+    }
+
+    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+        expected_event_mean_power_kw(
+            &self.extracted_events,
+            self.schedule_len,
+            self.month_multipliers,
+        )
+    }
+
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
+            &EventBasedLoadState {
+                phase: self.phase,
+                remaining_phase_s: self.remaining_phase_s,
+                load_fraction: self.load_fraction,
+                forced_mode: self.forced_mode,
+                rng_seed: self.rng_seed,
+                rng_draws: self.rng_draws,
+                event_window_source_state: capture_schedule_source_state(&self.event_window_source),
+                event_probability_source_state: capture_schedule_source_state(
+                    &self.event_probability_source,
+                ),
+                delay_remaining_s: self.delay_remaining_s,
+                event_cursor: self.event_cursor,
+                current_step: self.current_step,
+            },
+            Self::checkpoint_version(),
+            "EventBasedLoad",
+        )
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        let decoded: EventBasedLoadState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "EventBasedLoad",
+            self.descriptor().id,
+        )?;
+        self.phase = decoded.phase;
+        self.remaining_phase_s = decoded.remaining_phase_s;
+        self.load_fraction = decoded.load_fraction;
+        self.forced_mode = decoded.forced_mode;
+        self.delay_remaining_s = decoded.delay_remaining_s;
+        self.rng_seed = decoded.rng_seed;
+        self.rng_draws = decoded.rng_draws;
+        self.event_cursor = decoded.event_cursor;
+        self.current_step = decoded.current_step;
+
+        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+        self.rng.set_word_pos((self.rng_draws as u128) * 2);
+        restore_schedule_source_state(
+            &mut self.event_window_source,
+            &decoded.event_window_source_state,
+        )?;
+        restore_schedule_source_state(
+            &mut self.event_probability_source,
+            &decoded.event_probability_source_state,
+        )?;
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration::fuel());
+        }
+        self.core_output = CoreOutput::default();
+        // CoreOutput cannot be reconstructed from checkpoint data because
+        // active_power_kw (the per-step committed power) is not stored in
+        // EventBasedLoadState.  Reconstruction would require a checkpoint
+        // format change.  See ticket Known Limitations.
+
+        // Telemetry is populated on the next step() call, not reconstructed here.
+        // This avoids stale values when month_multipliers are configured.
+        Ok(())
+    }
+
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        match signal {
+            ControlSignal::LoadFraction { fraction } => {
+                if !fraction.is_finite() {
+                    return Err(HaresError::Control(
+                        "EventBasedLoad LoadFraction must be finite".to_string(),
+                    ));
+                }
+                self.load_fraction = fraction.max(0.0);
+            }
+            ControlSignal::ModeOverride { mode } => {
+                self.forced_mode = Some(mode_to_forced(*mode));
+            }
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                if !active_power_kw.is_finite() {
+                    return Err(HaresError::Control(
+                        "EventBasedLoad PowerSetpoint active_power_kw must be finite".to_string(),
+                    ));
+                }
+                self.power_setpoint_override = Some(active_power_kw.max(0.0));
+            }
+            ControlSignal::EventDelay { delay_s } => {
+                if self.phase == EventPhase::Active {
+                    return Err(HaresError::Control(
+                        "cannot delay an active event".to_string(),
+                    ));
+                }
+                if *delay_s <= 0.0 {
+                    return Err(HaresError::Control(
+                        "EventDelay delay_s must be positive".to_string(),
+                    ));
+                }
+                self.delay_remaining_s += delay_s;
+            }
+            _ => {
+                return Err(HaresError::Control(format!(
+                    "EventBasedLoad does not handle control signal: {signal:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl WetAppliance {
+    #[must_use]
+    pub fn new(config: EquipmentConfig, name: &'static str) -> Self {
+        let equipment_name = config.name.clone();
+        let descriptor = EquipmentDescriptor {
+            id: EquipmentId(constructor_equipment_id(&config)),
+            name: equipment_name,
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed(name),
+            zone: parse_zone_id(&config),
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::LOAD_FRACTION
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::EVENT_DELAY,
+            core_capabilities: CoreCapabilities::ELECTRIC,
+            telemetry_fields: wet_appliance_telemetry_fields(),
+            zone_type: None,
+        };
+        let ports = ports_for_zone(descriptor.zone);
+        let rng_seed = derive_rng_seed(&config);
+        Self {
+            descriptor,
+            ports,
+            telemetry: default_wet_appliance_telemetry(),
+            core_output: CoreOutput::default(),
+            fuel_type: FuelType::Electric,
+            event_window_source: ScheduleSource::Constant(1.0),
+            event_probability_source: ScheduleSource::Constant(1.0),
+            phases: vec![CyclePhase {
+                power_kw: 1.0,
+                duration_s: 900.0,
+                has_water_draw: false,
+            }],
+            n_units: 1.0,
+            sensible_gain_fraction: 0.0,
+            latent_gain_fraction: 0.0,
+            month_multipliers: None,
+            dryer_type: None,
+            active: false,
+            phase_index: 0,
+            elapsed_in_phase_s: 0.0,
+            load_fraction: 1.0,
+            forced_mode: None,
+            delay_remaining_s: 0.0,
+            hot_water_draw_rate_kg_s: 0.0,
+            rng_seed,
+            rng_draws: 0,
+            rng: ChaCha8Rng::from_seed(rng_seed),
+            extracted_events: Vec::new(),
+            event_cursor: 0,
+            current_step: 0,
+            schedule_len: 0,
+            zip: ResolvedZip::governing(ZipLoad::constant_power()),
+        }
+    }
+
+    fn maybe_start_cycle(&mut self, window_open: bool, probability: f64) {
+        if self.active {
+            return;
+        }
+        if self.delay_remaining_s > 0.0 {
+            return;
+        }
+        let should_start = match self.forced_mode {
+            Some(ForcedMode::Idle) => false,
+            Some(ForcedMode::Active) => true,
+            None => {
+                if !window_open {
+                    false
+                } else {
+                    let p = probability.clamp(0.0, 1.0);
+                    if p <= 0.0 {
+                        false
+                    } else if p >= 1.0 {
+                        true
+                    } else {
+                        self.rng_draws = self.rng_draws.saturating_add(1);
+                        self.rng.random::<f64>() < p
+                    }
+                }
+            }
+        };
+
+        if should_start {
+            self.active = true;
+            self.phase_index = 0;
+            self.elapsed_in_phase_s = 0.0;
+        }
+    }
+
+    fn apply_overrides(&mut self) {
+        match self.forced_mode {
+            Some(ForcedMode::Idle) => {
+                self.active = false;
+                self.phase_index = 0;
+                self.elapsed_in_phase_s = 0.0;
+            }
+            Some(ForcedMode::Active) if !self.active => {
+                self.active = true;
+                self.phase_index = 0;
+                self.elapsed_in_phase_s = 0.0;
+            }
+            Some(ForcedMode::Active) => {}
+            None => {}
+        }
+    }
+
+    fn advance_cycle(&mut self, dt_s: f64) {
+        if !self.active || dt_s <= 0.0 || matches!(self.forced_mode, Some(ForcedMode::Active)) {
+            return;
+        }
+
+        let mut remaining_dt = dt_s;
+        while remaining_dt > 0.0 && self.active {
+            let phase = self.phases[self.phase_index];
+            let remaining_phase = (phase.duration_s - self.elapsed_in_phase_s).max(0.0);
+            if remaining_phase > remaining_dt {
+                self.elapsed_in_phase_s += remaining_dt;
+                break;
+            }
+
+            remaining_dt -= remaining_phase;
+            self.phase_index += 1;
+            self.elapsed_in_phase_s = 0.0;
+
+            if self.phase_index >= self.phases.len() {
+                self.active = false;
+                self.phase_index = 0;
+            }
+        }
+    }
+
+    fn update_outputs(
+        &mut self,
+        ports: &mut PortSlots,
+        month_scale: f64,
+        voltage_pu: f64,
+        bus_energized: bool,
+    ) -> std::result::Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        crate::config::debug_assert_zip_sums(&self.zip, "WetAppliance", &self.descriptor.name);
+
+        let active_power_kw = if self.active && bus_energized {
+            // In deterministic mode, use extracted event power directly.
+            // In stochastic mode, use configured phase power × n_units.
+            let base_kw = if !self.extracted_events.is_empty()
+                && self.event_cursor < self.extracted_events.len()
+            {
+                self.extracted_events[self.event_cursor].power_kw
+            } else {
+                self.phases[self.phase_index].power_kw * self.n_units
+            };
+            base_kw * self.load_fraction.max(0.0) * month_scale
+        } else {
+            0.0
+        };
+
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel {
+            power_kw_to_w(active_power_kw)
+        } else {
+            0.0
+        };
+        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
+
+        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
+            self.zip.apply(raw_electric_kw, voltage_pu)
+        } else {
+            (0.0, 0.0)
+        };
+
+        let active_power_w = power_kw_to_w(electric_power_kw);
+        let gain_source_w = active_power_w + fuel_consumption_w;
+        // Unvented condenser dryers reject both sensible and latent energy
+        // as sensible heat to the zone (the condenser coil recovers latent
+        // heat from moisture condensation). HPXML 4.2 §3.8.2: ClothesDryer/Vented=false
+        // -> condenser dryer -> all energy stays in conditioned space as sensible.
+        let (sensible_gain_w, latent_gain_w) =
+            if self.dryer_type == Some(DryerType::UnventedCondenser) {
+                (gain_source_w, 0.0)
+            } else {
+                (
+                    gain_source_w * self.sensible_gain_fraction,
+                    gain_source_w * self.latent_gain_fraction,
+                )
+            };
+
+        if electric_power_kw != 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w,
+                reactive_power_kvar,
+            })?;
+        }
+
+        if fuel_consumption_w > 0.0 {
+            ports.accumulate(&PortContribution::Fuel {
+                fuel_type: self.fuel_type,
+                consumption_w: fuel_consumption_w,
+            })?;
+        }
+
+        if let Some(zone) = self.descriptor.zone
+            && (sensible_gain_w != 0.0 || latent_gain_w != 0.0)
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w,
+                category: ThermalCategory::InternalGain,
+            })?;
+        }
+
+        let current_phase_has_water = self
+            .phases
+            .get(self.phase_index)
+            .is_some_and(|p| p.has_water_draw);
+
+        if bus_energized
+            && self.active
+            && current_phase_has_water
+            && self.hot_water_draw_rate_kg_s > 0.0
+        {
+            let flow_rate_kg_s = self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0);
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                water_draw_flow_kg_s = flow_rate_kg_s,
+                phase_has_water_draw = true,
+                equipment = %self.descriptor.name,
+                "wet appliance water draw active"
+            );
+            ports.accumulate(&PortContribution::Fluid {
+                loop_id: crate::water_heater::DHW_DEMAND_LOOP,
+                flow_rate_kg_s,
+                supply_temp_c: 0.0,
+                return_temp_c: 0.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+                node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
+            })?;
+        }
+
+        // Report zero flow when phase lacks water draw or appliance is inactive.
+        #[cfg(feature = "observe")]
+        {
+            if !current_phase_has_water || !self.active {
+                tracing::info!(
+                    water_draw_flow_kg_s = 0.0,
+                    phase_has_water_draw = current_phase_has_water,
+                    equipment = %self.descriptor.name,
+                    "wet appliance water draw idle"
+                );
+            }
+        }
+
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
+        self.telemetry.set(
+            tk::CYCLE_PHASE,
+            cycle_phase_ordinal(self.active, self.phase_index),
+        );
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
+                reactive_power_kvar: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::REACTIVE)
+                    .then_some(reactive_power_kvar),
+                fuel_w: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::FUEL)
+                    .then_some(FuelPower {
+                        fuel_type: self.fuel_type,
+                        consumption_w: fuel_consumption_w.max(0.0),
+                    }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
+        Ok(())
+    }
+}
+
+impl Equipment for WetAppliance {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        let (window_source, probability_source) = parse_event_schedule_sources(config)?;
+        self.event_window_source = window_source;
+        self.event_probability_source = probability_source;
+        self.phases = parse_cycle_phases(config)?;
+        self.n_units = parse_non_negative(config, KEY_N_UNITS)?.unwrap_or(1.0);
+        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
+        // Unlike the prior silent 0.0 default, this must be specified explicitly —
+        // a missing gain fraction at an init boundary is a configuration error.
+        self.sensible_gain_fraction = config
+            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
+            .or_else(|| config.get_f64("frac_sensible"))
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
+                    self.descriptor.name
+                ))
+            })?;
+        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
+        self.latent_gain_fraction = config
+            .get_f64(KEY_LATENT_GAIN_FRACTION)
+            .or_else(|| config.get_f64("frac_latent"))
+            .unwrap_or(0.0);
+
+        if self.sensible_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not exceed 1.0",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.latent_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "latent_gain_fraction ({}) must not be negative",
+                self.latent_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
+                self.sensible_gain_fraction,
+                self.latent_gain_fraction,
+                self.sensible_gain_fraction + self.latent_gain_fraction
+            )));
+        }
+
+        self.dryer_type = match config.get_str(KEY_DRYER_TYPE) {
+            None => None,
+            Some(raw) => match raw {
+                "vented_electric" => Some(DryerType::VentedElectric),
+                "vented_gas" => Some(DryerType::VentedGas),
+                "unvented_condenser" => Some(DryerType::UnventedCondenser),
+                other => {
+                    return Err(HaresError::Equipment(format!(
+                        "unrecognised dryer_type '{other}'; expected one of: \
+                         vented_electric, vented_gas, unvented_condenser"
+                    )));
+                }
+            },
+        };
+
+        // Resolve the canonical ZIP model (sidecar -> class defaults ->
+        // constant power) and validate the coefficient-sum invariants.
+        let class_name = config.ochre_class.as_str();
+        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+            tracing::warn!(
+                equipment_type = class_name,
+                instance = %self.descriptor.name,
+                "no type-specific ZIP coefficients; reactive power will be zero",
+            );
+        }
+        self.zip = crate::config::resolve_zip(config);
+        crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = class_name,
+            instance = %self.descriptor.name,
+            zp = self.zip.zp,
+            ip = self.zip.ip,
+            pp = self.zip.pp,
+            zq = self.zip.zq,
+            iq = self.zip.iq,
+            pq = self.zip.pq,
+            pf = self.zip.pf,
+            "resolved ZIP coefficients",
+        );
+
+        self.month_multipliers = parse_month_multipliers(config)?;
+
+        self.fuel_type = match config.get_str("fuel_type") {
+            None => FuelType::Electric,
+            Some(raw) => parse_fuel_type(Some(raw))
+                .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
+        };
+        self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+            | if self.zip.pf != 0.0 {
+                // pf = 0.0 is the "no reactive ZIP configured" sentinel; any
+                // nonzero pf (including 1.0, which yields Q = 0 exactly)
+                // declares REACTIVE.
+                CoreCapabilities::REACTIVE
+            } else {
+                CoreCapabilities::empty()
+            }
+            | if has_combustion_fuel(self.fuel_type) {
+                CoreCapabilities::FUEL
+            } else {
+                CoreCapabilities::empty()
+            };
+
+        let water_draw_phases_duration_s: f64 = self
+            .phases
+            .iter()
+            .filter(|p| p.has_water_draw)
+            .map(|p| p.duration_s)
+            .sum();
+        self.hot_water_draw_rate_kg_s = if water_draw_phases_duration_s > 0.0 {
+            config
+                .get_f64(KEY_HOT_WATER_DRAW_VOLUME_L)
+                .unwrap_or(0.0)
+                .max(0.0)
+                / water_draw_phases_duration_s
+        } else {
+            0.0
+        };
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.hot_water_draw_rate_kg_s > 0.0 {
+            self.ports.push(PortDeclaration::fluid(
+                crate::water_heater::DHW_DEMAND_LOOP,
+                FluidType::Water,
+            ));
+        }
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration::fuel());
+        }
+
+        self.active = false;
+        self.phase_index = 0;
+        self.elapsed_in_phase_s = 0.0;
+        self.load_fraction = 1.0;
+        self.forced_mode = None;
+        self.delay_remaining_s = 0.0;
+        self.telemetry = default_wet_appliance_telemetry();
+
+        {
+            let dryer_type_ordinal = match self.dryer_type {
+                None => -1.0,
+                Some(DryerType::VentedElectric) => 0.0,
+                Some(DryerType::VentedGas) => 1.0,
+                Some(DryerType::UnventedCondenser) => 2.0,
+            };
+            self.telemetry.set(tk::DRYER_TYPE, dryer_type_ordinal);
+        }
+        self.core_output = CoreOutput::default();
+
+        self.rng_seed = derive_rng_seed(config);
+        self.rng_draws = 0;
+        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+
+        // If a kW time series was provided, pre-extract events for deterministic replay.
+        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
+            self.extracted_events = extract_events_from_kw_series(kw_series);
+            self.schedule_len = kw_series.len();
+            self.event_cursor = 0;
+            self.current_step = 0;
+        } else {
+            self.extracted_events = Vec::new();
+            self.schedule_len = 0;
+            self.event_cursor = 0;
+            self.current_step = 0;
+        }
+        Ok(())
+    }
+
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
+        if self.active {
+            OperatingMode::On
+        } else {
+            OperatingMode::Off
+        }
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        self.apply_overrides();
+
+        // Grid outage (de-energized bus): no power, no gains, but time and
+        // schedule state keep advancing. The event cursor passes completed
+        // events, current_step increments, delay_remaining_s decrements, and
+        // cycle phases advance. Cycles that fall during the outage are missed,
+        // not deferred. Islanded homes keep an energized bus and are not
+        // affected. See docs/outage-behavior.md.
+        let bus_energized = env.grid.bus_energized();
+
+        let dt_s = dt.as_secs_f64();
+        if self.delay_remaining_s > 0.0 {
+            self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
+        }
+
+        if !self.extracted_events.is_empty() {
+            // Deterministic schedule-driven mode: use extracted event power
+            // directly instead of multi-phase cycle power.
+            let step = self.current_step % self.schedule_len.max(1);
+
+            // Advance cursor past completed events.
+            while self.event_cursor < self.extracted_events.len()
+                && self.extracted_events[self.event_cursor].end_step <= step
+            {
+                self.event_cursor += 1;
+            }
+            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
+                self.event_cursor = 0;
+            }
+
+            let in_event = self.event_cursor < self.extracted_events.len() && {
+                let ev = &self.extracted_events[self.event_cursor];
+                step >= ev.start_step && step < ev.end_step
+            };
+
+            self.active = in_event;
+            if in_event {
+                self.phase_index = 0;
+            }
+
+            self.current_step += 1;
+        } else {
+            // Stochastic fallback.
+            let window_open = self.event_window_source.value_at(env)? > 0.0;
+            let probability = self.event_probability_source.value_at(env)?;
+            self.maybe_start_cycle(window_open, probability);
+        }
+
+        let month_scale = self
+            .month_multipliers
+            .map(|m| m[env.current_time.month0() as usize])
+            .unwrap_or(1.0);
+        self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
+        if self.extracted_events.is_empty() {
+            self.advance_cycle(dt_s);
+        }
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
+        Some(self.zip)
+    }
+
+    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+        expected_event_mean_power_kw(
+            &self.extracted_events,
+            self.schedule_len,
+            self.month_multipliers,
+        )
+    }
+
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
+            &WetApplianceState {
+                active: self.active,
+                phase_index: self.phase_index,
+                elapsed_in_phase_s: self.elapsed_in_phase_s,
+                load_fraction: self.load_fraction,
+                forced_mode: self.forced_mode,
+                hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
+                rng_seed: self.rng_seed,
+                rng_draws: self.rng_draws,
+                event_window_source_state: capture_schedule_source_state(&self.event_window_source),
+                event_probability_source_state: capture_schedule_source_state(
+                    &self.event_probability_source,
+                ),
+                delay_remaining_s: self.delay_remaining_s,
+                event_cursor: self.event_cursor,
+                current_step: self.current_step,
+            },
+            Self::checkpoint_version(),
+            "WetAppliance",
+        )
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        let decoded: WetApplianceState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "WetAppliance",
+            self.descriptor().id,
+        )?;
+        self.active = decoded.active;
+        if decoded.phase_index >= self.phases.len() {
+            return Err(HaresError::Equipment(format!(
+                "checkpoint phase_index {} exceeds configured phase count {}",
+                decoded.phase_index,
+                self.phases.len()
+            )));
+        }
+        self.phase_index = decoded.phase_index;
+        self.elapsed_in_phase_s = decoded.elapsed_in_phase_s;
+        self.load_fraction = decoded.load_fraction;
+        self.forced_mode = decoded.forced_mode;
+        self.delay_remaining_s = decoded.delay_remaining_s;
+        self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
+        self.event_cursor = decoded.event_cursor;
+        self.current_step = decoded.current_step;
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.hot_water_draw_rate_kg_s > 0.0 {
+            self.ports.push(PortDeclaration::fluid(
+                crate::water_heater::DHW_DEMAND_LOOP,
+                FluidType::Water,
+            ));
+        }
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration::fuel());
+        }
+
+        self.rng_seed = decoded.rng_seed;
+        self.rng_draws = decoded.rng_draws;
+
+        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+        self.rng.set_word_pos((self.rng_draws as u128) * 2);
+        restore_schedule_source_state(
+            &mut self.event_window_source,
+            &decoded.event_window_source_state,
+        )?;
+        restore_schedule_source_state(
+            &mut self.event_probability_source,
+            &decoded.event_probability_source_state,
+        )?;
+        self.core_output = CoreOutput::default();
+        // CoreOutput cannot be reconstructed from checkpoint data because
+        // per-step committed power is not stored in WetApplianceState.
+        // Reconstruction would require a checkpoint format change.
+        // See ticket Known Limitations.
+
+        // Telemetry is populated on the next step() call, not reconstructed here.
+        Ok(())
+    }
+
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        match signal {
+            ControlSignal::LoadFraction { fraction } => {
+                if !fraction.is_finite() {
+                    return Err(HaresError::Control(
+                        "WetAppliance LoadFraction must be finite".to_string(),
+                    ));
+                }
+                self.load_fraction = fraction.max(0.0);
+            }
+            ControlSignal::ModeOverride { mode } => {
+                self.forced_mode = Some(mode_to_forced(*mode));
+            }
+            ControlSignal::EventDelay { delay_s } => {
+                if self.active {
+                    return Err(HaresError::Control(
+                        "cannot delay an active event".to_string(),
+                    ));
+                }
+                if *delay_s <= 0.0 {
+                    return Err(HaresError::Control(
+                        "EventDelay delay_s must be positive".to_string(),
+                    ));
+                }
+                self.delay_remaining_s += delay_s;
+            }
+            _ => {
+                return Err(HaresError::Control(format!(
+                    "WetAppliance does not handle control signal: {signal:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn register_with_registry(registry: &mut EquipmentRegistry) {
+    registry.register(
+        "EventBasedLoad",
+        Box::new(|config| Box::new(EventBasedLoad::new(config))),
+    );
+    registry.register(
+        "Clothes Washer",
+        Box::new(|config| Box::new(WetAppliance::new(config, "Clothes Washer"))),
+    );
+    registry.register(
+        "Dishwasher",
+        Box::new(|config| Box::new(WetAppliance::new(config, "Dishwasher"))),
+    );
+    registry.register(
+        "Clothes Dryer",
+        Box::new(|config| Box::new(WetAppliance::new(config, "Clothes Dryer"))),
+    );
+    registry.register(
+        "Cooking Range",
+        Box::new(|config| Box::new(EventBasedLoad::new(config))),
+    );
+    registry.register(
+        "Microwave",
+        Box::new(|config| Box::new(EventBasedLoad::new(config))),
+    );
+}
+
+/// Convert a 1440-minute OCHRE-style daily start-probability vector (`pdf_*.csv`)
+/// into a timestep-aligned event-window/probability schedule.
+///
+/// Mapping contract:
+/// - `minute_pdf[i]` is interpreted as the probability mass for minute `i`.
+/// - For each simulation step, probabilities in that step window are summed and
+///   clamped to `[0, 1]`.
+/// - `event_window[k]` is `1.0` when the step probability is non-zero, else `0.0`.
+/// - `event_probability[k]` is the summed/clamped probability for that step.
+///
+/// This function is intended for ingestion layers that flatten OCHRE schedule
+/// inputs into `EquipmentConfig` keys.
+pub fn map_ochre_pdf_to_cycle_schedule(
+    minute_pdf: &[f64],
+    timestep_minutes: usize,
+) -> Result<(Vec<f64>, Vec<f64>), HaresError> {
+    if minute_pdf.len() != 1_440 {
+        return Err(HaresError::Equipment(format!(
+            "OCHRE daily PDF must contain 1440 entries, got {}",
+            minute_pdf.len()
+        )));
+    }
+    if timestep_minutes == 0 {
+        return Err(HaresError::Equipment(
+            "timestep_minutes must be > 0".to_string(),
+        ));
+    }
+
+    let mut window = Vec::new();
+    let mut probability = Vec::new();
+
+    let mut start = 0;
+    while start < 1_440 {
+        let end = (start + timestep_minutes).min(1_440);
+        let p_sum = minute_pdf[start..end]
+            .iter()
+            .copied()
+            .sum::<f64>()
+            .clamp(0.0, 1.0);
+        probability.push(p_sum);
+        window.push(if p_sum > 0.0 { 1.0 } else { 0.0 });
+        start = end;
+    }
+
+    Ok((window, probability))
+}
+
+fn parse_event_schedule_sources(
+    config: &EquipmentConfig,
+) -> crate::Result<(ScheduleSource, ScheduleSource)> {
+    let window_source = if let Some(col_idx) = parse_usize(config, KEY_EVENT_WINDOW_SCHEDULE_COL)? {
+        ScheduleSource::ColumnRef {
+            col_idx,
+            boundary: BoundaryPolicy::Wrap,
+        }
+    } else {
+        let source = config.get_str(KEY_EVENT_WINDOW_SOURCE).ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "missing required key `{KEY_EVENT_WINDOW_SCHEDULE_COL}` or `{KEY_EVENT_WINDOW_SOURCE}`"
+            ))
+        })?;
+        match source.to_ascii_lowercase().as_str() {
+            "constant" => ScheduleSource::Constant(1.0),
+            other => {
+                return Err(HaresError::Equipment(format!(
+                    "unsupported {KEY_EVENT_WINDOW_SOURCE} value `{other}` (expected `constant`)"
+                )));
+            }
+        }
+    };
+
+    let probability_source = parse_event_probability_source(config)?.unwrap_or_else(|| {
+        // Default: use the same CSV column as event window if present; otherwise
+        // flat schedules are deterministic starts while window is open.
+        match &window_source {
+            ScheduleSource::ColumnRef { col_idx, .. } => ScheduleSource::ColumnRef {
+                col_idx: *col_idx,
+                boundary: BoundaryPolicy::Wrap,
+            },
+            _ => ScheduleSource::Constant(1.0),
+        }
+    });
+
+    Ok((window_source, probability_source))
+}
+
+fn parse_event_probability_source(
+    config: &EquipmentConfig,
+) -> crate::Result<Option<ScheduleSource>> {
+    if let Some(col_idx) = parse_usize(config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? {
+        return Ok(Some(ScheduleSource::ColumnRef {
+            col_idx,
+            boundary: BoundaryPolicy::Wrap,
+        }));
+    }
+
+    let Some(source) = config.get_str(KEY_EVENT_PROBABILITY_SOURCE) else {
+        return Ok(None);
+    };
+    let source = source.to_ascii_lowercase();
+    match source.as_str() {
+        "constant" => Ok(Some(ScheduleSource::Constant(
+            config
+                .get_f64(KEY_EVENT_PROBABILITY_CONSTANT)
+                .unwrap_or(1.0),
+        ))),
+        "column" => {
+            let Some(col_idx) = parse_usize(config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? else {
+                return Err(HaresError::Equipment(format!(
+                    "missing required key `{KEY_EVENT_PROBABILITY_SCHEDULE_COL}` for column event probability schedule"
+                )));
+            };
+            Ok(Some(ScheduleSource::ColumnRef {
+                col_idx,
+                boundary: BoundaryPolicy::Wrap,
+            }))
+        }
+        _ => Err(HaresError::Equipment(format!(
+            "unsupported {KEY_EVENT_PROBABILITY_SOURCE} value `{source}` (expected `column` or `constant`)"
+        ))),
+    }
+}
+
+fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>> {
+    let count = parse_usize(config, KEY_PHASE_LEN)?.unwrap_or(0);
+    if count == 0 {
+        return Ok(vec![CyclePhase {
+            power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),
+            duration_s: parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0),
+            has_water_draw: false,
+        }]);
+    }
+
+    let mut phases = Vec::with_capacity(count);
+    for idx in 0..count {
+        let p_a = format!("{PHASE_POWER_PREFIX_A}{idx}{PHASE_POWER_SUFFIX_A}");
+        let d_a = format!("{PHASE_DURATION_PREFIX_A}{idx}{PHASE_DURATION_SUFFIX_A}");
+        let p_b = format!("{PHASE_POWER_PREFIX_B}{idx}{PHASE_POWER_SUFFIX_B}");
+        let d_b = format!("{PHASE_DURATION_PREFIX_B}{idx}{PHASE_DURATION_SUFFIX_B}");
+        let w_a = format!("{PHASE_WATER_DRAW_PREFIX_A}{idx}{PHASE_WATER_DRAW_SUFFIX_A}");
+        let w_b = format!("{PHASE_WATER_DRAW_PREFIX_B}{idx}{PHASE_WATER_DRAW_SUFFIX_B}");
+
+        let power_kw = config
+            .get_f64(&p_a)
+            .or_else(|| config.get_f64(&p_b))
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "missing wet appliance phase power at index {idx} (keys '{p_a}' or '{p_b}')"
+                ))
+            })?;
+        let duration_s = config
+            .get_f64(&d_a)
+            .or_else(|| config.get_f64(&d_b))
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "missing wet appliance phase duration at index {idx} (keys '{d_a}' or '{d_b}')"
+                ))
+            })?;
+
+        if !power_kw.is_finite() || power_kw < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "wet appliance phase power at index {idx} must be finite and >= 0"
+            )));
+        }
+        if !duration_s.is_finite() || duration_s <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "wet appliance phase duration at index {idx} must be finite and > 0"
+            )));
+        }
+
+        let has_water_draw = config
+            .get_bool(&w_a)
+            .or_else(|| config.get_bool(&w_b))
+            .unwrap_or(false);
+
+        phases.push(CyclePhase {
+            power_kw,
+            duration_s,
+            has_water_draw,
+        });
+    }
+
+    Ok(phases)
+}
+
+fn parse_non_negative(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f64>> {
+    let Some(value) = config.get_f64(key) else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "{key} must be finite and >= 0, got {value}"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f64>> {
+    let Some(value) = config.get_f64(key) else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "{key} must be finite and > 0, got {value}"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn derive_rng_seed(config: &EquipmentConfig) -> [u8; 32] {
+    // Pre-derived seed from the dwelling's hierarchical RNG stream
+    // partitioning — preferred path.  The dwelling injects a distinct seed
+    // per equipment via `EquipmentConfig.with_rng_seed()` before `init()`.
+    if let Some(seed) = config.rng_seed {
+        return seed;
+    }
+
+    // Legacy path for callers that do not use the hierarchical RNG system
+    // (e.g. standalone tests, synthetic configs).  Derives a deterministic
+    // per-equipment seed from master_seed, building_id, and the equipment
+    // name so sibling loads in one dwelling (and identical loads across
+    // dwellings) draw distinct but reproducible event streams.
+    let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
+    let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
+
+    let name_hash = {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in config.name.as_bytes() {
+            h ^= *byte as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    };
+
+    let mut seed = [0_u8; 32];
+    seed[0..8].copy_from_slice(&master_seed.to_le_bytes());
+    seed[8..16].copy_from_slice(&building_id.to_le_bytes());
+    seed[16..24].copy_from_slice(&name_hash.to_le_bytes());
+    seed
+}
+
+fn mode_to_forced(mode: OperatingMode) -> ForcedMode {
+    match mode {
+        OperatingMode::Off => ForcedMode::Idle,
+        _ => ForcedMode::Active,
+    }
+}
+
+fn phase_ordinal(phase: EventPhase) -> f64 {
+    match phase {
+        EventPhase::Idle => 0.0,
+        EventPhase::Active => 1.0,
+        EventPhase::Cooldown => 2.0,
+    }
+}
+
+fn cycle_phase_ordinal(active: bool, phase_index: usize) -> f64 {
+    if active {
+        (phase_index + 1) as f64
+    } else {
+        0.0
+    }
+}
+
+fn has_combustion_fuel(fuel: FuelType) -> bool {
+    !matches!(fuel, FuelType::Electric | FuelType::None)
+}
+
+fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
+    let mut ports = vec![PortDeclaration::electrical()];
+    if let Some(zone) = zone {
+        ports.push(PortDeclaration::thermal(zone));
+    }
+    ports
+}
+
+fn default_event_load_telemetry() -> Telemetry {
+    let mut telemetry = Telemetry::with_capacity(6);
+    telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::LATENT_GAIN_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::STATE, 0.0);
+    telemetry
+}
+
+fn default_wet_appliance_telemetry() -> Telemetry {
+    let mut telemetry = Telemetry::with_capacity(8);
+    telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::LATENT_GAIN_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::CYCLE_PHASE, 0.0);
+    telemetry.insert(tk::DRYER_TYPE, -1.0);
+    telemetry
+}
+
+fn event_load_telemetry_fields() -> Vec<TelemetryField> {
+    vec![
+        TelemetryField {
+            name: tk::ACTIVE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Active electrical power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::SENSIBLE_GAIN_W.to_string(),
+            unit: "W".to_string(),
+            description: "Sensible thermal gain to assigned zone".to_string(),
+        },
+        TelemetryField {
+            name: tk::LATENT_GAIN_W.to_string(),
+            unit: "W".to_string(),
+            description: "Latent thermal gain to assigned zone".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_INPUT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Gas fuel consumption rate converted to watts".to_string(),
+        },
+        TelemetryField {
+            name: tk::STATE.to_string(),
+            unit: "-".to_string(),
+            description: "State machine phase (0=Idle,1=Active,2=Cooldown)".to_string(),
+        },
+    ]
+}
+
+fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
+    vec![
+        TelemetryField {
+            name: tk::ACTIVE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Active electrical power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::SENSIBLE_GAIN_W.to_string(),
+            unit: "W".to_string(),
+            description: "Sensible thermal gain to assigned zone".to_string(),
+        },
+        TelemetryField {
+            name: tk::LATENT_GAIN_W.to_string(),
+            unit: "W".to_string(),
+            description: "Latent thermal gain to assigned zone".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_INPUT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Gas fuel consumption rate converted to watts".to_string(),
+        },
+        TelemetryField {
+            name: tk::CYCLE_PHASE.to_string(),
+            unit: "-".to_string(),
+            description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DRYER_TYPE.to_string(),
+            unit: "-".to_string(),
+            description: "Dryer type: -1=none,0=VentedElectric,1=VentedGas,2=UnventedCondenser"
+                .to_string(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_types::{
+        ControlSignal, CoreCapabilities, DomainUpdate, EnvironmentState, ExecutionStage, FuelType,
+        GridState, PortSlots, PortType, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
+    };
+
+    use super::{
+        EventBasedLoad, ResolvedZip, WetAppliance, ZipLoad, map_ochre_pdf_to_cycle_schedule,
+    };
+
+    use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
+
+    fn base_env() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(vec![0.0, 0.0]),
+            }],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
+                .single()
+                .expect("valid UTC timestamp"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    fn event_config(name: &str, class_name: &str) -> EquipmentConfig {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.5.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 60.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.4.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.1.into());
+        raw.insert("building_id".to_string(), 7.0.into());
+        raw.insert("master_seed".to_string(), 1234.0.into());
+        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
+    }
+
+    fn wet_config(name: &str, class_name: &str, n_units: f64) -> EquipmentConfig {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 2.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("phase_1_power_kw".to_string(), 1.2.into());
+        raw.insert("phase_1_duration_s".to_string(), 120.0.into());
+        raw.insert("n_units".to_string(), n_units.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.05.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
+    }
+
+    fn set_schedule_payload(env: &mut EnvironmentState, values: Vec<f64>) {
+        let slot = env
+            .custom_domains
+            .iter_mut()
+            .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+            .expect("schedule domain must exist");
+        slot.custom_payload = Some(values);
+    }
+
+    #[test]
+    fn load_fraction_rejects_out_of_domain_on_unchecked_path() {
+        use hares_types::ControlSignal;
+
+        // Both arms guard finiteness but then clamp only at zero
+        // (`fraction.max(0.0)`): a fraction above 1 is stored raw and
+        // scales the event's power directly, while a negative fraction is
+        // silently resolved to 0.0. The central validator rejects both on
+        // the checked path; the arms must not silently rewrite them.
+        let mut cfg = event_config("event", "EventBasedLoad");
+        let mut e = EventBasedLoad::new(cfg.clone());
+        e.init(&cfg, &base_env()).unwrap();
+        for bad in [5.0, -0.5] {
+            let err = e
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+
+        cfg = wet_config("washer", "Clothes Washer", 1.0);
+        let mut w = WetAppliance::new(cfg.clone(), "Clothes Washer");
+        w.init(&cfg, &base_env()).unwrap();
+        for bad in [5.0, -0.5] {
+            let err = w
+                .apply_control_unchecked(&ControlSignal::LoadFraction { fraction: bad })
+                .expect_err("out-of-domain LoadFraction must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("fraction"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptors_are_independent_stage() {
+        let e = EventBasedLoad::new(event_config("event", "EventBasedLoad"));
+        assert_eq!(e.descriptor().stage, ExecutionStage::Independent);
+
+        let w = WetAppliance::new(
+            wet_config("washer", "Clothes Washer", 1.0),
+            "Clothes Washer",
+        );
+        assert_eq!(w.descriptor().stage, ExecutionStage::Independent);
+    }
+
+    #[test]
+    fn event_triggers_within_one_timestep_window() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!((slots.electrical.load_power_w - 1500.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wet_appliance_multi_phase_profile_sequence() {
+        let mut env = base_env();
+        let config = wet_config("washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!((slots.electrical.load_power_w - 500.0).abs() < 1e-6);
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!((slots.electrical.load_power_w - 1200.0).abs() < 1e-6);
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!((slots.electrical.load_power_w - 1200.0).abs() < 1e-6);
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+    }
+
+    #[test]
+    fn thermal_gains_are_zero_when_idle() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        assert_eq!(t.sensible_gain_w, 0.0);
+        assert_eq!(t.latent_gain_w, 0.0);
+    }
+
+    #[test]
+    fn wet_appliance_n_units_scales_power_linearly() {
+        let mut env = base_env();
+
+        let cfg1 = wet_config("washer1", "Clothes Washer", 1.0);
+        let mut eq1 = WetAppliance::new(cfg1.clone(), "Clothes Washer");
+        eq1.init(&cfg1, &env).unwrap();
+        let mut p1 = PortSlots::from_declarations(eq1.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq1.step(&env, Duration::from_secs(60), &mut p1).unwrap();
+
+        let cfg2 = wet_config("washer2", "Clothes Washer", 2.0);
+        let mut eq2 = WetAppliance::new(cfg2.clone(), "Clothes Washer");
+        eq2.init(&cfg2, &env).unwrap();
+        let mut p2 = PortSlots::from_declarations(eq2.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq2.step(&env, Duration::from_secs(60), &mut p2).unwrap();
+
+        assert!((p2.electrical.load_power_w - 2.0 * p1.electrical.load_power_w).abs() < 1e-9);
+    }
+
+    #[test]
+    fn save_then_load_restores_identical_followup_behavior() {
+        let mut env_a = base_env();
+        let config = wet_config("dryer", "Clothes Dryer", 1.0);
+
+        let mut eq_a = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq_a.init(&config, &env_a).unwrap();
+        let mut ports_a = PortSlots::from_declarations(eq_a.ports());
+
+        set_schedule_payload(&mut env_a, vec![1.0, 1.0]);
+        eq_a.step(&env_a, Duration::from_secs(60), &mut ports_a)
+            .unwrap();
+        env_a.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env_a, vec![0.0, 0.0]);
+        ports_a.zero();
+        eq_a.step(&env_a, Duration::from_secs(60), &mut ports_a)
+            .unwrap();
+
+        let checkpoint = eq_a.save_state().unwrap();
+
+        let mut env_b = env_a.clone();
+        let mut eq_b = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq_b.init(&config, &env_b).unwrap();
+        eq_b.load_state(&checkpoint).unwrap();
+        let mut ports_b = PortSlots::from_declarations(eq_b.ports());
+
+        env_a.current_time += ChronoDuration::minutes(1);
+        env_b.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env_a, vec![0.0, 0.0]);
+        set_schedule_payload(&mut env_b, vec![0.0, 0.0]);
+        ports_a.zero();
+        ports_b.zero();
+        eq_a.step(&env_a, Duration::from_secs(60), &mut ports_a)
+            .unwrap();
+        eq_b.step(&env_b, Duration::from_secs(60), &mut ports_b)
+            .unwrap();
+
+        assert!((ports_a.electrical.load_power_w - ports_b.electrical.load_power_w).abs() < 1e-9);
+        assert_eq!(
+            eq_a.telemetry().get(tk::CYCLE_PHASE),
+            eq_b.telemetry().get(tk::CYCLE_PHASE)
+        );
+    }
+
+    #[test]
+    fn registry_contains_wet_appliance_ochre_names() {
+        let registry = EquipmentRegistry::new();
+        assert!(registry.get("Clothes Washer").is_some());
+        assert!(registry.get("Dishwasher").is_some());
+        assert!(registry.get("Clothes Dryer").is_some());
+    }
+
+    #[test]
+    fn mode_override_and_load_fraction_controls_work() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
+            .unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!((ports.electrical.load_power_w - 750.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn map_ochre_pdf_to_cycle_schedule_aggregates_probabilities() {
+        let mut pdf = vec![0.0; 1_440];
+        pdf[0] = 0.2;
+        pdf[1] = 0.3;
+        pdf[10] = 0.8;
+        let (window, probability) = map_ochre_pdf_to_cycle_schedule(&pdf, 5).unwrap();
+        assert_eq!(window[0], 1.0);
+        assert!((probability[0] - 0.5).abs() < 1e-9);
+        assert_eq!(window[2], 1.0);
+        assert!((probability[2] - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn registry_new_wires_event_loads_module() {
+        let registry = EquipmentRegistry::new();
+        assert!(registry.get("EventBasedLoad").is_some());
+    }
+
+    // =======================================================================
+    // Cooldown phase returns OperatingMode::Off, not Standby
+    // =======================================================================
+
+    #[test]
+    fn cooldown_phase_returns_off_not_standby() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        // Step at index 1 (probability 1.0) to trigger Active phase
+        env.current_time += ChronoDuration::minutes(1);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        // Active phase: update_control should return Standby
+        // (internally the step already set phase = Active)
+        // After step, we advanced the timer by 60s, which equals active_duration_s,
+        // so phase transitions to Cooldown. Let's verify directly with update_control.
+
+        // To get Active mode, step without advancing the timer first
+        let mut eq2 = EventBasedLoad::new(config.clone());
+        eq2.init(&config, &env).unwrap();
+
+        // Force Active via mode override to ensure we're in Active phase
+        eq2.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+        let mut slots2 = PortSlots::from_declarations(eq2.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq2.step(&env, Duration::from_secs(1), &mut slots2).unwrap();
+
+        // Now remove the override and check phase
+        // The eq should be in Active phase
+        let mode_active = eq2.update_control(&env);
+        assert_eq!(
+            mode_active,
+            hares_types::OperatingMode::On,
+            "Active phase should return On"
+        );
+
+        // Clear override, advance past active_duration to enter Cooldown
+        eq2.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+        eq2.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+        // Actually, let's just directly manipulate a fresh instance more cleanly.
+        let mut eq3 = EventBasedLoad::new(config.clone());
+        eq3.init(&config, &env).unwrap();
+        // Force Active
+        eq3.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+        let mut slots3 = PortSlots::from_declarations(eq3.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq3.step(&env, Duration::from_secs(1), &mut slots3).unwrap();
+        // Clear override so natural phase transitions happen
+        eq3.forced_mode = None;
+        // Advance past active_duration_s (60s) to enter Cooldown
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots3.zero();
+        eq3.step(&env, Duration::from_secs(60), &mut slots3)
+            .unwrap();
+
+        // After advancing 60s from Active (which had remaining_phase_s=60-1=59),
+        // we should be in Cooldown now
+        let mode_cooldown = eq3.update_control(&env);
+        assert_eq!(
+            mode_cooldown,
+            hares_types::OperatingMode::Off,
+            "Cooldown phase must return OperatingMode::Off, not Standby"
+        );
+    }
+
+    // =======================================================================
+    // Schedule wrap-around for multi-day simulations
+    // =======================================================================
+
+    #[test]
+    fn column_ref_wrap_boundary_is_used_for_event_schedules() {
+        // When col_idx is out of range for current schedule payload, Wrap maps it modulo payload len.
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 2.0.into()); // wraps to 0 for payload len=2
+        raw.insert("event_probability_schedule_col".to_string(), 3.0.into()); // wraps to 1 for payload len=2
+        raw.insert("active_power_kw".to_string(), 2.0.into());
+        raw.insert("active_duration_s".to_string(), 30.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("wrap_test".to_string(), "EventBasedLoad".to_string(), raw);
+
+        let mut env = base_env();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(slots.electrical.load_power_w > 0.0);
+    }
+
+    #[test]
+    fn schedule_len_zero_returns_error() {
+        let env = base_env();
+        // Create a config with no schedule entries at all
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        // No compact event schedule keys
+        let config = EquipmentConfig::raw("empty".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &env);
+        assert!(err.is_err(), "init with no schedule should fail");
+    }
+
+    // =======================================================================
+    // ChaCha8 set_word_pos regression test
+    // =======================================================================
+
+    #[test]
+    fn chacha8_set_word_pos_matches_sequential_draws() {
+        use rand::RngExt;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let seed = [42_u8; 32];
+        let n_draws = 10_u64;
+
+        // Method 1: sequential draws
+        let mut rng_sequential = ChaCha8Rng::from_seed(seed);
+        let mut sequential_values = Vec::new();
+        for _ in 0..n_draws {
+            sequential_values.push(rng_sequential.random::<f64>());
+        }
+        // Continue drawing after N draws
+        let next_sequential = rng_sequential.random::<f64>();
+
+        // Method 2: set_word_pos to skip N draws, then draw
+        let mut rng_skip = ChaCha8Rng::from_seed(seed);
+        rng_skip.set_word_pos((n_draws as u128) * 2);
+        let next_skip = rng_skip.random::<f64>();
+
+        assert_eq!(
+            next_sequential,
+            next_skip,
+            "set_word_pos({}) must produce identical subsequent draws to N sequential draws",
+            n_draws * 2
+        );
+
+        // Also verify that N+1, N+2 draws match
+        let next_sequential_2 = rng_sequential.random::<f64>();
+        let next_skip_2 = rng_skip.random::<f64>();
+        assert_eq!(next_sequential_2, next_skip_2);
+    }
+
+    #[test]
+    fn load_state_after_n_draws_matches_sequential_rng() {
+        // Integration test: save state after several steps, load into new instance,
+        // verify subsequent RNG-dependent behavior is identical.
+        let env = base_env();
+        let config = event_config("rng_test", "EventBasedLoad");
+        let mut eq_a = EventBasedLoad::new(config.clone());
+        eq_a.init(&config, &env).unwrap();
+
+        // Run several steps to accumulate rng_draws
+        let mut env_step = env.clone();
+        for _ in 0..5 {
+            let mut slots = PortSlots::from_declarations(eq_a.ports());
+            set_schedule_payload(&mut env_step, vec![1.0, 0.5]);
+            eq_a.step(&env_step, Duration::from_secs(60), &mut slots)
+                .unwrap();
+            env_step.current_time += ChronoDuration::minutes(1);
+        }
+
+        let checkpoint = eq_a.save_state().unwrap();
+
+        // Create new instance and load state
+        let mut eq_b = EventBasedLoad::new(config.clone());
+        eq_b.init(&config, &env).unwrap();
+        eq_b.load_state(&checkpoint).unwrap();
+
+        // Both should produce identical behavior going forward
+        for _ in 0..5 {
+            let mut slots_a = PortSlots::from_declarations(eq_a.ports());
+            let mut slots_b = PortSlots::from_declarations(eq_b.ports());
+            set_schedule_payload(&mut env_step, vec![1.0, 0.5]);
+            eq_a.step(&env_step, Duration::from_secs(60), &mut slots_a)
+                .unwrap();
+            eq_b.step(&env_step, Duration::from_secs(60), &mut slots_b)
+                .unwrap();
+            assert_eq!(
+                slots_a.electrical.load_power_w, slots_b.electrical.load_power_w,
+                "RNG divergence after load_state"
+            );
+            env_step.current_time += ChronoDuration::minutes(1);
+        }
+    }
+
+    // =======================================================================
+    // equipment_id in RNG seed: different names produce different seeds
+    // =======================================================================
+
+    #[test]
+    fn different_equipment_names_produce_different_rng_sequences() {
+        let env = base_env();
+
+        // Two configs with same master_seed and building_id but different names
+        let config_a = event_config("Dishwasher", "EventBasedLoad");
+        let config_b = event_config("Clothes Washer", "EventBasedLoad");
+
+        let mut eq_a = EventBasedLoad::new(config_a.clone());
+        eq_a.init(&config_a, &env).unwrap();
+        let mut eq_b = EventBasedLoad::new(config_b.clone());
+        eq_b.init(&config_b, &env).unwrap();
+
+        // The seeds should differ because equipment names differ
+        assert_ne!(
+            eq_a.rng_seed, eq_b.rng_seed,
+            "Different equipment names must produce different RNG seeds"
+        );
+    }
+
+    #[test]
+    fn derive_rng_seed_uses_injected_seed_when_present() {
+        let mut cfg = event_config("Dishwasher", "EventBasedLoad");
+        let injected = [0xABu8; 32];
+        cfg.rng_seed = Some(injected);
+        let result = super::derive_rng_seed(&cfg);
+        assert_eq!(
+            result, injected,
+            "derive_rng_seed must return the injected seed when config.rng_seed is Some"
+        );
+    }
+
+    #[test]
+    fn derive_rng_seed_falls_back_to_fnv1a_when_no_injected_seed() {
+        let env = base_env();
+        let config = event_config("Dishwasher", "EventBasedLoad");
+        let mut eq_a = EventBasedLoad::new(config.clone());
+        eq_a.init(&config, &env).unwrap();
+
+        let mut eq_b = EventBasedLoad::new(config.clone());
+        eq_b.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq_a.rng_seed, eq_b.rng_seed,
+            "Same config without rng_seed should produce identical seeds via FNV-1a fallback"
+        );
+    }
+
+    #[test]
+    fn injected_seed_survives_init_and_is_used_by_equipment() {
+        let env = base_env();
+        let mut cfg = event_config("Dishwasher", "EventBasedLoad");
+        let injected = [0x42u8; 32];
+        cfg.rng_seed = Some(injected);
+        let mut eq = EventBasedLoad::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        assert_eq!(
+            eq.rng_seed, injected,
+            "equipment must use injected seed after init, not the legacy FNV-1a fallback"
+        );
+    }
+
+    #[test]
+    fn same_name_same_seed_produces_identical_rng() {
+        let env = base_env();
+        let config_a = event_config("Dishwasher", "EventBasedLoad");
+        let config_b = event_config("Dishwasher", "EventBasedLoad");
+
+        let mut eq_a = EventBasedLoad::new(config_a.clone());
+        eq_a.init(&config_a, &env).unwrap();
+        let mut eq_b = EventBasedLoad::new(config_b.clone());
+        eq_b.init(&config_b, &env).unwrap();
+
+        assert_eq!(
+            eq_a.rng_seed, eq_b.rng_seed,
+            "Same name + same config should produce identical seeds"
+        );
+    }
+
+    // =======================================================================
+    // WetAppliance load_state with invalid phase_index returns error
+    // =======================================================================
+
+    #[test]
+    fn wet_appliance_load_state_invalid_phase_index_returns_error() {
+        let env = base_env();
+        let config = wet_config("washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // eq has 2 phases (phase_len=2). Craft a checkpoint with phase_index=5.
+        let bad_state = super::WetApplianceState {
+            active: true,
+            phase_index: 5,
+            elapsed_in_phase_s: 0.0,
+            load_fraction: 1.0,
+            forced_mode: None,
+            hot_water_draw_rate_kg_s: 0.0,
+            rng_seed: eq.rng_seed,
+            rng_draws: 0,
+            event_window_source_state: super::ScheduleSourceState::Stateless,
+            event_probability_source_state: super::ScheduleSourceState::Stateless,
+            delay_remaining_s: 0.0,
+            event_cursor: 0,
+            current_step: 0,
+        };
+        let bytes = crate::try_save_versioned(
+            &bad_state,
+            WetAppliance::checkpoint_version(),
+            "WetAppliance",
+        )
+        .expect("serialization should not fail in test");
+
+        let err = eq.load_state(&bytes);
+        assert!(
+            err.is_err(),
+            "load_state with phase_index=5 and 2 phases must return an error"
+        );
+        let err_msg = err.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("phase_index") && err_msg.contains("5"),
+            "error message should mention phase_index and the value 5, got: {err_msg}"
+        );
+    }
+
+    /// PowerSetpoint overrides active power for the current step only; the next
+    /// step without a new signal reverts to the configured active_power_kw.
+    #[test]
+    fn power_setpoint_overrides_active_power_for_one_step() {
+        // Use a schedule where index 0 is open with probability 1.0 so the
+        // equipment enters the Active phase immediately on the first step.
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        // Long duration so the Active phase persists across multiple steps.
+        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_duration_s".to_string(), 3600.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 1.0.into());
+        let config = EquipmentConfig::raw(
+            "setpoint_test".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        // Step once to enter Active phase (window open, probability 1.0).
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        // Verify the equipment is now drawing at the configured power.
+        assert!(
+            (ports.electrical.load_power_w - 3000.0).abs() < 1e-6,
+            "expected 3000.0 W before setpoint, got {}",
+            ports.electrical.load_power_w
+        );
+
+        // Apply a PowerSetpoint override for the next step only.
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 0.5,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // Step with the setpoint active -- output must be the override value.
+        let mut env2 = env.clone();
+        env2.current_time += chrono::Duration::minutes(1);
+        set_schedule_payload(&mut env2, vec![1.0, 1.0]);
+        ports.zero();
+        eq.step(&env2, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.load_power_w - 500.0).abs() < 1e-6,
+            "expected 500.0 W with PowerSetpoint override, got {}",
+            ports.electrical.load_power_w
+        );
+
+        // Next step without any new signal: override is consumed, output reverts.
+        let mut env3 = env2.clone();
+        env3.current_time += chrono::Duration::minutes(1);
+        set_schedule_payload(&mut env3, vec![1.0, 1.0]);
+        ports.zero();
+        eq.step(&env3, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.load_power_w - 3000.0).abs() < 1e-6,
+            "expected 3000.0 W after setpoint consumed, got {}",
+            ports.electrical.load_power_w
+        );
+    }
+
+    #[test]
+    fn wet_appliance_load_state_valid_phase_index_succeeds() {
+        let env = base_env();
+        let config = wet_config("washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // phase_index=1 is valid for a 2-phase appliance
+        let good_state = super::WetApplianceState {
+            active: true,
+            phase_index: 1,
+            elapsed_in_phase_s: 10.0,
+            load_fraction: 1.0,
+            forced_mode: None,
+            hot_water_draw_rate_kg_s: 0.0,
+            rng_seed: eq.rng_seed,
+            rng_draws: 0,
+            event_window_source_state: super::ScheduleSourceState::Stateless,
+            event_probability_source_state: super::ScheduleSourceState::Stateless,
+            delay_remaining_s: 0.0,
+            event_cursor: 0,
+            current_step: 0,
+        };
+        let bytes = crate::try_save_versioned(
+            &good_state,
+            WetAppliance::checkpoint_version(),
+            "WetAppliance",
+        )
+        .expect("serialization should not fail in test");
+
+        let result = eq.load_state(&bytes);
+        assert!(
+            result.is_ok(),
+            "phase_index=1 should be valid for 2-phase appliance"
+        );
+        assert_eq!(eq.phase_index, 1);
+    }
+
+    // =======================================================================
+    // Gas fuel type handling
+    // =======================================================================
+
+    fn gas_event_config(name: &str) -> EquipmentConfig {
+        let mut cfg = event_config(name, "Cooking Range");
+        cfg.test_extras_mut()
+            .insert("fuel_type".to_string(), "Gas".into());
+        cfg
+    }
+
+    fn gas_wet_config(name: &str) -> EquipmentConfig {
+        let mut cfg = wet_config(name, "Clothes Dryer", 1.0);
+        cfg.test_extras_mut()
+            .insert("fuel_type".to_string(), "Gas".into());
+        cfg
+    }
+
+    #[test]
+    fn gas_cooking_range_reports_gas_not_electric() {
+        let mut env = base_env();
+        let config = gas_event_config("Gas Range");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        // Gas power should be non-zero, electric should be zero.
+        assert!(
+            slots.fuel.get(FuelType::Gas) > 0.0,
+            "gas cooking range must report gas consumption"
+        );
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "gas cooking range must not report electrical consumption"
+        );
+        // Thermal gains must still be emitted (gas energy heats the zone).
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        assert!(t.sensible_gain_w > 0.0);
+    }
+
+    #[test]
+    fn gas_clothes_dryer_reports_gas() {
+        let mut env = base_env();
+        let config = gas_wet_config("Gas Dryer");
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            slots.fuel.get(FuelType::Gas) > 0.0,
+            "gas clothes dryer must report gas consumption"
+        );
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "gas clothes dryer must not report electrical consumption"
+        );
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        assert!(t.sensible_gain_w > 0.0);
+    }
+
+    #[test]
+    fn electric_cooking_range_still_reports_electric() {
+        let mut env = base_env();
+        let config = event_config("Electric Range", "Cooking Range");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Electric);
+        assert!(!eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "electric cooking range must report electrical consumption"
+        );
+        assert_eq!(
+            slots.fuel.get(FuelType::Gas),
+            0.0,
+            "electric cooking range must not report gas consumption"
+        );
+    }
+
+    #[test]
+    fn gas_telemetry_reports_fuel_input_w() {
+        let mut env = base_env();
+        let config = gas_event_config("Gas Range Telem");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let gas_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let elec_kw = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            gas_w > 0.0,
+            "fuel_input_w must be positive for gas equipment"
+        );
+        assert_eq!(
+            elec_kw, 0.0,
+            "active_power_kw must be zero for gas equipment"
+        );
+    }
+
+    // --- Month multiplier tests ---
+
+    fn event_config_with_month_multiplier(month: usize, multiplier: f64) -> EquipmentConfig {
+        let mut config = event_config("TestLoad", "EventBasedLoad");
+        config
+            .test_extras_mut()
+            .insert(format!("month_multiplier_{month}"), multiplier.into());
+        config
+    }
+
+    #[test]
+    fn month_multiplier_zero_suppresses_event_output() {
+        // month 2 = March (0-indexed) -> env.current_time is March 18
+        let config = event_config_with_month_multiplier(2, 0.0);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        // Force Active phase via ModeOverride
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert_eq!(power, 0.0, "month_multiplier=0 should zero power output");
+    }
+
+    #[test]
+    fn month_multiplier_scales_event_output() {
+        let config = event_config_with_month_multiplier(2, 0.5);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        // active_power_kw=1.5 * load_fraction=1.0 * month_scale=0.5 = 0.75
+        assert!((power - 0.75).abs() < 1e-9, "expected 0.75, got {power}");
+    }
+
+    #[test]
+    fn no_month_multiplier_uses_full_power() {
+        let config = event_config("TestLoad", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!((power - 1.5).abs() < 1e-9, "expected 1.5, got {power}");
+    }
+
+    #[test]
+    fn wet_appliance_month_multiplier_zero_suppresses_output() {
+        let mut config = wet_config("Washer", "Clothes Washer", 1.0);
+        config
+            .test_extras_mut()
+            .insert("month_multiplier_2".to_string(), 0.0.into());
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert_eq!(
+            power, 0.0,
+            "month_multiplier=0 should zero wet appliance power"
+        );
+    }
+
+    #[test]
+    fn expected_mean_power_is_zero_when_every_month_is_zeroed() {
+        // Deterministic replay of a kW series plus month multipliers that
+        // zero every month: the equipment's step-time draw is
+        // `base_kw * load_fraction * month_scale` with month_scale = 0 in
+        // all twelve months, so it draws nothing year-round (the step-side
+        // zeroing is pinned by month_multiplier_zero_suppresses_event_output
+        // and wet_appliance_month_multiplier_zero_suppresses_output above).
+        // The published expectation must describe that same load: zero, or
+        // an explicit "not computable". The unscaled series mean (event
+        // energy / schedule length) is a positive draw the equipment can
+        // never take, and the premise aggregation would use it as this
+        // equipment's weight. All-zero multipliers are chosen because the
+        // honest value is computable without timestamps; with partial
+        // multipliers the expectation depends on which month each replay
+        // step falls in, which the equipment cannot know.
+        let mut config = event_config("Zeroed Season Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            extras.insert(format!("month_multiplier_{month}"), 0.0.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        match eq.expected_mean_power_kw() {
+            None => {}
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                kw.abs() < 1e-12,
+                "a load zeroed in every month has zero expected draw, got {kw}"
+            ),
+            other => panic!("unexpected expected-mean shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uniform_month_multipliers_scale_the_published_expectation_exactly() {
+        // A uniform multiplier applies to every replay step equally, so the
+        // expected mean scales exactly: series [0, 2, 4, 0] kW has mean 1.5
+        // kW, and a uniform 0.5 month scale halves every step's draw, so
+        // the honest expectation is 0.75 kW — not the unscaled 1.5 kW the
+        // premise aggregate would otherwise use as this equipment's weight.
+        let mut config = event_config("Half Year Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            extras.insert(format!("month_multiplier_{month}"), 0.5.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                (kw - 0.75).abs() < 1e-12,
+                "uniform 0.5 month scale must halve the expected mean, got {kw}"
+            ),
+            other => panic!("a uniformly scaled load has a computable expectation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_month_multipliers_are_honestly_not_computable() {
+        // With multipliers that vary by month, the expected mean depends on
+        // which month each replay step falls in — not derivable from the kW
+        // series alone. The honest answer is "not computable" (`None`),
+        // never an unscaled or naively scaled mean presented as a weight.
+        let mut config = event_config("Shoulder Season Load", "EventBasedLoad");
+        let extras = config.test_extras_mut();
+        extras.insert(
+            "event_power_kw_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+        );
+        for month in 0..12 {
+            let multiplier = if month == 11 { 1.0 } else { 0.0 };
+            extras.insert(format!("month_multiplier_{month}"), multiplier.into());
+        }
+        let mut eq = EventBasedLoad::new(config.clone());
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq.expected_mean_power_kw(),
+            None,
+            "partial month multipliers make the expectation unknowable \
+             without simulation; it must be None, not a guessed weight"
+        );
+    }
+
+    // =======================================================================
+    // EventDelay control signal tests
+    // =======================================================================
+
+    /// A 120 s delay blocks the event start for the first step (delay decrements
+    /// from 120 -> 60, still positive) and allows it on the second step (delay
+    /// decrements 60 -> 0, then maybe_start_event fires).
+    #[test]
+    fn event_delay_blocks_event_start() {
+        let mut env = base_env();
+        let config = event_config("delay_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        // Step 1: delay decrements 120 -> 60; still positive, no start.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "step 1: event must be blocked while delay is active"
+        );
+
+        // Step 2: delay decrements 60 -> 0; maybe_start_event fires.
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "step 2: event must start once delay has expired, expected 1500.0 W, got {}",
+            slots.electrical.load_power_w
+        );
+    }
+
+    /// Applying EventDelay while the equipment is in the Active phase must return
+    /// an error; the running event cannot be postponed retroactively.
+    #[test]
+    fn event_delay_error_when_active() {
+        let mut env = base_env();
+        // Use a long active_duration_s so the event persists across the step
+        // (active_duration_s=60 with dt=60 would transition to Cooldown by the
+        // time advance_phase_timer runs; 3600 s keeps it Active).
+        let mut config = event_config("delay_active_test", "EventBasedLoad");
+        config
+            .test_extras_mut()
+            .insert("active_duration_s".to_string(), 3600.0.into());
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        // Trigger an event by stepping with window=1, probability=1.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "equipment must be Active after first step with open window"
+        );
+
+        // Applying EventDelay while Active must fail.
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        assert!(
+            result.is_err(),
+            "EventDelay on an active event must return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot delay"),
+            "error message should mention delay rejection, got: {msg}"
+        );
+    }
+
+    /// Two EventDelay applications accumulate: 60 s + 60 s = 120 s total, so the
+    /// event is still blocked on step 1 and starts on step 2.
+    #[test]
+    fn event_delay_accumulates() {
+        let mut env = base_env();
+        let config = event_config("delay_accum_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 })
+            .unwrap();
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 })
+            .unwrap();
+
+        // Step 1: combined 120 s delay decrements to 60 s; still blocked.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "step 1: accumulated delay must still block the event"
+        );
+
+        // Step 2: delay reaches 0; event starts.
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "step 2: event must start after accumulated delay expires, expected 1500.0 W, got {}",
+            slots.electrical.load_power_w
+        );
+    }
+
+    /// EventDelay { delay_s: 0.0 } is rejected: delay must be strictly positive.
+    #[test]
+    fn event_delay_zero_returns_error() {
+        let env = base_env();
+        let config = event_config("delay_zero_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 0.0 });
+        assert!(result.is_err(), "delay_s=0.0 must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must be positive"),
+            "error should mention positivity, got: {msg}"
+        );
+    }
+
+    /// EventDelay with negative delay_s is rejected.
+    #[test]
+    fn event_delay_negative_returns_error() {
+        let env = base_env();
+        let config = event_config("delay_neg_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: -10.0 });
+        assert!(result.is_err(), "negative delay_s must be rejected");
+        let msg = result.unwrap_err().to_string();
+        // Negative values are rejected by the central numeric-bounds check
+        // (enforced on the unchecked path too, via the `Equipment` trait's
+        // provided `apply_control_unchecked`); the arm's own check remains
+        // for the zero case, which the central rule allows and the arm
+        // rejects as "must be positive".
+        assert!(
+            msg.contains("must be finite and >= 0") || msg.contains("must be positive"),
+            "error should reject the negative delay, got: {msg}"
+        );
+    }
+
+    /// WetAppliance: a 120 s EventDelay blocks the cycle start on step 1 and
+    /// allows it on step 2, mirroring the EventBasedLoad behaviour.
+    #[test]
+    fn wet_appliance_event_delay_blocks_cycle_start() {
+        let mut env = base_env();
+        let config = wet_config("washer_delay", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        // Step 1: delay 120 -> 60; still blocked.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "step 1: WetAppliance cycle must be blocked while delay is active"
+        );
+
+        // Step 2: delay 60 -> 0; cycle starts at phase 0 (power=0.5 kW * 1 unit).
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_w - 500.0).abs() < 1e-6,
+            "step 2: WetAppliance cycle must start once delay expired, expected 500.0 W, got {}",
+            slots.electrical.load_power_w
+        );
+    }
+
+    /// WetAppliance: applying EventDelay while a cycle is active must return Err.
+    #[test]
+    fn wet_appliance_event_delay_error_when_active() {
+        let mut env = base_env();
+        let config = wet_config("washer_active_delay", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Start the cycle on the first step.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "WetAppliance must be active after first step with open window"
+        );
+
+        // Applying EventDelay while active must fail.
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        assert!(
+            result.is_err(),
+            "EventDelay on an active WetAppliance cycle must return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot delay"),
+            "error message should mention delay rejection, got: {msg}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // extract_events_from_kw_series unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn extract_events_empty_series() {
+        let events = super::extract_events_from_kw_series(&[]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn extract_events_all_zeros() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 0.0]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn extract_events_single_step_event() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 0.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 2);
+        assert_eq!(events[0].end_step, 3);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_multi_step_event_averages_power() {
+        let events = super::extract_events_from_kw_series(&[0.0, 2.0, 4.0, 6.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 1);
+        assert_eq!(events[0].end_step, 4);
+        // avg(2, 4, 6) = 4.0
+        assert!((events[0].power_kw - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_two_separate_events() {
+        let events = super::extract_events_from_kw_series(&[1.0, 0.0, 0.0, 3.0, 3.0, 0.0]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 1);
+        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert_eq!(events[1].start_step, 3);
+        assert_eq!(events[1].end_step, 5);
+        assert!((events[1].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_adjacent_events_separated_by_zero() {
+        let events = super::extract_events_from_kw_series(&[1.0, 1.0, 0.0, 2.0, 2.0]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 2);
+        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert_eq!(events[1].start_step, 3);
+        assert_eq!(events[1].end_step, 5);
+        assert!((events[1].power_kw - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_event_at_start() {
+        let events = super::extract_events_from_kw_series(&[5.0, 5.0, 0.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 2);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_event_at_end() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 5.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 2);
+        assert_eq!(events[0].end_step, 4);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_entire_series_is_one_event() {
+        let events = super::extract_events_from_kw_series(&[3.0, 3.0, 3.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 3);
+        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_varying_power_averages_correctly() {
+        let events = super::extract_events_from_kw_series(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 5);
+        // avg(1, 2, 3, 4, 5) = 3.0
+        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    /// Deterministic replay: EventBasedLoad driven by event_power_kw_series emits
+    /// power only during the steps that correspond to the non-zero regions, using
+    /// the averaged power for that region.
+    ///
+    /// Series: [0.0, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0]
+    ///   -> event 1: steps 1-3, power 3.0 kW (avg of 2+4)
+    ///   -> event 2: steps 5-7, power 6.0 kW
+    /// Expected per-step output (kW): 0, 3, 3, 0, 0, 6, 6, 0
+    #[test]
+    fn deterministic_replay_matches_schedule() {
+        use super::super::config::ConfigValue;
+
+        let kw_series = vec![0.0_f64, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+        let expected_w: &[f64] = &[0.0, 3000.0, 3000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
+
+        let mut raw: std::collections::HashMap<String, ConfigValue> =
+            std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        // active_power_kw is irrelevant in deterministic mode; the series power wins.
+        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        raw.insert(
+            "event_power_kw_series".to_string(),
+            ConfigValue::FloatArray(kw_series),
+        );
+        let config =
+            EquipmentConfig::raw("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        for (step, &expected) in expected_w.iter().enumerate() {
+            let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
+            // schedule payload is not used in deterministic mode but must be present
+            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+            let actual = slots.electrical.load_power_w;
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "step {step}: expected {expected} W, got {actual} W"
+            );
+            env.current_time += ChronoDuration::minutes(1);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+
+    /// save_state captures delay_remaining_s; load_state restores it so the event
+    /// remains blocked for the same number of steps as it would have been without
+    /// the checkpoint round-trip.
+    #[test]
+    fn event_delay_checkpoint_round_trip() {
+        let mut env = base_env();
+        let config = event_config("delay_checkpoint", "EventBasedLoad");
+
+        // Instance A: apply 120 s delay, run one step, save state.
+        let mut eq_a = EventBasedLoad::new(config.clone());
+        eq_a.init(&config, &env).unwrap();
+        eq_a.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots_a = PortSlots::from_declarations(eq_a.ports());
+        eq_a.step(&env, Duration::from_secs(60), &mut slots_a)
+            .unwrap();
+        // After step 1 the delay is 60 s; event has not started.
+        assert_eq!(slots_a.electrical.load_power_w, 0.0);
+
+        let checkpoint = eq_a.save_state().unwrap();
+
+        // Instance B: fresh init, load the checkpoint.
+        let mut eq_b = EventBasedLoad::new(config.clone());
+        eq_b.init(&config, &env).unwrap();
+        eq_b.load_state(&checkpoint).unwrap();
+
+        // Step 2 on both A and B -- delay expires, event must start on both.
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        slots_a.zero();
+        let mut slots_b = PortSlots::from_declarations(eq_b.ports());
+        eq_a.step(&env, Duration::from_secs(60), &mut slots_a)
+            .unwrap();
+        eq_b.step(&env, Duration::from_secs(60), &mut slots_b)
+            .unwrap();
+
+        assert!(
+            (slots_b.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "after load_state, delay must still be active for one more step and then expire; \
+             expected 1500.0 W on step 2, got {}",
+            slots_b.electrical.load_power_w
+        );
+        assert_eq!(
+            slots_a.electrical.load_power_w, slots_b.electrical.load_power_w,
+            "checkpoint round-trip must produce identical behaviour to the original instance"
+        );
+    }
+
+    // =======================================================================
+    // T3: PowerSetpoint on idle EventBasedLoad → electric_kw == 0.0
+    // =======================================================================
+
+    #[test]
+    fn power_setpoint_on_idle_event_load_produces_zero() {
+        let mut env = base_env();
+        let config = event_config("idle_setpoint", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert_eq!(
+            slots.electrical.load_power_w, 0.0,
+            "PowerSetpoint on an idle load must not produce output"
+        );
+    }
+
+    // =======================================================================
+    // T4: PowerSetpoint on active EventBasedLoad → output equals setpoint
+    // =======================================================================
+
+    #[test]
+    fn power_setpoint_on_active_event_load_equals_setpoint() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_duration_s".to_string(), 3600.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 1.0.into());
+        let config = EquipmentConfig::raw(
+            "setpoint_active".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "equipment must be active"
+        );
+
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 0.75,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        env.current_time += chrono::Duration::minutes(1);
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            (slots.electrical.load_power_w - 750.0).abs() < 1e-6,
+            "active load with PowerSetpoint must output setpoint value; got {}",
+            slots.electrical.load_power_w
+        );
+    }
+
+    // =======================================================================
+    // T5: Deterministic event does not mutate active_power_kw field
+    // =======================================================================
+
+    #[test]
+    fn deterministic_event_does_not_mutate_active_power_kw_field() {
+        use super::super::config::ConfigValue;
+
+        let kw_series = vec![0.0_f64, 5.0, 5.0, 0.0];
+        let mut raw: std::collections::HashMap<String, ConfigValue> =
+            std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        raw.insert(
+            "event_power_kw_series".to_string(),
+            ConfigValue::FloatArray(kw_series),
+        );
+        let config = EquipmentConfig::raw(
+            "field_unchanged".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let original_active_power_kw = eq.active_power_kw;
+
+        for _ in 0..4 {
+            let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
+            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+            env.current_time += chrono::Duration::minutes(1);
+        }
+
+        assert_eq!(
+            eq.active_power_kw, original_active_power_kw,
+            "deterministic replay must not mutate active_power_kw field; \
+             expected {original_active_power_kw}, got {}",
+            eq.active_power_kw
+        );
+    }
+
+    // =======================================================================
+    // T8: Active EventPhase → update_control returns OperatingMode::On
+    // =======================================================================
+
+    #[test]
+    fn active_phase_update_control_returns_on() {
+        let mut env = base_env();
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 3600.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 1.0.into());
+        let config =
+            EquipmentConfig::raw("mode_test".to_string(), "EventBasedLoad".to_string(), raw);
+
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(1), &mut slots).unwrap();
+
+        assert_eq!(
+            eq.phase,
+            super::EventPhase::Active,
+            "equipment must be in Active phase"
+        );
+        let mode = eq.update_control(&env);
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::On,
+            "Active phase must return OperatingMode::On, got {mode:?}"
+        );
+    }
+
+    // =======================================================================
+    // sensible_gain_fraction: loud error on missing / out-of-range
+    // =======================================================================
+
+    #[test]
+    fn event_load_missing_sensible_gain_fraction_returns_err_on_init() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
+        let config = EquipmentConfig::raw("no_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensible_gain_fraction missing"),
+            "expected 'sensible_gain_fraction missing' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_gain_fraction_out_of_range_negative_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("neg_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be negative"),
+            "expected 'must not be negative' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_gain_fraction_out_of_range_above_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("over_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 1.0"),
+            "expected 'must not exceed 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_plus_latent_exceeds_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("overflow".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds 1.0"),
+            "expected 'exceeds 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_missing_sensible_gain_fraction_returns_err_on_init() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
+        let config = EquipmentConfig::raw("no_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensible_gain_fraction missing"),
+            "expected 'sensible_gain_fraction missing' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_gain_fraction_negative_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("neg_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be negative"),
+            "expected 'must not be negative' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_gain_fraction_above_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("over_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 1.0"),
+            "expected 'must not exceed 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_plus_latent_exceeds_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("overflow".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds 1.0"),
+            "expected 'exceeds 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_based_load_with_zip_produces_reactive_power_under_voltage_deviation() {
+        let mut env = base_env();
+        let config = event_config("zip_event", "Clothes Washer");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert!(
+            eq.zip.pf != 0.0,
+            "EventBasedLoad 'Clothes Washer' should have type-specific ZIP coefficients"
+        );
+
+        // At nominal voltage (1.0 pu), ZIP should produce reactive power
+        // proportional to real power × tan(acos(pf)).
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let real_kw = slots.electrical.load_power_w / 1000.0;
+        let reactive_kvar = slots.electrical.reactive_power_kvar;
+        assert!(real_kw > 0.0, "expected non-zero real power");
+        assert!(
+            reactive_kvar > 0.0,
+            "expected non-zero reactive power at nominal voltage, got {reactive_kvar}"
+        );
+        // Clothes Washer has pf=0.65, so tan(acos(0.65)) ≈ 1.169
+        // (at v=1.0, multiplier=1.0 and base=1.0, so reactive = real * 1.169 * 1.0).
+        let tan_phi = 0.65_f64.clamp(-1.0, 1.0).acos().tan();
+        let expected_reactive = real_kw * tan_phi;
+        assert!(
+            (reactive_kvar - expected_reactive).abs() < 1e-9,
+            "expected reactive {expected_reactive} ≈ real × {tan_phi}, got {reactive_kvar}"
+        );
+
+        // Test at sag voltage (0.95 pu) with a fresh instance.
+        let mut env2 = base_env();
+        env2.grid.voltage_pu = 0.95;
+        let mut eq2 = EventBasedLoad::new(config.clone());
+        eq2.init(&config, &env2).unwrap();
+        let mut slots2 = PortSlots::from_declarations(eq2.ports());
+        set_schedule_payload(&mut env2, vec![1.0, 1.0]);
+        eq2.step(&env2, Duration::from_secs(60), &mut slots2)
+            .unwrap();
+        let reactive_sag = slots2.electrical.reactive_power_kvar;
+        assert!(
+            reactive_sag > 0.0,
+            "expected non-zero reactive power at sag voltage, got {reactive_sag}"
+        );
+        assert!(
+            (reactive_sag - reactive_kvar).abs() > 1e-9,
+            "reactive power should differ between nominal ({reactive_kvar}) and sag ({reactive_sag})"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_with_zip_produces_reactive_power_under_voltage_deviation() {
+        let mut env = base_env();
+        let config = wet_config("zip_washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        assert!(
+            eq.zip.pf != 0.0,
+            "WetAppliance 'Clothes Washer' should have type-specific ZIP coefficients"
+        );
+
+        // At nominal voltage, ZIP should produce reactive power.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let reactive_at_nominal = slots.electrical.reactive_power_kvar;
+        assert!(
+            reactive_at_nominal > 0.0,
+            "expected non-zero reactive power at nominal voltage, got {reactive_at_nominal}"
+        );
+
+        // At sag voltage (0.95 pu), reactive power should differ.
+        slots.zero();
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.95;
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let reactive_at_sag = slots.electrical.reactive_power_kvar;
+        assert!(
+            reactive_at_sag > 0.0,
+            "expected non-zero reactive power at sag voltage, got {reactive_at_sag}"
+        );
+        assert!(
+            (reactive_at_sag - reactive_at_nominal).abs() > 1e-9,
+            "reactive power should differ between nominal ({reactive_at_nominal}) and sag ({reactive_at_sag})"
+        );
+    }
+
+    #[test]
+    fn event_based_load_without_zip_produces_zero_reactive_power() {
+        let mut env = base_env();
+        let config = event_config("no_zip_event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq.zip,
+            ResolvedZip::governing(ZipLoad::constant_power()),
+            "EventBasedLoad 'EventBasedLoad' should have no type-specific ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.reactive_power_kvar.abs() < 1e-12,
+            "expected zero reactive power without ZIP, got {}",
+            slots.electrical.reactive_power_kvar
+        );
+    }
+
+    /// Grid outage (de-energized bus): a wet appliance draws nothing and
+    /// deposits no gains. An islanded home (utility out, backup source
+    /// holding the bus at nominal) keeps the appliance running at nominal
+    /// power.
+    #[test]
+    fn grid_outage_stops_wet_appliance_and_islanded_home_keeps_it_running() {
+        let mut env = base_env();
+        let config = wet_config("outage_washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Baseline: appliance draws power on an active event.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_nominal = slots.electrical.load_power_w;
+        assert!(power_nominal > 0.0, "baseline event draws power");
+
+        // Utility outage: zero draw, zero vars, zero gains.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.0;
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(slots.electrical.load_power_w, 0.0);
+        assert_eq!(slots.electrical.reactive_power_kvar, 0.0);
+
+        // Islanded: bus at nominal → appliance runs at nominal power.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.island_bus_voltage_pu = Some(1.0);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_w > 0.0,
+            "islanded bus at nominal voltage restores the appliance draw"
+        );
+    }
+
+    #[test]
+    fn clothes_washer_reactive_power_changes_with_voltage() {
+        let mut env = base_env();
+        env.grid.voltage_pu = 1.0;
+
+        let config = wet_config("washer_v", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Nominal voltage.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_nominal = slots.electrical.load_power_w;
+        let reactive_nominal = slots.electrical.reactive_power_kvar;
+
+        // Sag voltage.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.90;
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_sag = slots.electrical.load_power_w;
+        let reactive_sag = slots.electrical.reactive_power_kvar;
+
+        assert!(power_nominal > 0.0, "expected non-zero real power");
+        assert!(
+            reactive_nominal > 0.0,
+            "expected non-zero reactive power at nominal"
+        );
+        assert!(power_sag > 0.0, "expected non-zero real power at sag");
+        assert!(
+            reactive_sag > 0.0,
+            "expected non-zero reactive power at sag"
+        );
+
+        // Real power should change with voltage due to ZIP coefficients.
+        assert!(
+            (power_sag - power_nominal).abs() > 1e-12,
+            "real power should differ between nominal ({power_nominal}) and sag ({power_sag})"
+        );
+        assert!(
+            (reactive_sag - reactive_nominal).abs() > 1e-12,
+            "reactive power should differ between nominal ({reactive_nominal}) and sag ({reactive_sag})"
+        );
+    }
+
+    #[test]
+    fn event_based_load_thermal_gain_varies_with_zip_voltage() {
+        // Thermal gains must use ZIP-adjusted real power, not pre-ZIP nominal.
+        // At sag voltage, real power drops → thermal gain must also drop.
+        let mut env_nominal = base_env();
+        env_nominal.grid.voltage_pu = 1.0;
+        let config = event_config("zip_thermal", "Clothes Washer");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env_nominal).unwrap();
+        assert!(
+            eq.zip.pf != 0.0,
+            "Clothes Washer must have ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env_nominal, vec![1.0, 1.0]);
+        eq.step(&env_nominal, Duration::from_secs(60), &mut slots)
+            .unwrap();
+        let thermal_nominal = slots
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        let mut env_sag = base_env();
+        env_sag.grid.voltage_pu = 0.90;
+        let mut eq_sag = EventBasedLoad::new(config.clone());
+        eq_sag.init(&config, &env_sag).unwrap();
+        let mut slots_sag = PortSlots::from_declarations(eq_sag.ports());
+        set_schedule_payload(&mut env_sag, vec![1.0, 1.0]);
+        eq_sag
+            .step(&env_sag, Duration::from_secs(60), &mut slots_sag)
+            .unwrap();
+        let thermal_sag = slots_sag
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        assert!(
+            thermal_nominal > 0.0,
+            "thermal gain must be > 0 at nominal voltage"
+        );
+        assert!(thermal_sag > 0.0, "thermal gain must be > 0 at sag voltage");
+        assert!(
+            thermal_sag < thermal_nominal,
+            "thermal gain at sag ({thermal_sag}) must be less than nominal ({thermal_nominal})"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_thermal_gain_varies_with_zip_voltage() {
+        let mut env_nominal = base_env();
+        env_nominal.grid.voltage_pu = 1.0;
+        let config = wet_config("zip_thermal_wet", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env_nominal).unwrap();
+        assert!(
+            eq.zip.pf != 0.0,
+            "Clothes Washer WetAppliance must have ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env_nominal, vec![1.0, 1.0]);
+        eq.step(&env_nominal, Duration::from_secs(60), &mut slots)
+            .unwrap();
+        let thermal_nominal = slots
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        let mut env_sag = base_env();
+        env_sag.grid.voltage_pu = 0.90;
+        let mut eq_sag = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq_sag.init(&config, &env_sag).unwrap();
+        let mut slots_sag = PortSlots::from_declarations(eq_sag.ports());
+        set_schedule_payload(&mut env_sag, vec![1.0, 1.0]);
+        eq_sag
+            .step(&env_sag, Duration::from_secs(60), &mut slots_sag)
+            .unwrap();
+        let thermal_sag = slots_sag
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        assert!(
+            thermal_nominal > 0.0,
+            "thermal gain must be > 0 at nominal voltage"
+        );
+        assert!(thermal_sag > 0.0, "thermal gain must be > 0 at sag voltage");
+        assert!(
+            thermal_sag < thermal_nominal,
+            "thermal gain at sag ({thermal_sag}) must be less than nominal ({thermal_nominal})"
+        );
+    }
+
+    /// Configure a 3-phase cycle where only phase 0 has water draw.
+    fn wet_config_with_water_draw(only_phase_0_draws: bool) -> (EquipmentConfig, f64) {
+        let volume = 12.0;
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 3.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.4.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("phase_0_has_water_draw".to_string(), true.into());
+        raw.insert("phase_1_power_kw".to_string(), 0.8.into());
+        raw.insert("phase_1_duration_s".to_string(), 60.0.into());
+        raw.insert(
+            "phase_1_has_water_draw".to_string(),
+            (!only_phase_0_draws).into(),
+        );
+        raw.insert("phase_2_power_kw".to_string(), 1.0.into());
+        raw.insert("phase_2_duration_s".to_string(), 60.0.into());
+        raw.insert(
+            "phase_2_has_water_draw".to_string(),
+            (!only_phase_0_draws).into(),
+        );
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.05.into());
+        raw.insert("hot_water_draw_volume_l".to_string(), volume.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        (
+            EquipmentConfig::raw(
+                "test_water_draw".to_string(),
+                "Clothes Washer".to_string(),
+                raw,
+            ),
+            volume,
+        )
+    }
+
+    #[test]
+    fn wet_appliance_hot_water_only_during_fill_phases() {
+        let mut env = base_env();
+        let (config, _volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.iter().any(|f| f.total_flow_kg_s > 0.0),
+            "Phase 0 (fill with water draw) should emit fluid flow"
+        );
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
+            "Phase 1 (no water draw) should emit zero fluid flow"
+        );
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
+            "Phase 2 (no water draw) should emit zero fluid flow"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_no_phantom_draw_during_spin() {
+        let mut env = base_env();
+        let (config, _volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_phase_0: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        assert!(flow_phase_0 > 0.0, "Fill/wash phase should draw hot water");
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_phase_2: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        assert_eq!(
+            flow_phase_2, 0.0,
+            "Spin/drain phase must not draw hot water"
+        );
+    }
+
+    #[test]
+    fn parse_cycle_phases_respects_water_draw_flag() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("phase_len".to_string(), 2.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("phase_0_has_water_draw".to_string(), true.into());
+        raw.insert("phase_1_power_kw".to_string(), 1.0.into());
+        raw.insert("phase_1_duration_s".to_string(), 120.0.into());
+        // phase_1_has_water_draw intentionally absent
+
+        let config = EquipmentConfig::raw(
+            "test_parse_water_draw".to_string(),
+            "Clothes Washer".to_string(),
+            raw,
+        );
+        let phases = super::parse_cycle_phases(&config).unwrap();
+        assert_eq!(phases.len(), 2);
+        assert!(phases[0].has_water_draw);
+        assert!(!phases[1].has_water_draw);
+    }
+
+    #[test]
+    fn parse_cycle_phases_alternate_key_format() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("cycle_phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("cycle_phase_0_has_water_draw".to_string(), true.into());
+
+        let config =
+            EquipmentConfig::raw("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
+        let phases = super::parse_cycle_phases(&config).unwrap();
+        assert_eq!(phases.len(), 1);
+        assert!(phases[0].has_water_draw);
+    }
+
+    #[test]
+    fn hot_water_draw_rate_uses_water_phase_duration_only() {
+        let mut env = base_env();
+        let (config, volume) = wet_config_with_water_draw(true);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let flow_kg_s: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
+        let expected_rate = volume / 60.0;
+        assert!(
+            (flow_kg_s - expected_rate).abs() < 1e-9,
+            "Draw rate should be volume/water_phase_duration = {volume}/60 = {expected_rate}, got {flow_kg_s}"
+        );
+    }
+
+    #[test]
+    fn gas_wet_appliance_sets_core_capabilities_fuel() {
+        let env = base_env();
+        let config = gas_wet_config("Gas Dryer Core");
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::FUEL),
+            "gas WetAppliance must set CoreCapabilities::FUEL"
+        );
+
+        // non-gas WetAppliance should not have FUEL
+        let config_elec = wet_config("Elec Washer", "Clothes Washer", 1.0);
+        let mut eq_elec = WetAppliance::new(config_elec.clone(), "Clothes Washer");
+        eq_elec.init(&config_elec, &env).unwrap();
+        assert!(
+            !eq_elec
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::FUEL),
+            "electric WetAppliance must not have CoreCapabilities::FUEL"
+        );
+    }
+
+    fn dryer_config(name: &str, dryer_type: Option<&str>) -> EquipmentConfig {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 2.0.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.5.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        if let Some(dt) = dryer_type {
+            raw.insert(
+                "dryer_type".to_string(),
+                crate::config::ConfigValue::Text(dt.to_string()),
+            );
+        }
+        EquipmentConfig::raw(name.to_string(), "Clothes Dryer".to_string(), raw)
+    }
+
+    #[test]
+    fn unvented_condenser_dryer_zero_latent_gain() {
+        let mut env = base_env();
+        let config = dryer_config("unvented_dryer", Some("unvented_condenser"));
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(2.0));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let total_power_w = slots.electrical.load_power_w;
+        assert!(
+            total_power_w > 0.0,
+            "dryer should draw power when triggered"
+        );
+
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        // Unvented condenser: 100% sensible, zero latent.
+        assert!(
+            (t.sensible_gain_w - total_power_w).abs() < 1e-6,
+            "unvented condenser should route all gain as sensible, got sens={} expected={}",
+            t.sensible_gain_w,
+            total_power_w
+        );
+        assert_eq!(
+            t.latent_gain_w, 0.0,
+            "unvented condenser should have zero latent gain"
+        );
+    }
+
+    #[test]
+    fn vented_dryer_uses_fractions_normally() {
+        let mut env = base_env();
+        let config = dryer_config("vented_dryer", Some("vented_electric"));
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(0.0));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let total_power_w = slots.electrical.load_power_w;
+        assert!(total_power_w > 0.0);
+
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        let expected_sens = total_power_w * 0.5;
+        let expected_lat = total_power_w * 0.5;
+        assert!(
+            (t.sensible_gain_w - expected_sens).abs() < 1e-6,
+            "vented dryer should use configured sensible_gain_fraction"
+        );
+        assert!(
+            (t.latent_gain_w - expected_lat).abs() < 1e-6,
+            "vented dryer should use configured latent_gain_fraction"
+        );
+    }
+
+    #[test]
+    fn non_dryer_wet_appliance_ignores_dryer_type() {
+        let mut env = base_env();
+        let config = wet_config("washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(-1.0));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let total_power_w = slots.electrical.load_power_w;
+        assert!(total_power_w > 0.0);
+
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        let expected_sens = total_power_w * 0.2;
+        let expected_lat = total_power_w * 0.05;
+        assert!(
+            (t.sensible_gain_w - expected_sens).abs() < 1e-6,
+            "non-dryer appliance should use configured fractions"
+        );
+        assert!(
+            (t.latent_gain_w - expected_lat).abs() < 1e-6,
+            "non-dryer appliance should use configured fractions"
+        );
+    }
+
+    #[test]
+    fn parse_dryer_type_from_config() {
+        let env = base_env();
+
+        // Valid dryer types
+        for (input, expected_ordinal) in [
+            ("vented_electric", 0.0),
+            ("vented_gas", 1.0),
+            ("unvented_condenser", 2.0),
+        ] {
+            let config = dryer_config(input, Some(input));
+            let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+            eq.init(&config, &env).unwrap();
+            assert_eq!(
+                eq.telemetry().get(tk::DRYER_TYPE),
+                Some(expected_ordinal),
+                "dryer_type '{input}' should map to ordinal {expected_ordinal}"
+            );
+        }
+
+        // Absent dryer_type (non-dryer appliance)
+        let config = dryer_config("no_dryer", None);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+        assert_eq!(
+            eq.telemetry().get(tk::DRYER_TYPE),
+            Some(-1.0),
+            "absent dryer_type should map to -1 (none)"
+        );
+
+        // Invalid dryer_type should error
+        let config = dryer_config("bad_dryer", Some("vented_oil"));
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        let err = eq.init(&config, &env).unwrap_err();
+        assert!(
+            err.to_string().contains("unrecognised dryer_type"),
+            "invalid dryer_type should produce error, got: {err}"
+        );
+    }
+}

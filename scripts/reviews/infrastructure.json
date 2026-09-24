@@ -1,0 +1,70 @@
+{
+  "category": "infrastructure",
+  "description": "Tests, CI, documentation, benchmarks, error handling, and overall infrastructure health",
+  "reviews": [
+    {
+      "id": "infra-01",
+      "slug": "dead-module-aggregation-check",
+      "title": "Dead module reference aggregation_check.rs causes compile failure",
+      "vendor_refs": "",
+      "files": "tests/regression/mod.rs",
+      "prompt": "tests/regression/mod.rs at line 16 declares `mod aggregation_check;` and line 77 invokes it via `aggregation_check::run()?`, but no aggregation_check.rs file exists in the tests/regression/ directory. This causes a compilation failure for `cargo test --test regression`. The test harness was presumably intended to validate fleet aggregation results but was never implemented. The reference must either be removed (delete the mod declaration and the invocation) or the module must be implemented with actual aggregation check logic. Investigate whether the missing module represents a gap in regression test coverage — fleet aggregation correctness goes untested in the regression suite. Check git history to determine when the reference was added and whether the implementation file was accidentally deleted or never committed."
+    },
+    {
+      "id": "infra-02",
+      "slug": "bestest-should-panic-xfail",
+      "title": "BESTEST #[should_panic] xfail pattern has soundness hazard",
+      "vendor_refs": "",
+      "files": "tests/bestest/mod.rs",
+      "prompt": "The BESTEST test case 900FF (free-float) uses `#[should_panic(expected = 'metric=min_zone_temp_c')]` as an expected-failure pattern. This is a soundness hazard: if the test panics for any reason other than the asserted failure condition — e.g., a null pointer dereference, an array bounds violation, or a completely unrelated assertion — the Rust test harness reports PASS because any panic matches `#[should_panic]`. This masks real bugs introduced during development. The expected failure should be replaced with an explicit test that runs the simulation, catches the known failure condition (min_zone_temp_c outside tolerance), and asserts that the specific known issue is present while failing on any other error. All other BESTEST test cases (900, 910, 920, 930FF, 940, 950, 960) use `#[ignore]`, which is a safer pattern — they don't run and can't produce misleading results. Document which BESTEST cases are expected to pass, which have known discrepancies with documented root causes, and which have not yet been investigated."
+    },
+    {
+      "id": "infra-03",
+      "slug": "empty-fixture-directories",
+      "title": "Empty golden/ and schedules/ test fixture directories",
+      "vendor_refs": "",
+      "files": "tests/fixtures/golden/ tests/fixtures/schedules/",
+      "prompt": "The directories tests/fixtures/golden/ and tests/fixtures/schedules/ contain only .gitkeep files and are otherwise empty. The 'golden/' directory suggests golden-file testing (comparing current output against a known-good 'golden' reference file), but no golden files exist — this implies golden-file testing was planned but never implemented. The 'schedules/' directory suggests schedule fixture data (e.g., CSV schedule files, occupancy profiles) but contains none — this implies schedule testing with fixture data was planned but never implemented. Assess whether these directories should be populated with actual fixtures (to enable the planned tests) or removed (to eliminate dead directory structure that creates false expectations of test coverage). If kept, document in .gitkeep what fixtures are expected and link to the planned implementation. Golden-file tests are particularly valuable for regression detection — a missing golden/ directory with implemented tests represents a gap in regression protection."
+    },
+    {
+      "id": "infra-04",
+      "slug": "ci-no-test-execution",
+      "title": "CI runs only fmt + clippy — no test execution, Python tests, or benchmarks",
+      "vendor_refs": "",
+      "files": ".github/workflows/ci.yml",
+      "prompt": "The CI configuration in .github/workflows/ci.yml currently runs only `cargo fmt --check` and `cargo clippy` (with appropriate feature flags). No tests are executed — no `cargo test`, no Python unit tests, no integration tests, no benchmark execution. This means: (1) the CI pipeline cannot detect regressions in simulation correctness, (2) Python companion code (adapters, HELICS, data pipeline, RL environments) is never tested in CI, (3) benchmarks are never run to detect performance regressions, (4) the parity test suite is never exercised in CI. Propose a CI matrix that covers: Rust unit tests (cargo test --workspace), integration tests (cargo test --test regression, cargo test --test bestest, cargo test --test parity), Python tests (pytest with the Rust extension built), linting (clippy with stricter settings including pedantic or nursery lints), documentation tests (cargo doc --no-deps), and benchmark compilation (cargo bench --no-run). Identify dependencies needed for Python test execution in CI (PyO3 build, Python version matrix, HELICS installation, optional PyBaMM/SAM dependencies). Note that Python tests depend on Rust build artifacts and fixture data that CI never exercises, creating a testing gap."
+    },
+    {
+      "id": "infra-05",
+      "slug": "benchmark-coverage-gaps",
+      "title": "Benchmark coverage gaps: no aggregation, co-simulation, or RL episode benchmarks",
+      "vendor_refs": "",
+      "files": "benches/fleet.rs benches/rl_step.rs benches/single_building.rs",
+      "prompt": "Current benchmark coverage includes single-building simulation (single_building.rs), fleet parallel execution (fleet.rs), and RL step (rl_step.rs). Missing benchmarks: fleet aggregation (building aggregate statistics from many dwellings — computationally intensive and critical for fleet studies), HELICS co-simulation (federate time sync overhead, signal publication/subscription latency — critical for real-time co-simulation performance), and full RL episode (complete episode of many timesteps including environment reset, observation construction, action application — critical for RL training throughput). All current benchmarks use synthetic data rather than ResStock — synthetic data may not represent realistic performance because real HPXML buildings have more varied equipment configurations, schedules, and thermal characteristics. Prioritize missing benchmarks: aggregation benchmark is highest priority because fleet studies at scale (10,000+ dwellings) need aggregation to be fast; RL episode benchmark is second because RL training requires hundreds of thousands of episodes; HELICS benchmark is third because co-simulation is latency-sensitive. For each benchmark, specify what should be measured (wall-clock time, memory usage, allocation count) and what scale (number of dwellings, number of timesteps, number of zones)."
+    },
+    {
+      "id": "infra-06",
+      "slug": "docs-handoff-items-remaining",
+      "title": "HANDOFF items remaining as pre-release technical debt",
+      "vendor_refs": "",
+      "files": "docs/HANDOFF.md",
+      "prompt": "The HANDOFF.md document at commit ba133ca lists 7 items of technical debt. Check the current status of each item: (1) BESTEST 900FF root cause — has the free-float discrepancy been root-caused and fixed? If not, what investigation remains? (2-6) Five physics constants matching ASHRAE/EnergyPlus rather than OCHRE — which constants (e.g., specific heat of air, Stefan-Boltzmann constant, convective heat transfer coefficients)? Have they been corrected to match OCHRE for parity, or is there a documented justification for the ASHRAE/E+ values? (7) Python tests not run — have Python tests been integrated into CI? Are they passable? Map each unresolved HANDOFF item to the relevant review areas in this manifest system (e.g., BESTEST 900FF -> test-01 and infra-02; physics constants -> wiring-08; Python tests -> infra-04 and py-companion-02). Document which items are resolved, which remain with a concrete next step, and which should be promoted to GitHub issues with priority labels."
+    },
+    {
+      "id": "infra-07",
+      "slug": "docs-citation-verification",
+      "title": "Documentation citation verification: physics references, model sources, validation data",
+      "vendor_refs": "",
+      "files": "docs/ docs/findings/",
+      "prompt": "Audit all documentation files under docs/ and docs/findings/ for citation correctness. Verify that references to ASHRAE Handbook of Fundamentals cite the correct chapter and equation numbers for heat transfer correlations, infiltration models, and psychrometric relationships. Check that EnergyPlus Engineering Reference citations point to the correct version and section that describes the algorithm implemented in HARES. Verify that OCHRE publication citations (conference papers, journal articles) are accurate and that the model formulations described in those publications match the code implementation — documentation that claims to implement 'equation 5 from Paper X' but does not must be flagged. Identify any undocumented physics assumptions: simplifications (steady-state heat transfer instead of transient), empirical correlations without stated applicability ranges, or model limitations (e.g., 'single-zone air model' when the code supports multi-zone). Assess whether assumptions that differ from the reference implementations (OCHRE, EnergyPlus) are explicitly documented with justification. Check that validation data sources (BESTEST, ASHRAE 140, NREL ResStock) are correctly cited with version information and access instructions."
+    },
+    {
+      "id": "infra-08",
+      "slug": "error-handling-review",
+      "title": "Error handling audit: panics, unwraps, expects across the codebase",
+      "vendor_refs": "",
+      "files": "All crates",
+      "prompt": "Audit every use of .unwrap(), .expect(), unreachable!(), and panic!() across the entire workspace. Categorize each occurrence: (1) Should be proper errors — a malformed HPXML file, corrupt EPW weather file, or invalid user input should produce a Result::Err, not a panic; (2) Guarded by preconditions — the unwrap is safe because the code immediately before it guarantees the Option/Result is Some/Ok (e.g., checking is_some() then unwrap(), though .unwrap() after is_some() check still patterns to replace with if-let or match for clarity); (3) Acceptable — truly unreachable code paths (e.g., after exhaustive match on an enum), invariant assertions (e.g., array length derived from const generic), or initialization-time failures that indicate a programming error not a user error. No panic path must be triggerable by malformed HPXML input (missing required fields, out-of-range values, contradictory equipment specifications) or malformed EPW weather input (missing data columns, corrupt records, inconsistent row counts). Panics triggered by these user-facing inputs are high-severity bugs. Panics in simulation hot paths (called every timestep) are also high-severity because they can crash long-running fleet simulations. Document the count of unwrap/expect/panic occurrences by category and propose a remediation plan prioritizing user-input-triggerable panics."
+    }
+  ]
+}

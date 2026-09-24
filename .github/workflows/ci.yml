@@ -1,0 +1,286 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: "cargo fmt --check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check --all
+
+  clippy:
+    name: "cargo clippy"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --workspace -- -D warnings
+
+  check-si-guard:
+    name: "SI guard (imperial unit markers)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-nextest
+      - run: bash scripts/check-si-guard.sh
+
+  build:
+    name: "cargo build --release"
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace --release
+
+  docs-lint:
+    name: "docs: EnergyPlus section citations"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-energyplus-sections.sh
+
+  docs-citations:
+    name: "docs: known erroneous citations"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-citations.sh
+
+  docs-ashrae-chapters:
+    name: "docs: ASHRAE chapter citations"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-ashrae-chapters.sh
+
+  docs-ashrae-edition:
+    name: "docs: ASHRAE HOF edition"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-ashrae-edition.sh
+
+  docs-ochre-hash:
+    name: "docs: OCHRE commit hash"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
+      - run: bash scripts/check-ochre-commit.sh
+
+  check-ocv:
+    name: "OCV table synchronisation"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --extra pybamm
+      - run: bash scripts/check_ocv.sh
+
+  check-ashrae-reference:
+    name: "ASHRAE reference fixture sync"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --extra ochre
+      - run: bash scripts/check_ashrae_reference.sh
+
+  bench-check:
+    name: "cargo bench --no-run"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --no-run --workspace
+
+  test:
+    name: "cargo nextest run"
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-nextest
+      - run: cargo nextest run --workspace --no-fail-fast --profile ci -F observe
+      - run: cargo nextest run --workspace --release -F check_invariants --no-fail-fast --profile ci
+      - run: cargo nextest run --release --no-fail-fast --profile ci -p hares-equipment
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: nextest-results
+          path: nextest-results.xml
+
+  python-test:
+    name: "pytest (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev --extra helics
+      - run: uv run maturin develop
+      - run: uv run pytest -m "not slow and not ochre" --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: pytest-results
+          path: test-results.xml
+
+  slow-python-test:
+    name: "pytest slow + ochre group (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev --extra helics --group ochre
+      - run: uv run maturin develop
+      - run: uv run pytest -m "slow or ochre" --junitxml=test-results-slow.xml
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: pytest-slow-results
+          path: test-results-slow.xml
+
+  coverage:
+    name: "coverage"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+
+  bench:
+    name: "benchmark regression"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install critcmp
+        run: cargo install critcmp --quiet
+      - name: Get main branch SHA
+        run: |
+          echo "MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1 | cut -c1-10)" >> $GITHUB_ENV
+      - name: Cache main benchmark baseline
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: baseline.json
+          key: bench-baseline-${{ env.MAIN_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
+      - name: Generate main baseline
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git checkout main
+          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline main
+          critcmp --export main > baseline.json
+      - name: Restore PR branch
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: git checkout ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Run PR benchmarks
+        run: cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline pr
+      - name: Compare with baseline
+        run: |
+          if [ ! -f baseline.json ]; then
+            echo "::notice::No baseline data available — comparison skipped"
+            exit 0
+          fi
+          critcmp --export pr > current.json
+
+          echo '## Benchmark Comparison' >> "$GITHUB_STEP_SUMMARY"
+          critcmp baseline.json current.json >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+
+          echo "::group::Benchmark Comparison"
+          critcmp baseline.json current.json 2>&1 | tee compare.txt
+          echo "::endgroup::"
+
+          # Compare baseline.json and current.json directly: fail if any
+          # benchmark is >20% slower (current_ns / baseline_ns > 1.20).
+          # critcmp --export produces JSON with benchmark timings at .benchmarks.<name>.criterion_estimates_v1.mean.point_estimate.
+          # jq joins the two exports on benchmark name and computes the ratio.
+          REGRESSIONS_JSON=$(jq -n \
+            --slurpfile base baseline.json \
+            --slurpfile curr current.json \
+            '{ regressions:
+               [ $base[0].benchmarks | to_entries[] |
+                 . as $entry |
+                 ($curr[0].benchmarks[$entry.key].criterion_estimates_v1.mean.point_estimate // empty) as $cns |
+                 ($entry.value.criterion_estimates_v1.mean.point_estimate) as $bns |
+                 select($cns / $bns > 1.20) |
+                 { name: $entry.key,
+                   baseline_ns: $bns,
+                   current_ns: $cns,
+                   pct_slower: ((($cns / $bns - 1) * 1000) | round) / 10 } ]
+            }')
+
+          REGRESSION_COUNT=$(echo "$REGRESSIONS_JSON" | jq '.regressions | length')
+
+          if [ "$REGRESSION_COUNT" -gt 0 ]; then
+            echo "::error::${REGRESSION_COUNT} benchmark(s) regressed more than 20%"
+            echo ""
+            echo "Affected benchmarks:"
+            echo "$REGRESSIONS_JSON" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (\(.current_ns)ns vs baseline \(.baseline_ns)ns)"'
+            exit 1
+          fi
+          echo "No benchmark regressions exceed 20% threshold"

@@ -1,0 +1,102 @@
+{
+  "category": "envelope",
+  "description": "Thermal envelope solver: RC networks, longwave radiation, infiltration coupling, state-space methods",
+  "reviews": [
+    {
+      "id": "envelope-01",
+      "slug": "radiation-frac-starmesh-formula",
+      "title": "StarMesh radiation_frac derivation from first-principles UA",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/thermal_solver/config.rs crates/hares-envelope/src/boundary_rc.rs crates/hares-envelope/src/rc_network.rs crates/hares-envelope/src/thermal_solver/longwave.rs",
+      "prompt": "The StarMesh radiation_frac = R_film_int / R_total formula (config.rs ~240) derives the surface temperature as a voltage-divider between the interior node and zone air. However, for multi-layer constructions the interior film coefficient does not appear in isolation in the full RC network — it is coupled to the first mass layer. Verify that the StarMesh formula re-derives the correct effective interior surface temperature for arbitrary multi-layer wall constructions. Compare against EnergyPlus CTF/TARP interior surface temperature calculation and OCHRE Envelope.py surface heat balance."
+    },
+    {
+      "id": "envelope-02",
+      "slug": "frozen-interior-film-coefficients",
+      "title": "Interior film coefficients frozen at initialization (TARP convention)",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/config.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-physics/src/film_coefficients.rs",
+      "prompt": "Interior film coefficients (h_ci) are computed once at initialization using default surface temperatures and never updated during the simulation. EnergyPlus TARP algorithm recomputes h_ci each timestep based on actual surface-to-air temperature differences and surface orientation. For surfaces with strong solar gain or large temperature swings, frozen coefficients could bias surface heat transfer by 10-20%. Should HARES recompute film coefficients per timestep, or document the TARP vs. frozen-coefficient trade-off?"
+    },
+    {
+      "id": "envelope-03",
+      "slug": "energy-balance-not-public-telemetry",
+      "title": "Full-system energy balance not in public telemetry",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/thermal_solver/stepping.rs crates/hares-core/src/telemetry.rs",
+      "prompt": "Per-timestep energy balance residual is computed (stepping.rs:380-394) and stored in a private energy_balance_residuals HashMap, but the residual is not exposed as a top-level telemetry field. Users cannot verify energy conservation without instrumenting the solver internals. Should the zone-level energy balance residual be promoted to public telemetry output for every timestep? Compare with EnergyPlus Zone Air Heat Balance reporting."
+    },
+    {
+      "id": "envelope-04",
+      "slug": "interior-lwr-diagnostic-zero",
+      "title": "Interior LWR diagnostic reports zero by construction under linearized method",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/longwave.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/longwave_radiation.rs",
+      "prompt": "The linearized interior longwave radiation method uses zone-temperature-based linearization, meaning the net LWR exchange sum across all interior surfaces is zero by construction (a perfect redistribution). This makes the interior LWR diagnostic always report zero, masking any actual modeling errors. The full ScriptF method would show non-zero net flux. Should the linearized path compute and report a diagnostic comparing against a one-step ScriptF reference to detect divergence?"
+    },
+    {
+      "id": "envelope-05",
+      "slug": "port-radiant-multi-zone-asymmetry",
+      "title": "Radiant distribution port inputs to all zones simultaneously",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/ports.rs crates/hares-envelope/src/thermal_solver/config.rs crates/hares-envelope/src/thermal_solver/mod.rs",
+      "prompt": "Radiant gain ports apply their full magnitude to every zone simultaneously rather than distributing per zone area fraction. This means a 1000W radiant heater in zone A also injects 1000W into zone B's surfaces. For single-zone models this is a no-op, but multi-zone configurations will see asymmetric radiant distribution that violates energy conservation. Should port radiant inputs be indexed per zone with area-fraction weighting?"
+    },
+    {
+      "id": "envelope-06",
+      "slug": "gershgorin-vs-full-eigensystem",
+      "title": "Gershgorin stability check vs full eigensystem for large matrices",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/state_space.rs",
+      "prompt": "The eigenvalue stability check uses Gershgorin circle bounds (O(n)) instead of a full eigenvalue decomposition (state_space.rs:296-297). The comment notes that nalgebra's Schur QR has unlimited iterations and could hang on large matrices. However, the Gershgorin bound is a sufficient but not necessary condition — it can flag a stable matrix as unstable. For large multi-zone models, this could trigger false-positive stability warnings. Should the code attempt a full eigenvalue check with a timeout before falling back to Gershgorin?"
+    },
+    {
+      "id": "envelope-07",
+      "slug": "window-exterior-lwr-h-out-guard",
+      "title": "Window exterior LWR h_out guard threshold and NFRC fallback",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/longwave.rs crates/hares-envelope/src/thermal_solver/config.rs crates/hares-envelope/src/boundary_rc.rs",
+      "prompt": "Window exterior LWR correction falls back to NFRC standard h_out = 29 W/m2K when the computed exterior film coefficient is zero or negative (longwave.rs:100). However, the threshold check is strict — near-zero but positive h_out values (e.g., 0.01 from very low wind) produce enormous LWR corrections via division by a tiny number. Verify that the guard threshold (currently zero) should be raised to a minimum physically-plausible exterior film coefficient (e.g., 4-5 W/m2K for natural convection)."
+    },
+    {
+      "id": "envelope-08",
+      "slug": "semi-implicit-infiltration-lu-allocation",
+      "title": "Semi-implicit infiltration coupling LU decomposition allocation per timestep",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/infiltration.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/state_space.rs",
+      "prompt": "The semi-implicit infiltration coupling modifies the system matrix each timestep (when infiltration flow rate changes), requiring a new LU decomposition. For a typical residential simulation with hourly weather, this means 8760 LU factorizations of an n×n matrix. For moderate zone counts (n ~ 50-100), this allocation and factorization cost per timestep could dominate runtime. Should the code pre-allocate the LU workspace and reuse it via in-place factorization, or use a Sherman-Morrison rank-1 update if only infiltration rows change?"
+    },
+    {
+      "id": "envelope-09",
+      "slug": "starmesh-cascading-elimination",
+      "title": "StarMesh cascading elimination edge case for zero-capacitance layers",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/rc_network.rs crates/hares-envelope/src/boundary_rc.rs",
+      "prompt": "The StarMesh boundary RC construction eliminates interior mass nodes via cascading node reduction. When a construction layer has zero or near-zero capacitance (pure resistance, e.g., thin air films), the elimination step can produce singular matrices or divide-by-zero in the reduction chain. Check whether the RC network builder guards against zero-capacitance layers by fusing them with adjacent layers before elimination, and test with constructions that include infinitesimally-thin film layers."
+    },
+    {
+      "id": "envelope-10",
+      "slug": "steady-state-init-zone-pinning",
+      "title": "Steady-state initialization zone pinning fragile invariant",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/initialization.rs crates/hares-envelope/src/thermal_solver/mod.rs",
+      "prompt": "Steady-state initialization solves the thermal network with the zone air temperature pinned at the initial setpoint, then computes surface node temperatures from the resulting heat balance. This is fragile: if the zone has zero internal capacitance (a modeling choice), the pinned temperature creates a singular system because the zone node has no energy storage and cannot be independently fixed. Check whether the initialization path guards against zero-capacitance zones and falls back to a capacitively-regularized solve."
+    },
+    {
+      "id": "envelope-11",
+      "slug": "precomputed-rc-node-id-ordering",
+      "title": "Precomputed RC node ID ordering fragile across solver configurations",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/rc_network.rs crates/hares-envelope/src/boundary_rc.rs crates/hares-envelope/src/thermal_solver/config.rs",
+      "prompt": "The thermal solver relies on a precomputed node ID ordering that maps physical surfaces to state-space indices. If the RC network construction order changes (e.g., different zone ordering, different surface enumeration), the node ID mapping becomes stale and produces silently incorrect results — the wrong surface gets the wrong boundary condition. Verify that the solver asserts node-to-surface index correspondence defensively at initialization, and that any reordering after network construction is fully tracked."
+    },
+    {
+      "id": "envelope-12",
+      "slug": "bestest-tolerance-widening",
+      "title": "BESTEST tolerance widening masks underlying model defects",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/rc_network.rs crates/hares-envelope/src/boundary_rc.rs crates/hares-envelope/tests/",
+      "prompt": "BESTEST Case 600 validation tests in thermal_solver/mod.rs:1583-1764 use simplified 2R1C models rather than the full multi-layer StarMesh constructions. Comments note that full StarMesh reaches 10-12% error against BESTEST (rc_network.rs:904), which is within the standard's ~10% tolerance. However, systematic 10%+ error in a validation case may mask solver defects that compound with HPXML complexity. Should BESTEST be run with production-grade multi-layer constructions rather than simplified models, even if the tolerance must be widened?"
+    }
+  ]
+}

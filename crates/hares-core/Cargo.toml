@@ -1,0 +1,118 @@
+[package]
+name = "hares-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+profiling = []
+actor_profiling = []
+observe = ["hares-types/observe", "hares-io/observe", "hares-equipment/observe", "hares-envelope/observe", "hares-physics/observe", "hares-tariff/observe"]
+observe_detailed = ["observe", "hares-envelope/observe_detailed"]
+check_invariants = ["hares-io/check_invariants", "hares-equipment/check_invariants", "hares-envelope/check_invariants", "hares-tariff/check_invariants", "hares-physics/check_invariants"]
+dst = []
+
+[dependencies]
+hares-types = { workspace = true }
+hares-physics = { workspace = true }
+hares-envelope = { workspace = true }
+hares-control = { workspace = true }
+hares-equipment = { workspace = true }
+hares-io = { workspace = true }
+hares-tariff = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rand_distr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+arrow = { workspace = true }
+nalgebra = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+chrono-tz = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+parquet = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+criterion = { workspace = true }
+hares-fleet = { workspace = true }
+rayon = { workspace = true }
+tempfile = { workspace = true }
+libc = "0.2"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[[test]]
+name = "regression"
+path = "../../tests/regression/mod.rs"
+
+[[test]]
+name = "parity"
+path = "../../tests/parity/mod.rs"
+
+[[test]]
+name = "bestest"
+path = "../../tests/bestest/mod.rs"
+
+[[test]]
+name = "conditioned_oracle"
+path = "../../tests/conditioned_oracle.rs"
+
+[[test]]
+name = "freefloat_oracle"
+path = "../../tests/freefloat_oracle.rs"
+
+[[test]]
+name = "structural_envelope_oracle"
+path = "../../tests/structural_envelope_oracle.rs"
+
+[[test]]
+name = "warmup_regression"
+path = "../../tests/warmup_regression.rs"
+
+[[test]]
+name = "resstock_smoke"
+path = "../../tests/resstock_smoke.rs"
+
+[[test]]
+name = "batch_step_tests"
+path = "../../tests/batch_step_tests.rs"
+
+[[test]]
+name = "envelope_opaque_loads"
+path = "../../tests/envelope_opaque_loads.rs"
+
+[[test]]
+name = "wiring_properties"
+path = "tests/wiring_properties.rs"
+
+[[bench]]
+name = "single_building"
+path = "../../benches/single_building.rs"
+harness = false
+
+[[bench]]
+name = "fleet"
+path = "../../benches/fleet.rs"
+harness = false
+
+[[bench]]
+name = "rl_step"
+path = "../../benches/rl_step.rs"
+harness = false
+
+[[bench]]
+name = "aggregation"
+path = "../../benches/aggregation.rs"
+harness = false
+
+[[bench]]
+name = "rl_episode"
+path = "../../benches/rl_episode.rs"
+harness = false
+

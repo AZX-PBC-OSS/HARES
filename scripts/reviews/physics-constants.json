@@ -1,0 +1,134 @@
+{
+  "category": "physics-constants",
+  "description": "Physical constants and formulas verification",
+  "reviews": [
+    {
+      "id": "phys-const-01",
+      "slug": "psychrometric-saturation-pressure-coefficients",
+      "title": "Verify psychrometric saturation pressure formula — all 10 polynomial coefficients against ASHRAE HOF 2021 Ch.1 Table 2",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/psychrometrics.rs:49-61",
+      "prompt": "Verify that all 10 polynomial coefficients in the psychrometric saturation pressure formula match ASHRAE HOF 2021 Ch.1 Table 2 exactly. A typo in an e-9 or e-13 exponent silently produces wrong vapor pressure. Check every coefficient digit-for-digit."
+    },
+    {
+      "id": "phys-const-02",
+      "slug": "wet-bulb-specific-heat-constants",
+      "title": "Wet-bulb specific heat constants (2.381, 2.006 kJ/kg.K) vs PsychroLib (2.326)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/psychrometrics.rs:35,42",
+      "prompt": "Verify wet-bulb specific heat constants (2.381, 2.006 kJ/kg.K) against PsychroLib's value of 2.326. The test at line 343 documents the deviation and relaxes tolerance to 0.5%. Determine if the constants used are correct or if PsychroLib's value should be adopted."
+    },
+    {
+      "id": "phys-const-03",
+      "slug": "ice-specific-heat-constant",
+      "title": "Ice specific heat constant (2.1 kJ/kg.K) — verify no regression to IP units bug (0.24)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/psychrometrics.rs:36, crates/hares-physics/src/constants.rs:86",
+      "prompt": "Verify the ice specific heat constant is 2.1 kJ/kg.K (SI units). A previous bug used 0.24 which was the value in IP units (BTU/lb·°F). Confirm the constant is correct and no regression exists."
+    },
+    {
+      "id": "phys-const-04",
+      "slug": "kell-water-density-polynomial",
+      "title": "Kell (1975) water density polynomial — verify all 7 coefficients against Journal of Chemical & Engineering Data 20(1), 97-105",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:247-252",
+      "prompt": "Verify all 7 coefficients of the Kell (1975) water density polynomial against the original paper in Journal of Chemical & Engineering Data 20(1), 97-105. Check each coefficient digit-for-digit."
+    },
+    {
+      "id": "phys-const-05",
+      "slug": "gas-therm-hour-to-watt",
+      "title": "Gas therm/hour → Watt conversion (29,307.107...) — verify against NIST SP 811 BTU definition (1055.05585262)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:139",
+      "prompt": "Verify the gas therm/hour to Watt conversion constant (29,307.107...) against the NIST SP 811 BTU definition (1055.05585262). 1 therm = 100,000 BTU. Confirm the arithmetic is exact."
+    },
+    {
+      "id": "phys-const-06",
+      "slug": "boiler-auxiliary-hours-per-year",
+      "title": "Boiler auxiliary hours/year (2080) — verify against ANSI/RESNET/ICC 301-2019 Eq. 4.4-5",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:168",
+      "prompt": "Verify the boiler auxiliary hours/year constant (2080) against ANSI/RESNET/ICC 301-2019 Eq. 4.4-5. Confirm this value matches the standard exactly."
+    },
+    {
+      "id": "phys-const-07",
+      "slug": "occupant-gain-constants",
+      "title": "Occupant gain constants: sensible (66.0W), latent (51.2W), radiative fraction (0.30) — verify against OCHRE 400 BTU/h derivation and ASHRAE HOF 2021 Ch.18 Table 1",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:180-198",
+      "prompt": "Verify occupant gain constants: sensible 66.0W, latent 51.2W, radiative fraction 0.30. Cross-check the derivation from OCHRE 400 BTU/h total and ASHRAE HOF 2021 Ch.18 Table 1. Confirm sensible + latent = total and radiative fraction is reasonable for seated occupants."
+    },
+    {
+      "id": "phys-const-08",
+      "slug": "cp-liquid-water-constant",
+      "title": "CP_LIQUID_WATER_J_KG_K (4180) — verify against EnergyPlus Psychrometrics.hh CPHW; NIST gives 4182-4186 for 15-20°C",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:86",
+      "prompt": "Verify CP_LIQUID_WATER_J_KG_K (4180) against EnergyPlus Psychrometrics.hh CPHW constant. NIST gives 4182-4186 J/kg·K for 15-20°C water. Assess whether 4180 is a reasonable engineering approximation and document any deviation."
+    },
+    {
+      "id": "phys-const-09",
+      "slug": "isa-pressure-exponent-precision",
+      "title": "ISA pressure exponent precision (5.2558761 vs EnergyPlus 5.2559) — quantify pressure difference at 0-3000m",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:113",
+      "prompt": "Compare ISA pressure exponent precision: 5.2558761 used in HARES vs EnergyPlus 5.2559. Quantify the pressure difference in Pascals at elevations 0, 500, 1000, 2000, and 3000m. Determine if the extra digits are justified or merely cosmetic."
+    },
+    {
+      "id": "phys-const-10",
+      "slug": "btu-per-hr-per-watt",
+      "title": "BTU_PER_HR_PER_W (3.412141633) — verify against NIST exact conversion",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:126",
+      "prompt": "Verify BTU_PER_HR_PER_W (3.412141633) against the NIST exact conversion. 1 W = 1 J/s, 1 BTU = 1055.05585262 J. Compute the exact ratio and confirm the constant matches to full f64 precision."
+    },
+    {
+      "id": "phys-const-11",
+      "slug": "cfm-to-m3s",
+      "title": "CFM_TO_M3_S (0.0004719474432) — verify 1 ft³/60s derivation",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:130",
+      "prompt": "Verify CFM_TO_M3_S (0.0004719474432). Derivation: 1 CFM = 1 ft³/min → m³/s = (0.3048³) / 60. Compute the exact product and confirm the constant is correct to all digits shown."
+    },
+    {
+      "id": "phys-const-12",
+      "slug": "watts-per-ton-refrigeration",
+      "title": "Watts per ton of refrigeration (3516.852842066667) — verify against ASHRAE definition (1 ton = 12,000 BTU/h)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:123",
+      "prompt": "Verify Watts per ton of refrigeration (3516.852842066667). ASHRAE defines 1 ton = 12,000 BTU/h. Convert through J/s and confirm the constant is correct to full f64 precision."
+    },
+    {
+      "id": "phys-const-13",
+      "slug": "soil-thermal-diffusivity",
+      "title": "Soil thermal diffusivity default (0.05 m²/day) vs EnergyPlus (0.0208) — quantify effect at 0-3m depth",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/ground.rs:28",
+      "prompt": "Compare soil thermal diffusivity defaults: HARES uses 0.05 m²/day (moist clay/sand per docblock) vs EnergyPlus default 0.0208 m²/day (dry soil). Quantify the effect on ground temperature amplitude and phase lag at depths 0, 0.5, 1, 2, and 3m. Determine which soil type is more appropriate for typical residential modeling."
+    },
+    {
+      "id": "phys-const-14",
+      "slug": "f2-perimeter-loss-coefficients",
+      "title": "F2 perimeter loss coefficient: R-value thresholds (0.88, 1.76) and 6 hardcoded F2 values — verify against ASHRAE 90.1-2022 Table A6.3.1",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/ground.rs:155-166",
+      "prompt": "Verify F2 perimeter loss coefficient logic: R-value thresholds (0.88, 1.76) and all 6 hardcoded F2 values against ASHRAE 90.1-2022 Table A6.3.1. Check interpolation behavior at boundary values and confirm the thresholds correspond to correct insulation levels (R-5, R-10 in IP units)."
+    },
+    {
+      "id": "phys-const-15",
+      "slug": "stefan-boltzmann-precision",
+      "title": "Stefan-Boltzmann constant precision — verify f64 mantissa preserves full CODATA 2018 precision",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:202",
+      "prompt": "Verify Stefan-Boltzmann constant precision. The value is already tested against CODATA 2018. Determine whether an f64 (53-bit mantissa) preserves all significant digits of the CODATA 2018 value (5.670374419...e-8 W/m²·K⁴). A single f64 cannot hold more than ~15-17 decimal digits."
+    },
+    {
+      "id": "phys-const-16",
+      "slug": "linearised-radiative-h",
+      "title": "Linearised radiative h coefficient: verify h_rad = 4·ε·σ·T³ yields ~5.14 W/m²·K at 20°C with ε=0.9",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/constants.rs:218-220",
+      "prompt": "Verify the linearised radiative heat transfer coefficient formula: h_rad = 4·ε·σ·T³. Compute the expected value at 20°C (293.15 K) with ε=0.9 and confirm it yields approximately 5.14 W/m²·K. Check the derivation from the linearisation of the Stefan-Boltzmann law."
+    }
+  ]
+}

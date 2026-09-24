@@ -1,0 +1,46 @@
+{
+  "category": "infiltration-deep",
+  "description": "Infiltration model deep-dive: AIM-2 coefficients, terrain wind parameters, natural ventilation flow, and ASHRAE 119-1988 verification",
+  "reviews": [
+    {
+      "id": "infil-deep-01",
+      "slug": "infiltration-n-exponent",
+      "title": "Infiltration exponent N_I_MIN=0.5, N_I_MAX=0.7, N_I_DEFAULT=0.65 — verify against ASHRAE 119-1988",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/infiltration.rs",
+      "prompt": "The infiltration model uses N_I_MIN=0.5 (fully turbulent), N_I_MAX=0.7 (laminar), and N_I_DEFAULT=0.65 as the flow exponent for power-law infiltration. Verify these values against ASHRAE 119-1988, which recommends the exponent for 4-to-50 Pa blower door extrapolation. The exponent directly affects the conversion from blower-door-measured leakage area at high pressure to natural infiltration at low pressure. An incorrect exponent for the 4-to-50 Pa conversion produces an approximately 20% error in estimated natural infiltration rate. Check: does HARES use the exponent correctly in both the Sherman-Grimsrud model and the AIM-2 model? Is the exponent applied as a site-wide constant or can it be overridden per-building? Confirm that the default value of 0.65 is appropriate for the typical US housing stock (mixed-leakage assumption) and document any sensitivity analysis supporting this choice. Compare against EnergyPlus infiltration model exponent handling in WeatherManager.cc and the infiltration algorithm documentation."
+    },
+    {
+      "id": "infil-deep-02",
+      "slug": "terrain-class-wind-params",
+      "title": "All 5 TerrainClass variants (Ocean, Flat, Rough, VeryRough, Urban) — wind profile alpha and delta parameters",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/infiltration.rs",
+      "prompt": "The infiltration model defines five TerrainClass variants — Ocean, Flat, Rough, VeryRough, Urban — each with wind profile exponent alpha and boundary layer thickness delta parameters. Verify these values against ASHRAE HOF 2021 Chapter 24 (Airflow Around Buildings) and ASHRAE 119-1988 Table 1 terrain coefficients. Check: are the alpha values consistent with the logarithmic wind profile used in the local wind speed calculation? Does the terrain class selection in HARES match the EnergyPlus terrain classification used in WeatherManager.cc? Verify that the wind speed correction from meteorological station height to local building height correctly applies both the station terrain class and the building terrain class (two-stage correction). Incorrect terrain parameters propagate into the AIM-2 pressure coefficients and can bias infiltration rates by 15-30% for exposed sites. Also verify that the default terrain class assignment is reasonable for the typical US residential building stock."
+    },
+    {
+      "id": "infil-deep-03",
+      "slug": "aim2-coefficients",
+      "title": "AIM-2 model coefficients computation — all coefficient formulas for ShieldingClass × FoundationLeakageClass interactions",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/infiltration.rs",
+      "prompt": "The AIM-2 (Alberta Infiltration Model 2) coefficient computation spans approximately 200 lines covering all combinations of ShieldingClass and FoundationLeakageClass. Verify every coefficient formula against the EnergyPlus implementation in WeatherManager.cc. Check specific interactions: (1) Wind coefficient C_w for each shielding class — does HARES match the EnergyPlus AIM-2 wind coefficient table? (2) Stack coefficient C_s for each foundation leakage class — verify the temperature-difference exponent and height correction. (3) Horizontal leakage fraction for each foundation type — confirm the split between wind-driven and stack-driven flow is physically correct. (4) The combined flow coefficient formula C = sqrt(C_w^2 + C_s^2) — verify this is the correct superposition for the AIM-2 combined pressure model. (5) For slab-on-grade foundations, verify the effective stack height calculation matches EnergyPlus. Any coefficient error in the ShieldingClass × FoundationLeakageClass matrix will produce systematic infiltration biases for entire building archetypes, not just individual timesteps. Cross-reference against the AIM-2 technical reference documentation as well as the code implementation."
+    },
+    {
+      "id": "infil-deep-04",
+      "slug": "shielding-normal-constant",
+      "title": "SHIELDING_NORMAL=0.5/3.0 constant and attic/garage ELA coefficient formulas",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/infiltration.rs",
+      "prompt": "Review the SHIELDING_NORMAL constant (0.5/3.0) used in the AIM-2 model to normalize shielding class wind coefficients. This constant appears to represent a wind pressure coefficient ratio between the reference shielding condition and each specific shielding class. Verify: (1) The constant value matches the EnergyPlus AIM-2 reference implementation exactly — a small error here shifts all shielding class coefficients proportionally. (2) The attic ELA coefficient formulas — check how attic effective leakage area is computed from the building leakage area and verify the attic-to-dwelling leakage coupling factor. (3) The garage ELA coefficient formulas — verify garage-to-dwelling leakage pathway parameters and the foundation leakage interaction. (4) Are the attic and garage leakage contributions added to the total building leakage as parallel flow paths (additive ELA) or are they treated as separate zone-to-zone flows? The treatment affects the overall building infiltration balance. Compare against EnergyPlus ZoneInfiltration:EffectiveLeakageArea object documentation and the AIM-2 technical reference for multi-zone treatment."
+    },
+    {
+      "id": "infil-deep-05",
+      "slug": "natural-ventilation-flow",
+      "title": "Natural ventilation flow formula — wind and stack sign conventions, ASHRAE HOF verification",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/infiltration.rs",
+      "prompt": "Review the natural ventilation flow computation covering lines 239-305 of infiltration.rs. This section computes flow rates for intentional natural ventilation openings (windows, vents) as distinct from unintentional infiltration. Verify against ASHRAE HOF natural ventilation equations: (1) Wind-driven flow: check the wind pressure coefficient for each opening orientation — does HARES use the correct Cp values for different wind incidence angles? (2) Stack-driven flow: verify the hydrostatic pressure difference calculation includes the correct neutral pressure level assumption for single-sided vs. cross-ventilation configurations. (3) Combined wind-and-stack flow: verify the sign convention when wind and stack pressures act in the same direction (reinforcement) vs. opposing directions (cancellation). A sign error here could produce zero flow when pressures should add, or double-counted flow when they should cancel. (4) Opening area scheduling: verify that the opening fraction schedule correctly modulates flow at each timestep and that fully-closed openings produce exactly zero flow. (5) Discharge coefficient Cd for openings — verify the default value and its applicability to different opening types (casement windows, sliding windows, trickle vents). Cross-reference against EnergyPlus ZoneVentilation:WindandStackOpenArea object implementation."
+    }
+  ]
+}

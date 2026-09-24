@@ -1,0 +1,1292 @@
+//! Speed staging, part-load, and capacity interpolation for HVAC equipment.
+//!
+//! Extracted from `hvac_core.rs` to isolate speed selection algorithms from
+//! thermostat control and duct distribution. No zone or duct knowledge here.
+
+use hares_physics::biquadratic::quadratic;
+
+use super::hvac_core::HvacEquipment;
+use super::speed_control::{
+    SpeedControlMode, SpeedSelection, capacity_fractions_for, interpolate_speed_stages,
+};
+use super::thermostat::ThermostatMode;
+
+/// Default low-speed capacity fraction for two-speed equipment.
+/// Matches OCHRE/AHRI lookup table: 0.72 for 2-speed AC and ASHP coolers.
+pub(super) const DEFAULT_LOW_SPEED_CAPACITY_FRACTION: f64 = 0.72;
+
+/// Default part-load factor degradation coefficient (Cd).
+/// AHRI Standard 210/240-2023, S6.6.3 default when no test data available.
+pub(super) const DEFAULT_PLF_DEGRADATION_COEFF: f64 = 0.25;
+
+/// Default startup capacity ramp degradation coefficient (Cd).
+/// Winkler (2011) exponential startup capacity degradation model.
+/// Default 0.0 matches OCHRE's `"Startup Capacity Degradation (-)"` (HVAC.py:765)
+/// — startup ramp is OFF unless the user explicitly provides a non-zero Cd.
+pub(super) const DEFAULT_STARTUP_CD: f64 = 0.0;
+
+impl HvacEquipment {
+    /// Number of discrete speed stages. For single-speed equipment this is 1.
+    pub fn n_speed_stages(&self) -> usize {
+        match self.config.speed_control_mode {
+            SpeedControlMode::SingleSpeed => 1,
+            SpeedControlMode::TwoSpeedSetpoint
+            | SpeedControlMode::TwoSpeedTime
+            | SpeedControlMode::TwoSpeedAlternating => 2,
+            SpeedControlMode::MultiSpeedInterpolated => {
+                let caps = self
+                    .config
+                    .heating_capacities_w
+                    .len()
+                    .max(self.config.cooling_capacities_w.len());
+                caps.max(1)
+            }
+            SpeedControlMode::VariableSpeedIdeal => 1,
+        }
+    }
+
+    /// Dynamically disable or re-enable individual speed stages at runtime.
+    ///
+    /// If all speeds are disabled, `max_enabled_speed` falls back to the last stage.
+    pub fn set_disabled_speeds(&mut self, disabled: &[bool]) {
+        use super::hvac_core::MAX_SPEEDS;
+        let n = self.n_speed_stages();
+        self.control.speed_count = n as u8;
+        for i in 0..MAX_SPEEDS {
+            self.control.disabled_speeds[i] = disabled.get(i).copied().unwrap_or(false);
+        }
+        self.control.max_enabled_speed = self
+            .control
+            .disabled_speeds
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|&(i, &d)| !d && i < n)
+            .map(|(i, _)| i)
+            .unwrap_or(n.saturating_sub(1));
+    }
+
+    /// Record the current zone temperature for the next step's `TwoSpeedTime` comparison.
+    /// Pass `None` when the unit turns off to ensure the next on-cycle starts at low speed.
+    pub fn update_prev_zone_temp(&mut self, zone_temp_c: Option<f64>) {
+        self.runtime.prev_zone_temp_c = zone_temp_c;
+    }
+
+    /// Advance the speed-stage timer by `dt_s` seconds.
+    pub fn advance_speed_timer(&mut self, dt_s: f64) {
+        self.runtime.time_at_current_speed_s += dt_s;
+    }
+
+    pub fn select_speed(&mut self, load_fraction: f64) -> SpeedSelection {
+        self.select_speed_with_zone_temp(load_fraction, None, false)
+    }
+
+    /// Speed selection that accepts the current zone temperature and heating
+    /// direction for `TwoSpeedTime` mode.
+    pub fn select_speed_with_zone_temp(
+        &mut self,
+        load_fraction: f64,
+        zone_temp_c: Option<f64>,
+        is_heating: bool,
+    ) -> SpeedSelection {
+        let load_fraction = load_fraction.clamp(0.0, 1.0);
+        let selection = match self.config.speed_control_mode {
+            SpeedControlMode::SingleSpeed => SpeedSelection {
+                speed_index: 0,
+                part_load_ratio: load_fraction,
+                speed_frac: load_fraction,
+            },
+            SpeedControlMode::TwoSpeedSetpoint => self.select_two_speed_setpoint(load_fraction),
+            SpeedControlMode::TwoSpeedTime => {
+                self.select_two_speed_time(load_fraction, zone_temp_c, is_heating)
+            }
+            SpeedControlMode::TwoSpeedAlternating => {
+                let desired_index = self.apply_disabled_speeds_two_speed(1);
+                let time_before = self.runtime.time_at_current_speed_s;
+                let old_speed = self.runtime.last_speed_index;
+                let locked =
+                    time_before < self.config.min_time_per_speed_s && desired_index != old_speed;
+                if locked {
+                    tracing::debug!(
+                        time_at_current_speed_s = time_before,
+                        min_time_per_speed_s = self.config.min_time_per_speed_s,
+                        desired_index,
+                        current_index = old_speed,
+                        "TwoSpeedAlternating: min-time guard blocking speed change"
+                    );
+                }
+                let speed_index = if locked {
+                    old_speed
+                } else {
+                    if desired_index != old_speed {
+                        self.runtime.time_at_current_speed_s = 0.0;
+                    }
+                    desired_index
+                };
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    if speed_index != old_speed
+                        && self.config.min_time_per_speed_s > 0.0
+                        && time_before > 0.0
+                    {
+                        assert!(
+                            time_before >= self.config.min_time_per_speed_s,
+                            "TwoSpeedAlternating: speed changed before min_time period elapsed \
+                             (time_at_current_speed_s={time_before}s, \
+                             min_time_per_speed_s={min_time}s)",
+                            min_time = self.config.min_time_per_speed_s,
+                        );
+                    }
+                }
+                let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
+                let high_cap = 1.0;
+                if speed_index == 1 {
+                    SpeedSelection {
+                        speed_index: 1,
+                        part_load_ratio: (load_fraction / high_cap).clamp(0.0, 1.0),
+                        speed_frac: 1.0,
+                    }
+                } else {
+                    SpeedSelection {
+                        speed_index: 0,
+                        part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
+                        speed_frac: low_cap,
+                    }
+                }
+            }
+            SpeedControlMode::MultiSpeedInterpolated => self.select_multi_speed(load_fraction),
+            SpeedControlMode::VariableSpeedIdeal => self.select_multi_speed(load_fraction),
+        };
+        let old_speed_index = self.runtime.last_speed_index;
+        let old_speed_frac = self.runtime.last_speed_frac;
+        self.runtime.last_speed_index = selection.speed_index;
+        self.runtime.last_speed_frac = selection.speed_frac;
+        if selection.speed_index != old_speed_index || selection.speed_frac != old_speed_frac {
+            tracing::debug!(
+                old_speed_index,
+                new_speed_index = selection.speed_index,
+                speed_frac = selection.speed_frac,
+                part_load_ratio = selection.part_load_ratio,
+                "speed transition"
+            );
+        }
+        selection
+    }
+
+    fn select_two_speed_setpoint(&mut self, load_fraction: f64) -> SpeedSelection {
+        let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
+        let desired_index = if load_fraction > low_cap { 1 } else { 0 };
+        let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
+        let locked = self.runtime.time_at_current_speed_s < self.config.min_time_per_speed_s
+            && desired_index != self.runtime.last_speed_index;
+        let speed_index = if locked {
+            self.runtime.last_speed_index
+        } else {
+            if desired_index != self.runtime.last_speed_index {
+                self.runtime.time_at_current_speed_s = 0.0;
+            }
+            desired_index
+        };
+        if speed_index == 1 {
+            SpeedSelection {
+                speed_index: 1,
+                part_load_ratio: load_fraction,
+                speed_frac: 1.0,
+            }
+        } else {
+            SpeedSelection {
+                speed_index: 0,
+                part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
+                speed_frac: low_cap,
+            }
+        }
+    }
+
+    fn select_two_speed_time(
+        &mut self,
+        load_fraction: f64,
+        zone_temp_c: Option<f64>,
+        is_heating: bool,
+    ) -> SpeedSelection {
+        let (desired_index, fresh_cycle) =
+            if let (Some(current), Some(prev)) = (zone_temp_c, self.runtime.prev_zone_temp_c) {
+                let moving_wrong_way = if is_heating {
+                    current < prev
+                } else {
+                    current > prev
+                };
+                let idx = if moving_wrong_way
+                    && self.runtime.time_at_current_speed_s >= self.config.min_time_per_speed_s
+                {
+                    1
+                } else {
+                    self.runtime.last_speed_index
+                };
+                (idx, false)
+            } else {
+                (0, true)
+            };
+        let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
+        let locked = !fresh_cycle
+            && self.runtime.time_at_current_speed_s < self.config.min_time_per_speed_s
+            && desired_index != self.runtime.last_speed_index;
+        let speed_index = if locked {
+            self.runtime.last_speed_index
+        } else {
+            if desired_index != self.runtime.last_speed_index {
+                self.runtime.time_at_current_speed_s = 0.0;
+            }
+            desired_index
+        };
+        let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
+        if speed_index == 1 {
+            SpeedSelection {
+                speed_index: 1,
+                part_load_ratio: load_fraction,
+                speed_frac: 1.0,
+            }
+        } else {
+            SpeedSelection {
+                speed_index: 0,
+                part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
+                speed_frac: low_cap,
+            }
+        }
+    }
+
+    fn select_multi_speed(&self, load_fraction: f64) -> SpeedSelection {
+        let caps = match self.thermostat_fsm.mode {
+            ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
+                &self.config.heating_capacities_w
+            }
+            ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
+                &self.config.cooling_capacities_w
+            }
+            _ if !self.config.heating_capacities_w.is_empty() => &self.config.heating_capacities_w,
+            _ => &self.config.cooling_capacities_w,
+        };
+        let cap_fracs = capacity_fractions_for(caps);
+        interpolate_speed_stages(load_fraction, &cap_fracs, false)
+    }
+
+    fn apply_disabled_speeds_two_speed(&self, desired_index: usize) -> usize {
+        if self.control.speed_count == 0 {
+            return desired_index;
+        }
+        if self
+            .control
+            .disabled_speeds
+            .get(desired_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            self.control.max_enabled_speed
+        } else {
+            desired_index
+        }
+    }
+
+    /// Compute part-load factor at the current speed stage.
+    pub fn part_load_factor(&mut self, plr: f64) -> f64 {
+        self.part_load_factor_for_stage(plr, self.runtime.last_speed_index)
+    }
+
+    /// Compute PLF for an explicit speed stage index.
+    pub fn part_load_factor_for_stage(&mut self, plr: f64, stage_index: usize) -> f64 {
+        if matches!(
+            self.config.speed_control_mode,
+            SpeedControlMode::VariableSpeedIdeal
+        ) {
+            self.runtime.plf_state = 1.0;
+            return 1.0;
+        }
+        let plr = plr.clamp(0.0, 1.0);
+
+        let plf_raw = if let Some(ref curves) = self.config.eir_plr_coefficients {
+            let coeffs = if let Some(&c) = curves.get(stage_index) {
+                c
+            } else {
+                tracing::debug!(
+                    stage_index,
+                    n_curves = curves.len(),
+                    "PLF stage index out of range, using last curve"
+                );
+                curves.last().copied().unwrap_or([1.0, 0.0, 0.0])
+            };
+            quadratic(&coeffs, plr)
+        } else {
+            let cd = self.runtime.plf_cooling_degradation_coeff.clamp(0.0, 1.0);
+            1.0 - cd * (1.0 - plr)
+        };
+
+        if plf_raw < self.config.plf_min {
+            tracing::warn!(
+                plf_raw,
+                plr,
+                stage_index,
+                plf_min = self.config.plf_min,
+                "PLF curve returned value < plf_min; check eir_plr or cooling_cd. Clamping to max(plf_min, PLR)."
+            );
+        }
+        let plf = plf_raw.clamp(self.config.plf_min.max(plr), 1.0);
+        self.runtime.plf_state = plf;
+        plf
+    }
+
+    /// Apply the Winkler (2011) exponential startup capacity ramp.
+    ///
+    /// Only heat pump equipment (any mode) applies the ramp, matching OCHRE's
+    /// `"HP" in self.mode` guard (HVAC.py:977). Non-HP equipment (central AC,
+    /// room AC, furnaces, baseboard) returns steady-state capacity unchanged.
+    ///
+    /// `compressor_on` gates the ramp timer advance for HP equipment. When the
+    /// HP compressor is not energised (e.g. ASHP in ER-only backup mode), the
+    /// timer must not advance even though `duty_cycle > 0.0` — the startup ramp
+    /// models a compressor transient that only applies when the compressor is
+    /// actually running. OCHRE guards the timer advance on `"HP" in self.mode`
+    /// (HVAC.py:977,985); this parameter is the HARES equivalent.
+    pub fn apply_startup_capacity_degradation(
+        &mut self,
+        steady_capacity_w: f64,
+        dt_min: f64,
+        compressor_on: bool,
+    ) -> f64 {
+        if !self.config.equipment_type.is_heat_pump() {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if self.runtime.startup.c_d > 0.0 {
+                    tracing::warn!(
+                        equipment_type = ?self.config.equipment_type,
+                        c_d = self.runtime.startup.c_d,
+                        "startup cap degradation: non-HP equipment with non-zero Cd; \
+                         ramp bypassed (multiplier = 1.0). OCHRE HVAC.py:977 gate."
+                    );
+                }
+            }
+            return steady_capacity_w;
+        }
+        let on_now = compressor_on;
+        let mult = self.runtime.startup.capacity_multiplier(on_now, dt_min);
+        #[cfg(feature = "observe")]
+        {
+            let ramp_active = mult < 1.0;
+            tracing::debug!(
+                startup_multiplier = mult,
+                ramp_active,
+                equipment_type = ?self.config.equipment_type,
+                c_d = self.runtime.startup.c_d,
+                time_since_start_min = self.runtime.startup.time_since_start_min,
+                steady_capacity_w,
+                compressor_on,
+                "startup capacity degradation observe"
+            );
+        }
+        if mult < 1.0 {
+            tracing::debug!(
+                startup_multiplier = mult,
+                c_d = self.runtime.startup.c_d,
+                time_since_start_min = self.runtime.startup.time_since_start_min,
+                steady_capacity_w,
+                degraded_capacity_w = steady_capacity_w * mult,
+                "startup capacity degradation active"
+            );
+        }
+        steady_capacity_w * mult
+    }
+
+    pub fn rated_capacity_w(&self, mode: ThermostatMode) -> f64 {
+        match mode {
+            ThermostatMode::Heating => self
+                .config
+                .heating_capacities_w
+                .first()
+                .copied()
+                .unwrap_or_default(),
+            ThermostatMode::Cooling => self
+                .config
+                .cooling_capacities_w
+                .first()
+                .copied()
+                .unwrap_or_default(),
+            ThermostatMode::Deadband => 0.0,
+        }
+    }
+
+    pub fn capacity_at_stage(capacities: &[f64], stage_index: usize) -> f64 {
+        if capacities.is_empty() {
+            return 0.0;
+        }
+        capacities[stage_index.min(capacities.len() - 1)]
+    }
+
+    pub fn eir_at_stage(&self, stage_index: usize) -> f64 {
+        if self.config.eir_by_stage.is_empty() {
+            return 1.0;
+        }
+        self.config.eir_by_stage[stage_index.min(self.config.eir_by_stage.len() - 1)]
+    }
+
+    /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
+    pub fn capacity_fractions(&self) -> Vec<f64> {
+        let caps = match self.thermostat_fsm.mode {
+            ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
+                &self.config.heating_capacities_w
+            }
+            ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
+                &self.config.cooling_capacities_w
+            }
+            _ if self.config.heating_capacities_w.len()
+                >= self.config.cooling_capacities_w.len() =>
+            {
+                &self.config.heating_capacities_w
+            }
+            _ => &self.config.cooling_capacities_w,
+        };
+        capacity_fractions_for(caps)
+    }
+
+    /// Interpolate capacity between two bracket stages using `speed_frac`.
+    pub fn interpolated_capacity(
+        &self,
+        capacities: &[f64],
+        speed_index: usize,
+        speed_frac: f64,
+    ) -> f64 {
+        let cap_lo = Self::capacity_at_stage(capacities, speed_index);
+        if speed_frac > 0.0 {
+            let cap_hi = Self::capacity_at_stage(capacities, speed_index + 1);
+            cap_lo * (1.0 - speed_frac) + cap_hi * speed_frac
+        } else {
+            cap_lo
+        }
+    }
+
+    /// Interpolate EIR between two bracket stages using `speed_frac`.
+    pub fn interpolated_eir(&self, speed_index: usize, speed_frac: f64) -> f64 {
+        let eir_lo = self.eir_at_stage(speed_index);
+        if speed_frac > 0.0 {
+            let eir_hi = self.eir_at_stage(speed_index + 1);
+            eir_lo * (1.0 - speed_frac) + eir_hi * speed_frac
+        } else {
+            eir_lo
+        }
+    }
+
+    pub fn airflow_m3_s_for_capacity_w(&self, capacity_w: f64) -> f64 {
+        capacity_w.max(0.0) * self.config.airflow_m3_s_per_w
+    }
+
+    pub fn fan_power_w(&self, airflow_m3_s: f64) -> f64 {
+        airflow_m3_s.max(0.0) * self.config.fan_power_w_per_m3_s
+    }
+
+    pub fn sensible_latent_from_shr(&self, total_cooling_w: f64) -> (f64, f64) {
+        let shr = self.config.shr.clamp(0.0, 1.0);
+        let sensible = total_cooling_w * shr;
+        let latent = total_cooling_w - sensible;
+        (sensible, latent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hares_types::ZoneId;
+
+    use super::super::hvac_core::{HvacEquipment, HvacEquipmentType, MAX_SPEEDS};
+    use super::super::speed_control::SpeedControlMode;
+    use super::super::thermostat::ThermostatMode;
+
+    fn make_single_speed() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::SingleSpeed;
+        hvac.config.heating_capacities_w = vec![10_000.0];
+        hvac
+    }
+
+    fn make_multi_speed_4() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.config.cooling_capacities_w = vec![2_500.0, 5_000.0, 7_500.0, 10_000.0];
+        hvac
+    }
+
+    /// AHRI 210/240 S6.6.3: PLF = 1 - Cd*(1-PLR), default Cd = 0.25.
+    #[test]
+    fn plf_ahri_210_240_default_cd() {
+        let mut hvac = make_single_speed();
+        assert!((hvac.runtime.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12);
+
+        let cases: &[(f64, f64)] = &[(1.00, 1.000), (0.75, 0.9375), (0.50, 0.875)];
+        for &(plr, expected_plf) in cases {
+            let plf = hvac.part_load_factor_for_stage(plr, 0);
+            assert!(
+                (plf - expected_plf).abs() < 0.001,
+                "PLR={plr}: expected PLF={expected_plf}, got {plf}"
+            );
+        }
+    }
+
+    /// PLR = 0.0: raw PLF = 1 - 0.25*1 = 0.75.
+    /// Clamp is max(0.7, PLR) = max(0.7, 0.0) = 0.7.
+    /// Since 0.75 >= 0.7, PLF = 0.75.
+    #[test]
+    fn plf_zero_load_returns_floor() {
+        let mut hvac = make_single_speed();
+        let plf = hvac.part_load_factor_for_stage(0.0, 0);
+        assert!(
+            (plf - 0.75).abs() < 0.001,
+            "PLR=0: expected PLF=0.75, got {plf}"
+        );
+    }
+
+    /// High Cd produces raw PLF below default plf_min (0.7), clamped to max(0.7, PLR).
+    /// Cd=0.5, PLR=0.3 → raw PLF = 1 - 0.5*(1-0.3) = 0.65 → clamped to max(0.7, 0.3) = 0.7.
+    #[test]
+    fn plf_floor_clamp_with_high_cd() {
+        let mut hvac = make_single_speed();
+        hvac.runtime.plf_cooling_degradation_coeff = 0.5;
+        let plf = hvac.part_load_factor_for_stage(0.3, 0);
+        assert!(
+            (plf - 0.7).abs() < 1e-9,
+            "PLR=0.3, Cd=0.5: raw PLF=0.65 must clamp to 0.7, got {plf}"
+        );
+    }
+
+    /// MSHP CSV-derived plf_min=0.2195: the PLF floor should use that value, not 0.7.
+    /// Cd=0.5, PLR=0.3 → raw PLF = 1 - 0.5*(1-0.3) = 0.65 → clamped to max(0.2195, 0.3) = 0.3.
+    #[test]
+    fn plf_floor_uses_custom_plf_min() {
+        let mut hvac = make_single_speed();
+        hvac.runtime.plf_cooling_degradation_coeff = 0.5;
+        hvac.config.plf_min = 0.2195;
+        let plf = hvac.part_load_factor_for_stage(0.3, 0);
+        // raw=0.65, floor=max(0.2195, 0.3)=0.3, so PLF=0.65 (above floor)
+        assert!(
+            (plf - 0.65).abs() < 1e-9,
+            "PLR=0.3, Cd=0.5, plf_min=0.2195: raw PLF=0.65 >= floor 0.3, got {plf}"
+        );
+
+        // PLR=0.1 → raw PLF = 1 - 0.5*(1-0.1) = 0.55 → floor=max(0.2195, 0.1)=0.2195
+        // 0.55 >= 0.2195, so PLF=0.55
+        let plf2 = hvac.part_load_factor_for_stage(0.1, 0);
+        assert!(
+            (plf2 - 0.55).abs() < 1e-9,
+            "PLR=0.1, Cd=0.5, plf_min=0.2195: raw PLF=0.55 >= floor 0.2195, got {plf2}"
+        );
+
+        // Extreme: Cd=0.95, PLR=0.1 → raw PLF = 1 - 0.95*0.9 = 0.145 < plf_min=0.2195
+        // floor=max(0.2195, 0.1)=0.2195, clamp to 0.2195
+        hvac.runtime.plf_cooling_degradation_coeff = 0.95;
+        let plf3 = hvac.part_load_factor_for_stage(0.1, 0);
+        assert!(
+            (plf3 - 0.2195).abs() < 1e-9,
+            "PLR=0.1, Cd=0.95, plf_min=0.2195: raw PLF=0.145 clamped to 0.2195, got {plf3}"
+        );
+    }
+
+    /// SingleSpeed: any load fraction yields speed_index=0, PLR=load_fraction.
+    #[test]
+    fn single_speed_always_stage_zero() {
+        let mut hvac = make_single_speed();
+        for load in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let sel = hvac.select_speed(load);
+            assert_eq!(sel.speed_index, 0, "load={load}: speed_index must be 0");
+            assert!(
+                (sel.part_load_ratio - load).abs() < 1e-12,
+                "load={load}: PLR must equal load_fraction, got {}",
+                sel.part_load_ratio
+            );
+        }
+    }
+
+    /// 4-speed [0.25, 0.50, 0.75, 1.0] with load_fraction = 0.625.
+    /// Brackets between stage 1 (0.50) and stage 2 (0.75).
+    /// speed_index = 1, speed_frac = (0.625-0.50)/(0.75-0.50) = 0.50.
+    #[test]
+    fn multi_speed_interpolation_between_stages() {
+        let mut hvac = make_multi_speed_4();
+        let sel = hvac.select_speed(0.625);
+        assert_eq!(sel.speed_index, 1, "should bracket at stage 1");
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-9,
+            "expected speed_frac=0.5, got {}",
+            sel.speed_frac
+        );
+        assert!(
+            (sel.part_load_ratio - 1.0).abs() < 1e-9,
+            "inter-speed PLR must be 1.0, got {}",
+            sel.part_load_ratio
+        );
+    }
+
+    /// interpolated_capacity with capacities=[5000, 10000], speed_index=0, speed_frac=0.5.
+    /// Expected: 5000*(1-0.5) + 10000*0.5 = 7500.
+    #[test]
+    fn interpolated_capacity_linear() {
+        let hvac = make_single_speed();
+        let capacities = [5_000.0, 10_000.0];
+        let result = hvac.interpolated_capacity(&capacities, 0, 0.5);
+        assert!(
+            (result - 7_500.0).abs() < 1e-9,
+            "expected 7500 W, got {result}"
+        );
+    }
+
+    /// interpolated_eir with eir_by_stage=[0.3, 0.4], speed_index=0, speed_frac=0.5.
+    /// Expected: 0.3*(1-0.5) + 0.4*0.5 = 0.35.
+    #[test]
+    fn interpolated_eir_between_stages() {
+        let mut hvac = make_single_speed();
+        // COP ~3.3 at low speed, ~2.5 at high speed (realistic AC EIR values)
+        hvac.config.eir_by_stage = vec![0.30, 0.40];
+        let result = hvac.interpolated_eir(0, 0.5);
+        assert!(
+            (result - 0.35).abs() < 1e-9,
+            "expected EIR=0.35, got {result}"
+        );
+    }
+
+    /// interpolated_eir with speed_frac=0.0 returns stage 0 EIR unchanged.
+    #[test]
+    fn interpolated_eir_at_stage_boundary() {
+        let mut hvac = make_single_speed();
+        hvac.config.eir_by_stage = vec![0.30, 0.40];
+        let result = hvac.interpolated_eir(0, 0.0);
+        assert!(
+            (result - 0.30).abs() < 1e-9,
+            "expected EIR=0.30 at stage 0, got {result}"
+        );
+    }
+
+    /// capacity_fractions for a 2-speed heating config [5000, 10000 W].
+    /// Expected fractions: [0.5, 1.0] -- normalized to the highest stage.
+    #[test]
+    fn capacity_fractions_two_speed() {
+        let mut hvac = make_single_speed();
+        hvac.config.heating_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.thermostat_fsm.mode = ThermostatMode::Heating;
+        let fracs = hvac.capacity_fractions();
+        assert_eq!(fracs.len(), 2, "two-speed must yield two fractions");
+        assert!(
+            (fracs[0] - 0.5).abs() < 1e-9,
+            "low-speed fraction: expected 0.5, got {}",
+            fracs[0]
+        );
+        assert!(
+            (fracs[1] - 1.0).abs() < 1e-9,
+            "high-speed fraction: expected 1.0, got {}",
+            fracs[1]
+        );
+        for (i, &f) in fracs.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&f),
+                "fraction[{i}]={f} must be in [0, 1]"
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_fractions_follow_active_mode() {
+        let mut hvac = make_single_speed();
+        hvac.config.heating_capacities_w = vec![4_000.0, 8_000.0];
+        hvac.config.cooling_capacities_w = vec![2_000.0, 4_000.0, 6_000.0, 12_000.0];
+
+        hvac.thermostat_fsm.mode = ThermostatMode::Heating;
+        let heating_fracs = hvac.capacity_fractions();
+        assert_eq!(heating_fracs, vec![0.5, 1.0]);
+
+        hvac.thermostat_fsm.mode = ThermostatMode::Cooling;
+        let cooling_fracs = hvac.capacity_fractions();
+        assert_eq!(cooling_fracs, vec![1.0 / 6.0, 1.0 / 3.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn two_speed_alternating_normalizes_low_stage_plr_when_high_disabled() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.set_disabled_speeds(&[false, true]);
+
+        let sel = hvac.select_speed(0.3);
+        assert_eq!(sel.speed_index, 0);
+        assert!((sel.part_load_ratio - 0.6).abs() < 1e-9);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_speed_alternating_min_time_guard() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.72;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0;
+        hvac.set_disabled_speeds(&[true, false]);
+
+        let sel = hvac.select_speed(0.5);
+        assert_eq!(
+            sel.speed_index, 0,
+            "min-time guard must hold speed at 0 when time_at_current_speed_s < min_time"
+        );
+    }
+
+    #[test]
+    fn two_speed_alternating_allows_change_after_min_time() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.72;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0;
+        hvac.set_disabled_speeds(&[true, false]);
+
+        hvac.advance_speed_timer(300.0);
+        let sel = hvac.select_speed(0.5);
+        assert_eq!(
+            sel.speed_index, 1,
+            "speed must change after min_time_per_speed_s has elapsed"
+        );
+    }
+
+    fn make_two_speed_setpoint() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        // Set min_time_per_speed_s = 0 so tests are not time-locked.
+        hvac.config.min_time_per_speed_s = 0.0;
+        hvac.runtime.time_at_current_speed_s = 0.0;
+        hvac
+    }
+
+    fn make_two_speed_time() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.time_at_current_speed_s = 0.0;
+        hvac
+    }
+
+    /// TwoSpeedSetpoint: load ≤ low_speed_capacity_fraction → speed 0.
+    /// load=0.3, low_cap=0.5 → desired=0.  PLR = 0.3/0.5 = 0.6, speed_frac = 0.5.
+    #[test]
+    fn select_speed_two_speed_setpoint_low_load() {
+        let mut hvac = make_two_speed_setpoint();
+        let sel = hvac.select_speed(0.3);
+        assert_eq!(sel.speed_index, 0, "low load must select speed 0");
+        assert!(
+            (sel.part_load_ratio - 0.6).abs() < 1e-9,
+            "PLR must be load/low_cap = 0.3/0.5 = 0.6, got {}",
+            sel.part_load_ratio
+        );
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-9,
+            "speed_frac must equal low_speed_capacity_fraction=0.5, got {}",
+            sel.speed_frac
+        );
+    }
+
+    /// TwoSpeedSetpoint: load > low_speed_capacity_fraction → speed 1.
+    /// load=0.8, low_cap=0.5 → desired=1.  PLR = 0.8, speed_frac = 1.0.
+    #[test]
+    fn select_speed_two_speed_setpoint_high_load() {
+        let mut hvac = make_two_speed_setpoint();
+        let sel = hvac.select_speed(0.8);
+        assert_eq!(sel.speed_index, 1, "high load must select speed 1");
+        assert!(
+            (sel.part_load_ratio - 0.8).abs() < 1e-9,
+            "PLR must equal load_fraction=0.8, got {}",
+            sel.part_load_ratio
+        );
+        assert!(
+            (sel.speed_frac - 1.0).abs() < 1e-9,
+            "speed_frac must be 1.0 at high speed, got {}",
+            sel.speed_frac
+        );
+    }
+
+    /// TwoSpeedTime: fresh cycle (no prev_zone_temp) starts at speed 0.
+    /// After min_time_per_speed_s has elapsed and zone temp is moving wrong way
+    /// (cooling: zone temp rising), speed escalates to 1.
+    /// At speed 1 with load_fraction=0.8: PLR=0.8, speed_frac=1.0.
+    #[test]
+    fn select_speed_two_speed_time_direction_change() {
+        let mut hvac = make_two_speed_time();
+        // Fresh start: no previous temperature, must start at speed 0.
+        let sel0 = hvac.select_speed_with_zone_temp(0.8, Some(25.0), false);
+        assert_eq!(sel0.speed_index, 0, "fresh cycle must start at speed 0");
+
+        // Advance timer past the minimum guard and record current zone temp.
+        hvac.advance_speed_timer(300.0);
+        hvac.update_prev_zone_temp(Some(25.0));
+
+        // Next step: zone temp rose to 26.0°C during cooling -- moving wrong way.
+        let sel1 = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
+        assert_eq!(
+            sel1.speed_index, 1,
+            "rising zone temp during cooling after min_time must escalate to speed 1"
+        );
+        assert!(
+            (sel1.part_load_ratio - 0.8).abs() < 1e-9,
+            "speed 1 PLR must equal load_fraction=0.8, got {}",
+            sel1.part_load_ratio
+        );
+        assert!(
+            (sel1.speed_frac - 1.0).abs() < 1e-9,
+            "speed 1 speed_frac must be 1.0, got {}",
+            sel1.speed_frac
+        );
+    }
+
+    /// TwoSpeedTime: speed change is blocked when time_at_current_speed_s < min_time_per_speed_s.
+    /// Even with temperature moving in the wrong direction, the speed must not change.
+    #[test]
+    fn select_speed_two_speed_time_min_guard() {
+        let mut hvac = make_two_speed_time();
+        // Establish: running at speed 0, timer has not yet expired.
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0; // less than 300 s minimum
+        hvac.runtime.prev_zone_temp_c = Some(25.0);
+
+        // Zone temp is rising during cooling -- would normally trigger escalation,
+        // but the min-time guard must block it.
+        let sel = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
+        assert_eq!(
+            sel.speed_index, 0,
+            "speed must not change before min_time_per_speed_s expires: got {}",
+            sel.speed_index
+        );
+    }
+
+    /// apply_startup_capacity_degradation: cold start (duty_cycle > 0, timer=0) must
+    /// return capacity below steady-state.  Winkler (2011) c_d=0.25, dt=1 min → t_full=5.4 min,
+    /// first-step mult < 1.0. Uses a HP heating type so the ramp gate allows the ramp.
+    #[test]
+    fn startup_capacity_degradation_cold_start() {
+        let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
+        hvac.runtime.duty_cycle = 1.0; // unit is on
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+
+        assert!(
+            actual_w < steady_w,
+            "cold-start capacity must be below steady-state {steady_w} W, got {actual_w} W"
+        );
+        assert!(
+            actual_w > 0.0,
+            "startup capacity must be positive, got {actual_w} W"
+        );
+        // Winkler formula at t=0.5 min (mid-step), t_full=5.4 min:
+        // mult = -1.025 * exp(-3.79936 * 0.5 / 5.4) + 1.025
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let expected_mult =
+            (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        assert!(
+            (actual_w - steady_w * expected_mult).abs() < 1.0,
+            "cold-start capacity: expected {:.1} W, got {actual_w:.1} W",
+            steady_w * expected_mult
+        );
+    }
+
+    /// apply_startup_capacity_degradation: when c_d = 0.0 (variable-speed / no ramp),
+    /// the multiplier is always 1.0 and capacity equals steady-state on the first step.
+    /// Uses an HP type so the ramp gate allows the ramp path; the Cd=0 bypass is tested.
+    #[test]
+    fn startup_capacity_degradation_c_d_zero_no_ramp() {
+        let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = 0.0;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+
+        assert!(
+            (actual_w - steady_w).abs() < 1e-9,
+            "c_d=0 must yield full capacity immediately: expected {steady_w} W, got {actual_w} W"
+        );
+    }
+
+    /// apply_startup_capacity_degradation warm-restart scenario:
+    /// with c_d=0.25, once time_since_start_min >= t_full the multiplier is 1.0.
+    /// After an off cycle, the first on-step must start below 1.0 again.
+    /// Uses an HP type so the ramp gate allows the ramp path.
+    #[test]
+    fn startup_capacity_degradation_warm_restart_real() {
+        let steady_w = 10_000.0;
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4; // 5.4 min
+
+        // Run enough on-steps to pass t_full.
+        let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        // Advance beyond t_full with 1-min steps.
+        let mut mult_at_full = 0.0_f64;
+        for _ in 0..=((t_full as usize) + 1) {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+            mult_at_full = w / steady_w;
+        }
+        assert!(
+            (mult_at_full - 1.0).abs() < 1e-9,
+            "past t_full the multiplier must be 1.0, got {mult_at_full}"
+        );
+
+        // Off cycle: timer is preserved (edge detection — no per-step reset).
+        hvac.runtime.duty_cycle = 0.0;
+        let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+
+        // First on-step after off must ramp again (mult < 1.0).
+        hvac.runtime.duty_cycle = 1.0;
+        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            w_restart < steady_w,
+            "first on-step after off cycle must be below steady-state: got {w_restart} W"
+        );
+    }
+
+    /// apply_startup_capacity_degradation: non-HP AC must return multiplier 1.0
+    /// (stepping-state capacity unchanged) regardless of Cd value.
+    /// OCHRE gates the ramp on `"HP" in self.mode` (HVAC.py:977); no-DX
+    /// equipment does not experience Winkler (2011) compressor startup transients.
+    #[test]
+    fn startup_capacity_degradation_non_hp_bypasses_ramp_regardless_of_cd() {
+        for cd in [0.0, 0.07, 0.20, 0.25] {
+            let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+            hvac.runtime.duty_cycle = 1.0;
+            hvac.runtime.startup.c_d = cd;
+            hvac.runtime.startup.time_since_start_min = 0.0;
+
+            let steady_w = 10_000.0;
+            let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+            assert!(
+                (actual_w - steady_w).abs() < 1e-9,
+                "non-HP AC with Cd={cd} must return steady capacity (multiplier = 1.0): \
+                 expected {steady_w} W, got {actual_w} W"
+            );
+        }
+    }
+
+    /// apply_startup_capacity_degradation: HP in heating mode with Cd > 0 must
+    /// produce a non-unity ramp multiplier on a cold start.
+    /// Winkler (2011) model: c_d=0.25, dt=1 min → t_full=5.4 min,
+    /// first-step mult < 1.0.
+    #[test]
+    fn startup_capacity_degradation_hp_heating_cold_start_produces_ramp() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+
+        assert!(
+            actual_w < steady_w,
+            "HP heating cold start with Cd=0.25 must be below steady-state: \
+             expected < {steady_w} W, got {actual_w} W"
+        );
+
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let expected_mult =
+            (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        assert!(
+            (actual_w - steady_w * expected_mult).abs() < 1.0,
+            "HP heating cold start multiplier mismatch: expected {:.1} W, got {actual_w:.1} W",
+            steady_w * expected_mult
+        );
+    }
+
+    /// apply_startup_capacity_degradation: when compressor_on = false but
+    /// duty_cycle > 0.0 (ER-only operation), the startup timer must NOT advance.
+    /// OCHRE HVAC.py:977,985 guards timer advance on `"HP" in self.mode`.
+    #[test]
+    fn startup_capacity_degradation_compressor_off_does_not_advance_timer() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0; // ER is drawing power
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        // compressor_on = false: the HP compressor is not energised.
+        // Timer should NOT advance, multiplier = 1.0, time_since_start_min = 0.0.
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+
+        assert!(
+            (actual_w - steady_w).abs() < 1e-9,
+            "compressor_off with duty_cycle>0 must yield full capacity: \
+             expected {steady_w} W, got {actual_w} W"
+        );
+        assert_eq!(
+            hvac.runtime.startup.time_since_start_min, 0.0,
+            "compressor_off must not advance startup timer"
+        );
+
+        // Multiple ER-only steps: timer stays at 0, capacity stays at full.
+        for _ in 0..5 {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+            assert!(
+                (w - steady_w).abs() < 1e-9,
+                "repeated ER-only steps must keep full capacity"
+            );
+            assert_eq!(
+                hvac.runtime.startup.time_since_start_min, 0.0,
+                "repeated ER-only steps must not advance timer"
+            );
+        }
+    }
+
+    /// ASHP running ER-only (compressor_off) for 30 min, then switching to HP
+    /// mode (compressor_on): the first HP step must produce a startup ramp
+    /// (multiplier < 1.0), proving the timer was NOT advanced during ER operation.
+    /// OCHRE's `"HP" in self.mode` guard (HVAC.py:977) only advances the timer
+    /// when the HP compressor is actually energised.
+    #[test]
+    fn startup_capacity_degradation_er_then_hp_ramps_on_mode_switch() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        // 30 minutes of ER-only operation (compressor_off).
+        for _ in 0..30 {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, false);
+            assert!(
+                (w - steady_w).abs() < 1e-9,
+                "ER-only steps must not degrade capacity"
+            );
+        }
+        assert_eq!(
+            hvac.runtime.startup.time_since_start_min, 0.0,
+            "after 30 min ER-only, startup timer must be zero"
+        );
+
+        // Switch to HP mode: compressor_on = true.
+        let first_hp_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            first_hp_w < steady_w,
+            "first HP step after ER-only must have startup ramp: \
+             {first_hp_w} W >= {steady_w} W"
+        );
+        assert!(
+            hvac.runtime.startup.time_since_start_min > 0.0,
+            "first HP step must advance timer from zero"
+        );
+
+        // After t_full + 1 minutes of continuous HP, ramp should converge to 1.0.
+        for _ in 0..((t_full as usize) + 2) {
+            hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+        let converged_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            (converged_w - steady_w).abs() < 1e-9,
+            "after t_full+2 minutes of HP, ramp must converge to 1.0: \
+             expected {steady_w} W, got {converged_w} W"
+        );
+    }
+
+    /// ASHP in HP mode for 30 continuous minutes: ramp must converge to
+    /// multiplier = 1.0 within t_full = 20*Cd + 0.4 minutes.
+    /// Winkler (2011): c_d=0.25 → t_full=5.4 min.
+    #[test]
+    fn startup_capacity_degradation_hp_ramp_converges_to_full_within_t_full() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+
+        // First step must be degraded.
+        let first_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            first_w < steady_w,
+            "cold-start HP step must be degraded: {first_w} W >= {steady_w} W"
+        );
+
+        // Run 30 minutes of continuous HP.
+        let mut last_w = first_w;
+        for _ in 1..30 {
+            last_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+
+        // After 30 min the ramp must have converged to 1.0.
+        assert!(
+            (last_w - steady_w).abs() < 1e-9,
+            "after 30 min HP, ramp must converge to 1.0: \
+             expected {steady_w} W, got {last_w} W"
+        );
+
+        // The timer must be well past t_full.
+        assert!(
+            hvac.runtime.startup.time_since_start_min >= t_full,
+            "after 30 min HP, timer {} must be >= t_full={}",
+            hvac.runtime.startup.time_since_start_min,
+            t_full
+        );
+    }
+
+    /// Two sequential timesteps demonstrating that edge detection correctly
+    /// preserves the startup ramp timer across an off-step and fires a fresh
+    /// ramp on the next off→on transition.
+    ///
+    /// Scenario:
+    ///   1. Cold-start on-step (5 min): ramp degrades capacity. Capacity at
+    ///      t = 0.5·dt = 2.5 min follows the Winkler (2011) exponential ramp:
+    ///      multiplier = −1.025·exp(−3.79936·t/t_full) + 1.025, where
+    ///      t_full = 20·c_d + 0.4 = 5.4 min for c_d = 0.25.
+    ///   2. Off-step (5 min): timer preserved, multiplier returns 1.0.
+    ///   3. Subsequent on-step: off→on transition resets timer, fresh ramp begins.
+    ///   4. Continuous on-steps after ramp start converge to multiplier 1.0.
+    ///
+    /// This test exercises the edge-detection path end-to-end — timer
+    /// preservation, `was_on` state tracking, transition reset, and ramp
+    /// convergence — without relying on a PLR-cycling sub-timestep model
+    /// that does not exist in this crate.
+    #[test]
+    fn startup_edge_detection_preserves_timer_across_off_fires_fresh_ramp_on_next_on() {
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4;
+        let steady_w = 10_000.0;
+
+        let mut hvac = make_single_speed();
+        hvac.config.equipment_type = HvacEquipmentType::AshpHeatPumpOnly;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
+        hvac.runtime.startup.was_on = false;
+
+        // First timestep (5 min): cold start, compressor on. Ramp degrades
+        // capacity; timer advances to 0.5·dt = 2.5 min (OCHRE convention
+        // sets timer to mid-step on the first on-step after a transition).
+        let w_on = hvac.apply_startup_capacity_degradation(steady_w, 5.0, true);
+        assert!(
+            w_on < steady_w,
+            "cold-start capacity must show ramp: {w_on} W"
+        );
+        // Numeric assertion — Winkler formula at t = 2.5 min, t_full = 5.4.
+        let expected_multiplier = {
+            let ratio = -3.799_36_f64 * 2.5 / t_full;
+            (-1.025_f64 * ratio.exp() + 1.025).clamp(0.0, 1.0)
+        };
+        assert!(
+            (w_on - expected_multiplier * steady_w).abs() < 1e-9 * steady_w,
+            "w_on must match Winkler multiplier at t=2.5: expected {} W, got {w_on} W",
+            expected_multiplier * steady_w
+        );
+        let timer_after_on = hvac.runtime.startup.time_since_start_min;
+
+        // Second timestep (5 min): compressor off. Timer must be preserved,
+        // multiplier must be 1.0, and was_on must flip to false.
+        let w_off = hvac.apply_startup_capacity_degradation(steady_w, 5.0, false);
+        assert!(
+            (w_off - steady_w).abs() < 1e-9,
+            "off-step must return steady capacity (multiplier 1.0): {w_off} W"
+        );
+        assert!(
+            (hvac.runtime.startup.time_since_start_min - timer_after_on).abs() < 1e-12,
+            "off-step: timer must be preserved at {}, got {}",
+            timer_after_on,
+            hvac.runtime.startup.time_since_start_min
+        );
+        assert!(
+            !hvac.runtime.startup.was_on,
+            "was_on must be false after off-step"
+        );
+
+        // With c_d=0.25, dt=5.0 min: first on-step sets timer to 0.5·5.0 = 2.5 min.
+        // Since only one step, timer = 2.5 < t_full = 5.4, so ramp was active.
+        let expected_first_step_timer = 0.5 * 5.0;
+        assert!(
+            (timer_after_on - expected_first_step_timer).abs() < 1e-12,
+            "on-step timer must be {}, got {}",
+            expected_first_step_timer,
+            timer_after_on
+        );
+
+        // Third timestep: off→on transition correctly resets timer,
+        // fresh ramp begins for the next on-cycle.
+        hvac.runtime.duty_cycle = 1.0;
+        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            w_restart < steady_w,
+            "off→on transition must trigger fresh ramp: {w_restart} W"
+        );
+        // Timer was reset on transition and then set to 0.5·1.0 = 0.5 min.
+        assert!(
+            hvac.runtime.startup.time_since_start_min < timer_after_on,
+            "off→on transition must reset timer: {} >= {}",
+            hvac.runtime.startup.time_since_start_min,
+            timer_after_on
+        );
+        assert!(hvac.runtime.startup.was_on);
+
+        // Ramp converges within t_full on the next cycle.
+        for _ in 0..((t_full as usize) + 2) {
+            hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        }
+        let converged_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0, true);
+        assert!(
+            (converged_w - steady_w).abs() < 1e-9,
+            "ramp must converge to 1.0 within t_full+2 on the restart cycle: \
+             expected {steady_w} W, got {converged_w} W"
+        );
+    }
+
+    // ---- ticket 008: disabled_speeds is now [bool; MAX_SPEEDS] (stack-allocated) ----
+
+    /// Verifies that disabled_speeds is now a fixed-size array [bool; MAX_SPEEDS]
+    /// (ticket 008) instead of a heap-allocated Vec<bool>.
+    #[test]
+    fn disabled_speeds_is_fixed_array_not_vec() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
+
+        assert_eq!(
+            hvac.control.speed_count, 0,
+            "speed_count starts at 0 before set_disabled_speeds"
+        );
+        hvac.set_disabled_speeds(&[false, true]);
+        assert_eq!(
+            hvac.control.speed_count, 2,
+            "set_disabled_speeds sets speed_count to n_speed_stages"
+        );
+        assert!(!hvac.control.disabled_speeds[0]);
+        assert!(hvac.control.disabled_speeds[1]);
+        // Remaining slots must be false (initialized to [false; MAX_SPEEDS]).
+        for i in 2..MAX_SPEEDS {
+            assert!(!hvac.control.disabled_speeds[i], "slot {i} must be false");
+        }
+    }
+
+    /// Verifies that MAX_SPEEDS is defined and disabled_speeds is typed [bool; MAX_SPEEDS].
+    #[test]
+    fn max_speeds_constant_defined() {
+        assert_eq!(
+            MAX_SPEEDS, 8,
+            "MAX_SPEEDS must be 8 (highest stage count in default curves)"
+        );
+        let hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        assert_eq!(
+            std::mem::size_of_val(&hvac.control.disabled_speeds),
+            MAX_SPEEDS,
+            "disabled_speeds must be [bool; MAX_SPEEDS]"
+        );
+    }
+}

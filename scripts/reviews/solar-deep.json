@@ -1,0 +1,70 @@
+{
+  "category": "solar-deep",
+  "description": "Solar position and radiation deep-dive",
+  "reviews": [
+    {
+      "id": "solar-deep-01",
+      "slug": "solar-position-algorithm",
+      "title": "Solar position algorithm (altitude/azimuth) — verify against NOAA Solar Calculator or pvlib-python at multiple lat/lon/time grids across seasons; check equinox/solstice",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:88-147",
+      "prompt": "Verify the solar position algorithm (altitude and azimuth) against NOAA Solar Calculator or pvlib-python. Test at multiple latitudes (-40°, 0°, 40°, 60°), longitudes, and times across all four seasons. Check accuracy specifically at equinox and solstice dates. Quantify any systematic errors."
+    },
+    {
+      "id": "solar-deep-02",
+      "slug": "angle-of-incidence-tilted",
+      "title": "Angle of incidence for tilted surfaces: verify cos(theta) formula; check gimbal lock at zenith",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:149-163",
+      "prompt": "Verify the angle of incidence formula for tilted surfaces: cos(θ) = sin(δ)sin(φ)cos(β) - sin(δ)cos(φ)sin(β)cos(γ) + cos(δ)cos(φ)cos(β)cos(ω) + cos(δ)sin(φ)sin(β)cos(γ)cos(ω) + cos(δ)sin(β)sin(γ)sin(ω). Check for gimbal lock at zenith (θ ≈ 0°) and verify against pvlib-python's aoi function for multiple test cases."
+    },
+    {
+      "id": "solar-deep-03",
+      "slug": "extraterrestrial-irradiance",
+      "title": "Extraterrestrial irradiance: solar constant (1367 or 1361 W/m²?), eccentricity correction — check against NREL SPA",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:165-198",
+      "prompt": "Verify the extraterrestrial irradiance calculation: confirm whether the solar constant is 1367 W/m² (older WMO) or 1361 W/m² (modern CODATA/IAU). Check the eccentricity correction formula against NREL Solar Position Algorithm (SPA). Quantify the irradiance error if the wrong solar constant is used."
+    },
+    {
+      "id": "solar-deep-04",
+      "slug": "relative-airmass-kasten-young",
+      "title": "Relative airmass formula (Kasten-Young 1989 vs secant) — check validity range near horizon",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:255-279",
+      "prompt": "Verify the relative airmass formula using Kasten-Young 1989 vs simple secant approximation. Kasten-Young: AM = 1 / (sin(θ) + 0.50572·(θ+6.07995)^-1.6364). Check validity range near the horizon (θ < 5°) and assess whether the formula diverges or remains bounded."
+    },
+    {
+      "id": "solar-deep-05",
+      "slug": "omni-azimuth-integration",
+      "title": "OMNI_AZIMUTH_SAMPLES=12: verify integration quality for tilts 0-90°; quantify integration error",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:281-353",
+      "prompt": "Verify the OMNI_AZIMUTH_SAMPLES=12 integration quality. Compare 12-point azimuth integration against high-resolution reference (e.g., 360-point) for tilt angles 0°, 15°, 30°, 45°, 60°, 75°, 90°. Quantify the maximum integration error and determine if 12 samples are sufficient for engineering accuracy or if more samples are needed."
+    },
+    {
+      "id": "solar-deep-06",
+      "slug": "isotropic-tilted-irradiance-liu-jordan",
+      "title": "Isotropic tilted irradiance (Liu-Jordan): verify view factor to sky = (1+cos(β))/2, to ground = (1-cos(β))/2 — compare pvlib-python",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:451-486",
+      "prompt": "Verify the isotropic tilted irradiance model (Liu-Jordan). Confirm the view factor to sky is (1+cos(β))/2 and to ground is (1-cos(β))/2. Compare results against pvlib-python's isotropic model for a range of tilt angles and ground reflectances. Check that at β=0° both view factors sum to 1 and at β=90° each is 0.5."
+    },
+    {
+      "id": "solar-deep-07",
+      "slug": "window-transmitted-solar-shgc",
+      "title": "Window transmitted solar (SHGC-based): verify Q = I·SHGC·A; check whether SHGC accounts for IAM at normal incidence",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:487-522",
+      "prompt": "Verify the window transmitted solar calculation: Q = I · SHGC · A. Determine whether the SHGC value inherently accounts for the incidence angle modifier (IAM) at normal incidence, or if a separate IAM correction must be applied. Check the EnergyPlus convention where SHGC at normal incidence = SHGC_rated."
+    },
+    {
+      "id": "solar-deep-08",
+      "slug": "iam-glazing-curves",
+      "title": "All 6 IAM glazing curves (Clear, Bronze, Green, Grey, ReflectiveC, ReflectiveB) coefficients against EnergyPlus WindowManager.cc; verify IAM(0°) = 1.0",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/solar.rs:524-648",
+      "prompt": "Verify all 6 IAM glazing curve coefficient sets — Clear, Bronze, Green, Grey, ReflectiveC, ReflectiveB — against EnergyPlus WindowManager.cc. For each glass type, confirm that IAM at 0° incidence equals exactly 1.0. Check the polynomial coefficients digit-for-digit and verify curve monotonicity from 0° to 90°."
+    }
+  ]
+}

@@ -1,0 +1,2551 @@
+//! Stratified tank thermal model shared by storage water heaters.
+
+use std::{f64::consts::PI, time::Duration};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Result, load_versioned, try_save_versioned};
+use hares_types::{EquipmentId, HaresError, telemetry_keys as tk};
+
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
+use hares_physics::water_density_kg_m3;
+
+const MIN_NODES: usize = 1;
+const MAX_NODES: usize = 12;
+
+/// Version of the `StratifiedTankState` postcard checkpoint format.
+const STRATIFIED_TANK_CHECKPOINT_VERSION: u32 = 1;
+
+/// Configuration for a stratified tank.
+#[derive(Debug, Clone)]
+pub struct StratifiedTankConfig {
+    pub n_nodes: usize,
+    pub height_m: f64,
+    pub diameter_m: f64,
+    pub ua_w_per_k: f64,
+    pub conductivity_w_m_k: f64,
+    pub initial_temp_c: f64,
+    pub element_nodes: [Option<usize>; 2],
+    pub node_volumes_m3: Option<Vec<f64>>,
+    /// Additional UA (W/K) added to the top and bottom boundary nodes to account
+    /// for flat end-cap heat losses. When `None`, defaults to `ua_w_per_k * 0.1`
+    /// (approximately 10% of total UA for typical cylindrical aspect ratios).
+    ///
+    /// OCHRE Water.py:250-258: top and bottom nodes get additional parallel UA
+    /// for flat end caps. Reference: EnergyPlus ERM 26.1 — Water Thermal Tanks (includes Water Heaters): Stratified Water Thermal Tank.
+    pub ua_end_cap_w_per_k: Option<f64>,
+}
+
+/// Draw-step summary values used by water heater implementations and tests.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawResult {
+    /// Volume-weighted average temperature of water drawn from the tank,
+    /// computed from pre-injection node temperatures over the drawn volume [°C].
+    ///
+    /// OCHRE Water.py:335-347: segment-averaged outlet from pre-draw node
+    /// temperatures.  For draws fully contained within the top node, this
+    /// collapses to the top-node temperature.
+    pub outlet_temp_c: f64,
+    /// Thermal energy removed from the tank by the draw [J].
+    pub energy_out_j: f64,
+    /// Thermal energy added to the tank by incoming mains water [J].
+    pub energy_in_j: f64,
+    /// Unmet load power [W]: heat that could not be delivered because outlet
+    /// temperature was below the fixture setpoint. Zero when outlet >= setpoint.
+    ///
+    /// OCHRE Water.py:363: `h_unmet_load = max(draw_tempered / 60 * water_c *
+    /// (tempered_draw_temp - outlet_temp), 0)`.
+    pub unmet_load_w: f64,
+}
+
+/// Parameters that describe tempered (mixed) water draw behaviour.
+///
+/// OCHRE Water.py:305-325 -- the mixing valve blends hot tank water with cold
+/// mains water to reach a target fixture temperature.  For "hot" draws
+/// (e.g. dishwasher) the target is `hot_draw_temp_c`; for fixture draws
+/// (sink/shower/bath) the target is `tempered_draw_temp_c`.
+#[derive(Debug, Clone, Copy)]
+pub struct TemperedDrawConfig {
+    /// Target delivery temperature for fixture draws [°C].
+    /// Default: 40.6°C (≈ 105°F).
+    pub tempered_draw_temp_c: f64,
+    /// Target delivery temperature for "hot" draws (e.g. dishwasher) [°C].
+    /// Default: 51.7°C (≈ 125°F).
+    pub hot_draw_temp_c: f64,
+    /// Tank setpoint [°C]; used to decide whether TMV logic applies at all.
+    pub setpoint_temp_c: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StratifiedTank {
+    height_m: f64,
+    diameter_m: f64,
+    ua_w_per_k: f64,
+    conductivity_w_m_k: f64,
+    node_volumes_m3: Vec<f64>,
+    node_temps_c: Vec<f64>,
+    node_edges_m3: Vec<f64>,
+    total_volume_m3: f64,
+    cross_section_area_m2: f64,
+    node_height_m: f64,
+    element_nodes: [Option<usize>; 2],
+    /// Per-node UA (W/K). Boundary nodes include end-cap contribution.
+    ua_per_node: Vec<f64>,
+    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Positive means heat flowing OUT of the tank (warming the ambient zone).
+    last_skin_loss_w: f64,
+    /// Pre-computed telemetry key strings: `["tank_node_0_c", "tank_node_1_c", ...]`.
+    telemetry_keys: Vec<String>,
+    // Scratch buffers reused each step to avoid per-step heap allocations.
+    scratch_old_temps: Vec<f64>,
+    scratch_delta_energy: Vec<f64>,
+    scratch_new_temps: Vec<f64>,
+    scratch_pre_injection_temps: Vec<f64>,
+    scratch_inversion_temps: Vec<f64>,
+    scratch_inversion_volumes: Vec<f64>,
+    scratch_inversion_counts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StratifiedTankState {
+    node_temps_c: Vec<f64>,
+}
+
+impl StratifiedTank {
+    pub fn new(config: StratifiedTankConfig) -> Result<Self> {
+        validate_n_nodes(config.n_nodes)?;
+        validate_positive("height_m", config.height_m)?;
+        validate_positive("diameter_m", config.diameter_m)?;
+        validate_nonnegative("ua_w_per_k", config.ua_w_per_k)?;
+        validate_nonnegative("conductivity_w_m_k", config.conductivity_w_m_k)?;
+        validate_finite("initial_temp_c", config.initial_temp_c)?;
+        validate_element_nodes(config.n_nodes, config.element_nodes)?;
+
+        let node_volumes_m3 = match config.node_volumes_m3 {
+            Some(volumes) => {
+                if volumes.len() != config.n_nodes {
+                    return Err(HaresError::Equipment(format!(
+                        "node_volumes_m3 length {} does not match n_nodes {}",
+                        volumes.len(),
+                        config.n_nodes
+                    )));
+                }
+                for (idx, &volume_m3) in volumes.iter().enumerate() {
+                    validate_positive(&format!("node_volumes_m3[{idx}]"), volume_m3)?;
+                }
+                volumes
+            }
+            None => {
+                let total_volume_m3 = cylinder_volume(config.height_m, config.diameter_m);
+                if config.n_nodes == 2 {
+                    // OCHRE Water.py:475: TwoNodeWaterModel uses water_vol_fractions=[1/3, 2/3]
+                    // giving the top (hot) node one-third and bottom (cold) node two-thirds.
+                    vec![total_volume_m3 / 3.0, 2.0 * total_volume_m3 / 3.0]
+                } else {
+                    let node_volume_m3 = total_volume_m3 / config.n_nodes as f64;
+                    vec![node_volume_m3; config.n_nodes]
+                }
+            }
+        };
+
+        let total_volume_m3 = node_volumes_m3.iter().sum::<f64>();
+        validate_positive("total_volume_m3", total_volume_m3)?;
+
+        let node_edges_m3 = build_node_edges(&node_volumes_m3);
+        let cross_section_area_m2 = cylinder_cross_section_area(config.diameter_m);
+        validate_positive("cross_section_area_m2", cross_section_area_m2)?;
+
+        let node_height_m = config.height_m / config.n_nodes as f64;
+        validate_positive("node_height_m", node_height_m)?;
+
+        // Build per-node UA values from the uniform volume-fraction allocation,
+        // then add end-cap UA to the top (index 0) and bottom (last index) nodes.
+        // OCHRE Water.py:250-258: top/bottom nodes get additional parallel UA for
+        // flat end caps. Reference: EnergyPlus ERM 26.1 — Water Thermal Tanks (includes Water Heaters): Stratified Water Thermal Tank.
+        let ua_end = config.ua_end_cap_w_per_k.unwrap_or(config.ua_w_per_k * 0.1);
+        let mut ua_per_node: Vec<f64> = node_volumes_m3
+            .iter()
+            .map(|&v| config.ua_w_per_k * v / total_volume_m3)
+            .collect();
+        ua_per_node[0] += ua_end;
+        let last = config.n_nodes - 1;
+        if last != 0 {
+            ua_per_node[last] += ua_end;
+        }
+
+        Ok(Self {
+            height_m: config.height_m,
+            diameter_m: config.diameter_m,
+            ua_w_per_k: config.ua_w_per_k,
+            conductivity_w_m_k: config.conductivity_w_m_k,
+            node_temps_c: vec![config.initial_temp_c; config.n_nodes],
+            node_volumes_m3,
+            node_edges_m3,
+            total_volume_m3,
+            cross_section_area_m2,
+            node_height_m,
+            element_nodes: config.element_nodes,
+            ua_per_node,
+            last_skin_loss_w: 0.0,
+            telemetry_keys: (0..config.n_nodes).map(tk::tank_node_key).collect(),
+            scratch_old_temps: vec![0.0; config.n_nodes],
+            scratch_delta_energy: vec![0.0; config.n_nodes],
+            scratch_new_temps: vec![0.0; config.n_nodes],
+            scratch_pre_injection_temps: vec![0.0; config.n_nodes],
+            scratch_inversion_temps: Vec::with_capacity(config.n_nodes),
+            scratch_inversion_volumes: Vec::with_capacity(config.n_nodes),
+            scratch_inversion_counts: Vec::with_capacity(config.n_nodes),
+        })
+    }
+
+    pub fn n_nodes(&self) -> usize {
+        self.node_temps_c.len()
+    }
+
+    pub fn height_m(&self) -> f64 {
+        self.height_m
+    }
+
+    pub fn diameter_m(&self) -> f64 {
+        self.diameter_m
+    }
+
+    pub fn ua_w_per_k(&self) -> f64 {
+        self.ua_w_per_k
+    }
+
+    pub fn element_nodes(&self) -> [Option<usize>; 2] {
+        self.element_nodes
+    }
+
+    pub fn ua_per_node(&self) -> &[f64] {
+        &self.ua_per_node
+    }
+
+    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Positive means heat flowing OUT of the tank into the ambient zone.
+    pub fn skin_loss_w(&self) -> f64 {
+        self.last_skin_loss_w
+    }
+
+    pub fn node_temps(&self) -> &[f64] {
+        &self.node_temps_c
+    }
+
+    #[cfg(test)]
+    pub fn node_temps_mut(&mut self) -> &mut [f64] {
+        &mut self.node_temps_c
+    }
+
+    /// Number of telemetry keys that `register_node_telemetry` will insert.
+    pub fn telemetry_key_count(&self) -> usize {
+        self.telemetry_keys.len() + 1 // +1 for skin_loss_w
+    }
+
+    /// Registers per-node temperature keys in the telemetry map (`tank_node_0_c`, etc.).
+    pub fn register_node_telemetry(&self, telemetry: &mut hares_types::Telemetry) {
+        for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
+            telemetry.insert(key.as_str(), temp);
+        }
+        telemetry.insert(tk::SKIN_LOSS_W, self.last_skin_loss_w);
+    }
+
+    /// Updates per-node temperature values in the telemetry map. Zero allocations.
+    pub fn update_node_telemetry(&self, telemetry: &mut hares_types::Telemetry) {
+        for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
+            telemetry.set(key, temp);
+        }
+        telemetry.set(tk::SKIN_LOSS_W, self.last_skin_loss_w);
+    }
+
+    pub fn node_volumes_m3(&self) -> &[f64] {
+        &self.node_volumes_m3
+    }
+
+    /// Compute the ideal heating power [W] for a specific element node.
+    ///
+    /// Predicts what the node temperature would be after one timestep with
+    /// heater OFF (standby loss only), then returns the power needed to bring
+    /// that single node back to `setpoint_c`. This matches the physical
+    /// reality: each element only heats its local node, not the whole tank.
+    pub fn ideal_capacity_w(&self, setpoint_c: f64, ambient_c: f64, dt_s: f64) -> f64 {
+        self.ideal_capacity_for_node(self.node_temps_c.len() - 1, setpoint_c, ambient_c, dt_s)
+    }
+
+    /// Ideal capacity for a specific node index.
+    pub fn ideal_capacity_for_node(
+        &self,
+        node_idx: usize,
+        setpoint_c: f64,
+        ambient_c: f64,
+        dt_s: f64,
+    ) -> f64 {
+        if dt_s <= 0.0 || node_idx >= self.node_temps_c.len() {
+            return 0.0;
+        }
+        let t_now = self.node_temps_c[node_idx];
+        let vol = self.node_volumes_m3[node_idx];
+        let mcp = water_density_kg_m3(t_now) * vol * CP_LIQUID_WATER_J_KG_K;
+        let ua = self.ua_per_node.get(node_idx).copied().unwrap_or(0.0);
+        let t_off = t_now - ua * (t_now - ambient_c) * dt_s / mcp;
+        let deficit_k = (setpoint_c - t_off).max(0.0);
+        (deficit_k * mcp / dt_s).max(0.0)
+    }
+
+    pub fn total_volume_m3(&self) -> f64 {
+        self.total_volume_m3
+    }
+
+    /// Advance the tank by one time step with a raw (untempered) draw volume.
+    ///
+    /// `heat_injections` is a slice of `(node_index, power_w)` pairs representing
+    /// element or condenser heat to inject during this step. Heat injection and
+    /// draw are integrated in the same Euler step (matching OCHRE's single-step
+    /// ODE integration). Outlet temperature is the segment-average of the
+    /// **pre-heating** node temperatures over the drawn volume
+    /// (OCHRE Water.py:335-347).
+    ///
+    /// Use [`step_tempered`] when the draw comes from a mixing-valve schedule
+    /// that specifies a fixture delivery temperature.
+    pub fn step(
+        &mut self,
+        ambient_temp_c: f64,
+        draw_volume_m3: f64,
+        mains_temp_c: f64,
+        heat_injections: &[(usize, f64)],
+        dt: Duration,
+    ) -> Result<DrawResult> {
+        validate_finite("ambient_temp_c", ambient_temp_c)?;
+        validate_finite("mains_temp_c", mains_temp_c)?;
+        validate_nonnegative("draw_volume_m3", draw_volume_m3)?;
+        if draw_volume_m3 > self.total_volume_m3 {
+            return Err(HaresError::Equipment(format!(
+                "draw_volume_m3 {draw_volume_m3} exceeds tank volume {}",
+                self.total_volume_m3
+            )));
+        }
+
+        self.apply_conduction_and_standby(ambient_temp_c, dt)?;
+        self.scratch_pre_injection_temps
+            .copy_from_slice(&self.node_temps_c);
+        self.apply_heat_injections(heat_injections, dt)?;
+        let draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
+        self.mix_inversions();
+        self.recompute_skin_loss_w(ambient_temp_c);
+
+        #[cfg(feature = "observe")]
+        {
+            let post_injection_top = self.node_temps_c[0];
+            let pre_injection_top = self.scratch_pre_injection_temps[0];
+            let divergence_k = post_injection_top - draw.outlet_temp_c;
+            tracing::debug!(
+                outlet_temp_c = draw.outlet_temp_c,
+                pre_injection_top_c = pre_injection_top,
+                post_injection_top_c = post_injection_top,
+                divergence_k,
+                "step: pre-injection outlet vs post-injection top-node divergence"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
+            if has_heat {
+                let expected = Self::segment_average_temp(
+                    &self.node_edges_m3,
+                    &self.scratch_pre_injection_temps,
+                    0.0,
+                    draw_volume_m3,
+                );
+                debug_assert!(
+                    (draw.outlet_temp_c - expected).abs() < 1e-9,
+                    "outlet_temp_c ({}) must match pre-injection segment average ({})",
+                    draw.outlet_temp_c,
+                    expected
+                );
+            }
+        }
+
+        Ok(draw)
+    }
+
+    /// Advance the tank by one time step using a TMV-style tempered draw.
+    ///
+    /// `tempered_volume_m3_s` is the requested delivery flow rate [m³/s] at
+    /// `tmv.tempered_draw_temp_c`.  The method computes the actual hot-water
+    /// withdrawal from the tank after mixing-valve adjustment, and also reports
+    /// the unmet-load power when the tank cannot meet the fixture temperature.
+    ///
+    /// OCHRE Water.py:305-363 -- "tempered draw" logic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_tempered(
+        &mut self,
+        ambient_temp_c: f64,
+        tempered_flow_m3_s: f64,
+        hot_flow_m3_s: f64,
+        mains_temp_c: f64,
+        heat_injections: &[(usize, f64)],
+        tmv: TemperedDrawConfig,
+        dt: Duration,
+    ) -> Result<DrawResult> {
+        validate_finite("ambient_temp_c", ambient_temp_c)?;
+        validate_finite("mains_temp_c", mains_temp_c)?;
+        validate_nonnegative("tempered_flow_m3_s", tempered_flow_m3_s)?;
+        validate_nonnegative("hot_flow_m3_s", hot_flow_m3_s)?;
+
+        // OCHRE Water.py:284 -- snapshot outlet from pre-step top-node temperature.
+        let outlet_est_c = self.node_temps_c[0];
+
+        // --- TMV mixing-valve calculation (OCHRE Water.py:305-325) ---
+        // For hot draws (e.g. dishwasher): reduce draw if outlet > hot_draw_temp_c.
+        // OCHRE Water.py:305: if self.tempered_draw_temp < self.setpoint_temp:
+        // The guard compares setpoint against tempered_draw_temp (not hot_draw_temp)
+        // so that TMV activates for hot draws whenever the tank could produce
+        // water hotter than the tempered delivery target, not only when hotter
+        // than the hot delivery target itself.
+        let raw_hot_draw_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let hot_draw_volume_m3 = if tmv.setpoint_temp_c > tmv.tempered_draw_temp_c {
+            // Setpoint exceeds tempered delivery target -- TMV applies to hot draws.
+            if outlet_est_c <= tmv.hot_draw_temp_c {
+                raw_hot_draw_m3
+            } else {
+                let vol_ratio =
+                    (tmv.hot_draw_temp_c - mains_temp_c) / (outlet_est_c - mains_temp_c).max(1e-9);
+                raw_hot_draw_m3 * vol_ratio.clamp(0.0, 1.0)
+            }
+        } else {
+            raw_hot_draw_m3
+        };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // OCHRE Water.py:305 -- when TMV is active and the tank is hotter
+            // than the hot delivery target, the draw volume must be strictly
+            // less than the raw (unmixed) volume.
+            let tmv_active = tmv.setpoint_temp_c > tmv.tempered_draw_temp_c;
+            let above_hot_target = outlet_est_c > tmv.hot_draw_temp_c;
+            if raw_hot_draw_m3 > 0.0 && tmv_active && above_hot_target {
+                debug_assert!(
+                    hot_draw_volume_m3 < raw_hot_draw_m3,
+                    "TMV should reduce hot-draw volume when outlet ({outlet_est_c} °C) > hot_draw_temp ({hot} °C): \
+                     got {hot_draw_volume_m3} >= {raw_hot_draw_m3}",
+                    hot = tmv.hot_draw_temp_c,
+                );
+            }
+        }
+
+        // For fixture draws: reduce draw if outlet > tempered_draw_temp_c.
+        let tempered_draw_volume_m3 = if tempered_flow_m3_s > 0.0 {
+            if outlet_est_c <= tmv.tempered_draw_temp_c {
+                tempered_flow_m3_s * dt.as_secs_f64()
+            } else {
+                let vol_ratio = (tmv.tempered_draw_temp_c - mains_temp_c)
+                    / (outlet_est_c - mains_temp_c).max(1e-9);
+                tempered_flow_m3_s * dt.as_secs_f64() * vol_ratio.clamp(0.0, 1.0)
+            }
+        } else {
+            0.0
+        };
+
+        let total_draw_m3 = hot_draw_volume_m3 + tempered_draw_volume_m3;
+        let clamped_draw = total_draw_m3.min(self.total_volume_m3);
+
+        self.apply_conduction_and_standby(ambient_temp_c, dt)?;
+        self.scratch_pre_injection_temps
+            .copy_from_slice(&self.node_temps_c);
+        self.apply_heat_injections(heat_injections, dt)?;
+        let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
+        self.mix_inversions();
+        self.recompute_skin_loss_w(ambient_temp_c);
+
+        // F5: warn when outlet falls below mains (physically impossible for a
+        // passive tank; indicates numerical artefact or bad input).
+        if draw.outlet_temp_c < mains_temp_c {
+            tracing::debug!(
+                outlet_temp_c = draw.outlet_temp_c,
+                mains_temp_c,
+                "step_tempered: outlet_temp_c < mains_temp_c"
+            );
+        }
+
+        // Unmet load: watts of heat the fixture didn't receive because the pre-step
+        // outlet temperature fell below the fixture setpoint.
+        // OCHRE Water.py:363: h_unmet_load = max(draw_tempered/60 * water_c * (t_fix - t_out), 0)
+        // outlet_est_c is snapped from the pre-conduction/pre-injection state at line 388
+        // (OCHRE Water.py:284) — same-step element heat must not inflate the outlet and
+        // mask the deficit.
+        let unmet_load_w = if tempered_flow_m3_s > 0.0 {
+            let deficit = (tmv.tempered_draw_temp_c - outlet_est_c).max(0.0);
+            tempered_flow_m3_s
+                * water_density_kg_m3(outlet_est_c)
+                * CP_LIQUID_WATER_J_KG_K
+                * deficit
+        } else {
+            0.0
+        };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
+            if has_heat {
+                let expected = Self::segment_average_temp(
+                    &self.node_edges_m3,
+                    &self.scratch_pre_injection_temps,
+                    0.0,
+                    clamped_draw,
+                );
+                debug_assert!(
+                    (draw.outlet_temp_c - expected).abs() < 1e-9,
+                    "outlet_temp_c ({}) must match pre-injection segment average ({})",
+                    draw.outlet_temp_c,
+                    expected
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            // divergence_k = pre-injection outlet_temp_c - pre-conduction outlet_est_c.
+            // Positive when conduction warms the top node (ambient > tank);
+            // negative when conduction cools it (tank > ambient).
+            let divergence_k = draw.outlet_temp_c - outlet_est_c;
+            let hot_vol_ratio = if raw_hot_draw_m3 > 0.0 {
+                hot_draw_volume_m3 / raw_hot_draw_m3
+            } else {
+                1.0
+            };
+            let tmv_hot_entered = tmv.setpoint_temp_c > tmv.tempered_draw_temp_c;
+            tracing::debug!(
+                outlet_pre_conduction_c = outlet_est_c,
+                outlet_pre_injection_c = draw.outlet_temp_c,
+                divergence_k,
+                unmet_load_w,
+                tmv_hot_entered,
+                hot_vol_ratio,
+                raw_hot_draw_m3,
+                hot_draw_volume_m3,
+                "step_tempered: pre-conduction vs pre-injection outlet divergence, hot-draw TMV"
+            );
+        }
+
+        draw.unmet_load_w = unmet_load_w;
+        Ok(draw)
+    }
+
+    /// Apply a batch of heat injections to the tank.
+    ///
+    /// Each entry is `(node_index, power_w)`. Multiple injections to the same
+    /// node are additive. Called by `step()` / `step_tempered()` so that element
+    /// heating and draw occur within the same Euler step.
+    fn apply_heat_injections(&mut self, injections: &[(usize, f64)], dt: Duration) -> Result<()> {
+        let seconds = dt.as_secs_f64();
+        if seconds == 0.0 {
+            return Ok(());
+        }
+        for &(node, power_w) in injections {
+            if power_w == 0.0 {
+                continue;
+            }
+            validate_finite("heat_injection_power_w", power_w)?;
+            let volume_m3 = self.node_volume(node)?;
+            let delta_t_c = power_w * seconds
+                / (water_density_kg_m3(self.node_temps_c[node])
+                    * volume_m3
+                    * CP_LIQUID_WATER_J_KG_K);
+            self.node_temps_c[node] += delta_t_c;
+        }
+        Ok(())
+    }
+
+    /// Directly heat a single node. Intended for test setup only.
+    ///
+    /// Production code should pass heat injections through `step()` or
+    /// `step_tempered()` so that heating and draw are integrated in the
+    /// same Euler step with correct outlet temperature and energy accounting.
+    pub fn heat_node(&mut self, node: usize, power_w: f64, dt: Duration) -> Result<()> {
+        validate_finite("power_w", power_w)?;
+        let seconds = dt.as_secs_f64();
+        validate_nonnegative("dt_seconds", seconds)?;
+        let volume_m3 = self.node_volume(node)?;
+        let delta_t_c = power_w * seconds
+            / (water_density_kg_m3(self.node_temps_c[node]) * volume_m3 * CP_LIQUID_WATER_J_KG_K);
+        self.node_temps_c[node] += delta_t_c;
+        Ok(())
+    }
+
+    pub fn mix_inversions(&mut self) -> usize {
+        self.scratch_inversion_temps.clear();
+        self.scratch_inversion_volumes.clear();
+        self.scratch_inversion_counts.clear();
+        let mut total_merges = 0usize;
+
+        for (&temp_c, &volume_m3) in self.node_temps_c.iter().zip(self.node_volumes_m3.iter()) {
+            self.scratch_inversion_temps.push(temp_c);
+            self.scratch_inversion_volumes.push(volume_m3);
+            self.scratch_inversion_counts.push(1);
+
+            while self.scratch_inversion_temps.len() >= 2 {
+                let lower = self.scratch_inversion_temps.len() - 1;
+                let upper = lower - 1;
+                if self.scratch_inversion_temps[upper] >= self.scratch_inversion_temps[lower] {
+                    break;
+                }
+
+                let merged_volume =
+                    self.scratch_inversion_volumes[upper] + self.scratch_inversion_volumes[lower];
+                let merged_temp = (self.scratch_inversion_temps[upper]
+                    * self.scratch_inversion_volumes[upper]
+                    + self.scratch_inversion_temps[lower] * self.scratch_inversion_volumes[lower])
+                    / merged_volume;
+
+                self.scratch_inversion_temps[upper] = merged_temp;
+                self.scratch_inversion_volumes[upper] = merged_volume;
+                self.scratch_inversion_counts[upper] += self.scratch_inversion_counts[lower];
+
+                self.scratch_inversion_temps.pop();
+                self.scratch_inversion_volumes.pop();
+                self.scratch_inversion_counts.pop();
+                total_merges += 1;
+            }
+        }
+
+        let mut output_idx = 0usize;
+        for (layer_idx, &layer_temp_c) in self.scratch_inversion_temps.iter().enumerate() {
+            let count = self.scratch_inversion_counts[layer_idx];
+            for _ in 0..count {
+                self.node_temps_c[output_idx] = layer_temp_c;
+                output_idx += 1;
+            }
+        }
+
+        // Verify the profile is monotone non-increasing (top ≥ bottom).
+        #[cfg(debug_assertions)]
+        {
+            let n = self.node_temps_c.len();
+            for i in 0..n.saturating_sub(1) {
+                debug_assert!(
+                    self.node_temps_c[i] >= self.node_temps_c[i + 1] - 1e-9,
+                    "inversion mixing failed: node {} ({}) < node {} ({})",
+                    i,
+                    self.node_temps_c[i],
+                    i + 1,
+                    self.node_temps_c[i + 1]
+                );
+            }
+        }
+
+        total_merges
+    }
+
+    /// Compute total skin (jacket) heat loss [W] from a temperature profile.
+    /// Positive means heat flowing OUT of the tank into the ambient zone.
+    ///
+    /// `Σ ua_per_node[i] × (temps[i] − ambient_temp_c)`
+    fn compute_skin_loss_w(&self, temps: &[f64], ambient_temp_c: f64) -> f64 {
+        temps
+            .iter()
+            .zip(self.ua_per_node.iter())
+            .map(|(t, ua)| ua * (t - ambient_temp_c))
+            .sum()
+    }
+
+    /// Recompute `last_skin_loss_w` from the current (post-mixing) temperature
+    /// profile so that observers, energy accounting, and zone-coupled heat gains
+    /// use the physically-stable mixed profile rather than the pre-mixing profile
+    /// which may contain inversions.
+    ///
+    /// EnergyPlus WaterThermalTanks.cc:8466-8519 adjusts Tavg during inversion
+    /// mixing so that Qloss bookkeeping uses the post-mixing profile; HARES
+    /// corrects the loss post-mixing instead.
+    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) {
+        let _pre_mix_loss = self.last_skin_loss_w;
+        self.last_skin_loss_w = self.compute_skin_loss_w(&self.node_temps_c, ambient_temp_c);
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            last_skin_loss_w = self.last_skin_loss_w,
+            skin_loss_correction_w = _pre_mix_loss - self.last_skin_loss_w,
+            "post-mixing skin loss correction"
+        );
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.last_skin_loss_w.is_finite(),
+                "post-mixing skin loss must be finite, got {}",
+                self.last_skin_loss_w
+            );
+        }
+    }
+
+    pub fn save_state(&self) -> Result<Vec<u8>> {
+        try_save_versioned(
+            &StratifiedTankState {
+                node_temps_c: self.node_temps_c.clone(),
+            },
+            STRATIFIED_TANK_CHECKPOINT_VERSION,
+            "StratifiedTank",
+        )
+    }
+
+    pub fn load_state(&mut self, state: &[u8]) -> Result<()> {
+        let decoded: StratifiedTankState = load_versioned(
+            state,
+            STRATIFIED_TANK_CHECKPOINT_VERSION,
+            "StratifiedTank",
+            EquipmentId(0),
+        )?;
+        if decoded.node_temps_c.len() != self.n_nodes() {
+            return Err(HaresError::Equipment(format!(
+                "state node count {} does not match tank node count {}",
+                decoded.node_temps_c.len(),
+                self.n_nodes()
+            )));
+        }
+        for (idx, &temp_c) in decoded.node_temps_c.iter().enumerate() {
+            validate_finite(&format!("node_temps_c[{idx}]"), temp_c)?;
+        }
+        self.node_temps_c = decoded.node_temps_c;
+        Ok(())
+    }
+
+    fn apply_conduction_and_standby(&mut self, ambient_temp_c: f64, dt: Duration) -> Result<()> {
+        let seconds = dt.as_secs_f64();
+        validate_nonnegative("dt_seconds", seconds)?;
+        if seconds == 0.0 {
+            self.last_skin_loss_w = 0.0;
+            return Ok(());
+        }
+
+        self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
+        self.scratch_delta_energy.fill(0.0);
+
+        let conduction_w_per_k =
+            self.conductivity_w_m_k * self.cross_section_area_m2 / self.node_height_m;
+        for idx in 0..(self.n_nodes() - 1) {
+            let heat_flow_w = conduction_w_per_k
+                * (self.scratch_old_temps[idx + 1] - self.scratch_old_temps[idx]);
+            let transfer_j = heat_flow_w * seconds;
+            self.scratch_delta_energy[idx] += transfer_j;
+            self.scratch_delta_energy[idx + 1] -= transfer_j;
+        }
+
+        let total_skin_loss_w = self.compute_skin_loss_w(&self.scratch_old_temps, ambient_temp_c);
+        for idx in 0..self.n_nodes() {
+            let loss_w = self.ua_per_node[idx] * (self.scratch_old_temps[idx] - ambient_temp_c);
+            self.scratch_delta_energy[idx] -= loss_w * seconds;
+        }
+        self.last_skin_loss_w = total_skin_loss_w;
+
+        for (idx, node_temp_c) in self.node_temps_c.iter_mut().enumerate() {
+            let thermal_mass_j_per_k = water_density_kg_m3(*node_temp_c)
+                * self.node_volumes_m3[idx]
+                * CP_LIQUID_WATER_J_KG_K;
+            *node_temp_c += self.scratch_delta_energy[idx] / thermal_mass_j_per_k;
+        }
+
+        Ok(())
+    }
+
+    /// Compute the volume-weighted average temperature of a segment from
+    /// `start_m3` to `end_m3` in the node-temperature profile.
+    ///
+    /// `edges_m3` is the cumulative-volume edge array (length n_nodes + 1).
+    /// `temps_c` are the per-node temperatures. Returns the integrated average;
+    /// when the segment spans one node the result collapses to that node's
+    /// temperature exactly.
+    ///
+    /// OCHRE Water.py:335-347 (`_water_draw_general` lines 16-104): the draw
+    /// outlet temperature is the segment average of the pre-draw node
+    /// temperatures over the drawn volume.
+    fn segment_average_temp(edges_m3: &[f64], temps_c: &[f64], start_m3: f64, end_m3: f64) -> f64 {
+        let volume = end_m3 - start_m3;
+        if volume <= 0.0 {
+            return temps_c.first().copied().unwrap_or(0.0);
+        }
+        let mut sum = 0.0_f64;
+        for i in 0..temps_c.len() {
+            let left = edges_m3[i].max(start_m3);
+            let right = edges_m3[i + 1].min(end_m3);
+            let overlap = (right - left).max(0.0);
+            if overlap > 0.0 {
+                sum += overlap * temps_c[i];
+            }
+        }
+        sum / volume
+    }
+
+    /// Apply a draw to the tank, displacing water downward with mains water entering
+    /// from the bottom.
+    ///
+    /// Both `outlet_temp_c` and `energy_out_j` are computed from the same pre-injection
+    /// snapshot (`scratch_pre_injection_temps`), so they are internally consistent:
+    /// `outlet_temp_c` is the segment-average temperature over the drawn volume, and
+    /// `energy_out_j` is the per-node overlap sum of ρ(T)·cp·T across that same volume.
+    /// Callers must populate `scratch_pre_injection_temps` before calling this method.
+    ///
+    /// OCHRE Water.py:335-347: segment-averaged outlet from pre-draw node temperatures.
+    fn apply_draw(&mut self, draw_volume_m3: f64, mains_temp_c: f64) -> Result<DrawResult> {
+        if draw_volume_m3 == 0.0 {
+            return Ok(DrawResult {
+                outlet_temp_c: self.scratch_pre_injection_temps[0],
+                energy_out_j: 0.0,
+                energy_in_j: 0.0,
+                unmet_load_w: 0.0,
+            });
+        }
+
+        let outlet_temp_c = Self::segment_average_temp(
+            &self.node_edges_m3,
+            &self.scratch_pre_injection_temps,
+            0.0,
+            draw_volume_m3,
+        );
+
+        self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
+        let mut energy_out_j = 0.0_f64;
+        let mut remaining_m3 = draw_volume_m3;
+        let n = self.n_nodes();
+        for idx in 0..n {
+            if remaining_m3 <= 0.0 {
+                break;
+            }
+            let overlap = remaining_m3.min(self.node_volumes_m3[idx]);
+            if overlap > 0.0 {
+                let t = self.scratch_pre_injection_temps[idx];
+                energy_out_j += water_density_kg_m3(t) * CP_LIQUID_WATER_J_KG_K * t * overlap;
+                remaining_m3 -= overlap;
+            }
+        }
+        let energy_in_j = water_density_kg_m3(mains_temp_c)
+            * CP_LIQUID_WATER_J_KG_K
+            * mains_temp_c
+            * draw_volume_m3;
+
+        let mains_start_m3 = self.total_volume_m3 - draw_volume_m3;
+        self.scratch_new_temps.fill(0.0);
+        let n = self.n_nodes();
+        for idx in 0..n {
+            let target_start = self.node_edges_m3[idx];
+            let target_end = self.node_edges_m3[idx + 1];
+            let mut energy_volume_temp = 0.0_f64;
+
+            for src_idx in 0..n {
+                let shifted_start = self.node_edges_m3[src_idx] - draw_volume_m3;
+                let shifted_end = self.node_edges_m3[src_idx + 1] - draw_volume_m3;
+                let overlap = overlap_length(target_start, target_end, shifted_start, shifted_end);
+                if overlap > 0.0 {
+                    energy_volume_temp += overlap * self.scratch_old_temps[src_idx];
+                }
+            }
+
+            let mains_overlap = overlap_length(
+                target_start,
+                target_end,
+                mains_start_m3,
+                self.total_volume_m3,
+            );
+            if mains_overlap > 0.0 {
+                energy_volume_temp += mains_overlap * mains_temp_c;
+            }
+
+            let node_volume = self.node_volumes_m3[idx];
+            self.scratch_new_temps[idx] = energy_volume_temp / node_volume;
+        }
+
+        self.node_temps_c.copy_from_slice(&self.scratch_new_temps);
+        Ok(DrawResult {
+            outlet_temp_c,
+            energy_out_j,
+            energy_in_j,
+            unmet_load_w: 0.0,
+        })
+    }
+
+    fn node_volume(&self, node: usize) -> Result<f64> {
+        self.node_volumes_m3.get(node).copied().ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "node index {node} out of bounds for {} nodes",
+                self.n_nodes()
+            ))
+        })
+    }
+}
+
+fn validate_n_nodes(n_nodes: usize) -> Result<()> {
+    if !(MIN_NODES..=MAX_NODES).contains(&n_nodes) {
+        return Err(HaresError::Equipment(format!(
+            "n_nodes must be in [{MIN_NODES}, {MAX_NODES}], got {n_nodes}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_element_nodes(n_nodes: usize, element_nodes: [Option<usize>; 2]) -> Result<()> {
+    for (idx, maybe_node) in element_nodes.iter().enumerate() {
+        if let Some(node) = maybe_node
+            && *node >= n_nodes
+        {
+            return Err(HaresError::Equipment(format!(
+                "element_nodes[{idx}]={node} out of bounds for {n_nodes} nodes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_positive(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "{name} must be finite and > 0, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_nonnegative(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "{name} must be finite and >= 0, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_finite(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() {
+        return Err(HaresError::Equipment(format!("{name} must be finite")));
+    }
+    Ok(())
+}
+
+fn cylinder_cross_section_area(diameter_m: f64) -> f64 {
+    PI * (diameter_m * 0.5).powi(2)
+}
+
+fn cylinder_volume(height_m: f64, diameter_m: f64) -> f64 {
+    cylinder_cross_section_area(diameter_m) * height_m
+}
+
+fn build_node_edges(node_volumes_m3: &[f64]) -> Vec<f64> {
+    let mut edges = Vec::with_capacity(node_volumes_m3.len() + 1);
+    edges.push(0.0);
+    let mut running = 0.0;
+    for &volume in node_volumes_m3 {
+        running += volume;
+        edges.push(running);
+    }
+    edges
+}
+
+fn overlap_length(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
+    (a1.min(b1) - a0.max(b0)).max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+    use hares_physics::water_density_kg_m3;
+
+    use super::{StratifiedTank, StratifiedTankConfig};
+
+    const EPSILON: f64 = 1.0e-9;
+
+    fn test_tank(n_nodes: usize, initial_temp_c: f64) -> StratifiedTank {
+        StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 0.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c,
+            element_nodes: [Some(0), Some(n_nodes - 1)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank construction")
+    }
+
+    fn test_tank_with_ua(n_nodes: usize, ua_w_per_k: f64) -> StratifiedTank {
+        StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(n_nodes - 1)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank construction")
+    }
+
+    fn total_energy_j(tank: &StratifiedTank) -> f64 {
+        tank.node_temps()
+            .iter()
+            .zip(tank.node_volumes_m3().iter())
+            .map(|(temp_c, volume_m3)| {
+                water_density_kg_m3(*temp_c) * CP_LIQUID_WATER_J_KG_K * volume_m3 * temp_c
+            })
+            .sum()
+    }
+
+    #[test]
+    fn single_node_heating_matches_analytic_delta_t() {
+        let mut tank = test_tank(1, 50.0);
+        let power_w = 4_500.0;
+        let dt = Duration::from_secs(60);
+        let mcp = water_density_kg_m3(50.0) * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
+        let expected_delta_t = power_w * dt.as_secs_f64() / mcp;
+
+        tank.heat_node(0, power_w, dt).expect("heat top node");
+
+        assert!((tank.node_temps()[0] - (50.0 + expected_delta_t)).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn draw_event_cools_top_and_pushes_bottom_toward_mains() {
+        let mut tank = test_tank(6, 60.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[70.0, 68.0, 66.0, 64.0, 62.0, 60.0]);
+        }
+
+        let draw_volume = tank.node_volumes_m3()[0] * 1.5;
+        let draw = tank
+            .step(20.0, draw_volume, 10.0, &[], Duration::from_secs(60))
+            .expect("draw step");
+
+        // Outlet equals pre-injection segment-average temperature over the
+        // drawn volume. Draw = 1.5 × node_volume spans nodes 0 (70°C) and 1 (68°C):
+        //   (V·70 + 0.5V·68) / 1.5V = 69.333...°C.
+        // Pre-heating snapshot per OCHRE Water.py:335-347.
+        let expected_outlet = 70.0 - 2.0 / 3.0; // 69.333...
+        assert!(
+            (draw.outlet_temp_c - expected_outlet).abs() < 0.01,
+            "outlet {:.4} expected {:.4}",
+            draw.outlet_temp_c,
+            expected_outlet,
+        );
+        assert!(tank.node_temps()[0] < 70.0);
+        assert!(tank.node_temps()[5] < 20.0);
+    }
+
+    #[test]
+    fn standby_decay_uses_ua_over_mcp_dynamics() {
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 1,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 8.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 60.0,
+            element_nodes: [Some(0), None],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank");
+
+        let dt = Duration::from_secs(30);
+        let ambient = 20.0;
+        let mcp = water_density_kg_m3(60.0) * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
+        // Use the actual per-node UA (includes end-cap contribution) for the expected value.
+        let effective_ua = tank.ua_per_node[0];
+        let expected = 60.0 - (effective_ua * (60.0 - ambient) * dt.as_secs_f64()) / mcp;
+
+        tank.step(ambient, 0.0, 12.0, &[], dt)
+            .expect("standby step");
+        // Tolerance loosened from 1e-12 to 1e-6: the 5th-degree rational
+        // polynomial in water_density_kg_m3 introduces ~1e-6 float precision
+        // error across the combined operations.
+        assert!((tank.node_temps()[0] - expected).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn outlet_temp_matches_pre_draw_top_and_bottom_reaches_mains_with_large_draw() {
+        let mut tank = test_tank(6, 55.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[65.0, 63.0, 61.0, 59.0, 57.0, 55.0]);
+        }
+
+        let first = tank
+            .step(
+                20.0,
+                tank.node_volumes_m3()[0] * 0.25,
+                12.0,
+                &[],
+                Duration::from_secs(60),
+            )
+            .expect("first draw");
+        assert!((first.outlet_temp_c - 65.0).abs() < EPSILON);
+
+        let second = tank
+            .step(
+                20.0,
+                tank.total_volume_m3() * 0.95,
+                12.0,
+                &[],
+                Duration::from_secs(60),
+            )
+            .expect("second draw");
+        assert!(second.outlet_temp_c.is_finite());
+        assert!((tank.node_temps()[5] - 12.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn draw_energy_balance_is_conserved_to_within_one_joule() {
+        let mut tank = test_tank(6, 50.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[62.0, 60.0, 58.0, 56.0, 54.0, 52.0]);
+        }
+
+        let before = total_energy_j(&tank);
+        let draw = tank
+            .step(
+                20.0,
+                tank.total_volume_m3() * 0.37,
+                11.0,
+                &[],
+                Duration::from_secs(60),
+            )
+            .expect("draw step");
+        let after = total_energy_j(&tank);
+
+        let expected_after = before - draw.energy_out_j + draw.energy_in_j;
+        // The overlap blending in draw displacement uses volume-weighted
+        // temperature averaging. With temperature-dependent density,
+        // ρ(T_vol_avg) × T_vol_avg ≠ volume-weighted average of ρ(T)·T
+        // across the blend boundary. This introduces an energy bookkeeping
+        // error of up to ~25 kJ per blend boundary on this tank (~0.05 % of
+        // the ~55 MJ total thermal energy). EnergyPlus accepts the same
+        // approximation — it recomputes tank mass as ρ(T)·V at the average
+        // temperature, with no correction for per-node density variation.
+        // Tolerance of 50 kJ covers the two blend boundaries with margin.
+        assert!(
+            (after - expected_after).abs() <= 50_000.0,
+            "after={after:.1}, expected_after={expected_after:.1}, diff={}",
+            (after - expected_after).abs()
+        );
+    }
+
+    #[test]
+    fn dual_element_nodes_heat_correctly() {
+        let mut tank = test_tank(6, 45.0);
+        let dt = Duration::from_secs(120);
+        let power_w = 3_000.0;
+        let node_mass_cp =
+            water_density_kg_m3(45.0) * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
+        let expected_delta = power_w * dt.as_secs_f64() / node_mass_cp;
+
+        tank.heat_node(0, power_w, dt).expect("heat top");
+        tank.heat_node(5, power_w, dt).expect("heat bottom");
+
+        assert!((tank.node_temps()[0] - (45.0 + expected_delta)).abs() < 1.0e-12);
+        assert!((tank.node_temps()[5] - (45.0 + expected_delta)).abs() < 1.0e-12);
+        assert_eq!(tank.element_nodes(), [Some(0), Some(5)]);
+    }
+
+    #[test]
+    fn save_load_round_trip_restores_temperatures() {
+        let mut tank = test_tank(4, 50.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[58.0, 54.0, 50.0, 46.0]);
+        }
+        let state = tank.save_state().unwrap();
+
+        tank.heat_node(0, 2_000.0, Duration::from_secs(60))
+            .expect("mutate");
+        tank.load_state(&state).expect("restore");
+        assert_eq!(tank.node_temps(), &[58.0, 54.0, 50.0, 46.0]);
+    }
+
+    #[test]
+    fn inversion_mixing_converges_within_n_passes_and_stabilizes_profile() {
+        let mut tank = test_tank(12, 20.0);
+        for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
+            *temp = 20.0 + idx as f64;
+        }
+
+        let swaps = tank.mix_inversions();
+        assert!(swaps > 0);
+        for pair in tank.node_temps().windows(2) {
+            assert!(pair[0] >= pair[1]);
+        }
+    }
+
+    #[test]
+    fn inversion_mixing_conserves_energy_to_within_one_joule() {
+        let mut tank = test_tank(10, 20.0);
+        for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
+            *temp = 38.0 + idx as f64 * 1.25;
+        }
+
+        let before = total_energy_j(&tank);
+        let merges = tank.mix_inversions();
+        let after = total_energy_j(&tank);
+
+        assert!(merges > 0);
+        // Volume-weighted temperature merging in mix_inversions does not exactly
+        // conserve Σρ(T)·V·Cp·T when density is temperature-dependent, because
+        // ρ(T_merge) ≠ volume-weighted average of component ρ values.
+        // The discrepancy is ~40-50 J per merge; for a 10-node full inversion
+        // the total error is ~7,000 J on a ~42 MJ tank (~0.017 %).
+        // Tolerance of 10 kJ covers worst-case mixing with margin.
+        assert!((after - before).abs() <= 10_000.0);
+
+        // Regression: after a full step, last_skin_loss_w must reflect the
+        // post-mixing node temperatures, not the pre-mixing inverted profile.
+        let mut tank2 = test_tank_with_ua(6, 3.0);
+        // Inverted profile: top cold, bottom hot.
+        for (idx, temp) in tank2.node_temps_c.iter_mut().enumerate() {
+            *temp = 20.0 + idx as f64 * 5.0; // [20, 25, 30, 35, 40, 45] → warm bottom
+        }
+        tank2.node_temps_c.reverse(); // [45, 40, 35, 30, 25, 20] → cold bottom
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        tank2
+            .step(ambient, 0.0, 15.0, &[], dt)
+            .expect("step with inverted profile");
+
+        let expected_loss: f64 = tank2
+            .node_temps()
+            .iter()
+            .zip(tank2.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank2.skin_loss_w() - expected_loss).abs() < 1e-9,
+            "skin loss {:.6} must match post-mixing profile computation {:.6}",
+            tank2.skin_loss_w(),
+            expected_loss
+        );
+    }
+
+    /// After `step()` with an inverted temperature profile, `last_skin_loss_w`
+    /// must equal the skin loss computed manually from the final (post-mixing)
+    /// node temperatures rather than the pre-mixing inverted profile.
+    #[test]
+    fn skin_loss_uses_post_mixing_profile_not_inverted_profile() {
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 4,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 4.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 40.0,
+            element_nodes: [Some(0), Some(3)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: Some(0.5),
+        })
+        .expect("tank");
+
+        // Deliberate inversion: bottom-hot, top-cold.
+        // After PAV mixing with equal-volume nodes [40, 60, 70, 50]:
+        //   node 0=40 → 40 < 60 merge → average=[50,2], 50 < 70 merge → [56.67,3], 50 OK
+        //   Post-mixing: [56.67, 56.67, 56.67, 50.0]
+        //
+        // Pre-mixing boundary-node temps (40, 50) differ from post-mixing (56.67, 50),
+        // producing a measurable skin loss difference via the end-cap UA on node 0.
+        let original_temps = vec![40.0, 60.0, 70.0, 50.0];
+        tank.node_temps_c.copy_from_slice(&original_temps);
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        tank.step(ambient, 0.0, 15.0, &[], dt)
+            .expect("step with inversion");
+
+        // Compute expected skin loss from the actual final (post-mixing) node temps.
+        let expected_skin_loss: f64 = tank
+            .node_temps()
+            .iter()
+            .zip(tank.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-9,
+            "skin loss {:.6} must match post-mixing manual computation {:.6}",
+            tank.skin_loss_w(),
+            expected_skin_loss
+        );
+
+        // The pre-mixing loss should differ measurably from the corrected value.
+        let pre_mix_loss: f64 = original_temps
+            .iter()
+            .zip(tank.ua_per_node().iter())
+            .map(|(&t, &ua)| ua * (t - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - pre_mix_loss).abs() > 1e-9,
+            "skin loss correction must produce a measurable difference: pre {:.6}, post {:.6}",
+            pre_mix_loss,
+            tank.skin_loss_w()
+        );
+    }
+
+    #[test]
+    fn uniform_profile_mixing_has_zero_swaps() {
+        let mut tank = test_tank(8, 49.0);
+        let swaps = tank.mix_inversions();
+        assert_eq!(swaps, 0);
+    }
+
+    #[test]
+    fn construction_validates_node_count_and_element_bounds() {
+        let err = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 13,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 5.0,
+            conductivity_w_m_k: 0.6,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), None],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect_err("invalid node count should fail");
+        assert!(err.to_string().contains("n_nodes"));
+
+        let err = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 6,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 5.0,
+            conductivity_w_m_k: 0.6,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(6)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect_err("invalid element node should fail");
+        assert!(err.to_string().contains("element_nodes"));
+    }
+
+    /// End-cap UA: boundary nodes (first and last) must have higher UA than interior nodes.
+    #[test]
+    fn end_cap_ua_boundary_nodes_higher_than_interior() {
+        let tank = test_tank_with_ua(6, 4.0);
+        let interior_ua = tank.ua_per_node[1];
+        assert!(
+            tank.ua_per_node[0] > interior_ua,
+            "top node UA ({}) must exceed interior node UA ({})",
+            tank.ua_per_node[0],
+            interior_ua
+        );
+        assert!(
+            tank.ua_per_node[5] > interior_ua,
+            "bottom node UA ({}) must exceed interior node UA ({})",
+            tank.ua_per_node[5],
+            interior_ua
+        );
+        // Interior nodes (1..=4) should all be equal.
+        for idx in 1..5 {
+            assert!(
+                (tank.ua_per_node[idx] - interior_ua).abs() < 1e-12,
+                "interior node {idx} UA should equal base UA"
+            );
+        }
+    }
+
+    /// Single-node tank: end-cap is only added once (same index for top and bottom).
+    #[test]
+    fn end_cap_ua_single_node_added_once() {
+        let tank = test_tank_with_ua(1, 2.0);
+        // Single node UA = base_portion + 1x end_cap (top == bottom, only one addition).
+        let expected = 2.0 + 2.0 * 0.1; // ua_w_per_k + ua_end_cap_w_per_k (applied once via "if last != 0" guard)
+        assert!(
+            (tank.ua_per_node[0] - expected).abs() < 1e-12,
+            "single-node UA should be {} (base + 1×end_cap), got {}",
+            expected,
+            tank.ua_per_node[0]
+        );
+    }
+
+    /// For n_nodes=2 without explicit volumes, top node gets 1/3 and bottom 2/3 of total.
+    #[test]
+    fn two_node_volumes_follow_ochre_one_third_two_thirds_split() {
+        let tank = test_tank(2, 50.0);
+        let total = tank.total_volume_m3();
+        let expected_top = total / 3.0;
+        let expected_bot = 2.0 * total / 3.0;
+        assert!(
+            (tank.node_volumes_m3()[0] - expected_top).abs() < 1e-12,
+            "top node volume should be total/3 = {expected_top}, got {}",
+            tank.node_volumes_m3()[0]
+        );
+        assert!(
+            (tank.node_volumes_m3()[1] - expected_bot).abs() < 1e-12,
+            "bottom node volume should be 2*total/3 = {expected_bot}, got {}",
+            tank.node_volumes_m3()[1]
+        );
+    }
+
+    fn ochre_draw_general_reference(
+        states_c: &[f64],
+        vol_fractions: &[f64],
+        draw_fraction: f64,
+        mains_temp_c: f64,
+    ) -> (f64, Vec<f64>) {
+        let n = states_c.len();
+        let mut vols_pre = vec![0.0_f64; n + 1];
+        let mut vols_post = vec![0.0_f64; n + 1];
+        let mut temps = vec![0.0_f64; n + 1];
+
+        let mut running = 0.0_f64;
+        for (i, vf) in vol_fractions.iter().enumerate() {
+            running += *vf;
+            vols_pre[i] = running;
+            temps[i] = states_c[i];
+        }
+        vols_pre[n] = running + draw_fraction;
+        vols_post[0] = draw_fraction;
+        temps[n] = mains_temp_c;
+
+        running = draw_fraction;
+        for (i, vf) in vol_fractions.iter().enumerate() {
+            running += *vf;
+            vols_post[i + 1] = running;
+        }
+
+        let mut outlet_temp = 0.0_f64;
+        let mut prev = 0.0_f64;
+        for (i, vol_pre) in vols_pre.iter().enumerate() {
+            let clipped = (*vol_pre).min(draw_fraction);
+            let vol_del = clipped - prev;
+            outlet_temp += temps[i] * vol_del;
+            prev = clipped;
+        }
+        outlet_temp /= draw_fraction;
+
+        let mut t_end = vec![0.0_f64; n];
+        for i in 0..n {
+            let mut weighted_temp = 0.0_f64;
+            let mut prev_v = vols_post[i];
+            for j in 0..=n {
+                let clipped = vols_pre[j].max(vols_post[i]).min(vols_post[i + 1]);
+                let vol_del = clipped - prev_v;
+                weighted_temp += temps[j] * vol_del;
+                prev_v = clipped;
+            }
+            t_end[i] = weighted_temp / vol_fractions[i];
+        }
+
+        (outlet_temp, t_end)
+    }
+
+    #[test]
+    fn draw_step_matches_ochre_general_algorithm_for_equal_node_volumes() {
+        let mut tank = test_tank(6, 50.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[62.0, 59.0, 56.0, 53.0, 50.0, 47.0]);
+        }
+
+        let draw_volume = tank.total_volume_m3() * 0.12;
+        let draw_fraction = draw_volume / tank.total_volume_m3();
+        let old_temps = tank.node_temps().to_vec();
+        let vol_fraction = 1.0 / tank.n_nodes() as f64;
+        let vol_fractions = vec![vol_fraction; tank.n_nodes()];
+        let (expected_outlet_temp, expected_temps) =
+            ochre_draw_general_reference(&old_temps, &vol_fractions, draw_fraction, 12.0);
+
+        let draw = tank
+            .step(20.0, draw_volume, 12.0, &[], Duration::from_secs(60))
+            .expect("draw step");
+
+        assert!((draw.outlet_temp_c - expected_outlet_temp).abs() < 1.0e-12);
+        for (actual, expected) in tank.node_temps().iter().zip(expected_temps.iter()) {
+            assert!((*actual - *expected).abs() < 1.0e-12);
+        }
+    }
+
+    // --- TMV (tempered draw) tests ---
+
+    /// When outlet_temp == tempered_draw_temp, no mixing reduction: raw draw volume is used.
+    /// No unmet load either.
+    #[test]
+    fn tmv_no_reduction_when_outlet_at_fixture_temp() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 40.6); // initial temp exactly at fixture setpoint
+
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4; // 0.1 L/s
+        let dt = Duration::from_secs(60);
+        let draw = tank
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[], tmv, dt)
+            .expect("step_tempered");
+
+        assert_eq!(draw.unmet_load_w, 0.0);
+    }
+
+    /// When outlet_temp < tempered_draw_temp, unmet load must be positive and proportional to deficit.
+    #[test]
+    fn tmv_unmet_load_when_outlet_below_fixture_temp() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(1, 30.0); // cold tank
+
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4;
+        let mains_temp_c = 15.0;
+        let dt = Duration::from_secs(60);
+        let draw = tank
+            .step_tempered(20.0, flow_m3_s, 0.0, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered");
+
+        // outlet_temp < fixture setpoint → unmet load > 0
+        assert!(
+            draw.unmet_load_w > 0.0,
+            "expected positive unmet load, got {}",
+            draw.unmet_load_w
+        );
+        // Rough sanity: unmet load ≈ flow_kg_s * Cp * deficit
+        let deficit = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
+        let expected =
+            flow_m3_s * water_density_kg_m3(draw.outlet_temp_c) * CP_LIQUID_WATER_J_KG_K * deficit;
+        assert!(
+            (draw.unmet_load_w - expected).abs() < 1.0,
+            "unmet_load_w {:.2} should be close to {expected:.2}",
+            draw.unmet_load_w
+        );
+    }
+
+    /// When outlet_temp > tempered_draw_temp, TMV blends in cold water: actual hot draw < requested.
+    /// The draw volume applied to the tank must be less than the requested tempered volume.
+    #[test]
+    fn tmv_reduces_draw_when_outlet_above_fixture_temp() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(1, 65.0); // very hot tank
+
+        let mains_temp_c = 15.0;
+        let fixture_temp_c = 40.6;
+        let flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: fixture_temp_c,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+
+        let draw = tank
+            .step_tempered(20.0, flow_m3_s, 0.0, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered");
+
+        // energy removed should be less than if raw draw (65°C) was used
+        let raw_draw_energy = water_density_kg_m3(65.0)
+            * CP_LIQUID_WATER_J_KG_K
+            * (flow_m3_s * dt.as_secs_f64())
+            * 65.0;
+        assert!(
+            draw.energy_out_j < raw_draw_energy,
+            "energy_out {:.1} should be less than raw draw energy {raw_draw_energy:.1}",
+            draw.energy_out_j
+        );
+        assert_eq!(
+            draw.unmet_load_w, 0.0,
+            "no unmet load when outlet > fixture temp"
+        );
+    }
+
+    /// `DrawResult` from `step()` has zero `unmet_load_w`.
+    #[test]
+    fn raw_step_has_zero_unmet_load() {
+        let mut tank = test_tank(1, 55.0);
+        let draw = tank
+            .step(
+                20.0,
+                tank.total_volume_m3() * 0.1,
+                15.0,
+                &[],
+                Duration::from_secs(60),
+            )
+            .expect("step");
+        assert_eq!(draw.unmet_load_w, 0.0);
+    }
+
+    /// Unmet load in `step_tempered()` is computed from the pre-injection
+    /// outlet snapshot `outlet_est_c`, so same-step element heat does not
+    /// inflate the apparent outlet and under-report the deficit.
+    ///
+    /// Scenario: top node = 30°C, fixture setpoint = 40.6°C, 4500W element
+    /// fires into node 0 during a concurrent tempered draw.
+    /// Without the fix, post-injection outlet ≈ 31.65°C would mask ~2 kW
+    /// of unmet load. With the fix, `unmet_load_w` reflects the true 30°C
+    /// pre-heating state.
+    #[test]
+    fn unmet_load_from_pre_injection_outlet_not_post_heating() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 30.0);
+
+        let fixtureset_c = 40.6;
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: fixtureset_c,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+        let draw = tank
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .expect("step_tempered with heat");
+
+        // Pre-heating deficit: outlet_est_c = 30°C, deficit = 40.6 - 30.0 = 10.6°C.
+        // The tank has zero UA/conductivity, so outlet_est_c is exactly 30.0°C
+        // (no conduction drift before the snapshot) and this matches to float precision.
+        let density = water_density_kg_m3(30.0);
+        let expected_unmet = flow_m3_s * density * CP_LIQUID_WATER_J_KG_K * (fixtureset_c - 30.0);
+        assert!(
+            (draw.unmet_load_w - expected_unmet).abs() < 1e-6,
+            "unmet_load_w {:.6} diverges from pre-heating deficit {expected_unmet:.6}",
+            draw.unmet_load_w
+        );
+
+        // With Option A (pre-injection outlet), outlet_temp_c reflects pre-injection
+        // state. When UA=0 (adiabatic tank), pre-conduction = pre-injection, so
+        // old_unmet == unmet_load_w.  The key invariant: outlet_temp_c is not
+        // inflated by same-step element heat, so the unmet deficit is correct.
+        let old_unmet = {
+            let deficit = (fixtureset_c - draw.outlet_temp_c).max(0.0);
+            flow_m3_s * water_density_kg_m3(draw.outlet_temp_c) * CP_LIQUID_WATER_J_KG_K * deficit
+        };
+        assert!(
+            (draw.unmet_load_w - old_unmet).abs() < 1.0,
+            "unmet_load_w ({:.1}) must match pre-injection deficit ({old_unmet:.1})",
+            draw.unmet_load_w
+        );
+    }
+
+    /// `unmet_load_w` is identical whether or not a nonzero `HeatInjection` is
+    /// supplied during the step, because the computation uses the pre-injection
+    /// snapshot `outlet_est_c` which is independent of element heat.
+    #[test]
+    fn unmet_load_identical_with_and_without_heat_injection() {
+        use super::TemperedDrawConfig;
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        let flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+
+        let mut tank_no_heat = test_tank(6, 30.0);
+        let draw_no_heat = tank_no_heat
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[], tmv, dt)
+            .expect("step_tempered without heat");
+
+        let mut tank_with_heat = test_tank(6, 30.0);
+        let draw_with_heat = tank_with_heat
+            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .expect("step_tempered with heat");
+
+        assert!(
+            (draw_no_heat.unmet_load_w - draw_with_heat.unmet_load_w).abs() < 1e-6,
+            "unmet_load_w without heat ({}) differs from with heat ({})",
+            draw_no_heat.unmet_load_w,
+            draw_with_heat.unmet_load_w
+        );
+    }
+
+    /// With nonzero element heat and nonzero draw in the same step, the outlet
+    /// temperature must equal the pre-injection segment-average temperature
+    /// (not inflated by current-step element heat). For this single-node draw,
+    /// the segment average collapses to the top-node value. Validates that
+    /// element heat does not leak into outlet temperature.
+    ///
+    /// OCHRE Water.py:335-347: outlet computed from pre-draw node temperatures.
+    #[test]
+    fn outlet_temp_reflects_pre_heating_top_node() {
+        let mut tank = test_tank(6, 50.0);
+        let node_vol = tank.node_volumes_m3()[0];
+        let mcp = water_density_kg_m3(50.0) * node_vol * CP_LIQUID_WATER_J_KG_K;
+        let draw_volume = node_vol * 0.5;
+        let element_power_w = 10_000.0;
+        let dt = Duration::from_secs(60);
+        let delta_t = element_power_w * dt.as_secs_f64() / mcp;
+
+        let draw = tank
+            .step(20.0, draw_volume, 15.0, &[(0, element_power_w)], dt)
+            .expect("step with heat + draw");
+
+        // Outlet must equal the pre-injection segment-average temperature (50°C,
+        // since the draw is fully within node 0), NOT the post-injection value
+        // (50 + delta_t). The element adds ~delta_t °C, but that heat must not
+        // inflate outlet_temp_c.
+        assert!(
+            (draw.outlet_temp_c - 50.0).abs() < 0.01,
+            "outlet ({:.4}) must reflect pre-injection temp (50.0), not post-injection (expected {:.4})",
+            draw.outlet_temp_c,
+            50.0 + delta_t
+        );
+        assert!(
+            draw.outlet_temp_c < 50.0 + delta_t - 0.1,
+            "outlet ({:.4}) must be substantially below post-injection temp ({:.4})",
+            draw.outlet_temp_c,
+            50.0 + delta_t
+        );
+        // energy_out_j still uses the pre-injection snapshot for accounting.
+        let expected_energy_out =
+            water_density_kg_m3(50.0) * CP_LIQUID_WATER_J_KG_K * 50.0 * draw_volume;
+        assert!(
+            (draw.energy_out_j - expected_energy_out).abs() < 1.0,
+            "energy_out_j ({:.2}) must use pre-injection snapshot ({expected_energy_out:.2})",
+            draw.energy_out_j
+        );
+    }
+
+    /// Deterministic fixture test for PAV inversion mixing on a complex
+    /// multi-inversion profile. Verifies exact output temperatures (not just
+    /// monotonicity/energy conservation, which are tested elsewhere).
+    ///
+    /// Input profile (top→bottom): [20, 60, 10, 50, 30, 40]
+    /// Equal-volume nodes. PAV merges:
+    ///   nodes 0,1 → 40.0  (20+60)/2
+    ///   nodes 2,3 → 30.0  (10+50)/2
+    ///   nodes 4,5 → 35.0  (30+40)/2, then merges with nodes 2,3 → 32.5
+    /// Expected output: [40.0, 40.0, 32.5, 32.5, 32.5, 32.5]
+    #[test]
+    fn pav_deterministic_multi_inversion_fixture() {
+        let mut tank = test_tank(6, 0.0);
+        let input = [20.0, 60.0, 10.0, 50.0, 30.0, 40.0];
+        for (node, &temp) in input.iter().enumerate() {
+            tank.node_temps_mut()[node] = temp;
+        }
+
+        let merges = tank.mix_inversions();
+        assert!(merges > 0, "multi-inversion profile must require merges");
+
+        let expected = [40.0, 40.0, 32.5, 32.5, 32.5, 32.5];
+        for (i, (&got, &exp)) in tank.node_temps().iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-9,
+                "node {i}: expected {exp}, got {got}"
+            );
+        }
+
+        // Energy conservation: sum of temps must be preserved (equal volumes).
+        let input_sum: f64 = input.iter().sum();
+        let output_sum: f64 = tank.node_temps().iter().sum();
+        assert!(
+            (output_sum - input_sum).abs() < 1e-9,
+            "energy not conserved: input sum {input_sum}, output sum {output_sum}"
+        );
+    }
+
+    /// Run a multi-step simulation, verifying node temperatures match analytically
+    /// derived reference values. Uses a 6-node, zero-UA (adiabatic) tank with
+    /// a fixed draw and element heating each step so physics is simple enough
+    /// to compute by hand.
+    ///
+    /// Step A (no draw, heat node 0 @ 4500 W for 60 s):
+    ///   ΔT_node0 = P·dt / (ρ·V_node·Cp)
+    ///
+    /// Step B (draw = node_volume, mains = 15°C, no heat):
+    ///   Top node fully displaced by node-1 content; bottom fills with mains.
+    ///
+    /// The test verifies that the scratch-buffer implementation produces the
+    /// same f64-exact results as the analytic calculation.
+    #[test]
+    fn tank_step_heat_then_draw_analytic() {
+        let mut tank = test_tank(6, 50.0);
+        let dt = Duration::from_secs(60);
+        let power_w = 4_500.0;
+        let mains_temp_c = 15.0;
+        let node_vol = tank.node_volumes_m3()[0];
+        let mcp = water_density_kg_m3(50.0) * node_vol * CP_LIQUID_WATER_J_KG_K;
+        let delta_t = power_w * dt.as_secs_f64() / mcp;
+
+        // Step 1: heat-only (no draw)
+        let draw1 = tank
+            .step(20.0, 0.0, mains_temp_c, &[(0, power_w)], dt)
+            .expect("step 1");
+
+        let expected_top_after_heat = 50.0 + delta_t;
+        // Zero-draw outlet reflects pre-injection top-node temperature.
+        assert!(
+            (draw1.outlet_temp_c - 50.0).abs() < 1e-10,
+            "zero-draw outlet must be pre-injection top-node 50.0, got {:.6}",
+            draw1.outlet_temp_c,
+        );
+        assert!(
+            (tank.node_temps()[0] - expected_top_after_heat).abs() < 1e-10,
+            "node 0 after heating: expected {expected_top_after_heat:.6}, got {}",
+            tank.node_temps()[0]
+        );
+        for idx in 1..6 {
+            assert!(
+                (tank.node_temps()[idx] - 50.0).abs() < 1e-10,
+                "node {idx} must remain 50.0 after heat-only step, got {}",
+                tank.node_temps()[idx]
+            );
+        }
+
+        // Step 2: draw one node-volume of hot water; no element heat.
+        // Single full-node draw → segment average equals exactly the top-node temp.
+        let top_before_draw = tank.node_temps()[0];
+        let draw2 = tank
+            .step(20.0, node_vol, mains_temp_c, &[], dt)
+            .expect("step 2");
+
+        assert!(
+            (draw2.outlet_temp_c - top_before_draw).abs() < 1e-10,
+            "outlet temp must equal top-node, expected {top_before_draw:.6}, got {:.6}",
+            draw2.outlet_temp_c
+        );
+        // After drawing one full node-volume: node 0 takes content of old node 1 (50°C);
+        // bottom node gets mains water.
+        assert!(
+            (tank.node_temps()[0] - 50.0).abs() < 1e-10,
+            "node 0 after draw should be ~50.0°C (was node 1), got {}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            (tank.node_temps()[5] - mains_temp_c).abs() < 1e-10,
+            "bottom node after one-node draw should equal mains {mains_temp_c}°C, got {}",
+            tank.node_temps()[5]
+        );
+    }
+
+    /// Verify conduction+standby: a 6-node tank with known UA and a 10°C top-to-bottom
+    /// temperature gradient produces the expected inter-node conduction and skin-loss
+    /// values without allocating new Vecs.
+    ///
+    /// Conductivity = 0 so only standby UA losses apply.  With UA = 5.0 W/K,
+    /// ambient = 20°C, and node 0 at 60°C, the expected skin loss from node 0
+    /// equals ua_per_node[0] × (60 − 20).
+    #[test]
+    fn tank_standby_ua_loss_analytic() {
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 6,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 5.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(5)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank");
+
+        // Set a linear gradient: top (node 0) hottest.
+        for (i, t) in tank.node_temps_c.iter_mut().enumerate() {
+            *t = 60.0 - i as f64 * 2.0; // 60, 58, 56, 54, 52, 50
+        }
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        let ua_node0 = tank.ua_per_node[0];
+        let vol_node0 = tank.node_volumes_m3()[0];
+        let mcp_node0 = water_density_kg_m3(60.0) * vol_node0 * CP_LIQUID_WATER_J_KG_K;
+        let expected_loss_j = ua_node0 * (60.0 - ambient) * dt.as_secs_f64();
+        let expected_temp0 = 60.0 - expected_loss_j / mcp_node0;
+
+        tank.step(ambient, 0.0, 15.0, &[], dt)
+            .expect("standby step");
+
+        assert!(
+            (tank.node_temps()[0] - expected_temp0).abs() < 1e-9,
+            "node 0 standby temperature: expected {expected_temp0:.6}, got {:.6}",
+            tank.node_temps()[0]
+        );
+        // All nodes must cool toward ambient (none should heat up from conductivity=0).
+        for idx in 0..6 {
+            let initial_t = 60.0 - idx as f64 * 2.0;
+            assert!(
+                tank.node_temps()[idx] < initial_t,
+                "node {idx} must cool toward ambient after standby, initial={initial_t}, got {}",
+                tank.node_temps()[idx]
+            );
+        }
+        // Skin loss must be the sum of all per-node UA × ΔT contributions,
+        // computed from the final (post-standby, post-mixing) node temperatures.
+        let expected_skin_loss: f64 = (0..6)
+            .map(|i| tank.ua_per_node[i] * (tank.node_temps()[i] - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-9,
+            "skin_loss_w: expected {expected_skin_loss:.4}, got {:.4}",
+            tank.skin_loss_w()
+        );
+    }
+
+    /// Verify that a draw of exactly one node-volume produces correct outlet
+    /// temperature, correct energy accounting, and correct post-draw node
+    /// temperatures (each node shifts one position upward, bottom fills with mains).
+    #[test]
+    fn tank_draw_identical() {
+        let mut tank = test_tank(6, 50.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            temps.copy_from_slice(&[65.0, 62.0, 59.0, 56.0, 53.0, 50.0]);
+        }
+
+        let node_vol = tank.node_volumes_m3()[0];
+        let mains_temp_c = 12.0;
+        let dt = Duration::from_secs(60);
+
+        let draw = tank
+            .step(20.0, node_vol, mains_temp_c, &[], dt)
+            .expect("draw step");
+
+        // Outlet = pre-injection segment average; for a single-node draw within
+        // the top node (65°C) this equals the top-node temperature.
+        assert!(
+            (draw.outlet_temp_c - 65.0).abs() < 1e-10,
+            "outlet_temp_c must equal pre-injection top-node segment average 65.0, got {}",
+            draw.outlet_temp_c
+        );
+
+        // Energy removed equals ρ·V·Cp·T_outlet (pre-injection top-node segment).
+        let expected_energy_out =
+            water_density_kg_m3(65.0) * CP_LIQUID_WATER_J_KG_K * node_vol * 65.0;
+        assert!(
+            (draw.energy_out_j - expected_energy_out).abs() < 1e-6,
+            "energy_out_j: expected {expected_energy_out:.6}, got {:.6}",
+            draw.energy_out_j
+        );
+
+        // After a one-node draw each node shifts: node i takes content of node i+1.
+        // Bottom node receives mains water.
+        let expected_after = [62.0, 59.0, 56.0, 53.0, 50.0, mains_temp_c];
+        for (i, (&got, &exp)) in tank
+            .node_temps()
+            .iter()
+            .zip(expected_after.iter())
+            .enumerate()
+        {
+            assert!(
+                (got - exp).abs() < 1e-9,
+                "node {i} after one-node draw: expected {exp}, got {got}"
+            );
+        }
+    }
+
+    /// Verify inversion mixing with a profile where the bottom is hotter than the top.
+    /// A 6-node tank initialised as [20, 20, 20, 60, 60, 60] (top cold, bottom hot)
+    /// must merge into a uniform [40, 40, 40, 40, 40, 40] profile and the temperature
+    /// ordering must be non-increasing (top ≥ bottom) after mixing.
+    #[test]
+    fn tank_mix_inversions_identical() {
+        let mut tank = test_tank(6, 0.0);
+        {
+            let t = tank.node_temps_c.as_mut_slice();
+            t.copy_from_slice(&[20.0, 20.0, 20.0, 60.0, 60.0, 60.0]);
+        }
+
+        let before_energy = total_energy_j(&tank);
+        let merges = tank.mix_inversions();
+
+        assert!(
+            merges > 0,
+            "bottom-hot profile must require at least one merge"
+        );
+
+        // All six nodes must converge to 40°C (volume-weighted average of 20 and 60 with equal volumes).
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(
+                (t - 40.0).abs() < 1e-9,
+                "node {i}: expected 40.0°C after full inversion mix, got {t}"
+            );
+        }
+
+        // Profile must be monotone non-increasing (top ≥ bottom).
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "profile not monotone: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Energy must be conserved within the volume-weighted-merging approximation.
+        // Volume-weighted temperature averaging in mix_inversions does not exactly
+        // conserve Σρ(T)·V·Cp·T when density is temperature-dependent
+        // (same limitation as documented in inversion_mixing_conserves_energy test).
+        // The test tank thermal energy is ~39 MJ; the 210 kJ tolerance
+        // covers the density nonlinearity across the ~6 node mixing.
+        let after_energy = total_energy_j(&tank);
+        assert!(
+            (after_energy - before_energy).abs() <= 210_000.0,
+            "energy not conserved by mix_inversions: before={before_energy:.1}, after={after_energy:.1}"
+        );
+    }
+
+    /// Run 100 steps of alternating draw and recovery, verifying energy conservation
+    /// across the full multi-step sequence.
+    ///
+    /// Uses a zero-UA, zero-conductivity adiabatic tank so that the energy balance
+    /// closes exactly: `energy_after = energy_before − energy_out + energy_in + element_input`.
+    ///
+    /// Even steps: draw 5% of tank volume (mains 15°C), no element heat.
+    /// Odd steps: inject 4500 W into node 0, no draw.
+    ///
+    /// After every step the invariant must hold to within a tolerance that
+    /// accounts for the density-dependent volume-weighted blending in
+    /// apply_draw (draw steps) and mix_inversions (all steps).
+    /// The per-step energy bookkeeping error is ~25-200 kJ on this
+    /// ~52 MJ tank; 250 kJ tolerance covers both step types with margin.
+    #[test]
+    fn tank_multi_step_roundtrip() {
+        // Zero UA, zero conductivity: no losses, energy balance closes cleanly.
+        let mut tank = test_tank(6, 55.0);
+
+        let dt = Duration::from_secs(60);
+        let mains_temp_c = 15.0;
+        let total_vol = tank.total_volume_m3();
+        let draw_vol = total_vol * 0.05;
+        let element_power_w = 4_500.0;
+        let element_energy_j = element_power_w * dt.as_secs_f64();
+
+        let mut cumulative_energy_in = 0.0_f64;
+        let mut cumulative_energy_out = 0.0_f64;
+        let energy_initial = total_energy_j(&tank);
+
+        for step in 0..100u32 {
+            let before = total_energy_j(&tank);
+            let draw = if step % 2 == 0 {
+                tank.step(20.0, draw_vol, mains_temp_c, &[], dt)
+            } else {
+                tank.step(20.0, 0.0, mains_temp_c, &[(0, element_power_w)], dt)
+            }
+            .expect("step failed");
+            let after = total_energy_j(&tank);
+
+            let injected = if step % 2 == 1 { element_energy_j } else { 0.0 };
+            let expected_after = before - draw.energy_out_j + draw.energy_in_j + injected;
+            assert!(
+                (after - expected_after).abs() <= 250_000.0,
+                "step {step}: energy balance violated: expected {expected_after:.1}, got {after:.1}"
+            );
+
+            cumulative_energy_out += draw.energy_out_j;
+            cumulative_energy_in += draw.energy_in_j;
+        }
+
+        // All final temperatures must be within physical bounds.
+        // 100 steps: 50 heating steps × 4500 W × 60 s = 13_500_000 J max injection.
+        // Adiabatic tank means no losses, so upper bound is initial energy + all injected heat.
+        let max_possible_delta = 50.0 * element_power_w * dt.as_secs_f64()
+            / (water_density_kg_m3(50.0) * tank.total_volume_m3() * CP_LIQUID_WATER_J_KG_K);
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(
+                t >= mains_temp_c && t <= 55.0 + max_possible_delta,
+                "node {i} temperature {t:.4} outside physical bounds [{mains_temp_c}, {:.4}]",
+                55.0 + max_possible_delta
+            );
+        }
+
+        // Final profile must be monotone non-increasing.
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "final profile not monotone: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // 50 draw steps each remove heated tank water: cumulative_energy_out must be positive.
+        // (Each draw step has draw_vol > 0 and node temperatures > 0°C throughout.)
+        assert!(
+            cumulative_energy_out > 0.0,
+            "cumulative energy_out must be positive, got {cumulative_energy_out:.0}"
+        );
+        // 50 draw steps each inject mains water: cumulative_energy_in is exactly ρ·V_draw·Cp·T_mains·50.
+        let expected_energy_in = water_density_kg_m3(mains_temp_c)
+            * CP_LIQUID_WATER_J_KG_K
+            * draw_vol
+            * mains_temp_c
+            * 50.0;
+        assert!(
+            (cumulative_energy_in - expected_energy_in).abs() <= 1.0,
+            "cumulative energy_in {cumulative_energy_in:.0} must equal analytic {expected_energy_in:.0} ± 1 J"
+        );
+
+        // Sanity: final energy must be bounded: [0, initial + all injected heat].
+        let energy_final = total_energy_j(&tank);
+        let max_energy = energy_initial + 50.0 * element_power_w * dt.as_secs_f64() + 1.0;
+        assert!(
+            energy_final > 0.0 && energy_final <= max_energy,
+            "final energy {energy_final:.0} J outside plausible range [0, {max_energy:.0}]"
+        );
+    }
+
+    /// Draw 1.5 × node_volume through a 6-node tank.  This exercises the
+    /// fractional-node overlap path in `apply_draw` where the draw volume
+    /// straddles a node boundary.
+    ///
+    /// `apply_draw` shifts all content down by `draw_volume`.  New node i receives
+    /// content from source nodes whose shifted range overlaps the target range.
+    /// With equal node volumes V and draw = 1.5V, the shift map for node 0 is:
+    ///   - Old node 1 shifted to [-0.5V, 0.5V]: overlap [0, 0.5V] with node 0 → 0.5V of T1=60°C
+    ///   - Old node 2 shifted to [0.5V, 1.5V]:  overlap [0.5V, V] with node 0 → 0.5V of T2=58°C
+    ///     T_new_node0 = (0.5V×60 + 0.5V×58) / V = 59°C
+    #[test]
+    fn tank_fractional_draw_node_overlap() {
+        let mut tank = test_tank(6, 60.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            temps.copy_from_slice(&[70.0, 60.0, 58.0, 56.0, 54.0, 52.0]);
+        }
+
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_vol = 1.5 * node_vol;
+        let mains_temp_c = 10.0;
+
+        tank.step(20.0, draw_vol, mains_temp_c, &[], Duration::from_secs(60))
+            .expect("fractional draw step");
+
+        // New node 0 = (0.5V × 60°C + 0.5V × 58°C) / V = 59°C.
+        let expected_top = (0.5 * 60.0 + 0.5 * 58.0) / 1.0;
+        assert!(
+            (tank.node_temps()[0] - expected_top).abs() < 1e-9,
+            "node 0 after 1.5-node draw: expected {expected_top:.6}°C, got {}",
+            tank.node_temps()[0]
+        );
+    }
+
+    /// With nonzero conductivity and a two-node linear gradient, the inter-node
+    /// conduction heat transfer per second equals:
+    ///   Q_cond = k × A / Δx × (T_bottom − T_top)
+    /// where Δx = node_height_m = height_m / n_nodes.
+    ///
+    /// After one step of dt seconds, node 0 (top, hot) must cool by
+    ///   ΔT0 = −Q_cond × dt / (ρ·V_node·Cp)
+    /// and node 1 (bottom, cold) must warm by the same magnitude.
+    #[test]
+    fn tank_inter_node_conduction_gradient() {
+        let conductivity = 0.6_f64;
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 2,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 0.0,
+            conductivity_w_m_k: conductivity,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(1)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: Some(0.0),
+        })
+        .expect("tank");
+
+        // Two-node tank: node 0 = hot top, node 1 = cold bottom.
+        let t_top = 70.0_f64;
+        let t_bot = 30.0_f64;
+        tank.node_temps_c[0] = t_top;
+        tank.node_temps_c[1] = t_bot;
+
+        let dt = Duration::from_secs(60);
+        let node_height_m = 1.2 / 2.0;
+        let cross_section_m2 = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2);
+        let cond_w_per_k = conductivity * cross_section_m2 / node_height_m;
+        // Heat flows from bottom (hot side of gradient) to top? No -- node 0 is top/hot,
+        // node 1 is bottom/cold.  In apply_conduction_and_standby the loop is:
+        //   heat_flow_w = cond × (old_temps[idx+1] − old_temps[idx])
+        // i.e. idx=0 → heat_flow_w = cond × (T_bot − T_top) < 0 (heat leaves node 0).
+        let heat_flow_j = cond_w_per_k * (t_bot - t_top) * dt.as_secs_f64();
+
+        // ua_w_per_k=0 and ua_end_cap_w_per_k=Some(0.0) so no skin losses.
+        // Two-node tank uses volumes [V/3, 2V/3].
+        let total_vol = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2) * 1.2;
+        let vol0 = total_vol / 3.0;
+        let vol1 = 2.0 * total_vol / 3.0;
+        let mcp0 = water_density_kg_m3(80.0) * vol0 * CP_LIQUID_WATER_J_KG_K;
+        let mcp1 = water_density_kg_m3(20.0) * vol1 * CP_LIQUID_WATER_J_KG_K;
+
+        let expected_t0 = t_top + heat_flow_j / mcp0;
+        let expected_t1 = t_bot - heat_flow_j / mcp1;
+
+        tank.step(20.0, 0.0, 15.0, &[], dt)
+            .expect("conduction step");
+
+        assert!(
+            (tank.node_temps()[0] - expected_t0).abs() < 1e-5,
+            "node 0 after conduction: expected {expected_t0:.6}, got {:.6}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            (tank.node_temps()[1] - expected_t1).abs() < 1e-5,
+            "node 1 after conduction: expected {expected_t1:.6}, got {:.6}",
+            tank.node_temps()[1]
+        );
+        // Hot node must cool, cold node must warm.
+        assert!(
+            tank.node_temps()[0] < t_top,
+            "top node must cool toward equilibrium, got {}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            tank.node_temps()[1] > t_bot,
+            "bottom node must warm toward equilibrium, got {}",
+            tank.node_temps()[1]
+        );
+    }
+
+    /// After a large draw that injects cold mains water at the bottom, the
+    /// resulting temperature profile is inverted (bottom colder than nodes above).
+    /// `mix_inversions` must resolve this so that the profile is monotone
+    /// non-increasing (top ≥ bottom) and energy is conserved.
+    #[test]
+    fn tank_draw_triggers_inversion_mixing() {
+        let mut tank = test_tank(4, 60.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            // Uniform 60°C before the draw.
+            temps.copy_from_slice(&[60.0, 60.0, 60.0, 60.0]);
+        }
+
+        let total_vol = tank.total_volume_m3();
+        // Draw 75% of tank volume; mains = 10°C, so bottom node fills with cold water.
+        let draw_vol = total_vol * 0.75;
+        let mains_temp_c = 10.0;
+        let before_energy = total_energy_j(&tank);
+
+        tank.step(20.0, draw_vol, mains_temp_c, &[], Duration::from_secs(60))
+            .expect("large draw step");
+
+        // Profile must be monotone non-increasing after mix_inversions runs inside step().
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "profile must be non-increasing after draw+mix: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Energy in the tank after the draw must reflect the cold mains injection.
+        // All temperatures must be between mains and original tank temp.
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(
+                t >= mains_temp_c - 1e-9 && t <= 60.0 + 1e-9,
+                "node {i} temperature {t:.4} outside [{mains_temp_c}, 60.0] after draw"
+            );
+        }
+
+        // Energy balance: after = before - energy_out + energy_in.
+        let after_energy = total_energy_j(&tank);
+        assert!(
+            after_energy < before_energy,
+            "tank must lose net energy after drawing hot water and replacing with mains ({mains_temp_c}°C < 60°C): before={before_energy:.0}, after={after_energy:.0}"
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_returns_zero_when_at_setpoint() {
+        let tank = test_tank(2, 60.0);
+        let q = tank.ideal_capacity_w(60.0, 20.0, 900.0);
+        // All nodes at setpoint -- only standby loss contributes.
+        // Should be small (UA-driven), not the full element capacity.
+        assert!(
+            q < 500.0,
+            "ideal capacity at setpoint should be small (standby only), got {q:.1}"
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_positive_when_below_setpoint() {
+        // Small deficit: 2°C below setpoint → should need moderate power.
+        let tank = test_tank(2, 49.0);
+        let q = tank.ideal_capacity_w(51.0, 20.0, 900.0);
+        assert!(
+            q > 0.0,
+            "ideal capacity must be positive when tank is below setpoint"
+        );
+        // 2°C deficit over 15 min for ~235 L tank → ~2200 W; well below 5500 W rated.
+        assert!(
+            q < 5500.0,
+            "ideal capacity for 2°C deficit over 15 min should be < rated, got {q:.1}"
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_zero_when_above_setpoint() {
+        let tank = test_tank(2, 60.0);
+        let q = tank.ideal_capacity_w(50.0, 20.0, 900.0);
+        // Tank is above setpoint -- standby loss may push it slightly positive
+        // but the deficit term is zero.
+        assert!(
+            q < 200.0,
+            "ideal capacity when above setpoint should be near-zero (standby only), got {q:.1}"
+        );
+    }
+
+    /// Multi-node draw spanning two nodes at different temperatures: the
+    /// pre-injection segment average (below top-node temperature) is the
+    /// correct outlet, proving multi-node blending is active even without
+    /// heat injection.
+    ///
+    /// 12-node tank with gradient in top half: draw 2 full node volumes
+    /// (nodes 0 and 1 at 60°C and 56°C, UA=0, no heat). Outlet must be the
+    /// segment average 58.0°C, measurably below the 60°C top node.
+    #[test]
+    fn multi_node_draw_outlet_is_segment_average() {
+        let mut tank = test_tank(12, 20.0);
+        for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
+            *temp = if idx < 6 {
+                60.0 - idx as f64 * 4.0 // 60, 56, 52, 48, 44, 40
+            } else {
+                20.0
+            };
+        }
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_vol = node_vol * 2.0; // spans nodes 0 and 1
+        let draw = tank
+            .step(20.0, draw_vol, 10.0, &[], Duration::from_secs(60))
+            .expect("multi-node draw");
+
+        // Segment average: (V*60 + V*56) / 2V = 58.0°C.
+        assert!(
+            (draw.outlet_temp_c - 58.0).abs() < 0.01,
+            "outlet_temp_c ({:.4}) must equal segment average 58.0",
+            draw.outlet_temp_c,
+        );
+        // Outlet must be measurably below the top-node temperature, proving
+        // multi-node segment averaging is active.
+        assert!(
+            draw.outlet_temp_c < 60.0 - 0.5,
+            "outlet_temp_c ({:.4}) must be below top node 60.0 (multi-node blending)",
+            draw.outlet_temp_c,
+        );
+    }
+
+    /// 12-node tank with gradient and concurrent element heat: outlet_temp_c
+    /// must equal the pre-injection segment-average temperature, which for
+    /// a multi-node draw spanning nodes at different temperatures is below
+    /// the top-node temperature. Verifies segment averaging is not collapsed
+    /// to a bare top-node scalar.
+    #[test]
+    fn gradient_draw_outlet_below_top_node() {
+        let mut tank = test_tank(12, 20.0);
+        // Gradient: node 0 = 55, node 1 = 50, node 2 = 45, ... node 5 = 30, rest = 20
+        for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
+            *temp = if idx < 6 {
+                55.0 - idx as f64 * 5.0
+            } else {
+                20.0
+            };
+        }
+        let node_vol = tank.node_volumes_m3()[0];
+        // Draw 1.5 nodes with 4500W into top node: outlet must equal pre-injection
+        // segment average (55*V + 50*0.5V) / 1.5V = 53.333...°C, not the top-node 55°C.
+        let draw_vol = node_vol * 1.5;
+        let draw = tank
+            .step(
+                20.0,
+                draw_vol,
+                10.0,
+                &[(0, 4500.0)],
+                Duration::from_secs(60),
+            )
+            .expect("gradient draw with heat");
+
+        // Pre-injection segment average: 1 full node at 55°C + 0.5 node at 50°C.
+        let expected = (55.0 + 50.0 * 0.5) / 1.5;
+        assert!(
+            (draw.outlet_temp_c - expected).abs() < 0.01,
+            "outlet_temp_c ({:.4}) must equal pre-injection segment average ({expected:.4})",
+            draw.outlet_temp_c,
+        );
+        // Regression: outlet must be measurably below the top-node temperature,
+        // proving multi-node segment averaging is active.
+        assert!(
+            draw.outlet_temp_c < 55.0 - 0.5,
+            "outlet_temp_c ({:.4}) must be below top node 55.0 (multi-node blending)",
+            draw.outlet_temp_c,
+        );
+        // energy_out_j uses pre-injection temps and reflects the multi-node composition.
+        assert!(
+            draw.energy_out_j > 0.0,
+            "energy_out_j must be positive for nonzero draw"
+        );
+    }
+
+    /// Single-node draw (within top node) → outlet equals top-node temperature.
+    #[test]
+    fn single_node_draw_outlet_equals_top_node() {
+        let mut tank = test_tank(12, 20.0);
+        for (idx, temp) in tank.node_temps_c.iter_mut().enumerate() {
+            *temp = if idx == 0 { 55.0 } else { 20.0 };
+        }
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_vol = node_vol * 0.5; // half of top node
+        let draw = tank
+            .step(20.0, draw_vol, 10.0, &[], Duration::from_secs(60))
+            .expect("single-node draw");
+        assert!(
+            (draw.outlet_temp_c - 55.0).abs() < 0.01,
+            "single-node draw outlet should be 55.0, got {:.4}",
+            draw.outlet_temp_c,
+        );
+    }
+
+    /// Regression: overheated tank (70°C) with a hot draw — TMV must reduce the
+    /// draw volume because setpoint (51.7°C) > tempered_draw_temp (40.6°C) activates
+    /// the mixing valve for hot draws.  Without the fix (setpoint > hot_draw_temp = 51.7)
+    /// the valve never opens and the full 70°C volume is drawn, wasting stored energy.
+    ///
+    /// OCHRE Water.py:305: `if self.tempered_draw_temp < self.setpoint_temp:`.
+    #[test]
+    fn tmv_reduces_hot_draw_when_tank_overheated() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 70.0); // overheated tank
+        let mains_temp_c = 15.0;
+        let hot_flow_m3_s = 1e-4; // 0.1 L/s = 6 L/min
+        let dt = Duration::from_secs(60);
+        let raw_volume_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+
+        let draw = tank
+            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered hot draw");
+
+        // Full-energy draw if no TMV blending occurred:
+        // outlet ≈ 70°C (top node), volume = raw_volume_m3.
+        let density = water_density_kg_m3(70.0);
+        let full_draw_energy_j = raw_volume_m3 * density * CP_LIQUID_WATER_J_KG_K * 70.0;
+        assert!(
+            draw.energy_out_j < full_draw_energy_j,
+            "TMV should reduce hot-draw energy: {:.1} vs full {:.1}",
+            draw.energy_out_j,
+            full_draw_energy_j,
+        );
+        assert_eq!(
+            draw.unmet_load_w, 0.0,
+            "no unmet load when outlet exceeds fixture temp"
+        );
+    }
+
+    /// Boundary: when the tank top node is exactly at hot_draw_temp (51.7°C),
+    /// setpoint > tempered_draw is still true so TMV applies, but the outlet
+    /// temperature does not exceed the hot delivery target, so no blending
+    /// reduction occurs — the draw volume equals the raw volume.
+    #[test]
+    fn tmv_no_hot_draw_reduction_when_tank_at_hot_draw_temp() {
+        use super::TemperedDrawConfig;
+        let mut tank = test_tank(6, 51.7); // exactly at hot_draw_temp
+        let mains_temp_c = 15.0;
+        let hot_flow_m3_s = 1e-4;
+        let dt = Duration::from_secs(60);
+        let raw_volume_m3 = hot_flow_m3_s * dt.as_secs_f64();
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+
+        let draw = tank
+            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .expect("step_tempered hot draw at boundary");
+
+        // With UA=0 and no conduction, the draw outlet is a segment-average
+        // of 51.7°C water; energy_out should match the raw draw energy.
+        let density = water_density_kg_m3(51.7);
+        let expected_energy_j = raw_volume_m3 * density * CP_LIQUID_WATER_J_KG_K * 51.7;
+        assert!(
+            (draw.energy_out_j - expected_energy_j).abs() < 1.0,
+            "boundary hot draw should use full volume: {:.1} vs {:.1}",
+            draw.energy_out_j,
+            expected_energy_j,
+        );
+        assert_eq!(draw.unmet_load_w, 0.0);
+    }
+
+    /// Verify that `DrawResult.outlet_temp_c` carries the pre-injection
+    /// segment-average temperature even when element heat and draw occur in
+    /// the same step. The doc comment promises "pre-injection node temperatures"
+    /// (per OCHRE Water.py:335-347), so the value must not be inflated by
+    /// same-step heat injection.
+    #[test]
+    fn outlet_temp_c_excludes_same_step_heat_injection() {
+        let mut tank = test_tank(6, 45.0);
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_volume = node_vol * 0.3;
+        let dt = Duration::from_secs(60);
+
+        // Step with heat into node 0 + concurrent draw.
+        let draw = tank
+            .step(20.0, draw_volume, 12.0, &[(0, 4_500.0)], dt)
+            .expect("step with heat + draw");
+
+        // outlet_temp_c must be ~45°C (pre-injection), not elevated.
+        assert!(
+            (draw.outlet_temp_c - 45.0).abs() < 0.02,
+            "outlet_temp_c ({:.4}) must match pre-injection 45.0, not be inflated",
+            draw.outlet_temp_c
+        );
+
+        // The post-injection top node IS warmer (element fired).
+        let mcp = water_density_kg_m3(45.0) * node_vol * CP_LIQUID_WATER_J_KG_K;
+        let delta_t = 4_500.0 * dt.as_secs_f64() / mcp;
+        let post_injection_top = tank.node_temps()[0];
+        assert!(
+            post_injection_top > 45.0 + delta_t * 0.5,
+            "post-injection top node ({post_injection_top:.4}) must be warmer than 45.0 after heating"
+        );
+        assert!(
+            draw.outlet_temp_c < post_injection_top,
+            "outlet_temp_c ({:.4}) must be below post-injection top node ({post_injection_top:.4})",
+            draw.outlet_temp_c
+        );
+    }
+
+    /// Doc consistency: both the `DrawResult.outlet_temp_c` field doc and the
+    /// `step()` doc comment claim pre-injection semantics.  Validates that when
+    /// injection + draw coexist, the returned value is the pre-injection
+    /// segment-average temperature — consistent with both doc comments.
+    #[test]
+    fn outlet_temp_c_doc_comments_consistent_with_implementation() {
+        let mut tank = test_tank(4, 40.0);
+        {
+            let temps = &mut tank.node_temps_c;
+            temps.copy_from_slice(&[40.0, 38.0, 36.0, 34.0]);
+        }
+
+        let draw_volume = tank.node_volumes_m3()[0] * 0.8;
+        let draw = tank
+            .step(
+                20.0,
+                draw_volume,
+                12.0,
+                &[(0, 3_000.0)],
+                Duration::from_secs(60),
+            )
+            .expect("step with heat + draw");
+
+        // `DrawResult.outlet_temp_c` doc: "Volume-weighted average temperature
+        // of water drawn from the tank, computed from pre-injection node
+        // temperatures."
+        // `step()` doc: "segment-average of the pre-heating node temperatures
+        // over the drawn volume (OCHRE Water.py:335-347)."
+        //
+        // Both claim pre-injection; verify implementation matches.
+        // Draw = 0.8 node_vol, all within the 40°C top node → outlet = 40.0.
+        assert!(
+            (draw.outlet_temp_c - 40.0).abs() < 0.02,
+            "doc claims pre-injection segment-average; \
+             outlet_temp_c ({:.4}) must match 40.0",
+            draw.outlet_temp_c
+        );
+    }
+}

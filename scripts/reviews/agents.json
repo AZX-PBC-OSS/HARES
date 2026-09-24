@@ -1,0 +1,62 @@
+{
+  "category": "agents",
+  "description": "Actors/agents — autonomous actors, dispatch ordering, and policy composition",
+  "reviews": [
+    {
+      "id": "agents-01",
+      "slug": "actor-trait-registry-dispatch",
+      "title": "Actor trait definition, registry, and dispatch ordering correctness",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-core/src/actor.rs crates/hares-core/src/actor_registry.rs crates/hares-core/src/engine.rs",
+      "prompt": "Review Actor trait: update() signature, access to dwelling state, ordering guarantees. Check actor_registry.rs: are actors registered in correct execution order? Does registry enforce that solver feedback runs before thermostat before BMS? Verify no actor observes stale state from another in same timestep. The Actor trait must provide a consistent interface where update() receives shared or exclusive access to Dwelling state with clear documentation about what state is readable vs. writable. Actor registry ordering must be enforced so that solvers feeding back to equipment run first, followed by thermostat setpoint determination, then BMS mode logic, then equipment stepping — any violation of this order risks physics inconsistencies. Check that the registry provides compile-time or runtime guarantees rather than relying on convention alone."
+    },
+    {
+      "id": "agents-02",
+      "slug": "occupant-actor",
+      "title": "Occupant actor: behavior model, stochastic schedules, gain computation",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py vendors/OCHRE/ochre/Models/Envelope.py",
+      "files": "crates/hares-core/src/actors/occupant.rs",
+      "prompt": "Occupant actor generates stochastic occupancy, lighting, appliance schedules. Is stochastic model correct? Does RNG use dwelling RNG consistently? Are per-occupant sensible/latent/fractional gains correctly computed? Occupancy count 0 must not produce negative gains. Verify workday/weekend patterns. The stochastic occupancy model must draw from a probability distribution that replicates real-world arrival/departure patterns with correct conditional dependencies between occupants. Lighting and appliance schedules must be correlated with occupancy status, not independent. Internal gain computation must separately track sensible convective, sensible radiative, and latent fractions as required by the thermal solver. RNG state must be drawn from the dwelling-level seeded RNG to guarantee deterministic reproducibility across runs. Zero-occupancy timesteps must produce exactly zero gains (not negative) for all gain types. Workday and weekend patterns must have distinct parameters as defined in the building's schedule inputs."
+    },
+    {
+      "id": "agents-03",
+      "slug": "ideal-thermostat-actor",
+      "title": "Ideal thermostat actor: setpoint determination and interaction with equipment FSM",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-core/src/actors/ideal_thermostat.rs crates/hares-equipment/src/hvac/thermostat.rs",
+      "prompt": "Ideal thermostat determines heating/cooling setpoints from schedules+external signals, feeds to equipment thermostats. Setpoint priority correct (override > schedule > static)? Multiple setpoint sources conflict? Deadband transition cleanly heat<->cool? no_space_heating/cooling sentinel values correct? The priority chain must be explicitly coded: an external override signal (e.g., DR event curtailment) takes highest priority, followed by occupant-defined schedule setpoints, with static defaults as fallback. When multiple setpoint sources exist simultaneously, the actor must apply a deterministic resolution strategy (not first-come or non-deterministic). The deadband between heating and cooling setpoints must prevent simultaneous heating and cooling calls — verify that if T_heat_setpoint + deadband > T_cool_setpoint, the actor produces a clear error or adjusts the wider setpoint to maintain the deadband. Sentinel values for 'no heating/cooling needed' must be unambiguously different from valid temperature values and must propagate correctly through the equipment dispatch path."
+    },
+    {
+      "id": "agents-04",
+      "slug": "solver-feedback-actor",
+      "title": "Solver feedback actor: ideal capacity dispatch bridge between solvers and equipment",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-core/src/actors/solver_feedback.rs crates/hares-envelope/src/thermal_solver/stepping.rs",
+      "prompt": "Critical bridge: collects ideal target setpoints from thermal equipment, runs thermal solver's solve_ideal_capacity_for_target(), dispatches IdealCapacity signals. Collect-and-solve ordering correct? Multi-zone with different setpoints? No equipment provides ideal target? IdealCapacity->equipment dispatch path does not loop? This actor is the key coupling point between the thermal domain solver and equipment models. It must first collect all equipment declared ideal load targets (heating/cooling to a thermostat setpoint) before invoking the solver, ensuring the solver sees a complete picture. For multi-zone dwellings, verify that setpoints from different zones are correctly associated with their respective thermal zones and that the solver computes per-zone ideal capacities. The case where no equipment provides an ideal target (e.g., free-floating dwelling with no HVAC) must not crash or produce NaN ideal capacities. The dispatch path from IdealCapacity output back into equipment models must be one-way and not create a feedback loop — the actor must ensure that the ideal capacity it computes does not itself trigger another round of equipment ideal target requests within the same timestep."
+    },
+    {
+      "id": "agents-05",
+      "slug": "dr-compliance-actor",
+      "title": "Demand response compliance actor: DR event enforcement",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-core/src/actors/dr_compliance.rs",
+      "prompt": "How does DR actor enforce power limits? Correctly dispatch PowerLimit/LoadFraction? Multiple DR events overlap? Interaction with BMS mode transitions? DR compliance must not violate equipment operational constraints. The DR compliance actor enforces demand response events by imposing power limits or load fraction targets on equipment. Verify that it correctly dispatches PowerLimit (absolute wattage cap) vs. LoadFraction (proportional curtailment) signals to the appropriate equipment. When multiple DR events overlap (e.g., a utility event and a local pricing event), the actor must apply the most restrictive limit rather than summing or alternating. Transitions into and out of DR events must not cause equipment state machine violations — verify that equipment can safely ramp down to meet curtailment targets without minimum runtime violations. The actor must not override critical operational constraints such as minimum compressor off-time or water heater safety limits. Verify that DR compliance state resets cleanly at event end with no residual curtailment persisting into normal operation."
+    },
+    {
+      "id": "agents-06",
+      "slug": "ev-driver-composer",
+      "title": "EV driver charging strategy composer: policy composition logic",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EV.py",
+      "files": "crates/hares-core/src/actors/ev_driver/composer.rs crates/hares-core/src/actors/ev_driver/*.rs",
+      "prompt": "Composer assembles charging policy from sub-strategies (departure, efficiency, preference, price, SOC gate, SOC target, solar, time window, V2G, V2H). Conflicting sub-strategies resolved correctly? Priority ordering? All sub-strategies return None case? The composer must evaluate each sub-strategy independently and combine their outputs into a single charging power or current command. When sub-strategies produce conflicting signals — e.g., price strategy wants to charge (low TOU) while SOC gate says battery is full — the composer must apply a documented priority hierarchy (safety constraints like SOC gate first, then user preference, then economic signals). Verify that if all sub-strategies return None (no opinion), the composer produces a safe default (zero power or maintain current state) rather than an undefined value. V2G and V2H strategies that discharge the battery must be gated by minimum SOC constraints to prevent deep discharge damage. The composed output must respect the EVSE's maximum power rating and the vehicle's onboard charger limits."
+    },
+    {
+      "id": "agents-07",
+      "slug": "ev-driver-sub-strategies",
+      "title": "EV driver sub-strategies: individual policy correctness",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EV.py",
+      "files": "crates/hares-core/src/actors/ev_driver/departure.rs crates/hares-core/src/actors/ev_driver/soc_target.rs crates/hares-core/src/actors/ev_driver/time_window.rs crates/hares-core/src/actors/ev_driver/price.rs crates/hares-core/src/actors/ev_driver/solar.rs crates/hares-core/src/actors/ev_driver/soc_gate.rs crates/hares-core/src/actors/ev_driver/efficiency.rs crates/hares-core/src/actors/ev_driver/preference.rs",
+      "prompt": "Review each EV sub-strategy: departure (log-normal params), SOC target (ready-by), time window (wrap-around), solar (forecast vs actual), price (TOU detection), SOC gate (hysteresis), efficiency, preference (user weighting). The departure strategy uses a log-normal distribution to model driver departure time uncertainty — verify the mean and standard deviation parameters produce physically reasonable departure windows and that the CDF is used correctly to compute expected departure probability per timestep. SOC target must compute a charging rate that achieves the desired SOC by the ready-by time using a linear ramp; verify that if ready-by has already passed, the strategy does not produce infinite or excessive power. Time window must handle midnight wrap-around correctly where the allowed charging window spans from 22:00 to 06:00. Solar strategy must distinguish between forecast PV (for planning) and actual available PV (for real-time dispatch) and not over-commit based on forecast. Price strategy must correctly identify current TOU period and assign the appropriate price signal. SOC gate must implement hysteresis: stop charging above an upper threshold and resume below a lower threshold to prevent rapid cycling. Efficiency strategy must account for charging losses. Preference strategy must apply user-defined weights to combine sub-strategy outputs correctly."
+    }
+  ]
+}

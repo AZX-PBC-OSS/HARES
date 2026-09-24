@@ -1,0 +1,70 @@
+{
+  "category": "weather",
+  "description": "Weather data pipeline: TMY3/EPW/PSM3/ResStock CSV parsing, solar position, sky/ground models",
+  "reviews": [
+    {
+      "id": "weather-01",
+      "slug": "resstock-ghi-no-upper-bound",
+      "title": "ResStock CSV GHI has no upper validation bound",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/resstock_csv.rs crates/hares-io/src/epw.rs crates/hares-io/src/tmy3.rs crates/hares-io/src/psm3.rs",
+      "prompt": "TMY3, EPW, and PSM3 parsers validate GHI <= 1500 W/m2. The ResStock CSV parser validates only >= 0, so a corrupted value of 10000 W/m2 would pass silently. Should the same upper bound be added? What is the expected maximum GHI for AMY 2018 (the ResStock weather year) at high-altitude snowy sites? Compare with EnergyPlus WeatherManager validation."
+    },
+    {
+      "id": "weather-02",
+      "slug": "brunt-idso-sky-emissivity-dead-code",
+      "title": "Brunt and Idso sky emissivity models implemented but unwired",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/epw.rs",
+      "prompt": "brunt_sky_emissivity() and idso_sky_emissivity() are fully implemented in epw.rs:629-647 but are marked #[allow(dead_code)] and not selectable via configuration. EnergyPlus exposes sky temperature model selection as a user option (Clark-Allen, Berdahl-Martin, Brunt, Idso). Is sky model selection planned for HARES? If not, should these functions be removed to reduce maintenance burden, or documented as future expansion points?"
+    },
+    {
+      "id": "weather-03",
+      "slug": "ground-temp-reference-depth",
+      "title": "Ground temperature reference depth mismatch vs OCHRE (0.5m vs 2m)",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-physics/src/ground.rs crates/hares-io/src/epw.rs",
+      "prompt": "HARES uses 0.5m shallow foundation depth for ground temperature amplitude damping (gm ~0.97), while OCHRE uses approximately 2m (gm ~0.80). The shallower depth produces less amplitude damping and larger seasonal temperature swings. Is 0.5m correct for slab-on-grade and basement wall heat transfer? Should the depth be configurable? Check EnergyPlus reference depths for Site:GroundTemperature:Shallow vs Deep."
+    },
+    {
+      "id": "weather-04",
+      "slug": "epw-midpoint-offset",
+      "title": "EPW hour-ending midpoint offset convention verification",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/epw.rs crates/hares-io/src/weather.rs",
+      "prompt": "EPW uses midpoint_offset_secs=1800 (30 min), matching TMY3 and ResStock CSV. PSM3 uses offset 0. Is the 30-minute offset correct for all EPW variants (TMY2, TMY3, AMY, future climate)? Does the offset interact correctly with daylight saving time and leap-year handling? Compare against EnergyPlus WeatherManager midpoint convention and OCHRE schedule.py timestamp handling."
+    },
+    {
+      "id": "weather-05",
+      "slug": "triangular-resampling-footgun",
+      "title": "Triangular solar resampling energy non-conservation",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/weather.rs",
+      "prompt": "Triangular resampling warns of approximately 12.5% energy shortfall due to its non-conservative interpolation kernel. The method is only reachable via ResampleOverrides, never as the default. EnergyPlus also uses triangular interpolation with the same known issue. Are there legitimate use cases where triangular resampling is preferable? Should this be removed as a footgun or kept with stronger, more prominent warnings about energy non-conservation?"
+    },
+    {
+      "id": "weather-06",
+      "slug": "resstock-constant-pressure",
+      "title": "ResStock CSV uses constant ISA atmospheric pressure for all timesteps",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/resstock_csv.rs",
+      "prompt": "A single ISA-derived atmospheric pressure value is used for all 8760 timesteps in ResStock CSV runs. Real atmospheric pressure varies +/-2-3 kPa diurnally and +/-5 kPa with weather systems. Quantify the impact on infiltration driving forces, HVAC fan curve power draw, and psychrometric properties. What do OCHRE and EnergyPlus do for ResStock weather — do they also use constant pressure?"
+    },
+    {
+      "id": "weather-07",
+      "slug": "missing-ddy-stat-format",
+      "title": "Missing .ddy and .stat weather file format support",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc vendors/EnergyPlus/weather/",
+      "files": "crates/hares-io/src/epw.rs crates/hares-io/src/weather.rs crates/hares-core/src/dwelling/autosize.rs",
+      "prompt": "EnergyPlus uses .stat files for annual statistics-driven sizing and .ddy files for design-day definitions. HARES parses EPW header DesignConditions but does not support standalone DDY/STAT file formats. Does ASHRAE 152 or Manual J sizing require dedicated design-day input, or are EPW header design conditions sufficient for residential HVAC autosizing?"
+    },
+    {
+      "id": "weather-08",
+      "slug": "weather-test-coverage-gaps",
+      "title": "Weather test coverage gaps: synthetic weather, edge-case formats",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/schedule.py",
+      "files": "crates/hares-io/src/epw.rs crates/hares-io/src/tmy3.rs crates/hares-io/src/psm3.rs crates/hares-io/src/resstock_csv.rs crates/hares-io/tests/weather_parity.rs crates/hares-io/tests/psm3_parity.rs crates/hares-io/tests/resstock_csv_midpoint_offset.rs crates/hares-io/tests/weather_reexport.rs",
+      "prompt": "Audit weather test coverage for edge cases: leap-year EPW (see vendors/EnergyPlus/weather/MadeUpLeapYear.epw), PSM3 5-minute resolution, EPW with missing optional columns, extreme temperatures (-50C to +55C), DST transition hours, and multi-year EPW files. Inventory all fixtures in tests/fixtures/weather/ (currently only test_location.epw) against the EnergyPlus weather test fixtures. Identify the highest-priority gaps."
+    }
+  ]
+}

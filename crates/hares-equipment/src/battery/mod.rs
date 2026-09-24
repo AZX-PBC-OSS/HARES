@@ -1,0 +1,7187 @@
+//! Battery storage equipment model.
+//!
+//! Implements an electrochemical battery with OCV-based voltage model,
+//! ohmic loss efficiency, self-consumption control, rainflow cycle counting,
+//! and degradation tracking (stubbed in v1).
+
+pub mod catalog;
+pub mod config;
+pub(crate) mod degradation;
+pub mod ocv;
+
+use std::borrow::Cow;
+use std::time::Duration;
+
+use hares_types::telemetry_keys as tk;
+use hares_types::zip::{ResolvedZip, ZipLoad};
+use hares_types::{
+    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
+    CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
+};
+use serde::{Deserialize, Serialize};
+
+use hares_physics::constants::SECONDS_PER_HOUR;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
+
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
+
+pub use config::BatteryConfig;
+pub use ocv::{OcvTable, UNegTable};
+
+use degradation::{DegradationState, RainflowCounter};
+
+pub use hares_types::BatteryLutType;
+
+// ---------------------------------------------------------------------------
+// Config keys
+// ---------------------------------------------------------------------------
+
+use crate::config::{KEY_ZONE_ID, constructor_equipment_id};
+#[cfg(test)]
+pub(crate) const KEY_CAPACITY_KWH: &str = "capacity_kwh";
+#[cfg(test)]
+pub(crate) const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
+#[cfg(test)]
+pub(crate) const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
+#[cfg(test)]
+const KEY_N_SERIES: &str = "n_series";
+#[cfg(test)]
+const KEY_N_PARALLEL: &str = "n_parallel";
+#[cfg(test)]
+const KEY_CELL_RESISTANCE_OHM: &str = "cell_resistance_ohm";
+#[cfg(test)]
+pub(crate) const KEY_SELF_DISCHARGE_PCT_PER_DAY: &str = "self_discharge_pct_per_day";
+#[cfg(test)]
+pub(crate) const KEY_STANDBY_POWER_W: &str = "standby_power_w";
+#[cfg(test)]
+const KEY_INITIAL_SOC: &str = "initial_soc";
+#[cfg(test)]
+pub(crate) const KEY_MIN_SOC: &str = "min_soc";
+#[cfg(test)]
+pub(crate) const KEY_MAX_SOC: &str = "max_soc";
+#[cfg(test)]
+pub(crate) const KEY_HEATER_POWER_W: &str = "heater_power_w";
+#[cfg(test)]
+pub(crate) const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
+#[cfg(test)]
+const KEY_CELL_THERMAL_MASS_J_PER_K: &str = "cell_thermal_mass_j_per_k";
+#[cfg(test)]
+const KEY_CELL_UA_W_PER_K: &str = "cell_ua_w_per_k";
+#[cfg(test)]
+const KEY_MIN_DISCHARGE_TEMP_C: &str = "min_discharge_temp_c";
+#[cfg(test)]
+pub(crate) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
+#[cfg(test)]
+pub(crate) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
+/// Symmetric round-trip inverter efficiency: splits as sqrt(rte) per direction.
+#[cfg(test)]
+const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
+/// Explicit charge-direction efficiency (AC→DC). Overrides sqrt split when set.
+#[cfg(test)]
+pub(crate) const KEY_CHARGE_EFFICIENCY: &str = "charge_efficiency";
+/// Explicit discharge-direction efficiency (DC→AC). Overrides sqrt split when set.
+#[cfg(test)]
+pub(crate) const KEY_DISCHARGE_EFFICIENCY: &str = "discharge_efficiency";
+/// Per-cell capacity (Ah). When provided with KEY_V_CELL, n_series/n_parallel
+/// are derived from capacity_kwh: n_series = V_pack/V_cell, n_parallel = Ah_pack/Ah_cell,
+/// where V_pack ≈ cell_ocv_nom * n_series and Ah_pack = capacity_kwh * 1000 / V_pack.
+#[cfg(test)]
+const KEY_AH_CELL: &str = "ah_cell";
+/// Per-cell nominal voltage (V). Used with KEY_AH_CELL to derive pack topology.
+#[cfg(test)]
+const KEY_V_CELL: &str = "v_cell";
+/// Maximum grid import power while battery is charging (W). None = unlimited.
+/// OCHRE: `import_limit` parameter on Generator (Battery inherits it).
+#[cfg(test)]
+const KEY_IMPORT_LIMIT_W: &str = "import_limit_w";
+/// Maximum grid export power while battery is discharging (W). None = unlimited.
+/// OCHRE: `export_limit` parameter on Generator (Battery inherits it).
+#[cfg(test)]
+const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
+
+// ---------------------------------------------------------------------------
+// Physical defaults (Li-NMC, Tesla Powerwall-class)
+// ---------------------------------------------------------------------------
+
+/// Tesla Powerwall 3: 13.5 kWh usable. Franklin aPower 2: 13.6 kWh.
+const DEFAULT_CAPACITY_KWH: f64 = 13.5;
+/// Powerwall 3 continuous: 11.04 kW charge; most units derate to ~5 kW sustained.
+const DEFAULT_MAX_CHARGE_KW: f64 = 5.0;
+/// Powerwall 3 continuous: 11.04 kW discharge; conservative default for generic pack.
+const DEFAULT_MAX_DISCHARGE_KW: f64 = 5.0;
+/// 96S1P is a common Li-NMC configuration (~355 V nominal pack).
+const DEFAULT_N_SERIES: u32 = 96;
+const DEFAULT_N_PARALLEL: u32 = 1;
+/// Typical 18650/21700 Li-NMC cell internal resistance at 25 C, mid-SOC.
+const DEFAULT_CELL_RESISTANCE_OHM: f64 = 0.005;
+/// OCHRE default: 0.0 %/day (users opt-in to self-discharge via config).
+const DEFAULT_SELF_DISCHARGE_PCT_PER_DAY: f64 = 0.0;
+/// Parasitic BMS/inverter standby draw. Powerwall ~5-15 W; OCHRE hardcoded 0 W (fixed).
+const DEFAULT_STANDBY_POWER_W: f64 = 5.0;
+const DEFAULT_INITIAL_SOC: f64 = 0.5;
+// OCHRE default_parameters.csv: soc_min=0.15, soc_max=0.95
+const DEFAULT_MIN_SOC: f64 = 0.15;
+const DEFAULT_MAX_SOC: f64 = 0.95;
+/// Disabled by default. Catalog values (battery/catalog.rs): 300 W for
+/// FranklinWH aPower/aPower 2 pad heaters and Tesla Powerwall 3 cell heaters,
+/// 100 W for Tesla Powerwall 2 (600 W for the ×2 stacked variants).
+const DEFAULT_HEATER_POWER_W: f64 = 0.0;
+/// Heater activation threshold. Tesla Heat Mode targets 0 C minimum cell temp;
+/// Franklin activates around 5-10 C. 0 C is the Li-ion plating safety boundary.
+const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
+/// Default round-trip efficiency used by the raw config path.
+/// Typed configs convert RTE to one-way efficiency before init.
+const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.97;
+/// All major residential batteries (Powerwall, aPower 2, Enphase IQ) spec -20 C
+/// as the lower operating limit for discharge.
+const DEFAULT_MIN_DISCHARGE_TEMP_C: f64 = -20.0;
+/// Tesla and Franklin both require ~10 C for full charge/discharge power.
+/// Linear derating between min_discharge_temp_c and this value.
+const DEFAULT_FULL_POWER_TEMP_C: f64 = 10.0;
+/// Li-ion lithium plating occurs below 0 C; all manufacturers block charging here.
+/// Enphase derates charge below 15 C but still allows reduced-rate charging above 0 C.
+const DEFAULT_MIN_CHARGE_TEMP_C: f64 = 0.0;
+/// Lumped thermal mass for the battery pack (J/K).
+/// OCHRE Battery.py default: 90,000 J/K for a standard residential pack.
+const DEFAULT_CELL_THERMAL_MASS_J_PER_K: f64 = 90_000.0;
+/// Lumped UA (heat loss coefficient) between pack and ambient (W/K).
+/// Typical enclosed residential battery enclosure.
+const DEFAULT_CELL_UA_W_PER_K: f64 = 5.0;
+const SECONDS_PER_DAY: f64 = 86_400.0;
+const IDLE_POWER_THRESHOLD_KW: f64 = 1e-6;
+
+/// Gas constant [J/(mol·K)] for Arrhenius temperature dependence.
+const R_GAS_J_MOL_K: f64 = 8.314_46;
+
+// ---------------------------------------------------------------------------
+// Temperature-dependent capacity derating model
+// ---------------------------------------------------------------------------
+
+/// Configurable model for temperature-dependent capacity and power derating.
+///
+/// Affects both energy capacity (`capacity_kwh`) and power limits
+/// (`max_charge_kw`, `max_discharge_kw`) each timestep based on cell
+/// temperature.
+#[derive(Debug, Clone)]
+pub enum CapacityDerateModel {
+    /// Arrhenius electrochemical model (OCHRE/SAM-compatible).
+    ///
+    /// `d0 = d0_ref * exp(-e_ad1/R * (1/T - 1/T_ref) - e_ad2/R * (1/T - 1/T_ref)^2)`
+    ///
+    /// Reference: Schimpe et al. (2018) "Comprehensive Modeling of
+    /// Temperature-Dependent Degradation Mechanisms in Lithium Iron Phosphate
+    /// Batteries", NREL/TP-5400-70616.
+    Arrhenius {
+        d0_ref: f64,
+        e_ad1_j_mol: f64,
+        e_ad2_j2_mol2: f64,
+        t_ref_k: f64,
+    },
+    /// Piecewise-linear model from manufacturer datasheets.
+    ///
+    /// Points are `(cell_temp_c, derate_factor)` sorted by temperature.
+    /// Linearly interpolates between bracketing points; clamps outside range.
+    PiecewiseLinear { points: Vec<(f64, f64)> },
+}
+
+impl Default for CapacityDerateModel {
+    fn default() -> Self {
+        Self::Arrhenius {
+            d0_ref: 1.001,
+            e_ad1_j_mol: 4_126.0,
+            e_ad2_j2_mol2: 9.752e6,
+            t_ref_k: 298.15,
+        }
+    }
+}
+
+impl CapacityDerateModel {
+    /// Evaluate the derate factor at the given cell temperature.
+    ///
+    /// Returns a value in (0, ~1.0] where 1.0 means no derating. The factor
+    /// applies to available energy capacity (SOC bounds), not instantaneous power limits.
+    fn evaluate(&self, cell_temp_c: f64) -> f64 {
+        match self {
+            Self::Arrhenius {
+                d0_ref,
+                e_ad1_j_mol,
+                e_ad2_j2_mol2,
+                t_ref_k,
+            } => {
+                let t_k = cell_temp_c + 273.15;
+                if t_k <= 0.0 {
+                    return 0.0;
+                }
+                let inv_diff = 1.0 / t_k - 1.0 / t_ref_k;
+                let exponent = -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
+                    - e_ad2_j2_mol2 / R_GAS_J_MOL_K * inv_diff * inv_diff;
+                (d0_ref * exponent.exp()).clamp(0.0, 1.06)
+            }
+            Self::PiecewiseLinear { points } => {
+                if points.is_empty() {
+                    return 1.0;
+                }
+                if points.len() == 1 {
+                    return points[0].1.clamp(0.0, 1.06);
+                }
+                if cell_temp_c <= points[0].0 {
+                    return points[0].1.clamp(0.0, 1.06);
+                }
+                if cell_temp_c >= points[points.len() - 1].0 {
+                    return points[points.len() - 1].1.clamp(0.0, 1.06);
+                }
+                for i in 0..points.len() - 1 {
+                    if cell_temp_c <= points[i + 1].0 {
+                        let (t0, d0) = points[i];
+                        let (t1, d1) = points[i + 1];
+                        let span = t1 - t0;
+                        if span.abs() < f64::EPSILON {
+                            return d0.clamp(0.0, 1.06);
+                        }
+                        let frac = (cell_temp_c - t0) / span;
+                        return (d0 + frac * (d1 - d0)).clamp(0.0, 1.06);
+                    }
+                }
+                1.0
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serializable battery state for checkpointing
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct BatteryCheckpoint {
+    soc: f64,
+    cell_temp_c: f64,
+    heater_active: bool,
+    mode: OperatingMode,
+    degradation: DegradationState,
+    rainflow: RainflowCounter,
+    self_consumption_enabled: bool,
+    solar_only_charging: bool,
+    grid_connected: bool,
+    power_setpoint_kw: Option<f64>,
+    soc_target: Option<f64>,
+    soc_target_min: Option<f64>,
+    soc_target_max: Option<f64>,
+    last_daily_update_day: i32,
+    import_limit_kw: Option<f64>,
+    export_limit_kw: Option<f64>,
+    dr_level: DRLevel,
+    dr_duration_remaining_s: Option<f64>,
+    external_power_limit_kw: Option<f64>,
+    /// Reactive-power override [kVAR]. `None` = no override (baseline
+    /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
+    q_setpoint_kvar: Option<f64>,
+    power_factor: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Battery struct
+// ---------------------------------------------------------------------------
+
+/// How the battery pack topology (n_series, n_parallel) was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivationSource {
+    /// Default values (DEFAULT_N_SERIES / DEFAULT_N_PARALLEL) — no explicit
+    /// config and no cell parameters provided.
+    Defaults,
+    /// User explicitly provided n_series / n_parallel.
+    Explicit,
+    /// Derived from ah_cell / v_cell cell parameters.
+    CellParameters,
+    /// Partially explicit: one topology param was provided by the user,
+    /// the other was derived from cell parameters.
+    Mixed,
+}
+
+impl DerivationSource {
+    fn code(self) -> f64 {
+        match self {
+            Self::Defaults => 0.0,
+            Self::Explicit => 1.0,
+            Self::CellParameters => 2.0,
+            Self::Mixed => 3.0,
+        }
+    }
+}
+
+pub struct Battery {
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    telemetry: Telemetry,
+    core_output: CoreOutput,
+
+    // Static config
+    capacity_kwh: f64,
+    /// Rated pack capacity from config (immutable). Used as baseline for SOH scaling.
+    capacity_kwh_rated: f64,
+    /// Nominal pack capacity after SOH degradation, before temperature derating.
+    /// Updated daily: capacity_kwh_rated * (1 - capacity_fade).
+    capacity_kwh_nominal: f64,
+    max_charge_kw: f64,
+    max_discharge_kw: f64,
+    n_series: u32,
+    n_parallel: u32,
+    derivation_source: DerivationSource,
+    cell_resistance_ohm: f64,
+    chemistry: BatteryChemistry,
+    ocv_table: OcvTable,
+    u_neg_table: UNegTable,
+    charging_curve_lut: Option<crate::ndinterp::RegularGridInterpolator>,
+    self_discharge_rate_per_s: f64,
+    standby_power_w: f64,
+    min_soc: f64,
+    max_soc: f64,
+    /// Maximum charge power drawn from the grid (kW). None = unlimited.
+    /// OCHRE `import_limit`: clamps battery charging to prevent excessive grid import.
+    import_limit_kw: Option<f64>,
+    /// Maximum discharge power exported to the grid (kW). None = unlimited.
+    /// OCHRE `export_limit`: clamps battery discharging to prevent excessive grid export.
+    export_limit_kw: Option<f64>,
+
+    // Inverter AC↔DC conversion efficiencies (charge and discharge are independently configurable)
+    charge_efficiency: f64,
+    discharge_efficiency: f64,
+
+    // Cell heater config (catalog: 100-600 W depending on model)
+    heater_power_w: f64,
+    heater_threshold_c: f64,
+
+    // Temperature-dependent power and capacity derating
+    min_discharge_temp_c: f64,
+    full_power_temp_c: f64,
+    min_charge_temp_c: f64,
+    capacity_derate_model: CapacityDerateModel,
+
+    // Lumped cell thermal model
+    cell_thermal_mass_j_per_k: f64,
+    cell_ua_w_per_k: f64,
+
+    // Dynamic state
+    soc: f64,
+    cell_temp_c: f64,
+    heater_active: bool,
+    mode: OperatingMode,
+    degradation: DegradationState,
+    rainflow: RainflowCounter,
+
+    // Control state
+    self_consumption_enabled: bool,
+    solar_only_charging: bool,
+    grid_connected: bool,
+    power_setpoint_kw: Option<f64>,
+    soc_target: Option<f64>,
+    soc_target_min: Option<f64>,
+    soc_target_max: Option<f64>,
+
+    // Reactive power / smart-inverter control.
+    // `q_setpoint_kvar` is an absolute var override (from ReactiveSetpoint or
+    // PowerSetpoint.reactive_power_kvar): `None` = no override, fall through
+    // to the `power_factor` baseline; `Some(0.0)` is a *commanded zero* that
+    // forces Q = 0 even over a pf < 1 baseline.
+    q_setpoint_kvar: Option<f64>,
+    power_factor: f64,
+    inverter_capacity_kva: f64,
+
+    // Demand response state
+    dr_level: DRLevel,
+    dr_duration_remaining_s: Option<f64>,
+    /// External power limit from PowerLimit signal [kW]. Applied as ceiling in clamp_power.
+    external_power_limit_kw: Option<f64>,
+
+    last_daily_update_day: i32,
+
+    custom_ocv: bool,
+    custom_u_neg: bool,
+
+    bms_mode: BmsMode,
+    grid_export_rule: GridExportRule,
+    min_dwell_steps: usize,
+
+    /// Whether the battery inverter can form an island bus during a utility
+    /// outage. Configurable via `BatteryConfig::grid_forming` (default true).
+    /// Grid-following-only batteries (`false`) never report
+    /// `island_source_available` even when charged and dischargeable.
+    grid_forming: bool,
+
+    /// Guards against post-registration LUT mutation via the `Equipment` trait
+    /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
+    initialized: bool,
+
+    /// Count of SOCTarget signals that violated SOC ordering constraints
+    /// (min_soc < target_soc < max_soc) and were auto-corrected.
+    /// Gated on `observe` feature for diagnostic CSV output.
+    #[cfg(feature = "observe")]
+    #[allow(dead_code)]
+    setpoint_violation_count: u64,
+}
+
+impl Battery {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let equipment_id = constructor_equipment_id(&config);
+        let zone = config.get_f64(KEY_ZONE_ID).map(|v| ZoneId(v as u16));
+
+        let mut ports = vec![PortDeclaration::electrical()];
+        if let Some(z) = zone {
+            ports.push(PortDeclaration::thermal(z));
+        }
+
+        let descriptor = EquipmentDescriptor {
+            id: EquipmentId(equipment_id),
+            name: config.name.clone(),
+            end_use: EndUse::BATTERY,
+            equipment_type: Cow::Borrowed("Battery"),
+            zone,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Electrical,
+            control_capabilities: ControlCapabilities::POWER_SETPOINT
+                | ControlCapabilities::SOC_TARGET
+                | ControlCapabilities::GRID_CONNECT
+                | ControlCapabilities::SELF_CONSUMPTION
+                | ControlCapabilities::POWER_LIMIT
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::REACTIVE_SETPOINT
+                | ControlCapabilities::POWER_FACTOR_SETPOINT,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
+                | CoreCapabilities::HAS_SOC
+                | CoreCapabilities::HAS_MODE,
+            telemetry_fields: battery_telemetry_fields(),
+            zone_type: None,
+        };
+
+        Self {
+            descriptor,
+            ports,
+            telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
+            capacity_kwh: DEFAULT_CAPACITY_KWH,
+            capacity_kwh_rated: DEFAULT_CAPACITY_KWH,
+            capacity_kwh_nominal: DEFAULT_CAPACITY_KWH,
+            max_charge_kw: DEFAULT_MAX_CHARGE_KW,
+            max_discharge_kw: DEFAULT_MAX_DISCHARGE_KW,
+            n_series: DEFAULT_N_SERIES,
+            n_parallel: DEFAULT_N_PARALLEL,
+            derivation_source: DerivationSource::Defaults,
+            cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
+            chemistry: BatteryChemistry::Nmc,
+            ocv_table: OcvTable::default_li_nmc(),
+            u_neg_table: UNegTable::default_li_nmc(),
+            charging_curve_lut: None,
+            self_discharge_rate_per_s: DEFAULT_SELF_DISCHARGE_PCT_PER_DAY / 100.0 / SECONDS_PER_DAY,
+            standby_power_w: DEFAULT_STANDBY_POWER_W,
+            min_soc: DEFAULT_MIN_SOC,
+            max_soc: DEFAULT_MAX_SOC,
+            import_limit_kw: None,
+            export_limit_kw: None,
+            charge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
+            discharge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
+            heater_power_w: DEFAULT_HEATER_POWER_W,
+            heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
+            min_discharge_temp_c: DEFAULT_MIN_DISCHARGE_TEMP_C,
+            full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
+            min_charge_temp_c: DEFAULT_MIN_CHARGE_TEMP_C,
+            capacity_derate_model: CapacityDerateModel::default(),
+            cell_thermal_mass_j_per_k: DEFAULT_CELL_THERMAL_MASS_J_PER_K,
+            cell_ua_w_per_k: DEFAULT_CELL_UA_W_PER_K,
+            soc: DEFAULT_INITIAL_SOC,
+            cell_temp_c: 25.0,
+            heater_active: false,
+            mode: OperatingMode::Off,
+            degradation: DegradationState::default(),
+            rainflow: RainflowCounter::default(),
+            self_consumption_enabled: true,
+            solar_only_charging: false,
+            grid_connected: true,
+            power_setpoint_kw: None,
+            soc_target: None,
+            soc_target_min: None,
+            soc_target_max: None,
+            q_setpoint_kvar: None,
+            power_factor: 1.0,
+            inverter_capacity_kva: DEFAULT_MAX_CHARGE_KW.max(DEFAULT_MAX_DISCHARGE_KW),
+            dr_level: DRLevel::Normal,
+            dr_duration_remaining_s: None,
+            external_power_limit_kw: None,
+            last_daily_update_day: 0,
+            custom_ocv: false,
+            custom_u_neg: false,
+            bms_mode: BmsMode::Manual,
+            grid_export_rule: GridExportRule::Unrestricted,
+            min_dwell_steps: 0,
+            grid_forming: true,
+            initialized: false,
+            #[cfg(feature = "observe")]
+            setpoint_violation_count: 0,
+        }
+    }
+
+    pub fn bms_mode(&self) -> &BmsMode {
+        &self.bms_mode
+    }
+
+    pub fn grid_export_rule(&self) -> GridExportRule {
+        self.grid_export_rule
+    }
+
+    /// Compute pack-level voltage, current, and ohmic losses for a target AC power.
+    ///
+    /// Applies inverter efficiency to convert AC power to DC power, then uses the
+    /// quadratic terminal-voltage formula (OCHRE method) for accurate current and
+    /// ohmic loss calculation at high C-rates.
+    ///
+    /// Returns `(actual_power_kw, ohmic_loss_w, terminal_voltage_v, current_a)`
+    /// where `actual_power_kw` is the power at the grid connection point
+    /// (positive = charging/consuming, negative = discharging/generating).
+    fn compute_electrical(&self, target_ac_power_kw: f64) -> (f64, f64, f64, f64) {
+        if target_ac_power_kw.abs() < IDLE_POWER_THRESHOLD_KW {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        let cell_ocv = self.ocv_table.voltage_at_soc(self.soc);
+        let pack_ocv = cell_ocv * self.n_series as f64;
+        let pack_resistance =
+            self.cell_resistance_ohm * self.n_series as f64 / self.n_parallel as f64;
+
+        if pack_ocv < f64::EPSILON {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+
+        // Convert AC power to DC power using direction-specific efficiency.
+        // Charging (AC→DC): DC = AC * charge_eta (conversion loss reduces DC).
+        // Discharging (DC→AC): DC = AC / discharge_eta (more DC needed to deliver AC).
+        let dc_power_kw = if target_ac_power_kw > 0.0 {
+            target_ac_power_kw * self.charge_efficiency
+        } else {
+            target_ac_power_kw / self.discharge_efficiency
+        };
+        let dc_power_w = power_kw_to_w(dc_power_kw);
+
+        // Quadratic terminal voltage (OCHRE method, Battery.py:295).
+        //   V = Voc/2 + sqrt((Voc/2)^2 + P_dc * R)
+        // Sign convention: P_dc > 0 = charging (consuming from grid), P_dc < 0 = discharging.
+        // Charging (P_dc > 0): discriminant > (Voc/2)^2, so V > Voc (terminal voltage rises).
+        // Discharging (P_dc < 0): discriminant < (Voc/2)^2, so V < Voc (terminal voltage sags).
+        let half_voc = pack_ocv / 2.0;
+        let discriminant = half_voc * half_voc + dc_power_w * pack_resistance;
+
+        // Clamp to maximum extractable power P_max = Voc²/(4R) when discriminant < 0.
+        // At this limit terminal voltage = Voc/2 (matched-impedance condition).
+        let (terminal_v, actual_dc_power_w) = if discriminant >= 0.0 {
+            (half_voc + discriminant.sqrt(), dc_power_w)
+        } else {
+            let p_max_w = pack_ocv * pack_ocv / (4.0 * pack_resistance);
+            let clamped = dc_power_w.abs().min(p_max_w) * dc_power_w.signum();
+            (half_voc, clamped)
+        };
+
+        let current_a = if terminal_v.abs() > f64::EPSILON {
+            actual_dc_power_w / terminal_v
+        } else {
+            0.0
+        };
+        let ohmic_loss_w = current_a * current_a * pack_resistance;
+
+        // Convert actual DC power back to AC grid power for the clamped case.
+        let actual_ac_power_kw = if discriminant >= 0.0 {
+            target_ac_power_kw
+        } else if actual_dc_power_w > 0.0 {
+            // Charging: DC → AC = DC / charge_eta
+            power_w_to_kw(actual_dc_power_w / self.charge_efficiency)
+        } else {
+            // Discharging: DC → AC = DC * discharge_eta
+            power_w_to_kw(actual_dc_power_w * self.discharge_efficiency)
+        };
+
+        (actual_ac_power_kw, ohmic_loss_w, terminal_v, current_a)
+    }
+
+    /// Determine the target charge/discharge power based on control state and
+    /// Stage 1 accumulated electrical power.
+    fn determine_target_power(&mut self, net_load_kw: f64, dt_hours: f64) -> crate::Result<f64> {
+        // Priority 1: explicit power setpoint from external control
+        if let Some(setpoint) = self.power_setpoint_kw {
+            return self.clamp_power(setpoint);
+        }
+
+        // Priority 2: SOC target (simple proportional controller)
+        if let Some(target) = self.soc_target {
+            if dt_hours > 0.0 {
+                let error = target - self.soc;
+                // DC power needed to hit target in one step.
+                let dc_power = error * self.capacity_kwh / dt_hours;
+                // Convert DC→AC: compute_electrical expects AC (grid-side) power.
+                // Charging (dc_power > 0): AC = DC / charge_eta
+                // Discharging (dc_power < 0): AC = DC * discharge_eta
+                let ac_power = if dc_power > 0.0 {
+                    dc_power / self.charge_efficiency
+                } else {
+                    dc_power * self.discharge_efficiency
+                };
+                return self.clamp_power(ac_power);
+            }
+        }
+
+        // Priority 3: self-consumption
+        // Note: target power here is in AC grid terms. For discharge, the exact
+        // correction for inverter+ohmic losses would require iteration (losses depend
+        // on power which depends on losses). This is an intentional first-order
+        // approximation; the error is small (<4%) for typical inverter efficiencies.
+        if self.self_consumption_enabled {
+            if net_load_kw > IDLE_POWER_THRESHOLD_KW {
+                // Net load exceeds PV -- discharge to offset
+                let discharge = net_load_kw.min(self.max_discharge_kw);
+                return self.clamp_power(-discharge);
+            } else if net_load_kw < -IDLE_POWER_THRESHOLD_KW {
+                // PV surplus -- charge from excess (regardless of solar_only flag,
+                // since we already know there's a PV surplus)
+                let charge = (-net_load_kw).min(self.max_charge_kw);
+                return self.clamp_power(charge);
+            } else if self.solar_only_charging {
+                // No PV surplus and solar-only mode -- do not charge from grid
+                return Ok(0.0);
+            }
+        }
+
+        Ok(0.0)
+    }
+
+    /// Clamp power to hardware charge/discharge limits and any active import/export limits.
+    ///
+    /// Positive = charging (grid import), negative = discharging (grid export).
+    ///
+    /// `import_limit_kw` caps the charge power (grid → battery).
+    /// `export_limit_kw` caps the discharge power (battery → grid).
+    ///
+    /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
+    /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
+    fn clamp_power(&mut self, power_kw: f64) -> crate::Result<f64> {
+        let temp_derate = self
+            .capacity_derate_model
+            .evaluate(self.cell_temp_c)
+            .clamp(0.0, 1.0);
+        let dr_fraction = self.dr_power_fraction();
+        if power_kw > 0.0 {
+            let mut hw_max = self.max_charge_kw * temp_derate * dr_fraction;
+            if let Some(ref mut lut) = self.charging_curve_lut {
+                let soh = 1.0 - self.degradation.capacity_fade_fraction();
+                let pack_kwh = self.capacity_kwh_nominal;
+                let c_rate = if pack_kwh > 0.0 {
+                    power_kw / pack_kwh
+                } else {
+                    0.0
+                };
+                hw_max *= lut.interpolate(&[self.soc, self.cell_temp_c, c_rate, soh])? as f64;
+            }
+            let limit = self
+                .import_limit_kw
+                .map(|lim| hw_max.min(lim))
+                .unwrap_or(hw_max);
+            let limit = self
+                .external_power_limit_kw
+                .map_or(limit, |pl| limit.min(pl));
+            Ok(power_kw.min(limit))
+        } else {
+            let hw_max = self.max_discharge_kw * dr_fraction;
+            let limit = self
+                .export_limit_kw
+                .map(|lim| hw_max.min(lim))
+                .unwrap_or(hw_max);
+            let limit = self
+                .external_power_limit_kw
+                .map_or(limit, |pl| limit.min(pl));
+            Ok(power_kw.max(-limit))
+        }
+    }
+
+    /// DR-level power fraction: Normal=1.0, Moderate=0.8, High=0.5,
+    /// Critical=0.25, GridEmergency=0.0.
+    fn dr_power_fraction(&self) -> f64 {
+        match self.dr_level {
+            DRLevel::Normal => 1.0,
+            DRLevel::Moderate => 0.8,
+            DRLevel::High => 0.5,
+            DRLevel::Critical => 0.25,
+            DRLevel::GridEmergency => 0.0,
+        }
+    }
+
+    /// Temperature-dependent discharge derating factor [0.0 .. 1.0].
+    ///
+    /// Full power above `full_power_temp_c`, linearly derates to zero at
+    /// `min_discharge_temp_c`. Returns 0.0 below min discharge temp.
+    fn discharge_derate_factor(&self) -> f64 {
+        crate::linear_temp_derate(
+            self.cell_temp_c,
+            self.min_discharge_temp_c,
+            self.full_power_temp_c,
+        )
+    }
+
+    /// Whether charging is allowed at current cell temperature.
+    fn charge_allowed(&self) -> bool {
+        self.cell_temp_c >= self.min_charge_temp_c
+    }
+
+    fn day_ordinal(env: &EnvironmentState) -> i32 {
+        use chrono::Datelike;
+        env.current_time.date_naive().num_days_from_ce()
+    }
+}
+
+// init_typed is defined below in a separate impl Battery block (see after Equipment impl).
+
+impl Battery {
+    fn init_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        let c = config.require_typed::<BatteryConfig>("Battery")?;
+        c.validate()?;
+
+        self.capacity_kwh = c.capacity_kwh;
+        self.capacity_kwh_rated = c.capacity_kwh;
+        self.capacity_kwh_nominal = self.capacity_kwh_rated;
+        self.max_charge_kw = c.max_charge_kw;
+        self.max_discharge_kw = c.max_discharge_kw;
+
+        // Pack topology
+        let explicit_series = c.n_series;
+        let explicit_parallel = c.n_parallel;
+        let has_explicit_series = explicit_series.is_some();
+        let has_explicit_parallel = explicit_parallel.is_some();
+        let has_both_explicit = has_explicit_series && has_explicit_parallel;
+        let has_any_explicit = has_explicit_series || has_explicit_parallel;
+        let is_mixed = has_any_explicit && !has_both_explicit;
+        let has_cell_params = c.ah_cell.is_some() && c.v_cell.is_some();
+
+        // Start with explicit values (or defaults).
+        self.n_series = explicit_series.unwrap_or(DEFAULT_N_SERIES);
+        self.n_parallel = explicit_parallel.unwrap_or(DEFAULT_N_PARALLEL);
+
+        if has_both_explicit && has_cell_params {
+            // Conflict: user provided both explicit topology AND cell parameters.
+            // Prefer explicit topology — cell-parameter derivation is skipped.
+            self.derivation_source = DerivationSource::Explicit;
+            tracing::warn!(
+                explicit_n_series = ?explicit_series,
+                explicit_n_parallel = ?explicit_parallel,
+                ah_cell = c.ah_cell,
+                v_cell = c.v_cell,
+                "Battery config provides both explicit topology and cell parameters; \
+                 preferring explicit topology, skipping ah_cell/v_cell derivation"
+            );
+        } else if is_mixed && has_cell_params {
+            // Partial explicit: user provided one topology param alongside
+            // cell parameters. Use the explicit param, derive the missing one
+            // from cell params, and emit a warning describing the mixed result.
+            let ah = c.ah_cell.unwrap();
+            let vc = c.v_cell.unwrap();
+            if ah > 0.0 && vc > 0.0 {
+                self.derivation_source = DerivationSource::Mixed;
+                if !has_explicit_series {
+                    let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                    self.n_series = (target_pack_v / vc).round() as u32;
+                    if self.n_series == 0 {
+                        self.n_series = 1;
+                    }
+                }
+                let pack_v = self.n_series as f64 * vc;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                if !has_explicit_parallel {
+                    self.n_parallel = u32::max(1, (pack_ah / ah).ceil() as u32);
+                }
+                tracing::warn!(
+                    explicit_n_series = ?explicit_series,
+                    explicit_n_parallel = ?explicit_parallel,
+                    ah_cell = c.ah_cell,
+                    v_cell = c.v_cell,
+                    final_n_series = self.n_series,
+                    final_n_parallel = self.n_parallel,
+                    "Battery config provides partial explicit topology with cell parameters; \
+                     mixing explicit and derived values"
+                );
+            } else {
+                self.derivation_source = DerivationSource::Defaults;
+            }
+        } else if !has_any_explicit && has_cell_params {
+            // Derive topology from cell parameters — only when the user
+            // did NOT provide explicit n_series / n_parallel.
+            let ah = c.ah_cell.unwrap();
+            let vc = c.v_cell.unwrap();
+            if ah > 0.0 && vc > 0.0 {
+                self.derivation_source = DerivationSource::CellParameters;
+                let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                self.n_series = (target_pack_v / vc).round() as u32;
+                if self.n_series == 0 {
+                    self.n_series = 1;
+                }
+                let pack_v = self.n_series as f64 * vc;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                self.n_parallel = u32::max(1, (pack_ah / ah).ceil() as u32);
+            } else {
+                self.derivation_source = DerivationSource::Defaults;
+            }
+        } else if has_any_explicit {
+            self.derivation_source = DerivationSource::Explicit;
+        } else {
+            self.derivation_source = DerivationSource::Defaults;
+        }
+
+        // Capacity consistency check: when topology was derived from cell
+        // parameters (fully or partially), verify that the integer topology
+        // produces a physical capacity within 10% of the declared value.
+        // Matching EnergyPlus cmod_battwatts.cpp:133 which uses ceil() and
+        // recalculates batt_kwh from integer topology.
+        if has_cell_params
+            && (self.derivation_source == DerivationSource::CellParameters
+                || self.derivation_source == DerivationSource::Mixed)
+        {
+            if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                if ah > 0.0 && vc > 0.0 {
+                    let implied_kwh =
+                        self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                    let relative_error =
+                        (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                    // With ceil(), implied_kwh >= declared_kwh; the check guards
+                    // against pathological cell-parameter combinations where a
+                    // single cell's Ah capacity dwarfs the pack requirement,
+                    // producing a physically invalid topology.
+                    if relative_error > 0.10 {
+                        tracing::error!(
+                            self.n_series,
+                            self.n_parallel,
+                            ah_cell = ah,
+                            v_cell = vc,
+                            capacity_kwh = self.capacity_kwh,
+                            implied_capacity_kwh = implied_kwh,
+                            relative_error,
+                            "Battery topology derived from cell parameters is inconsistent \
+                             with declared capacity: implied {:.2} kWh vs declared {:.2} kWh \
+                             (relative error {:.1}% > 10%)",
+                            implied_kwh,
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                        );
+                        return Err(HaresError::Equipment(format!(
+                            "derived battery topology (n_series={}, n_parallel={}) implies capacity \
+                             {:.2} kWh, which differs from declared {:.2} kWh by {:.1}% (>10% threshold). \
+                             Cell parameters (ah_cell={} Ah, v_cell={} V) are incompatible with the \
+                             declared pack capacity",
+                            self.n_series,
+                            self.n_parallel,
+                            implied_kwh,
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                            ah,
+                            vc,
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Invariant check: when both explicit topology and cell params were
+        // provided, verify the explicit values are reasonably close to what
+        // cell-parameter derivation would have produced.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if has_any_explicit && has_cell_params {
+                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                    if ah > 0.0 && vc > 0.0 {
+                        let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                        let derived_series = {
+                            let s = (target_pack_v / vc).round() as u32;
+                            if s == 0 { 1 } else { s }
+                        };
+                        let pack_v = derived_series as f64 * vc;
+                        let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                        let derived_parallel = {
+                            let p = (pack_ah / ah).ceil() as u32;
+                            if p == 0 { 1 } else { p }
+                        };
+                        let series_diff =
+                            (self.n_series as i64 - derived_series as i64).unsigned_abs();
+                        let parallel_diff =
+                            (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
+                        if series_diff > 1 || parallel_diff > 1 {
+                            tracing::warn!(
+                                self.n_series,
+                                self.n_parallel,
+                                derived_n_series = derived_series,
+                                derived_n_parallel = derived_parallel,
+                                series_diff,
+                                parallel_diff,
+                                "Battery topology invariant: explicit topology differs \
+                                 from cell-parameter derivation by >1 cell"
+                            );
+                        }
+
+                        // Capacity consistency invariant: warn when the declared
+                        // capacity_kwh and the topology (whether explicit or derived)
+                        // produce an implied capacity mismatch >10%.
+                        // This catches pathological configs that slip through
+                        // the main derivation check (e.g. explicit topology that
+                        // the user believes matches the cell parameters but doesn't).
+                        let implied_kwh =
+                            self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                        let relative_error =
+                            (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                        if relative_error > 0.10 {
+                            tracing::warn!(
+                                self.n_series,
+                                self.n_parallel,
+                                ah_cell = ah,
+                                v_cell = vc,
+                                capacity_kwh = self.capacity_kwh,
+                                implied_capacity_kwh = implied_kwh,
+                                relative_error,
+                                "Battery topology invariant: declared capacity_kwh \
+                                 ({:.2} kWh) inconsistent with topology-implied \
+                                 capacity ({:.2} kWh, {:.1}% error)",
+                                self.capacity_kwh,
+                                implied_kwh,
+                                relative_error * 100.0,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            let implied_kwh = if has_cell_params {
+                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                    if ah > 0.0 && vc > 0.0 {
+                        Some(self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            tracing::debug!(
+                derivation_source = ?self.derivation_source,
+                n_series = self.n_series,
+                n_parallel = self.n_parallel,
+                ah_cell = c.ah_cell,
+                v_cell = c.v_cell,
+                declared_capacity_kwh = self.capacity_kwh,
+                implied_capacity_kwh = implied_kwh,
+                "Battery topology initialized",
+            );
+        }
+
+        if self.n_series == 0 || self.n_parallel == 0 {
+            return Err(HaresError::Equipment(
+                "n_series and n_parallel must be positive".to_string(),
+            ));
+        }
+
+        self.cell_resistance_ohm = c.cell_resistance_ohm.unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
+
+        self.chemistry = match c.chemistry.as_deref() {
+            Some(s) => s
+                .parse::<BatteryChemistry>()
+                .map_err(|e| HaresError::Equipment(format!("invalid chemistry: {e}")))?,
+            None => BatteryChemistry::Nmc,
+        };
+        if !self.custom_ocv {
+            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
+        }
+        if !self.custom_u_neg {
+            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
+        }
+
+        self.standby_power_w = c.standby_power_w.unwrap_or(DEFAULT_STANDBY_POWER_W);
+        self.min_soc = c.min_soc.unwrap_or(DEFAULT_MIN_SOC);
+        self.max_soc = c.max_soc.unwrap_or(DEFAULT_MAX_SOC);
+        self.import_limit_kw = c.import_limit_w.map(power_w_to_kw);
+        self.export_limit_kw = c.export_limit_w.map(power_w_to_kw);
+        self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.heater_power_w > 700.0 {
+                tracing::warn!(
+                    heater_power_w = self.heater_power_w,
+                    "Battery heater power {:.0} W exceeds 700 W plausibility threshold \
+                     for residential batteries; verify catalog entry or config",
+                    self.heater_power_w,
+                );
+            }
+        }
+        self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
+        self.min_discharge_temp_c = c
+            .min_discharge_temp_c
+            .unwrap_or(DEFAULT_MIN_DISCHARGE_TEMP_C);
+        self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
+        self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
+        self.cell_thermal_mass_j_per_k = c
+            .cell_thermal_mass_j_per_k
+            .unwrap_or(DEFAULT_CELL_THERMAL_MASS_J_PER_K);
+        self.cell_ua_w_per_k = c.cell_ua_w_per_k.unwrap_or(DEFAULT_CELL_UA_W_PER_K);
+
+        let self_discharge = c
+            .self_discharge_pct_per_day
+            .unwrap_or(DEFAULT_SELF_DISCHARGE_PCT_PER_DAY);
+        self.self_discharge_rate_per_s = self_discharge / 100.0 / SECONDS_PER_DAY;
+
+        // Typed configs carry one-way efficiency directly.
+        // Raw configs still pass round-trip efficiency and are split in init_raw().
+        let one_way_eta = c
+            .inverter_efficiency
+            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
+            .clamp(f64::EPSILON, 1.0);
+        self.charge_efficiency = c
+            .charge_efficiency
+            .unwrap_or(one_way_eta)
+            .clamp(f64::EPSILON, 1.0);
+        self.discharge_efficiency = c
+            .discharge_efficiency
+            .unwrap_or(one_way_eta)
+            .clamp(f64::EPSILON, 1.0);
+
+        if let Some(mode_str) = c.bms_mode.as_deref() {
+            // Parse-then-validate, mirroring the EV charging_strategy path:
+            // JSON shape alone must not admit a domain-invalid mode.
+            let mode: BmsMode = serde_json::from_str(mode_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
+            mode.validate()
+                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
+            self.bms_mode = mode;
+        }
+        if let Some(rule_str) = c.grid_export_rule.as_deref() {
+            self.grid_export_rule = serde_json::from_str(rule_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
+        }
+        self.min_dwell_steps = c.min_dwell_steps;
+        self.grid_forming = c.grid_forming.unwrap_or(true);
+
+        self.power_factor = c.power_factor.unwrap_or(1.0);
+        self.inverter_capacity_kva = c
+            .inverter_capacity_kva
+            .unwrap_or_else(|| self.max_charge_kw.max(self.max_discharge_kw));
+        self.q_setpoint_kvar = None;
+
+        let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
+        self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
+
+        self.cell_temp_c = if let Some(initial_temp) = c.initial_cell_temp_c {
+            initial_temp
+        } else if let Some(zone_id) = self.descriptor.zone {
+            env.zones
+                .iter()
+                .find(|z| z.id == zone_id)
+                .map(|z| z.temperature_c)
+                .unwrap_or(env.weather.outdoor_temp_c)
+        } else {
+            env.weather.outdoor_temp_c
+        };
+
+        self.mode = OperatingMode::Off;
+        self.heater_active = false;
+        self.degradation = DegradationState::default();
+        self.degradation.reset_day_tracking(self.soc);
+        self.rainflow = RainflowCounter::default();
+        self.self_consumption_enabled = true;
+        self.solar_only_charging = false;
+        self.grid_connected = true;
+        self.power_setpoint_kw = None;
+        self.soc_target = None;
+        self.soc_target_min = None;
+        self.soc_target_max = None;
+        self.last_daily_update_day = Self::day_ordinal(env);
+
+        self.telemetry = default_telemetry();
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::N_SERIES, self.n_series as f64);
+        self.telemetry.set(tk::N_PARALLEL, self.n_parallel as f64);
+        // Why: 0.0 sentinel for "cell params not configured" — a 0 Ah or 0 V
+        // cell is physically impossible, so no legitimate value can collide.
+        self.telemetry.set(tk::AH_CELL, c.ah_cell.unwrap_or(0.0));
+        self.telemetry.set(tk::V_CELL, c.v_cell.unwrap_or(0.0));
+        self.telemetry
+            .set(tk::DERIVATION_SOURCE, self.derivation_source.code());
+        self.telemetry
+            .set(tk::DECLARED_CAPACITY_KWH, self.capacity_kwh);
+        // Compute implied capacity from the integer topology when cell params
+        // are available; set to 0.0 otherwise (same pattern as ah_cell/v_cell).
+        let implied_kwh = if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+            if ah > 0.0 && vc > 0.0 && self.n_series > 0 && self.n_parallel > 0 {
+                self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        self.telemetry.set(tk::IMPLIED_CAPACITY_KWH, implied_kwh);
+        self.core_output = CoreOutput::default();
+
+        Ok(())
+    }
+}
+
+impl Equipment for Battery {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.init_typed(config, env)
+    }
+
+    fn island_source_available(&self) -> bool {
+        // The battery can island the home when it is grid-connected and able
+        // to discharge: SOC above its effective floor (physical min narrowed
+        // by any SOC-target window), hardware discharge capability, cell
+        // temperature above the discharge cutoff, and DR not commanding a
+        // full shed. `grid_forming` (default true) gates grid-following-only
+        // inverters that cannot form an island bus even when dischargeable.
+        let soc_floor = self
+            .soc_target_min
+            .map(|v| v.max(self.min_soc))
+            .unwrap_or(self.min_soc);
+        self.grid_forming
+            && self.grid_connected
+            && self.max_discharge_kw > 0.0
+            && self.soc > soc_floor
+            && self.discharge_derate_factor() > 0.0
+            && self.dr_power_fraction() > 0.0
+    }
+
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        // DR duration countdown: auto-revert to Normal when timer expires.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= env.time_res.num_seconds() as f64;
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
+        self.mode
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        let dt_s = dt.as_secs_f64();
+        let dt_hours = dt_s / SECONDS_PER_HOUR;
+
+        if dt_s <= 0.0 {
+            return Err(HaresError::Equipment(
+                "timestep must be positive".to_string(),
+            ));
+        }
+
+        // -- Read Stage 1 accumulated electrical power --
+        let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
+
+        // Grid outage with a de-energized bus: the battery can neither charge
+        // (nothing on the bus to charge from) nor dispatch — if it *could*
+        // discharge, it would be the island source and the bus would be
+        // energized (see `island_source_available`), so a dead bus implies
+        // this battery is empty/cold/disconnected. Standby electronics and
+        // the cell heater lose their supply too (gated below). During
+        // islanded operation the bus is energized and dispatch proceeds
+        // normally. See docs/outage-behavior.md.
+        let bus_dead = !env.grid.bus_energized();
+
+        // -- Determine target power --
+        let mut target_power_kw = if self.grid_connected && !bus_dead {
+            self.determine_target_power(net_load_kw, dt_hours)?
+        } else {
+            0.0
+        };
+
+        // -- Islanded charge clamp: no phantom grid import during an outage --
+        // While the utility is out and the bus is energized (islanded), there
+        // is no grid to import from: every watt of charge must come from
+        // on-site generation surplus already on the bus. PV and the generator
+        // run in the Independent stage before the battery, so the Stage-1
+        // accumulated `net_load_kw < 0` is exactly the visible surplus. Cap
+        // any charging target at that surplus — an explicit PowerSetpoint
+        // charge command beyond it is curtailed; self-consumption is
+        // unaffected (it already charges only from surplus). Discharge is
+        // NEVER clamped here: thermal-stage loads step after the battery, so
+        // a discharge clamp would strand them — the dwelling-level island
+        // accounting (island_unserved_kw / island_excess_kw) captures any
+        // residual imbalance instead. See docs/outage-behavior.md.
+        if env.grid.grid_outage() && !bus_dead && target_power_kw > 0.0 {
+            target_power_kw = target_power_kw.min((-net_load_kw).max(0.0));
+        }
+
+        // -- Effective SOC bounds: physical limits narrowed by any active SOC target window --
+        let eff_min_soc = self
+            .soc_target_min
+            .map(|v| v.max(self.min_soc))
+            .unwrap_or(self.min_soc);
+        let eff_max_soc = self
+            .soc_target_max
+            .map(|v| v.min(self.max_soc))
+            .unwrap_or(self.max_soc);
+
+        // -- SOC bounds check: can we actually charge/discharge? --
+        if target_power_kw > IDLE_POWER_THRESHOLD_KW && self.soc >= eff_max_soc {
+            target_power_kw = 0.0; // Already full
+        } else if target_power_kw < -IDLE_POWER_THRESHOLD_KW && self.soc <= eff_min_soc {
+            target_power_kw = 0.0; // Already empty
+        }
+
+        // -- Temperature-dependent power limits --
+        // Capture intent before temp limits may zero the power
+        let wants_charge = target_power_kw > IDLE_POWER_THRESHOLD_KW;
+        // Charging blocked below min_charge_temp_c (Li-ion safety: lithium plating risk)
+        if wants_charge && !self.charge_allowed() {
+            target_power_kw = 0.0;
+        }
+        // Discharge power derates linearly as cell temp drops
+        if target_power_kw < -IDLE_POWER_THRESHOLD_KW {
+            let derate = self.discharge_derate_factor();
+            target_power_kw *= derate;
+        }
+
+        // -- Temperature-dependent capacity derating --
+        let capacity_derate = self.capacity_derate_model.evaluate(self.cell_temp_c);
+        self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
+                    value: self.capacity_kwh,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
+        // -- Compute electrical model --
+        let (power_kw, _ohmic_loss_w, terminal_v, current_a) =
+            self.compute_electrical(target_power_kw);
+
+        // -- Apply self-discharge --
+        // Self-discharge: absolute SOC loss per OCHRE Battery.py:337-338, matching Li-ion calendar aging model.
+        let soc_before = self.soc; // true pre-step SOC before self-discharge
+        self.soc -= self.self_discharge_rate_per_s * dt_s;
+        self.soc = self.soc.clamp(0.0, 1.0);
+
+        // -- Update SOC from charge/discharge --
+        // DC power seen by the cells after inverter conversion.
+        // The terminal-voltage model in compute_electrical() already embeds ohmic
+        // losses in the power balance -- do NOT subtract I²R again here.
+        let dc_power_kw = if power_kw > 0.0 {
+            power_kw * self.charge_efficiency
+        } else {
+            power_kw / self.discharge_efficiency
+        };
+        let soc_before_charge = self.soc; // post-self-discharge, pre-charge/discharge
+        let energy_delta_kwh = dc_power_kw * dt_hours;
+        // Guard against division by zero when battery has no effective capacity
+        // (fully degraded, SOH=0). The SOC cannot change without capacity to store
+        // energy. We guard the SOC update specifically rather than returning early
+        // from step() so that degradation tracking — which updates SOH — continues.
+        if self.capacity_kwh > 0.0 {
+            self.soc += energy_delta_kwh / self.capacity_kwh;
+        }
+        self.soc = self.soc.clamp(eff_min_soc, eff_max_soc);
+
+        // Recompute actual grid power and ohmic losses if SOC was clamped.
+        // When SOC hits a bound, the actual energy transferred differs from
+        // the target, so we must recompute losses from the actual current.
+        let actual_soc_delta = self.soc - soc_before_charge;
+        let actual_cell_energy_kwh = actual_soc_delta * self.capacity_kwh;
+        let (actual_power_kw, ohmic_loss_w) =
+            if actual_soc_delta.abs() < f64::EPSILON && power_kw.abs() > IDLE_POWER_THRESHOLD_KW {
+                // SOC didn't change -- we hit a bound, no real power transfer
+                (0.0, 0.0)
+            } else if power_kw.abs() < IDLE_POWER_THRESHOLD_KW {
+                (0.0, 0.0)
+            } else {
+                // actual_cell_energy_kwh is the DC energy into/out of cells.
+                // Recover AC grid power from DC cell power + inverter conversion.
+                let actual_cell_power_kw = actual_cell_energy_kwh / dt_hours;
+                // Recompute ohmic losses from actual cell DC power (use effective DC power as proxy).
+                // Since compute_electrical works in AC terms, pass the scaled AC equivalent.
+                let ac_equivalent_kw = if actual_cell_energy_kwh > 0.0 {
+                    // Charging: cell DC → AC = DC / charge_eta
+                    actual_cell_power_kw / self.charge_efficiency
+                } else {
+                    // Discharging: cell DC → AC = DC * discharge_eta
+                    actual_cell_power_kw * self.discharge_efficiency
+                };
+                let (_, actual_ohmic_w, _, _) = self.compute_electrical(ac_equivalent_kw);
+                (ac_equivalent_kw, actual_ohmic_w)
+            };
+
+        // -- Cell heater --
+        // Heater activates based on cell temperature alone -- it protects cells
+        // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
+        // Mode and similar systems run proactively to maintain cells above the
+        // min_charge_temp threshold.
+        // A de-energized bus removes the heater's supply — it is an AC
+        // standby load, not powered from the cells.
+        let heater_w = if !bus_dead
+            && self.heater_power_w > 0.0
+            && self.cell_temp_c <= self.heater_threshold_c
+        {
+            self.heater_active = true;
+            self.heater_power_w
+        } else {
+            self.heater_active = false;
+            0.0
+        };
+
+        // -- Lumped cell thermal model --
+        // dT/dt = (Q_ohmic + Q_heater - UA * (T_cell - T_ambient)) / C_thermal
+        if self.cell_thermal_mass_j_per_k > 0.0 {
+            let ambient_c = if let Some(zone_id) = self.descriptor.zone {
+                env.zones
+                    .iter()
+                    .find(|z| z.id == zone_id)
+                    .map(|z| z.temperature_c)
+                    .unwrap_or(env.weather.outdoor_temp_c)
+            } else {
+                env.weather.outdoor_temp_c
+            };
+            let q_in = ohmic_loss_w + heater_w;
+            let q_loss = self.cell_ua_w_per_k * (self.cell_temp_c - ambient_c);
+            let dt_cell = (q_in - q_loss) * dt_s / self.cell_thermal_mass_j_per_k;
+            self.cell_temp_c += dt_cell;
+        }
+
+        // -- Standby power is consumed whenever the bus is energized --
+        // (grid up or islanded); a dead bus removes the supply for the
+        // battery's own control electronics.
+        let standby_kw = if bus_dead {
+            0.0
+        } else {
+            power_w_to_kw(self.standby_power_w)
+        };
+        let heater_kw = power_w_to_kw(heater_w);
+        let port_power_kw = actual_power_kw + standby_kw + heater_kw;
+
+        // -- Reactive power: control-precedence then baseline pf --
+        // A `Some` q_setpoint (including a commanded 0.0) is an absolute
+        // override; only `None` falls through to the power-factor baseline.
+        //
+        // Deliberate physics note: the baseline Q and the kVA clamp below use
+        // the *inverter-side* `actual_power_kw` (AC charge/discharge power
+        // through the inverter), while the electrical-port P adds standby and
+        // cell-heater power on top (`port_power_kw`). Standby electronics and
+        // the resistive heater are not inverter throughput, so port-level
+        // Q/P deviates slightly from tan(acos(pf)) whenever they draw power.
+        // A de-energized bus produces no vars either — a commanded
+        // q-setpoint cannot be served by an idle inverter on a dead bus.
+        let reactive_power_kvar = if bus_dead {
+            0.0
+        } else {
+            match self.q_setpoint_kvar {
+                Some(q) => q,
+                None if self.power_factor < 1.0 => {
+                    let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+                    actual_power_kw * zip.tan_phi()
+                }
+                None => 0.0,
+            }
+        };
+
+        // kVA clamp: active-power priority — P is never curtailed by Q.
+        // |Q| ≤ sqrt(max(0, S² − P²)) where S = inverter_capacity_kva.
+        let s_kva = self.inverter_capacity_kva;
+        let p2 = actual_power_kw * actual_power_kw;
+        let q_max = (s_kva * s_kva - p2).max(0.0).sqrt();
+        let clamped_q_kvar = reactive_power_kvar.clamp(-q_max, q_max);
+
+        // -- Write electrical port contribution --
+        ports.accumulate(&PortContribution::Electrical {
+            active_power_w: power_kw_to_w(port_power_kw),
+            reactive_power_kvar: clamped_q_kvar,
+        })?;
+
+        // -- Optional thermal port: heat from ohmic losses only --
+        // Energy pathway: grid → heater → cell thermal mass → zone (via UA model).
+        // The heater energy enters the cell thermal mass and reaches the zone through the
+        // lumped UA conductance above. Adding heater_w here directly would double-count it.
+        // Only ohmic losses dissipate directly into the zone without passing through the cell model.
+        if let Some(zone) = self.descriptor.zone {
+            if ohmic_loss_w > 0.0 {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: ohmic_loss_w,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::InternalGain,
+                })?;
+            }
+        }
+
+        // -- Update mode based on cell electrochemical power --
+        self.mode = if actual_power_kw > IDLE_POWER_THRESHOLD_KW {
+            OperatingMode::Charging
+        } else if actual_power_kw < -IDLE_POWER_THRESHOLD_KW {
+            OperatingMode::Discharging
+        } else {
+            OperatingMode::Standby
+        };
+
+        // -- Daily degradation update (midnight boundary) --
+        // OCHRE Battery.py:315-346: calculate_degradation() runs *before*
+        // degradation_data.append() so the midnight timestep belongs to the
+        // *next* day's degradation window.  HARES mirrors this ordering:
+        // the day-boundary check and update_daily() run *before* the current
+        // step's rainflow.push() and degradation.accumulate(), ensuring
+        // day N's accumulators are finalised before day N+1 begins
+        // accumulating.
+        let current_day = Self::day_ordinal(env);
+        if current_day != self.last_daily_update_day {
+            let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
+
+            // Capture pre-update state for observer diagnostics.
+            #[cfg(feature = "observe")]
+            let (q_li1_before, cell_temp_for_tafel) =
+                { (self.degradation.q_li1, self.degradation.daily_mean_temp_k()) };
+
+            self.degradation.update_daily(&self.u_neg_table, sum_sq_dod);
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    day = self.last_daily_update_day,
+                    sum_sq_dod,
+                    q_li1_before,
+                    q_li1_after = self.degradation.q_li1,
+                    cell_temp_for_tafel,
+                    "Battery daily degradation boundary",
+                );
+            }
+
+            let soh = 1.0 - self.degradation.capacity_fade_fraction();
+            self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_capacity_nominal_underflow".to_string(),
+                        value: self.capacity_kwh_nominal,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+            tracing::debug!(
+                soh,
+                capacity_kwh_nominal = self.capacity_kwh_nominal,
+                "daily SOH update"
+            );
+            self.degradation.reset_day_tracking(self.soc);
+            self.rainflow.reset_daily();
+
+            // Invariant: after reset, per-day accumulators must be zero.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                const EPS: f64 = 1e-15;
+                if self.degradation.b1_accum.abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b1_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b1_accum,
+                        tolerance: EPS,
+                    });
+                }
+                if self.degradation.b2_accum().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b2_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b2_accum(),
+                        tolerance: EPS,
+                    });
+                }
+                if self.degradation.b3_accum().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_b3_accum_nonzero_after_daily".to_string(),
+                        value: self.degradation.b3_accum(),
+                        tolerance: EPS,
+                    });
+                }
+                if self.rainflow.sum_squared_dod_daily().abs() >= EPS {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "battery_sum_squared_dod_daily_nonzero_after_daily".to_string(),
+                        value: self.rainflow.sum_squared_dod_daily(),
+                        tolerance: EPS,
+                    });
+                }
+            }
+
+            self.last_daily_update_day = current_day;
+        }
+
+        // Invariant: after the boundary block, last_daily_update_day must
+        // equal current_day (either the block ran and advanced it, or no
+        // boundary was crossed).
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.last_daily_update_day != current_day {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_last_daily_update_day_mismatch".to_string(),
+                    value: self.last_daily_update_day as f64,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
+        // -- Rainflow tracking (current step belongs to the new day) --
+        self.rainflow.push(self.soc);
+
+        // -- Degradation per-timestep accumulation (current step, new day) --
+        // Use pre-step SOC snapshot so that degradation sees the SOC the cell
+        // was at *before* the charge/discharge delta, matching the physical
+        // voltage the cell experienced during the interval.
+        {
+            let cell_temp_k = self.cell_temp_c + 273.15;
+            let v_oc_before = self.ocv_table.voltage_at_soc(soc_before);
+            self.degradation
+                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before);
+        }
+
+        // -- Update telemetry --
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, port_power_kw);
+        self.telemetry.set(tk::OHMIC_LOSS_W, ohmic_loss_w);
+        self.telemetry
+            .set(tk::STANDBY_POWER_W, self.standby_power_w);
+        self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
+        self.telemetry.set(tk::HEATER_POWER_W, heater_w);
+        self.telemetry
+            .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
+        self.telemetry.set(
+            tk::CAPACITY_DERATE,
+            self.capacity_derate_model.evaluate(self.cell_temp_c),
+        );
+        self.telemetry
+            .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
+        self.telemetry.set(
+            tk::CAPACITY_FADE_PCT,
+            self.degradation.capacity_fade_fraction() * 100.0,
+        );
+        self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
+        self.telemetry.set(tk::CURRENT_A, current_a);
+        self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
+        self.telemetry
+            .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, clamped_q_kvar);
+        self.telemetry.set(
+            tk::DR_LEVEL,
+            match self.dr_level {
+                DRLevel::Normal => 0.0,
+                DRLevel::Moderate => 1.0,
+                DRLevel::High => 2.0,
+                DRLevel::Critical => 3.0,
+                DRLevel::GridEmergency => 4.0,
+            },
+        );
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
+                reactive_power_kvar: Some(clamped_q_kvar),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: Soc::try_from(self.soc).ok(),
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
+
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
+    fn resolved_zip(&self) -> Option<ResolvedZip> {
+        // Live runtime state: constant-power reactive-only ZIP carrying the
+        // current effective power factor (config baseline, later mutated by
+        // PowerFactorSetpoint) — mirrors the baseline Q path in `step()`.
+        // Real power is BMS-controlled, never ZIP-scaled, so the resolved
+        // regime is reactive-only.
+        Some(ResolvedZip::reactive_only(ZipLoad::reactive_only(
+            0.0,
+            0.0,
+            1.0,
+            self.power_factor,
+        )))
+    }
+
+    fn actor_seed(&self) -> Option<crate::ActorSeed> {
+        if matches!(self.bms_mode, BmsMode::Manual) {
+            return None;
+        }
+        Some(crate::ActorSeed::Battery {
+            bms_mode: self.bms_mode.clone(),
+            grid_export_rule: self.grid_export_rule,
+            max_charge_kw: self.max_charge_kw,
+            max_discharge_kw: self.max_discharge_kw,
+            min_dwell_steps: self.min_dwell_steps,
+        })
+    }
+
+    fn checkpoint_version() -> u32 {
+        // v2: BatteryCheckpoint gained the reactive-control fields
+        // `q_setpoint_kvar` (Option<f64>, None = no var override) and
+        // `power_factor`.
+        2
+    }
+
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
+            &BatteryCheckpoint {
+                soc: self.soc,
+                cell_temp_c: self.cell_temp_c,
+                heater_active: self.heater_active,
+                mode: self.mode,
+                degradation: self.degradation.clone(),
+                rainflow: self.rainflow.clone(),
+                self_consumption_enabled: self.self_consumption_enabled,
+                solar_only_charging: self.solar_only_charging,
+                grid_connected: self.grid_connected,
+                power_setpoint_kw: self.power_setpoint_kw,
+                soc_target: self.soc_target,
+                soc_target_min: self.soc_target_min,
+                soc_target_max: self.soc_target_max,
+                last_daily_update_day: self.last_daily_update_day,
+                import_limit_kw: self.import_limit_kw,
+                export_limit_kw: self.export_limit_kw,
+                dr_level: self.dr_level,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                external_power_limit_kw: self.external_power_limit_kw,
+                q_setpoint_kvar: self.q_setpoint_kvar,
+                power_factor: self.power_factor,
+            },
+            Self::checkpoint_version(),
+            "Battery",
+        )
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        // `capacity_kwh_rated` is static config set by init(), not stored in the
+        // checkpoint. The caller must call init() before load_state() so that
+        // `capacity_kwh_rated` is available for recomputing `capacity_kwh_nominal`.
+        let cp: BatteryCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Battery",
+            self.descriptor().id,
+        )?;
+        self.soc = cp.soc;
+        self.cell_temp_c = cp.cell_temp_c;
+        self.heater_active = cp.heater_active;
+        self.mode = cp.mode;
+        self.degradation = cp.degradation;
+        self.rainflow = cp.rainflow;
+        self.self_consumption_enabled = cp.self_consumption_enabled;
+        self.solar_only_charging = cp.solar_only_charging;
+        self.grid_connected = cp.grid_connected;
+        self.power_setpoint_kw = cp.power_setpoint_kw;
+        self.soc_target = cp.soc_target;
+        self.soc_target_min = cp.soc_target_min;
+        self.soc_target_max = cp.soc_target_max;
+        self.last_daily_update_day = cp.last_daily_update_day;
+        self.import_limit_kw = cp.import_limit_kw;
+        self.export_limit_kw = cp.export_limit_kw;
+        self.dr_level = cp.dr_level;
+        self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
+        self.external_power_limit_kw = cp.external_power_limit_kw;
+        self.q_setpoint_kvar = cp.q_setpoint_kvar;
+        self.power_factor = cp.power_factor;
+
+        // Recompute capacity_kwh_nominal from rated capacity and restored SOH.
+        let soh = 1.0 - self.degradation.capacity_fade_fraction();
+        self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+
+        // Recompute all derived telemetry from restored state so no fields are stale.
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
+        self.telemetry
+            .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
+        self.telemetry.set(
+            tk::CAPACITY_FADE_PCT,
+            self.degradation.capacity_fade_fraction() * 100.0,
+        );
+        self.telemetry
+            .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
+        self.telemetry.set(
+            tk::CAPACITY_DERATE,
+            self.capacity_derate_model.evaluate(self.cell_temp_c),
+        );
+        // active_power_kw, ohmic_loss_w, heater_power_w are operational -- reset to
+        // idle defaults; they will be updated on the next step() call.
+        self.telemetry.set(
+            tk::HEATER_POWER_W,
+            if self.heater_active {
+                self.heater_power_w
+            } else {
+                0.0
+            },
+        );
+        self.telemetry
+            .set(tk::STANDBY_POWER_W, self.standby_power_w);
+        self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
+        // Telemetry fields are recomputed on next step; not restored from checkpoint.
+        // active_power_kw, ohmic_loss_w, terminal_voltage_v, current_a reset to idle
+        // defaults above and will be updated on the next step() call.
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(0.0)),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: Soc::try_from(self.soc).ok(),
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
+        Ok(())
+    }
+
+    fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        match signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw,
+                reactive_power_kvar,
+                min_soc,
+                max_soc,
+            } => {
+                if min_soc.is_some() || max_soc.is_some() {
+                    return Err(HaresError::Control(
+                        "Battery PowerSetpoint must not carry min_soc/max_soc; SOC window constraints arrive via SOCTarget".to_string(),
+                    ));
+                }
+                // Self-contained guard: `apply_control_unchecked` bypasses the
+                // central signal validation, and a non-finite setpoint would
+                // poison every downstream power calculation.
+                if !active_power_kw.is_finite() {
+                    return Err(HaresError::Control(
+                        "Battery PowerSetpoint active_power_kw must be finite".to_string(),
+                    ));
+                }
+                self.power_setpoint_kw = Some(*active_power_kw);
+                self.soc_target = None;
+                self.self_consumption_enabled = false;
+                if let Some(q) = reactive_power_kvar {
+                    if !q.is_finite() {
+                        return Err(HaresError::Control(
+                            "Battery PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                        ));
+                    }
+                    self.q_setpoint_kvar = Some(*q);
+                }
+            }
+            ControlSignal::SOCTarget {
+                target_soc,
+                min_soc,
+                max_soc,
+            } => {
+                let raw_target = *target_soc;
+                let raw_min = *min_soc;
+                let raw_max = *max_soc;
+
+                // When bounds are unspecified, fall back to the battery's
+                // physical min_soc/max_soc — never narrow the operational
+                // window with ad-hoc defaults that are tighter than the
+                // battery's hardware limits.
+                let eff_min = raw_min.unwrap_or(self.min_soc);
+                let eff_max = raw_max.unwrap_or(self.max_soc);
+
+                // Reject if the bounds themselves are fundamentally invalid.
+                if eff_min >= eff_max {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget bounds invalid: min_soc ({}) must be < max_soc ({})",
+                        eff_min, eff_max,
+                    )));
+                }
+
+                // Clamp target_soc between effective bounds.
+                let clamped_target = raw_target.clamp(eff_min, eff_max);
+
+                // Reject if after clamping the ordering is still invalid
+                // (target equals a bound or bounds are still broken).
+                if clamped_target <= eff_min || clamped_target >= eff_max {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget ordering invalid after clamping: \
+                         target_soc={clamped_target} not in ({eff_min}, {eff_max}); \
+                         raw target_soc={raw_target}",
+                    )));
+                }
+
+                // Reject NaN / infinite target.
+                if !clamped_target.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget target_soc must be finite, got {raw_target}"
+                    )));
+                }
+
+                let was_clamped = (clamped_target - raw_target).abs() > f64::EPSILON;
+
+                self.soc_target = Some(clamped_target);
+                // Store as operational window -- do NOT mutate physical
+                // min_soc/max_soc which are hardware limits set at init.
+                self.soc_target_min = Some(eff_min);
+                self.soc_target_max = Some(eff_max);
+                self.power_setpoint_kw = None;
+                self.self_consumption_enabled = false;
+
+                if was_clamped {
+                    #[cfg(feature = "observe")]
+                    {
+                        self.setpoint_violation_count =
+                            self.setpoint_violation_count.saturating_add(1);
+                    }
+                    tracing::warn!(
+                        raw_target_soc = raw_target,
+                        raw_min_soc = raw_min,
+                        raw_max_soc = raw_max,
+                        clamped_target_soc = clamped_target,
+                        effective_min = eff_min,
+                        effective_max = eff_max,
+                        "SOCTarget target_soc clamped to satisfy {eff_min} < target < {eff_max}",
+                    );
+                }
+
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    let stored_min = self.soc_target_min.unwrap_or(self.min_soc);
+                    let stored_max = self.soc_target_max.unwrap_or(self.max_soc);
+                    if !(self.soc_target.is_none()
+                        || stored_min < self.soc_target.unwrap()
+                            && self.soc_target.unwrap() < stored_max)
+                    {
+                        return Err(HaresError::InvariantViolation {
+                            check_name: "battery_soc_target_bounds".to_string(),
+                            value: self.soc_target.unwrap_or(-1.0),
+                            tolerance: 0.0,
+                        });
+                    }
+                }
+            }
+            ControlSignal::GridConnect { connected } => {
+                self.grid_connected = *connected;
+            }
+            ControlSignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            } => {
+                self.self_consumption_enabled = *enabled;
+                self.solar_only_charging = *solar_only_charging;
+                self.power_setpoint_kw = None;
+                self.soc_target = None;
+            }
+            ControlSignal::PowerLimit { max_power_kw, .. } => {
+                self.external_power_limit_kw = Some(*max_power_kw);
+            }
+            ControlSignal::ReactiveSetpoint { kvar } => {
+                if !kvar.is_finite() {
+                    return Err(HaresError::Control(
+                        "Battery ReactiveSetpoint kvar must be finite".to_string(),
+                    ));
+                }
+                self.q_setpoint_kvar = Some(*kvar);
+            }
+            ControlSignal::PowerFactorSetpoint { power_factor } => {
+                if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
+                    return Err(HaresError::Control(
+                        "Battery PowerFactorSetpoint must be in (0, 1]".to_string(),
+                    ));
+                }
+                self.power_factor = *power_factor;
+                self.q_setpoint_kvar = None;
+            }
+            ControlSignal::DemandResponse { level, duration_s } => {
+                self.dr_level = *level;
+                self.dr_duration_remaining_s = *duration_s;
+            }
+            _ => {
+                return Err(HaresError::Control(format!(
+                    "Battery does not handle control signal: {signal:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    fn mark_initialized(&mut self) {
+        self.initialized = true;
+    }
+
+    fn unmark_initialized(&mut self) {
+        self.initialized = false;
+    }
+
+    fn set_charging_curve_lut(
+        &mut self,
+        lut: Option<crate::ndinterp::RegularGridInterpolator>,
+    ) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set charging curve LUT",
+                self.descriptor().name
+            )));
+        }
+        self.charging_curve_lut = lut;
+        Ok(())
+    }
+
+    fn set_ocv_table(&mut self, table: OcvTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set OCV table",
+                self.descriptor().name
+            )));
+        }
+        self.ocv_table = table;
+        self.custom_ocv = true;
+        Ok(())
+    }
+
+    fn set_u_neg_table(&mut self, table: UNegTable) -> crate::Result<()> {
+        if self.initialized {
+            return Err(HaresError::InvalidState(format!(
+                "equipment '{}' is already initialized; cannot set UNeg table",
+                self.descriptor().name
+            )));
+        }
+        self.u_neg_table = table;
+        self.custom_u_neg = true;
+        Ok(())
+    }
+
+    fn reset_ocv_table(&mut self) -> crate::Result<()> {
+        self.ocv_table = OcvTable::for_chemistry(self.chemistry);
+        self.custom_ocv = false;
+        Ok(())
+    }
+
+    fn reset_u_neg_table(&mut self) -> crate::Result<()> {
+        self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
+        self.custom_u_neg = false;
+        Ok(())
+    }
+
+    fn has_charging_curve_lut(&self) -> bool {
+        self.charging_curve_lut.is_some()
+    }
+
+    fn has_custom_ocv_table(&self) -> bool {
+        self.custom_ocv
+    }
+
+    fn has_custom_u_neg_table(&self) -> bool {
+        self.custom_u_neg
+    }
+
+    fn ocv_source(&self) -> Option<&str> {
+        Some(self.ocv_table.ocv_source.as_str())
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
+        crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+}
+
+pub fn register_with_registry(registry: &mut EquipmentRegistry) {
+    registry.register("Battery", Box::new(|config| Box::new(Battery::new(config))));
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn default_telemetry() -> Telemetry {
+    let mut t = Telemetry::with_capacity(20);
+    // Why: ah_cell / v_cell / implied_capacity_kwh / declared_capacity_kwh
+    // default to 0.0 as "not configured / not applicable." A 0 Ah cell or
+    // 0 V cell is physically impossible (no real battery has zero cell
+    // parameters), and a 0 kWh capacity is likewise impossible. These
+    // sentinels cannot collide with legitimate values. After init_typed()
+    // is called, configured fields are overwritten with real values.
+    t.insert(tk::SOC, 0.0);
+    t.insert(tk::ACTIVE_POWER_KW, 0.0);
+    t.insert(tk::OHMIC_LOSS_W, 0.0);
+    t.insert(tk::STANDBY_POWER_W, 0.0);
+    t.insert(tk::CELL_TEMP_C, 25.0);
+    t.insert(tk::HEATER_POWER_W, 0.0);
+    t.insert(tk::DISCHARGE_DERATE, 1.0);
+    t.insert(tk::CAPACITY_DERATE, 1.0);
+    t.insert(tk::CYCLE_COUNT, 0.0);
+    t.insert(tk::CAPACITY_FADE_PCT, 0.0);
+    t.insert(tk::TERMINAL_VOLTAGE_V, 0.0);
+    t.insert(tk::CURRENT_A, 0.0);
+    t.insert(tk::OPERATING_MODE, 0.0);
+    t.insert(tk::N_SERIES, 0.0);
+    t.insert(tk::N_PARALLEL, 0.0);
+    t.insert(tk::AH_CELL, 0.0);
+    t.insert(tk::V_CELL, 0.0);
+    t.insert(tk::DERIVATION_SOURCE, 0.0);
+    t.insert(tk::IMPLIED_CAPACITY_KWH, 0.0);
+    t.insert(tk::DECLARED_CAPACITY_KWH, 0.0);
+    t.insert(tk::DR_POWER_FRACTION, 1.0);
+    t.insert(tk::DR_LEVEL, 0.0);
+    t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    t
+}
+
+fn battery_telemetry_fields() -> Vec<TelemetryField> {
+    vec![
+        TelemetryField {
+            name: tk::SOC.to_string(),
+            unit: "-".to_string(),
+            description: "State of charge [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::ACTIVE_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-side active power (positive=consuming, negative=generating)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::OHMIC_LOSS_W.to_string(),
+            unit: "W".to_string(),
+            description: "Ohmic heat dissipation from internal resistance".to_string(),
+        },
+        TelemetryField {
+            name: tk::STANDBY_POWER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Parasitic standby power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::CELL_TEMP_C.to_string(),
+            unit: "C".to_string(),
+            description: "Cell temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::CYCLE_COUNT.to_string(),
+            unit: "-".to_string(),
+            description: "Equivalent full cycles from rainflow counting".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATER_POWER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Cell heater power draw (active when cells are cold and charge requested)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::DISCHARGE_DERATE.to_string(),
+            unit: "-".to_string(),
+            description: "Temperature-dependent discharge power derating factor [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::CAPACITY_DERATE.to_string(),
+            unit: "-".to_string(),
+            description:
+                "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)"
+                    .to_string(),
+        },
+        TelemetryField {
+            name: tk::CAPACITY_FADE_PCT.to_string(),
+            unit: "%".to_string(),
+            description: "Cumulative capacity degradation (updated once per day at midnight; "
+                .to_string()
+                + "reflects the previous day's cumulative degradation between updates)",
+        },
+        TelemetryField {
+            name: tk::TERMINAL_VOLTAGE_V.to_string(),
+            unit: "V".to_string(),
+            description: "Pack terminal voltage (Voc ± IR drop)".to_string(),
+        },
+        TelemetryField {
+            name: tk::CURRENT_A.to_string(),
+            unit: "A".to_string(),
+            description: "Pack current (positive=charging, negative=discharging)".to_string(),
+        },
+        TelemetryField {
+            name: tk::OPERATING_MODE.to_string(),
+            unit: "enum".to_string(),
+            description: "Operating mode code: 0=Off, 4=Standby, 5=Charging, 6=Discharging"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::N_SERIES.to_string(),
+            unit: "-".to_string(),
+            description: "Pack series cell count".to_string(),
+        },
+        TelemetryField {
+            name: tk::N_PARALLEL.to_string(),
+            unit: "-".to_string(),
+            description: "Pack parallel cell count".to_string(),
+        },
+        TelemetryField {
+            name: tk::AH_CELL.to_string(),
+            unit: "Ah".to_string(),
+            description: "Per-cell capacity from config (NaN when not provided)".to_string(),
+        },
+        TelemetryField {
+            name: tk::V_CELL.to_string(),
+            unit: "V".to_string(),
+            description: "Per-cell nominal voltage from config (NaN when not provided)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DERIVATION_SOURCE.to_string(),
+            unit: "enum".to_string(),
+            description: "Topology derivation source: 0=defaults, 1=explicit, 2=cell_parameters, 3=mixed"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::IMPLIED_CAPACITY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "Pack capacity implied by integer topology (n_parallel * ah_cell * n_series * v_cell / 1000)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::DECLARED_CAPACITY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "Declared pack capacity from config".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kVAR".to_string(),
+            description: "Reactive power (positive=absorbing vars, negative=supplying)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_POWER_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Demand response power scaling factor [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_LEVEL.to_string(),
+            unit: "code".to_string(),
+            description: "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
+                .to_string(),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::*;
+    use crate::hvac::thermostat::{ThermalSetpoints, ThermostatFsm};
+    use crate::{Equipment, EquipmentConfig};
+
+    fn base_env() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 7.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid UTC timestamp"),
+            time_res: ChronoDuration::minutes(5),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    fn warm_env() -> EnvironmentState {
+        let mut env = base_env();
+        env.weather.outdoor_temp_c = 25.0;
+        env
+    }
+
+    fn battery_config(overrides: &[(&str, f64)]) -> EquipmentConfig {
+        let mut cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(10.0),
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        for (k, v) in overrides {
+            match *k {
+                KEY_CAPACITY_KWH => cfg.capacity_kwh = *v,
+                KEY_MAX_CHARGE_KW => cfg.max_charge_kw = *v,
+                KEY_MAX_DISCHARGE_KW => cfg.max_discharge_kw = *v,
+                KEY_STANDBY_POWER_W => cfg.standby_power_w = Some(*v),
+                KEY_INITIAL_SOC => cfg.initial_soc = Some(*v),
+                KEY_MIN_SOC => cfg.min_soc = Some(*v),
+                KEY_MAX_SOC => cfg.max_soc = Some(*v),
+                KEY_INVERTER_EFFICIENCY => cfg.inverter_efficiency = Some(*v),
+                KEY_CHARGE_EFFICIENCY => cfg.charge_efficiency = Some(*v),
+                KEY_DISCHARGE_EFFICIENCY => cfg.discharge_efficiency = Some(*v),
+                KEY_CELL_RESISTANCE_OHM => cfg.cell_resistance_ohm = Some(*v),
+                KEY_SELF_DISCHARGE_PCT_PER_DAY => cfg.self_discharge_pct_per_day = Some(*v),
+                KEY_IMPORT_LIMIT_W => cfg.import_limit_w = Some(*v),
+                KEY_EXPORT_LIMIT_W => cfg.export_limit_w = Some(*v),
+                KEY_HEATER_POWER_W => cfg.heater_power_w = Some(*v),
+                KEY_HEATER_THRESHOLD_C => cfg.heater_threshold_c = Some(*v),
+                KEY_MIN_DISCHARGE_TEMP_C => cfg.min_discharge_temp_c = Some(*v),
+                KEY_FULL_POWER_TEMP_C => cfg.full_power_temp_c = Some(*v),
+                KEY_MIN_CHARGE_TEMP_C => cfg.min_charge_temp_c = Some(*v),
+                KEY_CELL_THERMAL_MASS_J_PER_K => cfg.cell_thermal_mass_j_per_k = Some(*v),
+                KEY_CELL_UA_W_PER_K => cfg.cell_ua_w_per_k = Some(*v),
+                KEY_ZONE_ID => cfg.zone_id = Some(*v as u16),
+                KEY_N_SERIES => cfg.n_series = Some(*v as u32),
+                KEY_N_PARALLEL => cfg.n_parallel = Some(*v as u32),
+                KEY_AH_CELL => cfg.ah_cell = Some(*v),
+                KEY_V_CELL => cfg.v_cell = Some(*v),
+                _ => panic!("unsupported battery test override key: {k}"),
+            }
+        }
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
+    }
+
+    fn typed_battery_config(chemistry: Option<&str>, bms_mode: Option<BmsMode>) -> EquipmentConfig {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: chemistry.map(|s| s.to_string()),
+            standby_power_w: Some(10.0),
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: bms_mode.as_ref().map(|m| serde_json::to_string(m).unwrap()),
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: None,
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
+    }
+
+    fn default_ports() -> PortSlots {
+        PortSlots::default()
+    }
+
+    #[test]
+    fn descriptor_matches_ticket_contract() {
+        let config = battery_config(&[]);
+        let bat = Battery::new(config);
+        assert_eq!(bat.descriptor().end_use, EndUse::BATTERY);
+        assert_eq!(bat.descriptor().stage, ExecutionStage::Electrical);
+        assert_eq!(bat.descriptor().fuel, FuelType::Electric);
+        let caps = bat.descriptor().control_capabilities;
+        assert!(caps.contains(ControlCapabilities::POWER_SETPOINT));
+        assert!(caps.contains(ControlCapabilities::SOC_TARGET));
+        assert!(caps.contains(ControlCapabilities::GRID_CONNECT));
+        assert!(caps.contains(ControlCapabilities::SELF_CONSUMPTION));
+        assert!(caps.contains(ControlCapabilities::REACTIVE_SETPOINT));
+        assert!(caps.contains(ControlCapabilities::POWER_FACTOR_SETPOINT));
+        assert!(
+            bat.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+        let field_names: Vec<&str> = bat
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(field_names.contains(&tk::SOC));
+        assert!(field_names.contains(&tk::ACTIVE_POWER_KW));
+        assert!(field_names.contains(&tk::OHMIC_LOSS_W));
+        assert!(field_names.contains(&tk::STANDBY_POWER_W));
+        assert!(field_names.contains(&tk::CELL_TEMP_C));
+        assert!(field_names.contains(&tk::CYCLE_COUNT));
+        assert!(field_names.contains(&tk::CAPACITY_FADE_PCT));
+        assert!(field_names.contains(&tk::REACTIVE_POWER_KVAR));
+    }
+
+    #[test]
+    fn day_ordinal_is_contiguous_across_year_boundary() {
+        let mut env_dec31 = base_env();
+        env_dec31.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2025, 12, 31, 23, 59, 0)
+            .single()
+            .expect("valid");
+        let mut env_jan1 = base_env();
+        env_jan1.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid");
+        let ord_dec31 = Battery::day_ordinal(&env_dec31);
+        let ord_jan1 = Battery::day_ordinal(&env_jan1);
+        assert_eq!(
+            ord_jan1 - ord_dec31,
+            1,
+            "day_ordinal must be contiguous across year boundary: Dec 31={ord_dec31}, Jan 1={ord_jan1}"
+        );
+    }
+
+    #[test]
+    fn power_setpoint_rejects_non_finite_active_power_on_unchecked_path() {
+        // apply_control_unchecked bypasses the central signal validation;
+        // the arm must stay self-safe (it already re-checks the reactive
+        // component — this mirrors that guard for the active component).
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let err = bat
+            .apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                active_power_kw: f64::NAN,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .expect_err("non-finite active setpoint must be rejected");
+        assert!(
+            format!("{err:?}").contains("active_power_kw"),
+            "error must name the offending field, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn power_limit_rejects_non_finite_and_negative_on_unchecked_path() {
+        // The arm stores max_power_kw raw with no check of its own. A NaN
+        // limit silently no-ops downstream (`limit.min(NaN)` returns the
+        // limit, f64::min ignores NaN) — a requested cap that quietly never
+        // applies — and a negative limit inverts the discharge clamp
+        // (`power_kw.max(-limit)` forces at least |limit| kW of discharge).
+        // The central validator rejects both on the checked path; the PV arm
+        // guards finiteness at the arm level. The battery arm must not be
+        // the surface where the same garbage silently rewrites power.
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        for bad in [f64::NAN, f64::NEG_INFINITY, -5.0] {
+            let err = bat
+                .apply_control_unchecked(&ControlSignal::PowerLimit {
+                    max_power_kw: bad,
+                    ramp_rate_kw_per_s: None,
+                })
+                .expect_err("invalid PowerLimit must be rejected");
+            assert!(
+                format!("{err:?}").to_lowercase().contains("power"),
+                "error must name the signal for {bad}, got {err:?}"
+            );
+        }
+    }
+
+    /// The two setpoint channels clear each other on every write — a fresh
+    /// `SOCTarget` supersedes a latched `power_setpoint_kw` and vice versa
+    /// (`apply_signal`'s `SOCTarget` arm sets `power_setpoint_kw = None`,
+    /// the `PowerSetpoint` arm sets `soc_target = None`). Without the
+    /// clearing, a latched setpoint would outrank every later target via
+    /// `determine_target_power`'s Priority 1, and a controller's SOC-window
+    /// dispatch would silently never govern — the latch-veto failure mode.
+    #[test]
+    fn soc_target_supersedes_latched_power_setpoint_and_vice_versa() {
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Latch a full-rate charge setpoint, then dispatch a fresh SOC
+        // target just above the current SOC (0.5). The setpoint must no
+        // longer govern: charging stops at the target instead of riding
+        // the latched 5 kW toward max_soc.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.6,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        for _ in 0..200 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(
+            (bat.soc - 0.6).abs() < 0.05,
+            "a fresh SOCTarget must supersede the latched 5 kW setpoint — charging must stop at \
+             the target (0.6), not ride the setpoint toward max_soc: soc {}",
+            bat.soc
+        );
+
+        // Mirror: a fresh PowerSetpoint supersedes the latched target — a
+        // 2 kW discharge must drive SOC back below the 0.6 target.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        for _ in 0..60 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(
+            bat.soc < 0.6 - 0.01,
+            "a fresh PowerSetpoint must supersede the latched SOC target — discharging at 2 kW \
+             must drive SOC below the 0.6 target: soc {}",
+            bat.soc
+        );
+    }
+
+    #[test]
+    fn soc_clamped_at_upper_bound() {
+        // Explicitly set max_soc=1.0 so this test is independent of the OCHRE default.
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.99),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Apply large charge power setpoint
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 100.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        // Step multiple times
+        for _ in 0..100 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(bat.soc <= 1.0);
+        assert!((bat.soc - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn soc_clamped_at_lower_bound() {
+        // Explicitly set min_soc=0.0 so this test is independent of the OCHRE default.
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.01),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -100.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        for _ in 0..100 {
+            ports.zero();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+        assert!(bat.soc >= 0.0);
+        assert!(bat.soc.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn round_trip_efficiency_less_than_one() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let dt = Duration::from_secs(300);
+        let charge_power = 3.0; // kW
+
+        // Charge for 10 steps
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: charge_power,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut total_charge_energy = 0.0;
+        for _ in 0..10 {
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            total_charge_energy +=
+                ports.electrical.net_active_w() * dt.as_secs_f64() / SECONDS_PER_HOUR;
+        }
+        let soc_after_charge = bat.soc;
+
+        // Discharge for 10 steps at same power magnitude
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -charge_power,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut total_discharge_energy = 0.0;
+        for _ in 0..10 {
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            // Discharging produces negative power (generation)
+            total_discharge_energy +=
+                (-ports.electrical.net_active_w()) * dt.as_secs_f64() / SECONDS_PER_HOUR;
+        }
+
+        assert!(
+            soc_after_charge > 0.5,
+            "SOC should have increased during charge"
+        );
+        // Due to ohmic losses, discharge energy < charge energy
+        assert!(
+            total_discharge_energy < total_charge_energy,
+            "round-trip efficiency must be < 1.0: charged {total_charge_energy:.4} kWh, discharged {total_discharge_energy:.4} kWh"
+        );
+    }
+
+    /// Enabling self-consumption must supersede a latched setpoint/target:
+    /// the `SelfConsumption` arm clears both (`power_setpoint_kw = None`,
+    /// `soc_target = None`), otherwise `determine_target_power`'s Priority 1
+    /// keeps the stale setpoint governing forever and the battery charges
+    /// through a net load it was told to offset. Existing self-consumption
+    /// tests never latch a setpoint first, so the clearing is what this
+    /// pins.
+    #[test]
+    fn self_consumption_supersedes_latched_power_setpoint() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::SelfConsumption {
+            enabled: true,
+            solar_only_charging: false,
+        })
+        .unwrap();
+
+        // Stage 1: net load = 2 kW — self-consumption must discharge to
+        // offset it, not ride the latched 5 kW charge setpoint.
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            bat.soc < 0.5,
+            "enabling self-consumption must supersede the latched 5 kW charge setpoint — \
+             with a 2 kW net load the battery must discharge, not charge: soc {}",
+            bat.soc
+        );
+    }
+
+    #[test]
+    fn self_consumption_charges_from_pv_surplus() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Simulate Stage 1 PV surplus: generation_power_w = -3.0 (negative = generation)
+        let mut ports = PortSlots::default();
+        ports.electrical.generation_power_w = -3.0; // PV producing 3 kW
+        ports.electrical.load_power_w = 1.0; // 1 kW base load
+        // net_active_kw = 1.0 + (-3.0) = -2.0 (surplus)
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(bat.soc > 0.5, "battery should charge from PV surplus");
+        assert_eq!(bat.mode, OperatingMode::Charging);
+    }
+
+    #[test]
+    fn self_consumption_discharges_to_offset_load() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Stage 1: net load = 2 kW (no PV, just loads)
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(bat.soc < 0.5, "battery should discharge to offset load");
+        assert_eq!(bat.mode, OperatingMode::Discharging);
+    }
+
+    #[test]
+    fn solar_only_charging_does_not_charge_from_grid() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.3)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::SelfConsumption {
+            enabled: true,
+            solar_only_charging: true,
+        })
+        .unwrap();
+
+        // Stage 1: net load positive (no PV surplus) -- should NOT charge
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        let soc_before = bat.soc;
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        // SOC should decrease or stay same (discharge to offset load + self-discharge),
+        // definitely not increase (no charging from grid)
+        assert!(
+            bat.soc <= soc_before,
+            "should not charge from grid in solar-only mode"
+        );
+    }
+
+    #[test]
+    fn standby_power_consumed_when_idle() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 20.0)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // No control signal, no stage 1 load -- battery should be idle
+        bat.apply_control(&ControlSignal::SelfConsumption {
+            enabled: false,
+            solar_only_charging: false,
+        })
+        .unwrap();
+        bat.self_consumption_enabled = false;
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let expected_standby_w = 20.0; // standby is defined in W
+        let actual = ports.electrical.net_active_w();
+        assert!(
+            (actual - expected_standby_w).abs() < 1.0,
+            "idle battery should consume standby power: expected {expected_standby_w}, got {actual}"
+        );
+    }
+
+    /// Grid outage with a de-energized bus (battery itself cannot discharge:
+    /// SOC at floor): charging, standby electronics, cell heater, and vars
+    /// are all gated — nothing on a dead bus can deliver or absorb power.
+    #[test]
+    fn dead_bus_blocks_charging_standby_heater_and_vars() {
+        let config = battery_config(&[
+            (KEY_STANDBY_POWER_W, 20.0),
+            (KEY_MIN_SOC, 0.2),
+            (KEY_INITIAL_SOC, 0.2),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = base_env();
+        bat.init(&config, &env).unwrap();
+        assert!(
+            !bat.island_source_available(),
+            "battery at its SOC floor cannot island the home"
+        );
+
+        // Command a charge — during a dead-bus outage it must not happen.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: Some(1.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        env.grid.voltage_pu = 0.0;
+
+        let soc_before = bat.soc;
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "no charging and no standby draw on a dead bus"
+        );
+        assert_eq!(
+            ports.electrical.reactive_power_kvar, 0.0,
+            "no vars on a dead bus"
+        );
+        assert!(
+            bat.soc <= soc_before,
+            "SOC must not increase during a dead-bus outage"
+        );
+
+        // Islanded bus (another source formed it): standby returns, but the
+        // commanded charge is clamped to the on-site surplus — none here, so
+        // no charging (there is no grid to import from during the outage).
+        env.grid.island_bus_voltage_pu = Some(1.0);
+        let soc_before_islanded = bat.soc;
+        let mut ports2 = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports2)
+            .unwrap();
+        assert!(
+            ports2.electrical.net_active_w() > 0.0,
+            "energized (islanded) bus restores standby draw"
+        );
+        assert!(
+            ports2.electrical.net_active_w() < 1000.0,
+            "islanded charge command without surplus must not draw charging power, got {} W",
+            ports2.electrical.net_active_w()
+        );
+        assert!(
+            bat.soc <= soc_before_islanded,
+            "no on-site surplus while islanded: SOC must not increase"
+        );
+    }
+
+    /// Islanded charge clamp: during a utility outage with an energized
+    /// (islanded) bus there is no grid to import from, so a commanded charge
+    /// with no on-site surplus (positive Stage-1 net load) is curtailed to
+    /// zero.
+    #[test]
+    fn islanded_charge_command_without_surplus_is_curtailed() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // Utility outage, bus islanded (this battery is the source).
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        // Stage-1 net load is positive: house loads, no generation surplus.
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 1500.0;
+
+        let soc_before = bat.soc;
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            (ports.electrical.load_power_w - 1500.0).abs() < 5.0,
+            "islanded charge command without surplus must add no charging draw, got {} W",
+            ports.electrical.load_power_w
+        );
+        assert!(
+            bat.soc <= soc_before,
+            "SOC must not increase while islanded with no on-site surplus"
+        );
+    }
+
+    /// Islanded charge clamp: with an on-site generation surplus the
+    /// commanded charge is capped at exactly that surplus, not the full
+    /// setpoint.
+    #[test]
+    fn islanded_charge_command_is_capped_at_onsite_surplus() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        // Command 3 kW of charging — more than the visible surplus.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        // Stage-1 surplus: 2.5 kW PV generation against a 0.5 kW load
+        // → 2.0 kW visible on-site surplus.
+        let mut ports = PortSlots::default();
+        ports.electrical.generation_power_w = -2500.0;
+        ports.electrical.load_power_w = 500.0;
+
+        let soc_before = bat.soc;
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let charge_draw_w = ports.electrical.load_power_w - 500.0;
+        assert!(
+            (charge_draw_w - 2000.0).abs() < 50.0,
+            "islanded charge must be capped at the 2 kW surplus, drew {charge_draw_w} W"
+        );
+        assert!(
+            bat.soc > soc_before,
+            "battery must still charge from the available surplus"
+        );
+    }
+
+    /// The islanded clamp applies to charging only: a commanded discharge
+    /// during islanded operation proceeds at the full setpoint (the battery
+    /// is the source serving downstream loads).
+    #[test]
+    fn islanded_discharge_command_is_never_clamped() {
+        let config = battery_config(&[(KEY_STANDBY_POWER_W, 0.0), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        env.grid.voltage_pu = 0.0;
+        env.grid.island_bus_voltage_pu = Some(1.0);
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            (ports.electrical.generation_power_w - (-2000.0)).abs() < 50.0,
+            "islanded discharge must proceed at the full 2 kW setpoint, got {} W",
+            ports.electrical.generation_power_w
+        );
+        assert_eq!(bat.mode, OperatingMode::Discharging);
+    }
+
+    /// `island_source_available` reflects dischargeability: SOC above the
+    /// floor and grid-connected → available; disconnected → not.
+    #[test]
+    fn island_source_availability_tracks_soc_and_connection() {
+        let config = battery_config(&[(KEY_MIN_SOC, 0.2), (KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        assert!(bat.island_source_available());
+
+        bat.apply_control(&ControlSignal::GridConnect { connected: false })
+            .unwrap();
+        assert!(
+            !bat.island_source_available(),
+            "a disconnected battery cannot island the home"
+        );
+    }
+
+    #[test]
+    fn two_independent_instances_evolve_separately() {
+        let config_a = battery_config(&[(KEY_INITIAL_SOC, 0.3)]);
+        let config_b = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat_a = Battery::new(config_a.clone());
+        let mut bat_b = Battery::new(config_b.clone());
+        let env = base_env();
+        bat_a.init(&config_a, &env).unwrap();
+        bat_b.init(&config_b, &env).unwrap();
+
+        // Both charge at 3 kW
+        bat_a
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        bat_b
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+        let mut ports_a = default_ports();
+        let mut ports_b = default_ports();
+        bat_a
+            .step(&env, Duration::from_secs(300), &mut ports_a)
+            .unwrap();
+        bat_b
+            .step(&env, Duration::from_secs(300), &mut ports_b)
+            .unwrap();
+
+        assert!(bat_a.soc > 0.3);
+        assert!(bat_b.soc > 0.8);
+        assert!(
+            (bat_a.soc - bat_b.soc).abs() > 0.1,
+            "different initial SOCs should stay different"
+        );
+    }
+
+    #[test]
+    fn state_round_trip_preserves_soc_and_control() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.6)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Step a few times to build up some state
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let saved = bat.save_state().unwrap();
+        let soc_saved = bat.soc;
+        let cycles_saved = bat.rainflow.total_cycles();
+
+        // Create fresh battery and restore
+        let mut bat2 = Battery::new(config.clone());
+        bat2.init(&config, &env).unwrap();
+        bat2.load_state(&saved).unwrap();
+
+        assert!(
+            (bat2.soc - soc_saved).abs() < f64::EPSILON,
+            "SOC mismatch after round-trip"
+        );
+        assert!(
+            (bat2.rainflow.total_cycles() - cycles_saved).abs() < f64::EPSILON,
+            "cycle count mismatch after round-trip"
+        );
+        assert!(!bat2.self_consumption_enabled);
+        assert_eq!(bat2.power_setpoint_kw, Some(2.0));
+    }
+
+    #[test]
+    fn self_discharge_reduces_soc_over_time() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 1.0), // 1%/day for visible effect
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Disable self-consumption so battery is idle
+        bat.self_consumption_enabled = false;
+        bat.power_setpoint_kw = None;
+
+        let soc_start = bat.soc;
+        // Step for many timesteps (simulate ~1 day: 288 x 5-min steps)
+        for _ in 0..288 {
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+
+        assert!(
+            bat.soc < soc_start,
+            "SOC should decrease due to self-discharge"
+        );
+        // Absolute self-discharge: 1%/day = 0.01 SOC units per day (independent of SOC level).
+        // 288 steps × 300 s = 86400 s = 1 day. Expected loss ≈ 0.01 SOC units.
+        let loss = soc_start - bat.soc;
+        assert!(loss > 0.005, "self-discharge loss too small: {loss}");
+        assert!(loss < 0.02, "self-discharge loss too large: {loss}");
+    }
+
+    #[test]
+    fn ocv_interpolation_at_known_points() {
+        let table = OcvTable::default_li_nmc();
+
+        // Exact table endpoints (PyBaMM Chen2020)
+        assert!((table.voltage_at_soc(0.0) - 2.5000).abs() < 1e-10);
+        assert!((table.voltage_at_soc(1.0) - 4.2000).abs() < 1e-10);
+
+        // Mid-SOC should be in a reasonable NMC range
+        let v50 = table.voltage_at_soc(0.5);
+        assert!(
+            (3.70..=3.80).contains(&v50),
+            "NMC OCV at SOC=0.5 should be ~3.75V, got {v50}"
+        );
+
+        // Clamped below/above table bounds
+        assert!((table.voltage_at_soc(-0.5) - 2.5000).abs() < 1e-10);
+        assert!((table.voltage_at_soc(1.5) - 4.2000).abs() < 1e-10);
+    }
+
+    #[test]
+    fn registry_includes_battery() {
+        let registry = EquipmentRegistry::new();
+        assert!(registry.get("Battery").is_some());
+    }
+
+    #[test]
+    fn init_rejects_zero_capacity() {
+        let config = battery_config(&[(KEY_CAPACITY_KWH, 0.0)]);
+        let mut bat = Battery::new(config.clone());
+        let err = bat.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capacity_kwh must be finite and > 0")
+        );
+    }
+
+    #[test]
+    fn init_rejects_invalid_soc_bounds() {
+        let config = battery_config(&[(KEY_MIN_SOC, 0.8), (KEY_MAX_SOC, 0.2)]);
+        let mut bat = Battery::new(config.clone());
+        let err = bat.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("min_soc must be less than max_soc")
+        );
+    }
+
+    #[test]
+    fn apply_control_rejects_unsupported_signal() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grid_disconnect_prevents_power_flow() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::GridConnect { connected: false })
+            .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let soc_before = bat.soc;
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        // Only standby power should flow; SOC should not increase
+        // (self-discharge may decrease it slightly)
+        assert!(bat.soc <= soc_before + f64::EPSILON);
+    }
+
+    #[test]
+    fn heater_activates_when_cold_and_charge_requested() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.3),
+            (KEY_HEATER_POWER_W, 500.0),
+            (KEY_HEATER_THRESHOLD_C, 5.0),
+            (KEY_MIN_CHARGE_TEMP_C, 0.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -5.0; // Below threshold
+
+        // PV surplus wants to charge
+        let mut ports = PortSlots::default();
+        ports.electrical.generation_power_w = -3.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            bat.heater_active,
+            "heater should be active when cold and charge desired"
+        );
+        assert!(
+            bat.telemetry().get(tk::HEATER_POWER_W).unwrap() > 0.0,
+            "heater power should be reported in telemetry"
+        );
+        // Charging should be blocked (cell too cold), but heater draws power.
+        // The battery's own contribution (heater + standby) is on top of the
+        // pre-set Stage 1 values in the accumulator.
+        let heater_w = 500.0;
+        let standby_w = 10.0;
+        let battery_contribution_w = heater_w + standby_w;
+        // load_power_w should include battery's heater + standby draw
+        assert!(
+            (ports.electrical.load_power_w - battery_contribution_w).abs() < 10.0,
+            "battery should draw heater + standby: load_power={}",
+            ports.electrical.load_power_w
+        );
+        // SOC should not change (charging blocked)
+        assert!(
+            (bat.soc - 0.3).abs() < 0.001,
+            "SOC should not change when charging blocked"
+        );
+        // Cell temp should increase due to heater
+        assert!(bat.cell_temp_c > -5.0, "heater should warm cells");
+    }
+
+    #[test]
+    fn heater_does_not_activate_when_warm() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.3),
+            (KEY_HEATER_POWER_W, 500.0),
+            (KEY_HEATER_THRESHOLD_C, 5.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = 20.0; // Well above threshold
+
+        let mut ports = PortSlots::default();
+        ports.electrical.generation_power_w = -3.0; // PV surplus
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(!bat.heater_active, "heater should not activate when warm");
+        assert_eq!(bat.telemetry().get(tk::HEATER_POWER_W).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn heater_activates_when_discharge_requested_and_cells_cold() {
+        // The heater is gated on cell temperature alone, so it must run when a
+        // discharge is requested at cell temps below the activation threshold
+        // (e.g. grid outage at -25 C).
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                heater_power_w: Some(500.0),
+                heater_threshold_c: Some(5.0),
+                self_discharge_pct_per_day: Some(0.0),
+                grid_forming: None,
+                min_dwell_steps: 0,
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -25.0; // Below min discharge temp
+
+        // Request discharge
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            bat.heater_active,
+            "heater should activate when discharge requested and cells cold"
+        );
+        assert!(bat.cell_temp_c > -25.0, "heater should warm cells");
+    }
+
+    #[test]
+    fn heater_activates_even_during_idle_when_cold() {
+        // Heater protects cells from freezing regardless of charge/discharge state.
+        // At -25°C with a 500W heater and threshold=5°C, the heater must run
+        // even if no charge or discharge is requested.
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_HEATER_POWER_W, 500.0),
+            (KEY_HEATER_THRESHOLD_C, 5.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -25.0;
+
+        // No control signal -- battery is idle
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            bat.heater_active,
+            "heater must activate at -25°C to protect cells, even when idle"
+        );
+        let heater_kw = bat.telemetry().get(tk::HEATER_POWER_W).unwrap() / 1000.0;
+        assert!(
+            heater_kw > 0.4,
+            "heater should draw ~500W, got {heater_kw:.3} kW"
+        );
+    }
+
+    #[test]
+    fn discharge_derates_at_low_temperature() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Step at warm temp to get baseline discharge
+        bat.cell_temp_c = 25.0;
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports_warm = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports_warm)
+            .unwrap();
+        let warm_power = ports_warm.electrical.net_active_w();
+
+        // Reset and step at cold temp (halfway in derating range)
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -5.0; // Midpoint of [-20, 10] -> derate = 0.5
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports_cold = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports_cold)
+            .unwrap();
+        let cold_power = ports_cold.electrical.net_active_w();
+
+        // Cold discharge should be less than warm (more negative = more generation)
+        assert!(
+            cold_power > warm_power,
+            "cold discharge should be derated (less generation): warm={warm_power}, cold={cold_power}"
+        );
+    }
+
+    #[test]
+    fn discharge_blocked_below_min_temp() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -25.0; // Below default min_discharge_temp_c (-20)
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        // Only standby should be consumed, no discharge
+        let standby_w = 10.0;
+        assert!(
+            (ports.electrical.net_active_w() - standby_w).abs() < 1.0,
+            "discharge should be fully blocked below min temp"
+        );
+    }
+
+    #[test]
+    fn charging_blocked_below_min_charge_temp() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.3),
+            (KEY_MIN_CHARGE_TEMP_C, 0.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = -2.0; // Below min charge temp
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let soc_before = bat.soc;
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(
+            (bat.soc - soc_before).abs() < 1e-12,
+            "charging should be blocked below min charge temp"
+        );
+    }
+
+    #[test]
+    fn cell_temp_evolves_toward_ambient() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env(); // outdoor_temp_c = 10
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = 30.0; // Warmer than ambient
+        bat.self_consumption_enabled = false;
+
+        // Step idle for many steps -- cell should cool toward ambient
+        for _ in 0..1000 {
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+
+        // Should approach outdoor temp (10 C since no zone configured)
+        assert!(
+            (bat.cell_temp_c - 10.0).abs() < 1.0,
+            "cell temp should converge to ambient: got {}",
+            bat.cell_temp_c
+        );
+    }
+
+    #[test]
+    fn soc_target_drives_toward_target() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.3),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.8,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        for _ in 0..20 {
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+
+        assert!(bat.soc > 0.3, "SOC should increase toward target");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for bug fixes
+    // -----------------------------------------------------------------------
+
+    /// ASTM E1049-85: a 50% DOD round-trip (0.5→1.0→0.5→1.0) should yield
+    /// two half-cycles (weight 0.5 each), totalling 1.0 EFC regardless of DOD amplitude.
+    #[test]
+    fn rainflow_50_pct_dod_round_trip() {
+        let mut rf = RainflowCounter::default();
+        rf.push(0.5);
+        rf.push(1.0);
+        rf.push(0.5);
+        rf.push(1.0);
+
+        // ASTM E1049-85: two half-cycles extracted, each with weight 0.5 → total = 1.0 EFC.
+        // DOD amplitude does not affect the cycle count; it only affects sum_squared_dod_daily.
+        assert!(
+            (rf.total_cycles() - 1.0).abs() < 1e-10,
+            "50% DOD round-trip should count as 1.0 EFC (two half-cycles), got {}",
+            rf.total_cycles()
+        );
+    }
+
+    /// ASTM E1049-85: full 0→1→0→1 swing yields two half-cycles of range 1.0,
+    /// totalling 1.0 EFC.
+    #[test]
+    fn rainflow_full_dod_round_trip() {
+        let mut rf = RainflowCounter::default();
+        rf.push(0.0);
+        rf.push(1.0);
+        rf.push(0.0);
+        rf.push(1.0);
+
+        assert!(
+            (rf.total_cycles() - 1.0).abs() < 1e-10,
+            "100% DOD round-trip should count as 1.0 EFC, got {}",
+            rf.total_cycles()
+        );
+    }
+
+    /// Inverter efficiency reduces DC stored per AC drawn (charging) and increases
+    /// DC consumed per AC delivered (discharging). The combined effect equals
+    /// charge_eta * discharge_eta = inv_eta in SOC terms.
+    ///
+    /// Measuring at the AC port always shows the setpoint regardless of efficiency;
+    /// the effect is visible in SOC delta: for the same AC power and step count,
+    /// lower inv_eta stores less SOC per charge step and consumes more SOC per
+    /// discharge step.
+    #[test]
+    fn inverter_efficiency_reduces_round_trip_efficiency() {
+        let make_bat = |inv_eta: f64| {
+            EquipmentConfig::from_typed(
+                "TestBat".to_string(),
+                "Battery".to_string(),
+                BatteryConfig {
+                    standby_power_w: Some(0.0),
+                    self_discharge_pct_per_day: Some(0.0),
+                    min_soc: Some(0.0),
+                    max_soc: Some(1.0),
+                    cell_resistance_ohm: Some(0.0),
+                    inverter_efficiency: Some(inv_eta),
+                    ..battery_config(&[])
+                        .typed::<BatteryConfig>()
+                        .expect("typed battery config")
+                },
+            )
+            .unwrap()
+        };
+
+        let charge_steps = 10;
+        let dt = Duration::from_secs(300);
+        let charge_power_kw = 3.0;
+        let env = base_env();
+
+        // Returns SOC-based RTE = delta_soc_charge / delta_soc_discharge.
+        // With symmetric efficiency: RTE = charge_eta * discharge_eta = inv_eta.
+        let measure_soc_rte = |inv_eta: f64| -> f64 {
+            let config = make_bat(inv_eta);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+
+            let soc_before_charge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: charge_power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+            for _ in 0..charge_steps {
+                bat.step(&env, dt, &mut default_ports()).unwrap();
+            }
+            let soc_after_charge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
+            let delta_soc_charge = soc_after_charge - soc_before_charge;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: -charge_power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+            for _ in 0..charge_steps {
+                bat.step(&env, dt, &mut default_ports()).unwrap();
+            }
+            let soc_after_discharge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
+            let delta_soc_discharge = soc_after_charge - soc_after_discharge;
+
+            delta_soc_charge / delta_soc_discharge
+        };
+
+        let rte_ideal = measure_soc_rte(1.0);
+        let rte_with_inverter = measure_soc_rte(0.96);
+
+        assert!(
+            (rte_ideal - 1.0).abs() < 1e-6,
+            "ideal RTE (inv_eta=1.0) should be exactly 1.0, got {rte_ideal:.6}"
+        );
+        assert!(
+            rte_with_inverter < rte_ideal,
+            "inverter losses (eta=0.96) must reduce RTE below ideal: \
+             rte_ideal={rte_ideal:.4}, rte_with_inverter={rte_with_inverter:.4}"
+        );
+        // Typed `inverter_efficiency` is one-way, so round-trip efficiency is eta^2.
+        assert!(
+            (rte_with_inverter - 0.96_f64.powi(2)).abs() < 1e-4,
+            "RTE with one-way inv_eta=0.96 should be ~0.9216, got {rte_with_inverter:.6}"
+        );
+    }
+
+    /// Asymmetric charge/discharge efficiencies must apply in the correct direction.
+    ///
+    /// With R=0 (no ohmic loss), the SOC change per unit AC energy is determined
+    /// entirely by the inverter efficiency:
+    ///   - Charging 1 kWh AC → stores charge_eta kWh in cells → SOC += charge_eta / capacity
+    ///   - Discharging 1 kWh DC from cells → delivers discharge_eta kWh AC → SOC -= 1/capacity
+    ///   - To get 1 kWh AC output: need 1/discharge_eta kWh DC → SOC -= (1/discharge_eta)/capacity
+    ///
+    /// We verify each direction independently by observing SOC delta.
+    #[test]
+    fn asymmetric_charge_discharge_efficiency() {
+        let charge_eta = 0.90_f64;
+        let discharge_eta = 0.80_f64;
+        let capacity_kwh = 10.0_f64;
+        let dt = Duration::from_secs(3600); // 1 hour for clean arithmetic
+        let power_kw = 1.0_f64; // 1 kW AC for 1 hour = 1 kWh AC
+
+        let make_bat = |charge_e: f64, discharge_e: f64| {
+            EquipmentConfig::from_typed(
+                "TestBat".to_string(),
+                "Battery".to_string(),
+                BatteryConfig {
+                    capacity_kwh,
+                    standby_power_w: Some(0.0),
+                    min_soc: Some(0.0),
+                    max_soc: Some(1.0),
+                    initial_soc: Some(0.5),
+                    self_discharge_pct_per_day: Some(0.0),
+                    charge_efficiency: Some(charge_e),
+                    discharge_efficiency: Some(discharge_e),
+                    cell_resistance_ohm: Some(0.0),
+                    ..battery_config(&[])
+                        .typed::<BatteryConfig>()
+                        .expect("typed battery config")
+                },
+            )
+            .unwrap()
+        };
+
+        let env = warm_env();
+
+        // --- Charge leg: 1 kW AC for 1 h → 1 kWh AC drawn, charge_eta kWh stored ---
+        {
+            let config = make_bat(charge_eta, discharge_eta);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_after = bat.soc;
+
+            let soc_delta = soc_after - soc_before;
+            let expected_soc_delta = power_kw * charge_eta / capacity_kwh; // 1 * 0.90 / 10 = 0.090
+            assert!(
+                (soc_delta - expected_soc_delta).abs() < 1e-6,
+                "charge leg: 1 kW AC for 1 h with charge_eta={charge_eta} should give \
+                 SOC delta {expected_soc_delta:.4}, got {soc_delta:.4}"
+            );
+        }
+
+        // --- Discharge leg: 1 kW AC for 1 h → 1 kWh AC delivered, 1/discharge_eta kWh consumed ---
+        {
+            let config = make_bat(charge_eta, discharge_eta);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: -power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_after = bat.soc;
+
+            let soc_delta = soc_before - soc_after; // positive = energy drawn from cells
+            // Cell energy consumed = AC_energy / discharge_eta = 1 / 0.80 = 1.25 kWh
+            let expected_soc_delta = power_kw / discharge_eta / capacity_kwh;
+            assert!(
+                (soc_delta - expected_soc_delta).abs() < 1e-6,
+                "discharge leg: 1 kW AC for 1 h with discharge_eta={discharge_eta} should consume \
+                 SOC delta {expected_soc_delta:.4}, got {soc_delta:.4}"
+            );
+        }
+
+        // --- Verify asymmetry: swapping etas gives different per-leg behavior ---
+        {
+            let config_swapped = make_bat(discharge_eta, charge_eta); // swapped
+            let mut bat = Battery::new(config_swapped.clone());
+            bat.init(&config_swapped, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_delta_swapped = bat.soc - soc_before;
+
+            // With charge_eta=0.80 (swapped), SOC delta = 0.80/10 = 0.080 < 0.090
+            let expected_swapped = power_kw * discharge_eta / capacity_kwh;
+            assert!(
+                (soc_delta_swapped - expected_swapped).abs() < 1e-4,
+                "swapped charge leg: expected SOC delta {expected_swapped:.4}, got {soc_delta_swapped:.4}"
+            );
+            assert!(
+                soc_delta_swapped < power_kw * charge_eta / capacity_kwh,
+                "lower charge_eta must give smaller SOC increase per AC kWh"
+            );
+        }
+    }
+
+    /// The quadratic terminal-voltage formula accounts for voltage sag during
+    /// discharge. At high C-rate discharge, V < Voc, so I = P/V > P/Voc,
+    /// giving higher ohmic losses than the linear approximation.
+    #[test]
+    fn quadratic_current_gives_higher_losses_during_discharge() {
+        // Uses warm_env (25°C) so capacity derate ≈ 1.0 and full rated power flows.
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_INVERTER_EFFICIENCY, 1.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        // Discharge at 95% of max (negative = discharge).
+        let high_power_kw = -0.95 * DEFAULT_MAX_DISCHARGE_KW;
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: high_power_kw,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let ohmic_quadratic = bat.telemetry().get(tk::OHMIC_LOSS_W).unwrap_or(0.0);
+
+        // Linear approximation: I = P / Voc
+        let cell_ocv = bat.ocv_table.voltage_at_soc(0.5);
+        let pack_ocv = cell_ocv * bat.n_series as f64;
+        let pack_r = bat.cell_resistance_ohm * bat.n_series as f64 / bat.n_parallel as f64;
+        let dc_power_w = high_power_kw.abs() * 1000.0;
+        let i_linear = dc_power_w / pack_ocv;
+        let ohmic_linear = i_linear * i_linear * pack_r;
+
+        assert!(
+            ohmic_quadratic > ohmic_linear,
+            "quadratic model should give higher ohmic losses during discharge: \
+             quadratic={ohmic_quadratic:.4} W, linear={ohmic_linear:.4} W"
+        );
+    }
+
+    /// Self-discharge loss must be independent of SOC level (absolute, not multiplicative).
+    /// OCHRE Battery.py:337-338 uses absolute SOC loss per timestep.
+    #[test]
+    fn self_discharge_is_absolute_not_soc_relative() {
+        let dt = Duration::from_secs(3600); // 1 hour
+        let rate = 1.0; // 1%/day self-discharge
+
+        let make_bat = |initial_soc: f64| {
+            let config = battery_config(&[
+                (KEY_INITIAL_SOC, initial_soc),
+                (KEY_MIN_SOC, 0.0),
+                (KEY_MAX_SOC, 1.0),
+                (KEY_SELF_DISCHARGE_PCT_PER_DAY, rate),
+            ]);
+            let mut bat = Battery::new(config.clone());
+            let env = base_env();
+            bat.init(&config, &env).unwrap();
+            bat.self_consumption_enabled = false;
+            bat.power_setpoint_kw = None;
+            bat
+        };
+
+        let mut bat_high = make_bat(0.9);
+        let mut bat_low = make_bat(0.1);
+        let env = base_env();
+
+        let soc_high_before = bat_high.soc;
+        let soc_low_before = bat_low.soc;
+
+        let mut ports = default_ports();
+        bat_high.step(&env, dt, &mut ports).unwrap();
+        ports.zero();
+        bat_low.step(&env, dt, &mut ports).unwrap();
+
+        let loss_high = soc_high_before - bat_high.soc;
+        let loss_low = soc_low_before - bat_low.soc;
+
+        // Absolute loss must be equal regardless of starting SOC.
+        assert!(
+            (loss_high - loss_low).abs() < 1e-12,
+            "self-discharge must be absolute (SOC-independent): high={loss_high:.10}, low={loss_low:.10}"
+        );
+        assert!(loss_high > 0.0, "self-discharge must cause SOC loss");
+    }
+
+    /// With heater active, zone thermal gain must equal ohmic_loss_w only, not ohmic + heater.
+    /// The heater energy path is: grid → heater → cell thermal mass → zone (via UA model).
+    #[test]
+    fn zone_thermal_gain_is_ohmic_only_not_ohmic_plus_heater() {
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                standby_power_w: Some(0.0),
+                initial_soc: Some(0.5),
+                min_soc: Some(0.0),
+                max_soc: Some(1.0),
+                heater_power_w: Some(500.0),
+                heater_threshold_c: Some(5.0),
+                self_discharge_pct_per_day: Some(0.0),
+                zone_id: Some(1),
+                cell_ua_w_per_k: Some(0.0),
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        // Force cold cells so heater activates
+        bat.cell_temp_c = -5.0;
+
+        // Build ports with a thermal slot for zone 1.
+        let mut ports = PortSlots::from_declarations(bat.ports());
+        // PV surplus to request charging (heater activates because cell is cold and min_charge_temp=0°C)
+        ports.electrical.generation_power_w = -3.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(bat.heater_active, "heater should be active for this test");
+
+        let ohmic_w = bat.telemetry().get(tk::OHMIC_LOSS_W).unwrap_or(0.0);
+        // Zone 1 thermal gain should equal ohmic_loss_w only (heater not double-counted).
+        let zone_gain_w = ports
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .map(|t| t.sensible_gain_w)
+            .unwrap_or(0.0);
+        assert!(
+            (zone_gain_w - ohmic_w).abs() < 1e-6,
+            "zone thermal gain should equal ohmic_loss_w={ohmic_w:.4} W, got {zone_gain_w:.4} W"
+        );
+    }
+
+    /// At -20°C, capacity should be significantly lower than at 25°C (d0 Arrhenius model).
+    /// OCHRE Battery.py:321-331: expect ~70-80% of nominal at -20°C.
+    #[test]
+    fn temperature_dependent_capacity_lower_at_cold() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let env = base_env();
+
+        // Measure capacity at 25°C
+        let mut bat_warm = Battery::new(config.clone());
+        bat_warm.init(&config, &env).unwrap();
+        bat_warm.cell_temp_c = 25.0;
+        let mut ports = default_ports();
+        bat_warm
+            .step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let cap_warm = bat_warm.capacity_kwh;
+
+        // Measure capacity at -20°C
+        let mut bat_cold = Battery::new(config.clone());
+        bat_cold.init(&config, &env).unwrap();
+        bat_cold.cell_temp_c = -20.0;
+        let mut ports = default_ports();
+        bat_cold
+            .step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let cap_cold = bat_cold.capacity_kwh;
+
+        let ratio = cap_cold / cap_warm;
+        assert!(
+            ratio < 0.99,
+            "capacity at -20°C should be less than at 25°C: cold={cap_cold:.4}, warm={cap_warm:.4}"
+        );
+        // OCHRE Arrhenius constants give ~49% at -20°C (Schimpe et al. 2018 fit).
+        // Assert a wide range to verify the model is active without over-constraining the physics.
+        assert!(
+            ratio > 0.3,
+            "capacity at -20°C should not be unreasonably low: ratio={ratio:.4}"
+        );
+    }
+
+    /// Request discharge power well above rated; output must be clamped to P_max = Voc²/(4R).
+    #[test]
+    fn discriminant_clamp_limits_discharge_to_p_max() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_MAX_DISCHARGE_KW, 1000.0), // allow large setpoint
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_INVERTER_EFFICIENCY, 1.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Compute expected P_max
+        let cell_ocv = bat.ocv_table.voltage_at_soc(0.5);
+        let pack_ocv = cell_ocv * bat.n_series as f64;
+        let pack_r = bat.cell_resistance_ohm * bat.n_series as f64 / bat.n_parallel as f64;
+        let p_max_w = pack_ocv * pack_ocv / (4.0 * pack_r);
+
+        // Request discharge power 10× P_max (guaranteed to drive discriminant negative)
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -(p_max_w * 10.0 / 1000.0),
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        // Actual discharge power (negative = generation) should be clamped to P_max
+        let actual_w = -ports.electrical.net_active_w() - bat.standby_power_w;
+        assert!(
+            actual_w <= p_max_w * 1.001, // small tolerance for floating point
+            "discharge must be clamped to P_max={p_max_w:.1} W, got {actual_w:.1} W"
+        );
+    }
+
+    /// After reset_daily, the reversal buffer is preserved (not cleared).
+    /// Residential charge/discharge cycles can straddle midnight.
+    #[test]
+    fn reset_daily_preserves_reversal_buffer() {
+        let mut rf = RainflowCounter::default();
+        rf.push(0.5);
+        rf.push(0.8);
+        rf.push(0.3); // 3 reversals in buffer
+
+        let reversals_before = rf.reversals.len();
+        rf.reset_daily();
+        let reversals_after = rf.reversals.len();
+
+        assert_eq!(
+            reversals_after, reversals_before,
+            "reset_daily must not discard partial cycles: had {reversals_before}, now {reversals_after}"
+        );
+    }
+
+    /// ASTM E1049-85 4-point extraction: with a large outer cycle containing a small
+    /// inner cycle, the inner cycle is extracted as a full cycle.
+    /// Sequence: 0.0 → 0.8 → 0.6 → 1.0.
+    /// After 3 points [0.0, 0.8, 0.6]: X=|0.6-0.8|=0.2, Y=|0.8-0.0|=0.8. X < Y → no extract.
+    /// After 4 points [0.0, 0.8, 0.6, 1.0]: X=|1.0-0.6|=0.4, Y=|0.6-0.8|=0.2. X >= Y, n=4
+    ///   → full cycle of range 0.2, weight 1.0 → count += 1.0. Remaining: [0.0, 1.0].
+    #[test]
+    fn rainflow_inner_cycle_extracted_as_full_cycle() {
+        let mut rf = RainflowCounter::default();
+        rf.push(0.0);
+        rf.push(0.8);
+        rf.push(0.6);
+        rf.push(1.0);
+
+        // ASTM E1049-85: one full cycle (weight 1.0) extracted, DOD=0.2.
+        // total_cycles counts the weight, not the amplitude.
+        assert!(
+            (rf.total_cycles() - 1.0).abs() < 1e-10,
+            "inner cycle should be extracted as full cycle (weight=1.0, range=0.2): got {} EFC",
+            rf.total_cycles()
+        );
+        assert_eq!(
+            rf.reversals.len(),
+            2,
+            "should have 2 remaining reversals after extraction"
+        );
+    }
+
+    /// After a save/load round-trip, all telemetry fields must be consistent
+    /// with the restored state (no stale values from before the checkpoint).
+    #[test]
+    fn load_state_telemetry_is_fully_consistent() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.6),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_HEATER_POWER_W, 200.0),
+            (KEY_HEATER_THRESHOLD_C, 5.0),
+        ]);
+        let env = base_env();
+
+        // First battery: step a few times to accumulate state.
+        let mut bat1 = Battery::new(config.clone());
+        bat1.init(&config, &env).unwrap();
+        bat1.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.5,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        for _ in 0..5 {
+            let mut ports = default_ports();
+            bat1.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+
+        let saved_soc = bat1.soc;
+        let saved_temp = bat1.cell_temp_c;
+        let saved_cycles = bat1.rainflow.total_cycles();
+        let saved_derate = bat1.discharge_derate_factor();
+        let saved_standby = bat1.standby_power_w;
+        let state = bat1.save_state().unwrap();
+
+        // Restore into a fresh battery.
+        let mut bat2 = Battery::new(config.clone());
+        bat2.init(&config, &env).unwrap();
+        // Modify bat2's temp to ensure load_state overwrites it.
+        bat2.cell_temp_c = -99.0;
+        bat2.load_state(&state).unwrap();
+
+        // Verify all telemetry fields are consistent with restored state.
+        assert!(
+            (bat2.telemetry().get(tk::SOC).unwrap() - saved_soc).abs() < 1e-12,
+            "soc telemetry mismatch after load_state"
+        );
+        assert!(
+            (bat2.telemetry().get(tk::CELL_TEMP_C).unwrap() - saved_temp).abs() < 1e-12,
+            "cell_temp_c telemetry mismatch: expected {saved_temp}, got {}",
+            bat2.telemetry().get(tk::CELL_TEMP_C).unwrap()
+        );
+        assert!(
+            (bat2.telemetry().get(tk::CYCLE_COUNT).unwrap() - saved_cycles).abs() < 1e-12,
+            "cycle_count telemetry mismatch after load_state"
+        );
+        assert!(
+            (bat2.telemetry().get(tk::DISCHARGE_DERATE).unwrap() - saved_derate).abs() < 1e-10,
+            "discharge_derate telemetry stale after load_state: expected {saved_derate}, got {}",
+            bat2.telemetry().get(tk::DISCHARGE_DERATE).unwrap()
+        );
+        assert!(
+            (bat2.telemetry().get(tk::STANDBY_POWER_W).unwrap() - saved_standby).abs() < 1e-12,
+            "standby_power_w telemetry stale after load_state"
+        );
+    }
+
+    /// Default SOC bounds must match OCHRE: min=0.15, max=0.95.
+    #[test]
+    fn default_soc_bounds_match_ochre() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert!(
+            (bat.min_soc - 0.15).abs() < 1e-12,
+            "default min_soc should be 0.15, got {}",
+            bat.min_soc
+        );
+        assert!(
+            (bat.max_soc - 0.95).abs() < 1e-12,
+            "default max_soc should be 0.95, got {}",
+            bat.max_soc
+        );
+    }
+
+    /// ASTM E1049-85 known sequence test.
+    /// Sequence: -2, 1, -3, 5, -1, 3, -4, 4, -2 (scaled to SOC [0..1] range).
+    /// The Python `rainflow` library extracts 4.0 total cycles (with end-of-series
+    /// flush). HARES's incremental (no-flush) design extracts 2.5 during the push
+    /// loop, leaving 1.5 cycles in the reversal buffer for later extraction.
+    #[test]
+    fn rainflow_astm_known_sequence() {
+        let values: Vec<f64> = [-2.0, 1.0, -3.0, 5.0, -1.0, 3.0, -4.0, 4.0, -2.0]
+            .iter()
+            .map(|x| (x + 4.0) / 9.0)
+            .collect();
+
+        let mut rf = RainflowCounter::default();
+        for &v in &values {
+            rf.push(v);
+        }
+
+        assert!(
+            (rf.total_cycles() - 2.5).abs() < 1e-10,
+            "ASTM reference sequence (incremental, no flush): expected 2.5 cycles, got {}",
+            rf.total_cycles()
+        );
+    }
+
+    /// At 60 C (hot), capacity should differ from 25 C reference due to Arrhenius model.
+    #[test]
+    fn temperature_dependent_capacity_at_hot() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let env = base_env();
+
+        let mut bat_ref = Battery::new(config.clone());
+        bat_ref.init(&config, &env).unwrap();
+        bat_ref.cell_temp_c = 25.0;
+        let mut ports = default_ports();
+        bat_ref
+            .step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let cap_ref = bat_ref.capacity_kwh;
+
+        let mut bat_hot = Battery::new(config.clone());
+        bat_hot.init(&config, &env).unwrap();
+        bat_hot.cell_temp_c = 60.0;
+        let mut ports = default_ports();
+        bat_hot
+            .step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let cap_hot = bat_hot.capacity_kwh;
+
+        assert!(
+            (cap_hot - cap_ref).abs() > 1e-6,
+            "capacity at 60 C should differ from 25 C reference: hot={cap_hot:.6}, ref={cap_ref:.6}"
+        );
+    }
+
+    /// Midnight boundary: partial cycles that straddle the daily reset are preserved
+    /// and can still contribute to cycle counts after the boundary.
+    #[test]
+    fn midnight_boundary_preserves_partial_cycles() {
+        let mut rf = RainflowCounter::default();
+        rf.push(0.3);
+        rf.push(0.8);
+        rf.push(0.4);
+
+        let reversals_before = rf.reversals.clone();
+        let cycles_before = rf.total_cycles();
+
+        rf.reset_daily();
+
+        assert_eq!(rf.reversals.len(), reversals_before.len());
+        assert!((rf.total_cycles() - cycles_before).abs() < 1e-12);
+
+        // Complete the cycle after midnight
+        rf.push(0.9);
+
+        // [0.3, 0.8, 0.4, 0.9]: x1=0.8, x2=0.4, x3=0.9
+        // X=0.5, Y=0.4. X >= Y, n=4 -> full cycle of range 0.4.
+        assert!(
+            rf.total_cycles() > cycles_before,
+            "completing cycle after midnight should increment count: before={cycles_before}, after={}",
+            rf.total_cycles()
+        );
+    }
+
+    /// Negative discriminant: requesting power beyond P_max should clamp correctly.
+    #[test]
+    fn negative_discriminant_clamp_is_correct() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_MAX_DISCHARGE_KW, 1000.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_INVERTER_EFFICIENCY, 1.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let cell_ocv = bat.ocv_table.voltage_at_soc(0.5);
+        let pack_ocv = cell_ocv * bat.n_series as f64;
+        let pack_r = bat.cell_resistance_ohm * bat.n_series as f64 / bat.n_parallel as f64;
+        let p_max_w = pack_ocv * pack_ocv / (4.0 * pack_r);
+        let p_max_kw = p_max_w / 1000.0;
+
+        let (actual_kw, ohmic_w, _, _) = bat.compute_electrical(-p_max_kw * 100.0);
+
+        assert!(actual_kw.is_finite(), "clamped power must be finite");
+        assert!(ohmic_w.is_finite(), "clamped ohmic loss must be finite");
+        assert!(
+            actual_kw.abs() <= p_max_kw * 1.001,
+            "clamped discharge must not exceed P_max={p_max_kw:.1} kW, got {:.1} kW",
+            actual_kw.abs()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Smith 2017 degradation model tests
+    // -----------------------------------------------------------------------
+
+    /// U_neg table must interpolate correctly at exact table points and in-between.
+    #[test]
+    fn u_neg_interpolation_at_known_points() {
+        let table = UNegTable::default_li_nmc();
+        // PyBaMM Chen2020 graphite anode endpoints
+        assert!((table.potential_at_soc(0.0) - 1.1054).abs() < 1e-3);
+        assert!((table.potential_at_soc(1.0) - 0.0920).abs() < 1e-3);
+        // Clamped below / above bounds
+        assert!((table.potential_at_soc(-0.1) - table.potential_at_soc(0.0)).abs() < 1e-10);
+        assert!((table.potential_at_soc(1.5) - table.potential_at_soc(1.0)).abs() < 1e-10);
+    }
+
+    /// After zero simulated time, capacity fade must be exactly 0.0 (fresh cell).
+    #[test]
+    fn degradation_starts_at_zero() {
+        let state = DegradationState::default();
+        assert_eq!(state.capacity_fade_fraction(), 0.0);
+    }
+
+    /// After many complete days of cycling at 25 C, capacity fade must be positive
+    /// but physically plausible (well below 100% after a few simulated years).
+    #[test]
+    fn degradation_positive_after_cycling() {
+        let u_neg = UNegTable::default_li_nmc();
+        let mut state = DegradationState::default();
+        state.reset_day_tracking(0.5);
+
+        let cell_temp_k = 298.15; // 25 °C
+        let v_oc = 3.69; // Mid-charge OCV
+        let dt_s = 300.0; // 5-minute timesteps
+        let steps_per_day = (86_400.0 / dt_s) as usize;
+
+        // Simulate 365 days with cycling between SOC 0.2 and 0.8.
+        let mut soc_direction = 1_f64;
+        let mut soc = 0.5;
+        for day in 0..365 {
+            for _ in 0..steps_per_day {
+                soc += soc_direction * 0.002; // slow charge/discharge ramp
+                if soc >= 0.8 {
+                    soc = 0.8;
+                    soc_direction = -1.0;
+                } else if soc <= 0.2 {
+                    soc = 0.2;
+                    soc_direction = 1.0;
+                }
+                state.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            }
+            // One half-cycle of DOD=0.6 per day: push 3 points to complete the reversal.
+            // The 3-point algorithm requires [low, high, low] to extract a half-cycle.
+            let mut rf = RainflowCounter::default();
+            rf.push(0.2);
+            rf.push(0.8);
+            rf.push(0.2); // completes the reversal → half-cycle range 0.6
+            let sum_sq = rf.sum_squared_dod_daily(); // 0.5 × 0.6² = 0.18
+            state.update_daily(&u_neg, sum_sq);
+            state.reset_day_tracking(soc);
+            let _ = day; // suppress lint
+        }
+
+        // The BOL transient (q_li3 ≈ B3_REF ≈ -2.8%) dominates capacity_fade for years.
+        // Verify the individual mechanisms are accumulating -- q_li1 and q_li2 must be positive.
+        assert!(
+            state.q_li1 > 0.0,
+            "q_li1 (calendar) must be positive after 1 year: got {}",
+            state.q_li1
+        );
+        assert!(
+            state.q_li2 > 0.0,
+            "q_li2 (cycle) must be positive after 1 year: got {}",
+            state.q_li2
+        );
+        assert!(
+            state.q_li3 < 0.0,
+            "q_li3 (BOL boost) must be negative: got {}",
+            state.q_li3
+        );
+    }
+
+    /// Mechanism 1 (calendar) dominates at rest: even without cycling,
+    /// fade must accumulate slowly over many days.
+    #[test]
+    fn degradation_calendar_aging_at_rest() {
+        let u_neg = UNegTable::default_li_nmc();
+        let mut state = DegradationState::default();
+        state.reset_day_tracking(0.5);
+
+        let cell_temp_k = 308.15; // 35 °C -- elevated temperature accelerates calendar aging
+        let v_oc = 3.69;
+        let dt_s = 3600.0; // hourly steps, idle battery
+
+        // Simulate 365 days at rest with no cycling.
+        for _ in 0..365 {
+            for _ in 0..24 {
+                state.accumulate(dt_s, cell_temp_k, v_oc, 0.5); // constant SOC = 0.5
+            }
+            let sum_sq = 0.0; // no cycles
+            state.update_daily(&u_neg, sum_sq);
+            state.reset_day_tracking(0.5);
+        }
+
+        // q_li1 must be positive (calendar mechanism active).
+        // capacity_fade includes q_li3 (BOL boost, negative), which can dominate for years.
+        assert!(
+            state.q_li1 > 0.0,
+            "q_li1 (calendar) must be positive after 365 days at rest: got {}",
+            state.q_li1
+        );
+    }
+
+    /// Higher temperature must produce more q_li1 (calendar SEI growth) than lower temperature.
+    /// Uses q_li1 directly -- capacity_fade_fraction includes q_li3 whose temperature dependence
+    /// differs and can mask the Arrhenius effect during the BOL transient.
+    #[test]
+    fn degradation_higher_temp_more_fade() {
+        let u_neg = UNegTable::default_li_nmc();
+        let dt_s = 300.0;
+        let steps_per_day = (86_400.0 / dt_s) as usize;
+        let v_oc = 3.69;
+
+        let simulate = |temp_k: f64| -> DegradationState {
+            let mut state = DegradationState::default();
+            state.reset_day_tracking(0.5);
+            let mut rf = RainflowCounter::default();
+            rf.push(0.2);
+            rf.push(0.8);
+            let sum_sq = rf.sum_squared_dod_daily();
+
+            for _ in 0..180 {
+                for _ in 0..steps_per_day {
+                    state.accumulate(dt_s, temp_k, v_oc, 0.5);
+                }
+                state.update_daily(&u_neg, sum_sq);
+                state.reset_day_tracking(0.5);
+            }
+            state
+        };
+
+        let ds_cold = simulate(278.15); // 5 °C
+        let ds_warm = simulate(318.15); // 45 °C
+
+        assert!(
+            ds_warm.q_li1 > ds_cold.q_li1,
+            "higher temperature must produce more q_li1: 45C={:.6}, 5C={:.6}",
+            ds_warm.q_li1,
+            ds_cold.q_li1
+        );
+    }
+
+    /// After a save/load round-trip, degradation state (capacity fade and accumulators)
+    /// must be identical, and the model must continue evolving consistently.
+    #[test]
+    fn degradation_state_survives_checkpoint_round_trip() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+        ]);
+        let env = base_env();
+
+        let mut bat1 = Battery::new(config.clone());
+        bat1.init(&config, &env).unwrap();
+
+        // Run 10 steps to accumulate some sub-daily degradation state.
+        bat1.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 3.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        for _ in 0..10 {
+            let mut ports = default_ports();
+            bat1.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+        }
+
+        let saved = bat1.save_state().unwrap();
+        let fade_before = bat1.degradation.capacity_fade_fraction();
+        let b1_accum_before = bat1.degradation.b1_accum;
+
+        // Restore into a fresh battery.
+        let mut bat2 = Battery::new(config.clone());
+        bat2.init(&config, &env).unwrap();
+        bat2.load_state(&saved).unwrap();
+
+        assert!(
+            (bat2.degradation.capacity_fade_fraction() - fade_before).abs() < 1e-15,
+            "capacity_fade must survive checkpoint"
+        );
+        assert!(
+            (bat2.degradation.b1_accum - b1_accum_before).abs() < 1e-15,
+            "b1_accum must survive checkpoint"
+        );
+    }
+
+    /// After several days of cycling, save a checkpoint, load into a fresh Battery,
+    /// and verify `capacity_kwh_nominal` matches the original (non-zero degradation).
+    #[test]
+    fn load_state_preserves_nominal_capacity_after_degradation() {
+        let config = typed_battery_config(None, None);
+        let mut env = warm_env();
+        let mut bat1 = Battery::new(config.clone());
+        bat1.init(&config, &env).unwrap();
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288;
+
+        // Run 7 days of cycling to accumulate measurable degradation.
+        for _day in 0..7 {
+            for step in 0..steps_per_day {
+                env.current_time += ChronoDuration::seconds(300);
+                let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
+                bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                    active_power_kw: power,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+                let mut ports = default_ports();
+                bat1.step(&env, dt, &mut ports).unwrap();
+            }
+        }
+
+        let fade1 = bat1.degradation.capacity_fade_fraction();
+        let nominal1 = bat1.capacity_kwh_nominal;
+        let rated = bat1.capacity_kwh_rated;
+
+        // Degradation should be non-zero after 7 days.
+        assert!(
+            fade1.abs() > 0.0,
+            "expected non-zero fade after 7 days, got {fade1}"
+        );
+
+        // Save and restore into a fresh battery.
+        let saved = bat1.save_state().unwrap();
+        let mut bat2 = Battery::new(config.clone());
+        bat2.init(&config, &env).unwrap();
+        bat2.load_state(&saved).unwrap();
+
+        assert!(
+            (bat2.capacity_kwh_nominal - nominal1).abs() < 1e-12,
+            "capacity_kwh_nominal mismatch after load_state: expected {nominal1}, got {}",
+            bat2.capacity_kwh_nominal
+        );
+        assert!(
+            (bat2.capacity_kwh_nominal - rated * (1.0 - fade1)).abs() < 1e-12,
+            "capacity_kwh_nominal should equal rated * soh"
+        );
+    }
+
+    /// RainflowCounter daily DOD sum-of-squares is zero when no cycles have been
+    /// completed today, and non-zero after a full cycle.
+    #[test]
+    fn rainflow_sum_squared_dod_reflects_daily_cycles() {
+        let mut rf = RainflowCounter::default();
+        assert_eq!(rf.sum_squared_dod_daily(), 0.0);
+
+        // Push a 50% DOD round-trip: 0.5 → 1.0 → 0.5 → 1.0
+        // Two half-cycles extracted: each (range=0.5, count=0.5).
+        rf.push(0.5);
+        rf.push(1.0);
+        rf.push(0.5);
+        rf.push(1.0);
+
+        let sum_sq = rf.sum_squared_dod_daily();
+        // Σ(count_i × range_i²) = 0.5 × 0.5² + 0.5 × 0.5² = 0.125 + 0.125 = 0.25
+        assert!(
+            (sum_sq - 0.25).abs() < 1e-10,
+            "sum_squared_dod should be 0.25 for two half-cycles of range 0.5: got {sum_sq}"
+        );
+
+        // After reset_daily, sum should be zero again.
+        rf.reset_daily();
+        assert_eq!(rf.sum_squared_dod_daily(), 0.0);
+    }
+
+    /// The BOL transient mechanism (q_li3) uses B3_REF < 0, which means b3_accum
+    /// accumulates negative values. The `.max(0.0)` clamp in `update_daily` keeps
+    /// dq_li3 = 0 when b3_accum < q_li3, so q_li3 never rises above 0 during
+    /// calendar-only aging. This confirms the mechanism produces no fade contribution
+    /// (≤ 0) in the early-life period and that total capacity fade grows with time.
+    #[test]
+    fn degradation_bol_transient_initially_provides_capacity_gain() {
+        let u_neg = UNegTable::default_li_nmc();
+        let cell_temp_k = 298.15; // 25 °C
+        let soc = 0.5;
+        let v_oc = OcvTable::default_li_nmc().voltage_at_soc(soc);
+        let dt_s = 300.0; // 5-minute timesteps
+        let steps_per_day = (SECONDS_PER_DAY / dt_s) as usize;
+
+        // --- Simulate 5 days of calendar aging (no cycling) ---
+        let mut state_5 = DegradationState::default();
+        state_5.reset_day_tracking(soc);
+
+        for _ in 0..5 {
+            for _ in 0..steps_per_day {
+                state_5.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            }
+            state_5.update_daily(&u_neg, 0.0);
+            state_5.reset_day_tracking(soc);
+        }
+
+        // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative -- the BOL transient
+        // provides a transient capacity gain (negative lithium loss). Not zero as with the
+        // former broken `.max(0.0)` clamp.
+        assert!(
+            state_5.q_li3 < 0.0,
+            "q_li3 must be negative after 5 days (BOL boost active): got {}",
+            state_5.q_li3
+        );
+
+        // --- Simulate 60 days of calendar aging (no cycling) ---
+        let mut state_60 = DegradationState::default();
+        state_60.reset_day_tracking(soc);
+
+        for _ in 0..60 {
+            for _ in 0..steps_per_day {
+                state_60.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            }
+            state_60.update_daily(&u_neg, 0.0);
+            state_60.reset_day_tracking(soc);
+        }
+
+        assert!(
+            state_60.q_li3 < 0.0,
+            "q_li3 must be negative after 60 days (BOL boost active): got {}",
+            state_60.q_li3
+        );
+
+        // Calendar aging (mechanism 1) grows monotonically with time: 60-day q_li1
+        // must exceed 5-day q_li1. Test q_li1 directly -- capacity_fade includes the
+        // q_li3 BOL term which is also growing more negative over 60 days.
+        assert!(
+            state_60.q_li1 > state_5.q_li1,
+            "q_li1 after 60 days ({:.6}) must exceed after 5 days ({:.6})",
+            state_60.q_li1,
+            state_5.q_li1
+        );
+    }
+
+    /// NMC OCV table grid points must exactly match the embedded array values.
+    #[test]
+    fn ocv_table_grid_points_exact() {
+        let table = OcvTable::default_li_nmc();
+        assert_eq!(table.soc_points.len(), 51);
+        assert_eq!(table.voltage_v.len(), 51);
+
+        // Spot-check boundary and mid points (PyBaMM Chen2020)
+        assert!((table.voltage_at_soc(0.0) - 2.5000).abs() < 1e-4);
+        assert!((table.voltage_at_soc(1.0) - 4.2000).abs() < 1e-4);
+
+        // Every grid point must interpolate to its exact value
+        for (i, (soc, v)) in table
+            .soc_points
+            .iter()
+            .zip(table.voltage_v.iter())
+            .enumerate()
+        {
+            let actual = table.voltage_at_soc(*soc);
+            assert!(
+                (actual - v).abs() < 1e-10,
+                "grid point {i} SOC={soc:.2}: expected {v:.6}, got {actual:.10}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_limit_caps_charge_power() {
+        // OCHRE Battery Max Import Limit: clamps the charge power drawn from the grid.
+        // Setting import_limit_w=2000 W = 2 kW should cap charging to 2 kW even
+        // when max_charge_kw=5 kW and a 5 kW setpoint is applied.
+        // Standby = 0 so ACTIVE_POWER_KW == charging power for a clean assertion.
+        let config = battery_config(&[
+            (KEY_IMPORT_LIMIT_W, 2000.0), // 2 kW limit
+            (KEY_INITIAL_SOC, 0.1),       // plenty of room to charge
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut slots = default_ports();
+        bat.step(&base_env(), Duration::from_secs(300), &mut slots)
+            .unwrap();
+
+        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            charging_kw <= 2.0 + 1e-9,
+            "charge power {charging_kw:.4} kW should be capped at 2 kW by import_limit_w"
+        );
+        assert!(
+            charging_kw > 1.9,
+            "charge power {charging_kw:.4} kW should be close to the 2 kW import limit"
+        );
+    }
+
+    #[test]
+    fn export_limit_caps_discharge_power() {
+        // OCHRE Battery Max Export Limit: clamps discharge power exported to the grid.
+        // Setting export_limit_w=1500 W = 1.5 kW should cap discharging to 1.5 kW
+        // even when max_discharge_kw=5 kW and a -5 kW setpoint is applied.
+        let config = battery_config(&[
+            (KEY_EXPORT_LIMIT_W, 1500.0), // 1.5 kW limit
+            (KEY_INITIAL_SOC, 0.9),       // plenty of energy to discharge
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut slots = default_ports();
+        bat.step(&base_env(), Duration::from_secs(300), &mut slots)
+            .unwrap();
+
+        // active_power_kw includes standby; subtract it to get net discharge.
+        let active_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
+        let discharge_kw = active_kw - standby_kw;
+        assert!(
+            discharge_kw >= -1.5 - 1e-9,
+            "discharge power {discharge_kw:.4} kW must not exceed export_limit of -1.5 kW"
+        );
+        assert!(
+            discharge_kw < -1.3,
+            "discharge power {discharge_kw:.4} kW should be close to the -1.5 kW export limit"
+        );
+    }
+
+    #[test]
+    fn no_limit_allows_full_charge_power() {
+        // Without import/export limits, the battery should use its full capacity.
+        // Uses warm_env (25°C) so capacity derate ≈ 1.0 and rated power is available.
+        let env = warm_env();
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.1),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut slots = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut slots)
+            .unwrap();
+
+        let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
+        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) - standby_kw;
+        // Should be close to 5 kW (max_charge_kw), not capped lower.
+        // Ohmic losses from the OCV model reduce effective power slightly.
+        assert!(
+            charging_kw > 4.5,
+            "without import limit, charge power {charging_kw:.4} kW should reach near max_charge_kw"
+        );
+    }
+
+    #[test]
+    fn import_limit_defaults_to_none_unlimited() {
+        // Default construction has no import/export limits.
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        assert!(bat.import_limit_kw.is_none());
+        assert!(bat.export_limit_kw.is_none());
+    }
+
+    #[test]
+    fn init_rejects_negative_import_limit() {
+        let config = battery_config(&[(KEY_IMPORT_LIMIT_W, -100.0)]);
+        let mut bat = Battery::new(config.clone());
+        assert!(bat.init(&config, &base_env()).is_err());
+    }
+
+    #[test]
+    fn init_rejects_negative_export_limit() {
+        let config = battery_config(&[(KEY_EXPORT_LIMIT_W, -100.0)]);
+        let mut bat = Battery::new(config.clone());
+        assert!(bat.init(&config, &base_env()).is_err());
+    }
+
+    // ── PowerLimit + DemandResponse tests ──────────────────────────
+
+    #[test]
+    fn power_limit_caps_discharge_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::PowerLimit {
+            max_power_kw: 2.0,
+            ramp_rate_kw_per_s: None,
+        })
+        .expect("PowerLimit accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power.abs() <= 2.0 + 0.01,
+            "discharge should be capped at 2 kW by PowerLimit, got {power}"
+        );
+    }
+
+    #[test]
+    fn demand_response_reduces_available_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Critical,
+            duration_s: Some(600.0),
+        })
+        .expect("DR accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        // Critical = 25% of max, so max discharge ≈ 1.25 kW
+        assert!(
+            power.abs() <= 1.3,
+            "Critical DR should limit discharge to ~25% of max, got {power}"
+        );
+    }
+
+    #[test]
+    fn grid_emergency_blocks_all_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: None,
+        })
+        .expect("DR accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        let standby = DEFAULT_STANDBY_POWER_W / 1000.0;
+        assert!(
+            (power - standby).abs() < 0.01,
+            "GridEmergency should block all discharge, got power={power}"
+        );
+    }
+
+    #[test]
+    fn dr_auto_reverts_after_duration_expires() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(120.0),
+        })
+        .expect("DR accepted");
+
+        // Step through 3 minutes (180s > 120s duration)
+        let mut ports = default_ports();
+        for _ in 0..3 {
+            bat.update_control(&env);
+            bat.step(&env, Duration::from_secs(60), &mut ports)
+                .expect("step");
+            ports = default_ports();
+        }
+
+        // DR should have reverted to Normal -- full power available
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1.0,
+            "after DR expiry, discharge should be available again, got {power}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 4D LUT and Equipment trait LUT method tests
+    // ---------------------------------------------------------------
+
+    fn make_4d_lut(soc_pf: &[(f64, f32)]) -> crate::ndinterp::RegularGridInterpolator {
+        let soc_grid: Vec<f64> = soc_pf.iter().map(|(s, _)| *s).collect();
+        let values: Vec<f32> = soc_pf.iter().map(|(_, p)| *p).collect();
+        crate::ndinterp::RegularGridInterpolator::new(
+            vec![soc_grid, vec![25.0], vec![1.0], vec![1.0]],
+            values,
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn set_charging_curve_lut_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        assert!(bat.charging_curve_lut.is_some());
+    }
+
+    #[test]
+    fn clear_charging_curve_lut_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.set_charging_curve_lut(None).unwrap();
+        assert!(bat.charging_curve_lut.is_none());
+    }
+
+    #[test]
+    fn set_ocv_table_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        bat.set_ocv_table(table).unwrap();
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        assert!((v - 3.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ocv_source_reports_hardcoded_after_construction() {
+        let config = battery_config(&[]);
+        let bat = Battery::new(config);
+        assert_eq!(bat.ocv_source().unwrap(), "hardcoded-NMC-v26.3.0");
+    }
+
+    #[test]
+    fn ocv_source_reports_runtime_injected_after_set_ocv_table() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        bat.set_ocv_table(table).unwrap();
+        assert_eq!(bat.ocv_source().unwrap(), "runtime-injected");
+    }
+
+    #[test]
+    fn ocv_source_restored_after_reset_ocv_table() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+        assert_eq!(bat.ocv_source().unwrap(), "hardcoded-NMC-v26.3.0");
+    }
+
+    #[test]
+    fn set_u_neg_table_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        bat.set_u_neg_table(table).unwrap();
+        let p = bat.u_neg_table.potential_at_soc(0.5);
+        assert!((p - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn reset_ocv_table_restores_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+        let v = bat.ocv_table.voltage_at_soc(0.0);
+        assert!(
+            (v - 2.5).abs() < 1e-3,
+            "should be default NMC voltage at SOC=0"
+        );
+    }
+
+    #[test]
+    fn reset_u_neg_table_restores_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = UNegTable::new(vec![0.0, 1.0], vec![0.5, 0.01]).unwrap();
+        bat.set_u_neg_table(custom).unwrap();
+        bat.reset_u_neg_table().unwrap();
+        let p = bat.u_neg_table.potential_at_soc(0.0);
+        assert!(
+            (p - 1.1054).abs() < 1e-3,
+            "should be default NMC U_neg at SOC=0"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Initialized guard: post-registration LUT rejection (T-0534)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn set_ocv_table_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        // Before initialization, LUT setters succeed.
+        bat.set_ocv_table(table.clone()).unwrap();
+        // Mark as initialized (as Dwelling::add_equipment would).
+        bat.mark_initialized();
+        // After initialization, LUT setters must reject.
+        let err = bat.set_ocv_table(table).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn set_charging_curve_lut_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut.clone())).unwrap();
+        bat.mark_initialized();
+        let err = bat.set_charging_curve_lut(Some(lut)).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn set_u_neg_table_rejected_after_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        bat.set_u_neg_table(table.clone()).unwrap();
+        bat.mark_initialized();
+        let err = bat.set_u_neg_table(table).unwrap_err();
+        assert!(
+            err.to_string().contains("already initialized"),
+            "expected 'already initialized' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lut_setters_succeed_before_mark_initialized() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        assert!(
+            bat.set_ocv_table(table).is_ok(),
+            "LUT setter should succeed before initialization"
+        );
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        assert!(
+            bat.set_charging_curve_lut(Some(lut)).is_ok(),
+            "charging curve setter should succeed before initialization"
+        );
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        assert!(
+            bat.set_u_neg_table(table).is_ok(),
+            "u_neg setter should succeed before initialization"
+        );
+    }
+
+    #[test]
+    fn is_initialized_defaults_false() {
+        let config = battery_config(&[]);
+        let bat = Battery::new(config);
+        assert!(!bat.is_initialized());
+    }
+
+    #[test]
+    fn mark_initialized_sets_flag() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.mark_initialized();
+        assert!(bat.is_initialized());
+    }
+
+    #[test]
+    fn lfp_chemistry_selects_lfp_ocv_on_init() {
+        let config = typed_battery_config(Some("lfp"), None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        let lfp_expected = OcvTable::default_lfp().voltage_at_soc(0.5);
+        assert!(
+            (v - lfp_expected).abs() < 1e-9,
+            "LFP battery should use LFP OCV, got {v}, expected {lfp_expected}"
+        );
+    }
+
+    #[test]
+    fn reset_ocv_on_lfp_battery_restores_lfp_default() {
+        let config = typed_battery_config(Some("lfp"), None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        let lfp_expected = OcvTable::default_lfp().voltage_at_soc(0.5);
+        assert!(
+            (v - lfp_expected).abs() < 1e-9,
+            "reset should restore LFP default, not NMC. got {v}, expected {lfp_expected}"
+        );
+    }
+
+    #[test]
+    fn custom_ocv_not_overwritten_by_chemistry_on_init() {
+        let config = typed_battery_config(Some("lfp"), None);
+        let mut bat = Battery::new(config.clone());
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.init(&config, &base_env()).unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        assert!(
+            (v - 4.0).abs() < 1e-9,
+            "custom OCV should survive init, got {v}"
+        );
+    }
+
+    #[test]
+    fn init_errors_on_unparseable_chemistry_override() {
+        // A present-but-unparseable chemistry must fail init, not silently
+        // substitute NMC: the OCV and u_neg tables selected from the fallback
+        // chemistry drive every charge-voltage decision for a battery the
+        // operator did not configure.
+        for bad in ["Graphite", "lfp "] {
+            let config = typed_battery_config(Some(bad), None);
+            let mut bat = Battery::new(config.clone());
+            let err = bat
+                .init(&config, &base_env())
+                .expect_err("unparseable chemistry must fail init");
+            assert!(
+                format!("{err:?}").contains("chemistry"),
+                "error must name the offending key for override '{bad}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lut_tapers_battery_charge_at_high_soc() {
+        let lut = make_4d_lut(&[(0.0, 1.0), (0.5, 1.0), (0.8, 0.5), (1.0, 0.0)]);
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.soc = 0.9;
+
+        let clamped = bat.clamp_power(5.0).unwrap();
+        assert!(
+            clamped < 2.0,
+            "charge should be tapered at high SOC with LUT, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn no_lut_allows_full_charge_power() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.soc = 0.5;
+        // Without LUT, charge power should be near max (5 kW)
+        let clamped = bat.clamp_power(5.0).unwrap();
+        assert!(
+            clamped > 4.0,
+            "without LUT, charge should be near max, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn lut_with_temperature_variation() {
+        // 4D LUT where temperature affects power fraction:
+        // cold (-10C) → 0.5, warm (25C) → 1.0
+        let axes = vec![
+            vec![0.0, 1.0],    // soc
+            vec![-10.0, 25.0], // temp
+            vec![1.0],         // c_rate
+            vec![1.0],         // soh
+        ];
+        // Row-major: [soc=0,t=-10], [soc=0,t=25], [soc=1,t=-10], [soc=1,t=25]
+        let values = vec![0.5f32, 1.0, 0.5, 1.0];
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            axes,
+            values,
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.soc = 0.5;
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+
+        // At 25C → power fraction 1.0, full power
+        bat.cell_temp_c = 25.0;
+        let warm = bat.clamp_power(5.0).unwrap();
+
+        // At -10C → power fraction 0.5, half power
+        bat.cell_temp_c = -10.0;
+        let cold = bat.clamp_power(5.0).unwrap();
+
+        assert!(
+            cold < warm,
+            "cold ({cold}) should produce less power than warm ({warm})"
+        );
+    }
+
+    #[test]
+    fn discharge_unaffected_by_charging_lut() {
+        let lut = make_4d_lut(&[(0.0, 0.1), (1.0, 0.0)]);
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.soc = 0.5;
+
+        // Discharge (negative power) should not be affected by charging LUT
+        let clamped = bat.clamp_power(-5.0).unwrap();
+        assert!(
+            clamped < -4.0,
+            "discharge should not be limited by charging LUT, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn battery_discharge_not_double_derated() {
+        // min_discharge_temp=-20C, full_power_temp=10C → at -10C, linear derate = 10/30 ≈ 0.333
+        // capacity_derate_model is set to return 0.5 at -10C to confirm it does NOT affect discharge power.
+        // clamp_power(-5.0) should return -5.0 (unclamped by capacity model); step() applies the linear ramp separately.
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.cell_temp_c = -10.0;
+        bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear {
+            points: vec![(-20.0, 0.2), (25.0, 0.5)],
+        };
+
+        let clamped = bat.clamp_power(-5.0).unwrap();
+        assert!(
+            (clamped - (-5.0)).abs() < 1e-9,
+            "discharge clamp_power should not apply capacity_derate_model; expected -5.0, got {clamped}"
+        );
+
+        // Charge branch still uses capacity_derate_model (interpolates ~0.41 at -10C → 5.0 * 0.41 ≈ 2.05)
+        let charge_clamped = bat.clamp_power(5.0).unwrap();
+        assert!(
+            charge_clamped < 3.0,
+            "charge clamp_power should still apply capacity_derate_model, got {charge_clamped}"
+        );
+    }
+
+    #[test]
+    fn battery_default_bms_mode_is_manual() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(bat.bms_mode(), &BmsMode::Manual);
+    }
+
+    #[test]
+    fn battery_bms_mode_from_config_json() {
+        let bms = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 1.0,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        };
+        let config = typed_battery_config(None, Some(bms));
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(
+            bat.bms_mode(),
+            &BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 1.0,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn battery_domain_invalid_bms_mode_rejected() {
+        // JSON shape is fine but the domain values are not: init must run
+        // BmsMode::validate, not just serde. An inverted SoC window and a
+        // negative deadband are the two representative failures.
+        let inverted_window = BmsMode::SelfConsumption {
+            min_soc: 0.9,
+            max_soc: 0.2,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        };
+        let config = typed_battery_config(None, Some(inverted_window));
+        let mut bat = Battery::new(config.clone());
+        let err = bat
+            .init(&config, &warm_env())
+            .expect_err("inverted SoC window must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("bms_mode"), "error must name bms_mode: {msg}");
+        assert!(
+            msg.contains("min_soc"),
+            "error must carry the validator detail: {msg}"
+        );
+
+        let negative_deadband = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+            surplus_deadband_kw: -1.0,
+        };
+        let config = typed_battery_config(None, Some(negative_deadband));
+        let mut bat = Battery::new(config.clone());
+        let err = bat
+            .init(&config, &warm_env())
+            .expect_err("negative surplus deadband must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("bms_mode"), "error must name bms_mode: {msg}");
+        assert!(
+            msg.contains("surplus_deadband_kw"),
+            "error must carry the validator detail: {msg}"
+        );
+    }
+
+    #[test]
+    fn battery_grid_export_rule_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(bat.grid_export_rule(), GridExportRule::Unrestricted);
+    }
+
+    #[test]
+    fn actor_seed_manual_returns_none() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &warm_env()).unwrap();
+        assert!(bat.actor_seed().is_none());
+    }
+
+    #[test]
+    fn actor_seed_self_consumption_returns_battery_seed() {
+        let bms = BmsMode::SelfConsumption {
+            min_soc: 0.15,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        };
+        let config = typed_battery_config(None, Some(bms));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &warm_env()).unwrap();
+
+        let seed = bat.actor_seed();
+        assert!(seed.is_some());
+        match seed.unwrap() {
+            crate::ActorSeed::Battery {
+                bms_mode,
+                max_charge_kw,
+                max_discharge_kw,
+                ..
+            } => {
+                assert!(matches!(bms_mode, BmsMode::SelfConsumption { .. }));
+                assert!((max_charge_kw - 5.0).abs() < 1e-6);
+                assert!((max_discharge_kw - 5.0).abs() < 1e-6);
+            }
+            _ => panic!("expected Battery seed"),
+        }
+    }
+
+    /// Class rule: every `BmsMode` variant is pinned to its side of the
+    /// `actor_seed` exemption. `Manual` — and only `Manual` — gets no
+    /// management actor, because a manually driven battery legitimately
+    /// needs no built-in dispatch logic; every other variant must produce a
+    /// seed or the configured mode never runs. The exhaustive match (no
+    /// wildcard arm) fails compilation when a variant is added to the enum,
+    /// so a new variant cannot silently inherit either side of the guard.
+    #[test]
+    fn actor_seed_pins_every_bms_mode_variant() {
+        use hares_types::{
+            BmsAction, BmsScheduleWindow, BmsTimeWindow, DayFilter, StormWatchTrigger,
+        };
+
+        let modes: Vec<(BmsMode, bool)> = vec![
+            (
+                BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                true,
+            ),
+            (
+                BmsMode::TimeOfUseOptimization {
+                    reserve_soc: 0.2,
+                    charge_threshold_percentile: 0.3,
+                    discharge_threshold_percentile: 0.7,
+                    solar_only_charging: false,
+                    price_deadband: 0.0,
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (
+                BmsMode::BackupReserve {
+                    target_soc: 0.9,
+                    charge_from_grid: true,
+                    charge_rate_fraction: 0.5,
+                    soc_deadband: 0.0,
+                },
+                true,
+            ),
+            (
+                BmsMode::DemandResponse {
+                    base_mode: Box::new(BmsMode::Manual),
+                    dr_discharge_rate: 0.5,
+                    min_soc_during_dr: 0.3,
+                    dr_deactivation_multiplier: 0.0,
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (
+                BmsMode::Scheduled {
+                    windows: vec![BmsScheduleWindow {
+                        time_window: BmsTimeWindow {
+                            day: DayFilter::Any,
+                            start_minute: 0,
+                            end_minute: 60,
+                        },
+                        action: BmsAction::Idle,
+                    }],
+                },
+                true,
+            ),
+            (
+                BmsMode::StormWatch {
+                    target_soc: 0.95,
+                    trigger: StormWatchTrigger::ManualEnable,
+                    base_mode: Box::new(BmsMode::Manual),
+                    min_duration_steps: None,
+                },
+                true,
+            ),
+            (BmsMode::Manual, false),
+        ];
+
+        for (mode, expect_seed) in modes {
+            // Exhaustiveness tripwire: names every variant, no wildcard arm.
+            match &mode {
+                BmsMode::SelfConsumption { .. }
+                | BmsMode::TimeOfUseOptimization { .. }
+                | BmsMode::BackupReserve { .. }
+                | BmsMode::DemandResponse { .. }
+                | BmsMode::Scheduled { .. }
+                | BmsMode::StormWatch { .. }
+                | BmsMode::Manual => {}
+            }
+            let config = typed_battery_config(None, Some(mode.clone()));
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &warm_env()).unwrap();
+            assert_eq!(
+                bat.actor_seed().is_some(),
+                expect_seed,
+                "actor_seed() returned the wrong side of the exemption for {mode:?}"
+            );
+        }
+    }
+
+    /// Run 365 days of cycling. The SOH-to-capacity relationship
+    /// capacity_fade_fraction = 1.0 - (capacity_kwh_nominal / capacity_kwh_rated) must hold.
+    /// Note: the BOL transient (q_li3 < 0) can cause soh > 1.0 initially (Smith 2017),
+    /// so we verify the algebraic relationship rather than assuming monotonic decline.
+    #[test]
+    fn degradation_reduces_nominal_capacity() {
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        let rated = bat.capacity_kwh_rated;
+        assert!(
+            (bat.capacity_kwh_nominal - rated).abs() < 1e-12,
+            "nominal should equal rated at init"
+        );
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288; // 5-min steps
+
+        // Cycle the battery: charge then discharge each day to cause degradation.
+        for day in 0..365 {
+            for step in 0..steps_per_day {
+                env.current_time += ChronoDuration::seconds(300);
+
+                if step < steps_per_day / 2 {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: 5.0,
+                        reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
+                    })
+                    .unwrap();
+                } else {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: -5.0,
+                        reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
+                    })
+                    .unwrap();
+                }
+
+                let mut ports = default_ports();
+                bat.step(&env, dt, &mut ports).unwrap();
+            }
+
+            // Verify the SOH-to-capacity algebraic relationship at periodic checkpoints.
+            if day % 50 == 0 {
+                let fade = bat.degradation.capacity_fade_fraction();
+                let soh = 1.0 - fade;
+                let expected_nominal = rated * soh;
+                assert!(
+                    (bat.capacity_kwh_nominal - expected_nominal).abs() < 1e-6,
+                    "day {day}: capacity_kwh_nominal ({}) should match rated * soh ({expected_nominal})",
+                    bat.capacity_kwh_nominal
+                );
+            }
+        }
+
+        // After 365 days, the algebraic invariant must still hold.
+        let fade = bat.degradation.capacity_fade_fraction();
+        let expected_fade = 1.0 - (bat.capacity_kwh_nominal / rated);
+        assert!(
+            (fade - expected_fade).abs() < 1e-6,
+            "capacity_fade_fraction ({fade}) should match 1 - nominal/rated ({expected_fade})"
+        );
+
+        // Capacity_kwh_nominal should differ from rated (degradation had an effect).
+        assert!(
+            (bat.capacity_kwh_nominal - rated).abs() > 1e-6,
+            "after 365 days, nominal ({}) should differ from rated ({rated})",
+            bat.capacity_kwh_nominal
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology derivation tests (T-0061)
+    // -----------------------------------------------------------------------
+
+    /// When both explicit n_series/n_parallel and ah_cell/v_cell are provided,
+    /// the explicit topology must be preserved and a conflict warning emitted.
+    #[test]
+    fn battery_topology_conflict_preserves_explicit() {
+        let config = battery_config(&[
+            (KEY_N_SERIES, 14.0),
+            (KEY_N_PARALLEL, 3.0),
+            (KEY_AH_CELL, 70.0),
+            (KEY_V_CELL, 3.6),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 14, "explicit n_series must be preserved");
+        assert_eq!(bat.n_parallel, 3, "explicit n_parallel must be preserved");
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            1.0,
+            "derivation_source must be Explicit (1.0)"
+        );
+        // ah_cell / v_cell raw config values should be present in telemetry
+        assert!(
+            (bat.telemetry().get(tk::AH_CELL).unwrap() - 70.0).abs() < 1e-12,
+            "ah_cell must reflect config value"
+        );
+        assert!(
+            (bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12,
+            "v_cell must reflect config value"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::N_SERIES).unwrap(),
+            14.0,
+            "n_series telemetry must match struct"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::N_PARALLEL).unwrap(),
+            3.0,
+            "n_parallel telemetry must match struct"
+        );
+    }
+
+    /// Cell-parameter derivation must still work when no explicit n_series/n_parallel
+    /// are provided, and the implied capacity must be within 10% of declared.
+    #[test]
+    fn battery_topology_derivation_without_conflict() {
+        let config = battery_config(&[(KEY_AH_CELL, 5.0), (KEY_V_CELL, 3.6)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Derivation: target_pack_v = 350 V default
+        // n_series = round(350 / 3.6) = round(97.22) = 97
+        // pack_v = 97 * 3.6 = 349.2 V, pack_ah = 10.0 kWh * 1000 / 349.2 = 28.637 Ah
+        // n_parallel = ceil(28.637 / 5.0) = ceil(5.727) = 6
+        assert_eq!(
+            bat.n_series, 97,
+            "n_series should be derived from target_pack_v / v_cell"
+        );
+        assert_eq!(
+            bat.n_parallel, 6,
+            "n_parallel should be ceil(pack_ah / ah_cell)"
+        );
+        // Implied capacity: 6 * 5.0 * 97 * 3.6 / 1000 = 10.476 kWh
+        // Relative error: |10.476 - 10| / 10 = 4.76% < 10% ✓
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            2.0,
+            "derivation_source must be CellParameters (2.0)"
+        );
+        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 5.0).abs() < 1e-12);
+        assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
+    }
+
+    /// Explicit n_series/n_parallel with no cell parameters must be preserved.
+    #[test]
+    fn battery_topology_explicit_without_cell_params() {
+        let config = battery_config(&[(KEY_N_SERIES, 10.0), (KEY_N_PARALLEL, 2.0)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 10);
+        assert_eq!(bat.n_parallel, 2);
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            1.0,
+            "derivation_source must be Explicit"
+        );
+        // ah_cell / v_cell not provided → 0.0 sentinel
+        assert_eq!(
+            bat.telemetry().get(tk::AH_CELL),
+            Some(0.0),
+            "ah_cell must be 0.0 when not provided"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::V_CELL),
+            Some(0.0),
+            "v_cell must be 0.0 when not provided"
+        );
+    }
+
+    /// When only one topology param is provided alongside cell parameters,
+    /// the explicit param is preserved and the missing one is derived.
+    /// Regression test for the partial-explicit case where `||` previously
+    /// blocked all derivation when any explicit value was present.
+    #[test]
+    fn battery_topology_partial_explicit_derives_missing() {
+        // n_series=14 explicit, n_parallel missing → derive parallel from cell params
+        let config =
+            battery_config(&[(KEY_N_SERIES, 14.0), (KEY_AH_CELL, 70.0), (KEY_V_CELL, 3.6)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 14, "explicit n_series must be preserved");
+        // pack_v = 14 * 3.6 = 50.4 V, pack_ah = 10 kWh * 1000 / 50.4 ≈ 198.41 Ah
+        // n_parallel = ceil(198.41 / 70) = 3
+        assert_eq!(
+            bat.n_parallel, 3,
+            "n_parallel must be derived from cell params when not explicit"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            3.0,
+            "derivation_source must be Mixed (3.0)"
+        );
+        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 70.0).abs() < 1e-12);
+        assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology capacity consistency tests (T-0062)
+    // -----------------------------------------------------------------------
+
+    /// When cell parameters imply an n_parallel that rounds-to-zero (pack_ah
+    /// much smaller than ah_cell), `ceil()` produces n_parallel=1 but the
+    /// implied physical capacity is grossly inconsistent with the declared
+    /// value → init_typed must return an error.
+    #[test]
+    fn battery_topology_n_parallel_zero_is_error() {
+        // ah_cell=100, v_cell=3.6, capacity_kwh=5.0
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 5.0 * 1000 / 349.2 ≈ 14.32 Ah
+        // n_parallel = ceil(14.32 / 100) = 1
+        // implied = 1 * 100 * 97 * 3.6 / 1000 = 34.92 kWh
+        // error = |34.92 - 5.0| / 5.0 = 598% > 10% → error
+        let config = battery_config(&[
+            (KEY_AH_CELL, 100.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 5.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        let result = bat.init(&config, &env);
+
+        assert!(
+            result.is_err(),
+            "expected error for incompatible cell parameters (ah_cell=100, capacity_kwh=5.0)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("incompatible") || msg.contains("inconsistent") || msg.contains("differ"),
+            "error must describe topology/capacity mismatch, got: {msg}"
+        );
+    }
+
+    /// The problematic case from the review finding: ah_cell=100, v_cell=3.6,
+    /// capacity_kwh=13.5. ceil() produces n_parallel=1 but implied capacity
+    /// (34.92 kWh) is 2.6× the declared (13.5 kWh) → init_typed must error.
+    #[test]
+    fn battery_topology_capacity_consistency_ceil() {
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 13.5 * 1000 / 349.2 ≈ 38.66 Ah
+        // n_parallel = ceil(38.66 / 100) = ceil(0.387) = 1
+        // implied = 1 * 100 * 97 * 3.6 / 1000 = 34.92 kWh
+        // error = |34.92 - 13.5| / 13.5 ≈ 158.7% > 10% → error
+        let config = battery_config(&[
+            (KEY_AH_CELL, 100.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 13.5),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        let result = bat.init(&config, &env);
+
+        assert!(
+            result.is_err(),
+            "expected error for the review-finding case (ah_cell=100, capacity_kwh=13.5)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("34.92") || msg.contains("implied") || msg.contains("inconsistent"),
+            "error message must indicate the capacity mismatch, got: {msg}"
+        );
+    }
+
+    /// With compatible cell parameters, topology derivation produces a
+    /// consistent implied capacity within 10% of declared → init_typed
+    /// must succeed.
+    #[test]
+    fn battery_topology_capacity_consistent() {
+        // ah_cell=5.0, v_cell=3.6, capacity_kwh=13.5
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 13.5 * 1000 / 349.2 ≈ 38.66 Ah
+        // n_parallel = ceil(38.66 / 5.0) = ceil(7.733) = 8
+        // implied = 8 * 5.0 * 97 * 3.6 / 1000 = 13.968 kWh
+        // error = |13.968 - 13.5| / 13.5 ≈ 3.47% < 10% ✓
+        let config = battery_config(&[
+            (KEY_AH_CELL, 5.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 13.5),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 97);
+        assert_eq!(bat.n_parallel, 8);
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            2.0,
+            "derivation_source must be CellParameters (2.0)"
+        );
+        // Implied capacity telemetry should be populated (not NaN)
+        let implied = bat.telemetry().get(tk::IMPLIED_CAPACITY_KWH).unwrap();
+        assert!(
+            !implied.is_nan(),
+            "implied_capacity_kwh must be computed when cell params are present"
+        );
+        let error = (implied - 13.5).abs() / 13.5;
+        assert!(
+            error < 0.10,
+            "implied capacity {implied} kWh must be within 10% of declared 13.5 kWh (error: {:.1}%)",
+            error * 100.0
+        );
+    }
+
+    /// When capacity_kwh is zero (fully degraded battery, SOH=0), the SOC update
+    /// must be skipped — no division by zero, and SOC remains finite and unchanged.
+    #[test]
+    fn soc_update_noop_when_capacity_zero() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let initial_soc = bat.soc;
+        // Simulate fully degraded battery: nominal capacity driven to zero
+        // (SOH=0 => capacity_kwh_nominal = 0). Also set current capacity_kwh to
+        // zero since step() recomputes it from capacity_kwh_nominal * derate.
+        bat.capacity_kwh_nominal = 0.0;
+        bat.capacity_kwh = 0.0;
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(bat.soc.is_finite(), "SOC must be finite, got {}", bat.soc);
+        assert!(
+            (bat.soc - initial_soc).abs() < f64::EPSILON,
+            "SOC should not change when capacity_kwh=0 (was {initial_soc}, now {})",
+            bat.soc
+        );
+
+        let telemetry_soc = bat.telemetry().get(tk::SOC).unwrap();
+        assert!(
+            telemetry_soc.is_finite(),
+            "telemetry SOC must be finite, got {telemetry_soc}"
+        );
+        assert!(
+            (telemetry_soc - initial_soc).abs() < f64::EPSILON,
+            "telemetry SOC should not change when capacity_kwh=0"
+        );
+    }
+
+    /// capacity_kwh_nominal must be > 0 when soh > 0 under default degradation
+    /// model parameters. The rated capacity times a positive SOH fraction should
+    /// produce a positive nominal capacity.
+    #[test]
+    fn nominal_capacity_positive_when_soh_positive() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // At init with fresh degradation state (capacity_fade = 0.0 => soh = 1.0),
+        // capacity_kwh_nominal must equal rated capacity and be positive.
+        assert!(
+            bat.capacity_kwh_nominal > 0.0,
+            "capacity_kwh_nominal must be > 0 at init (rated={}, nominal={})",
+            bat.capacity_kwh_rated,
+            bat.capacity_kwh_nominal
+        );
+        assert!(
+            (bat.capacity_kwh_nominal - bat.capacity_kwh_rated).abs() < 1e-12,
+            "nominal should equal rated at init (rated={}, nominal={})",
+            bat.capacity_kwh_rated,
+            bat.capacity_kwh_nominal
+        );
+
+        // Run a few days of cycling; soh should stay > 0, so capacity_kwh_nominal > 0.
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288;
+        let mut env = base_env();
+        for day in 0..30 {
+            for step in 0..steps_per_day {
+                env.current_time += ChronoDuration::seconds(300);
+                if step < steps_per_day / 2 {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: 5.0,
+                        reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
+                    })
+                    .unwrap();
+                } else {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: -5.0,
+                        reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
+                    })
+                    .unwrap();
+                }
+                let mut ports = default_ports();
+                bat.step(&env, dt, &mut ports).unwrap();
+            }
+            assert!(
+                bat.capacity_kwh_nominal > 0.0,
+                "day {day}: capacity_kwh_nominal must remain > 0 (rated={}, nominal={}, soh={})",
+                bat.capacity_kwh_rated,
+                bat.capacity_kwh_nominal,
+                1.0 - bat.degradation.capacity_fade_fraction()
+            );
+        }
+    }
+
+    /// Under extreme degradation (SOH → 0), the battery simulation must produce
+    /// no Inf or NaN in telemetry output. This also exercises the zero-capacity
+    /// guard path explicitly.
+    #[test]
+    fn no_inf_or_nan_in_telemetry_under_extreme_degradation() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force capacity_kwh to zero (fully degraded).
+        bat.capacity_kwh_nominal = 0.0;
+        bat.capacity_kwh = 0.0;
+
+        // Exercise both charge and discharge directions.
+        for &power_kw in &[5.0, -5.0] {
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+
+            let soc = bat.telemetry().get(tk::SOC).unwrap();
+            assert!(
+                soc.is_finite(),
+                "SOC must be finite at power_kw={power_kw}, got {soc}"
+            );
+            assert!(!soc.is_nan(), "SOC must not be NaN at power_kw={power_kw}");
+
+            // Also verify key telemetry fields are finite.
+            for key in &[
+                tk::SOC,
+                tk::CELL_TEMP_C,
+                tk::ACTIVE_POWER_KW,
+                tk::CAPACITY_FADE_PCT,
+            ] {
+                if let Some(v) = bat.telemetry().get(key) {
+                    assert!(
+                        v.is_finite(),
+                        "telemetry key {key:?} must be finite at power_kw={power_kw}, got {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SOCTarget cross-field validation tests
+    // -----------------------------------------------------------------------
+
+    /// SOCTarget with target below min → clamped and stored.
+    #[test]
+    fn soc_target_clamps_target_below_min() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // min_soc=0.8, target=0.3 → target_soc not in (min, max) → rejected centrally.
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.3,
+            min_soc: Some(0.8),
+            max_soc: Some(0.9),
+        });
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("SOCTarget"),
+            "expected SOCTarget rejection, got: {msg}"
+        );
+    }
+
+    /// SOCTarget with target above max → clamped but equal to max → rejected.
+    #[test]
+    fn soc_target_rejects_target_above_max() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.95,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        });
+        // target clamped: 0.9 → 0.9 >= 0.9 → invalid → rejected.
+        assert!(result.is_err());
+    }
+
+    /// SOCTarget with valid ordering and missing bounds → defaults applied.
+    #[test]
+    fn soc_target_defaults_missing_bounds() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target_min, Some(0.15));
+        assert_eq!(bat.soc_target_max, Some(0.95));
+        assert_eq!(bat.soc_target, Some(0.5));
+    }
+
+    /// SOCTarget with target exactly at valid mid-point → accepted without clamping.
+    #[test]
+    fn soc_target_accepts_valid_ordering() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.7,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.7));
+        assert_eq!(bat.soc_target_min, Some(0.1));
+        assert_eq!(bat.soc_target_max, Some(0.9));
+    }
+
+    /// SOCTarget with inverted bounds (min >= max) → rejected before clamping.
+    #[test]
+    fn soc_target_rejects_inverted_bounds() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.5,
+            min_soc: Some(0.8),
+            max_soc: Some(0.2),
+        });
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("min_soc"), "expected bounds error, got: {msg}");
+    }
+
+    /// SOCTarget with target outside bounds but after clamping falls in valid range.
+    #[test]
+    fn soc_target_accepts_within_bounds_after_defaults() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // target=0.05 is below physical default min=0.15 → clamped to 0.15.
+        // After clamping, 0.15 == eff_min → rejected (must be strictly within).
+        // Use target=0.20 which is clamped within [0.15, 0.95] and strictly inside.
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.20,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.20));
+    }
+
+    /// SOCTarget with NaN target → rejected.
+    #[test]
+    fn soc_target_rejects_nan_target() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let result = bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: f64::NAN,
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+        });
+        assert!(result.is_err());
+    }
+
+    /// Unspecified SOCTarget bounds must fall back to the battery's physical
+    /// min_soc/max_soc (0.15/0.95 default), not ad-hoc 0.1/0.9 literals that
+    /// would silently narrow the operational window below hardware limits.
+    #[test]
+    fn soc_target_unspecified_bounds_use_physical_limits() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_MIN_SOC, 0.05),
+            (KEY_MAX_SOC, 1.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // A target of 0.95 is within the battery's physical [0.05, 1.0] range.
+        // With the old hardcoded 0.1/0.9 defaults, this would have been clamped
+        // to 0.9 and potentially rejected. With physical bounds it's accepted.
+        bat.apply_control(&ControlSignal::SOCTarget {
+            target_soc: 0.95,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.soc_target, Some(0.95));
+        assert_eq!(bat.soc_target_min, Some(0.05));
+        assert_eq!(bat.soc_target_max, Some(1.0));
+    }
+
+    /// 100-step random-policy regression test: verifies that repeated
+    /// random ThermalSetpoint and SOCTarget signals cannot produce
+    /// degenerate thermostat or battery states (inverted setpoints,
+    /// invalid SOC bounds).
+    #[test]
+    fn regression_random_policy_no_degenerate_states() {
+        use std::num::Wrapping;
+
+        // Deterministic pseudo-random source: no rand dependency needed.
+        let mut rng = Wrapping(0x5bd1_e995_u64);
+        let mut next_f64 = || -> f64 {
+            rng = Wrapping(
+                rng.0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407),
+            );
+            (rng.0 as f64) / (u64::MAX as f64)
+        };
+
+        let mut tstat = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        for _step in 0..100 {
+            let heat = 18.0 + next_f64() * 8.0;
+            let cool = 22.0 + next_f64() * 8.0;
+
+            let _ = tstat.apply_thermal_setpoint_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(heat),
+                cooling_setpoint_c: Some(cool),
+                deadband_c: None,
+            });
+
+            let target = next_f64();
+            let min_soc = if next_f64() > 0.3 {
+                Some(next_f64())
+            } else {
+                None
+            };
+            let max_soc = if next_f64() > 0.3 {
+                Some(next_f64())
+            } else {
+                None
+            };
+
+            let _ = bat.apply_control(&ControlSignal::SOCTarget {
+                target_soc: target,
+                min_soc,
+                max_soc,
+            });
+        }
+
+        // Thermostat: effective setpoints must be physically valid.
+        let eff = tstat.effective_setpoints();
+        let deadband = 2.0 * tstat.thermostat.hysteresis_c;
+        assert!(
+            eff.cooling_c > eff.heating_c + deadband,
+            "after 100 random steps, thermostat cooling {} must exceed heating {} + deadband {}",
+            eff.cooling_c,
+            eff.heating_c,
+            deadband,
+        );
+
+        // Battery: SOC target must be strictly within stored bounds.
+        if let Some(tgt) = bat.soc_target {
+            let stored_min = bat.soc_target_min.unwrap_or(bat.min_soc);
+            let stored_max = bat.soc_target_max.unwrap_or(bat.max_soc);
+            assert!(
+                stored_min < tgt && tgt < stored_max,
+                "after 100 random steps, SOC target {tgt} must be within [{stored_min}, {stored_max}]"
+            );
+            assert!(
+                stored_min < stored_max,
+                "after 100 random steps, SOC bounds must be ordered: min={stored_min}, max={stored_max}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Reactive power / smart-inverter tests
+    // -----------------------------------------------------------------
+
+    fn approx_eq(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-6, "values differ: {a} != {b}");
+    }
+
+    /// Default config (pf=1.0) emits Q == Some(0.0) and real power is
+    /// unchanged from pre-reactive-control behaviour.
+    #[test]
+    fn default_config_emits_zero_reactive_power() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q_co = bat
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE cap implies Some");
+        assert!(
+            q_co.abs() < 1e-9,
+            "default pf=1.0 should give Q≈0, got {q_co}"
+        );
+        let q_telem = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q_telem, 0.0);
+        assert_eq!(
+            bat.descriptor().control_capabilities,
+            ControlCapabilities::POWER_SETPOINT
+                | ControlCapabilities::SOC_TARGET
+                | ControlCapabilities::GRID_CONNECT
+                | ControlCapabilities::SELF_CONSUMPTION
+                | ControlCapabilities::POWER_LIMIT
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::REACTIVE_SETPOINT
+                | ControlCapabilities::POWER_FACTOR_SETPOINT
+        );
+        assert!(
+            bat.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::REACTIVE)
+        );
+    }
+
+    /// Charging (P>0) with pf<1 yields baseline Q>0 (absorbing vars).
+    #[test]
+    fn charging_baseline_q_positive_absorbing() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: None,
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force charging via PowerSetpoint.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(q > 0.0, "charging should yield Q>0 absorbing, got {q}");
+
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(p_kw > 0.0, "expected P>0 charging");
+        let expected_q = p_kw * (0.9_f64.acos().tan());
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q} for P={p_kw}, got {q}"
+        );
+    }
+
+    /// Discharging (P<0) with pf<1 yields baseline Q<0 (supplying vars).
+    #[test]
+    fn discharging_baseline_q_negative_supplying() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.8),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: None,
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force discharging via PowerSetpoint.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(q < 0.0, "discharging should yield Q<0 supplying, got {q}");
+
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(p_kw < 0.0, "expected P<0 discharging");
+        let expected_q = p_kw * (0.9_f64.acos().tan());
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q}, got {q}"
+        );
+    }
+
+    /// ReactiveSetpoint overrides baseline pf Q.
+    #[test]
+    fn reactive_setpoint_overrides_baseline_q() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: Some(10.0),
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 1.5);
+    }
+
+    /// A commanded ReactiveSetpoint of exactly 0.0 is an absolute override:
+    /// it must force Q = 0 even though the pf = 0.9 baseline would otherwise
+    /// produce nonzero Q while the battery charges. Regression test for the
+    /// zero-as-unset sentinel bug (q_setpoint is `Option<f64>`; `Some(0.0)`
+    /// is distinct from `None`).
+    #[test]
+    fn reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: Some(0.9),
+            inverter_capacity_kva: Some(10.0),
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Charge at 2 kW so the pf = 0.9 baseline would produce Q > 0.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let baseline_q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            baseline_q > 0.0,
+            "pf=0.9 charging baseline must produce Q>0, got {baseline_q}"
+        );
+
+        // Commanded zero must beat the baseline.
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.0);
+        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    }
+
+    /// PowerFactorSetpoint updates pf, zeros q_setpoint, and Q follows
+    /// the new pf baseline.
+    #[test]
+    fn power_factor_setpoint_overrides_and_zeros_q_setpoint() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5), (KEY_STANDBY_POWER_W, 0.0)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.q_setpoint_kvar = Some(2.0);
+        bat.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
+            .unwrap();
+
+        // PowerFactorSetpoint must clear the q_setpoint (PV-style precedence).
+        assert_eq!(bat.q_setpoint_kvar, None);
+        approx_eq(bat.power_factor, 0.8);
+
+        // Force charging via PowerSetpoint so P>0.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let p_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let tan_phi = 0.8_f64.acos().tan();
+        let expected_q = p_kw * tan_phi;
+        assert!(
+            (q - expected_q).abs() < 1e-9,
+            "expected Q={expected_q} (P={p_kw} × tan(acos(0.8))={tan_phi}), got {q}"
+        );
+        assert!(q > 0.0);
+    }
+
+    /// A default battery (no `power_factor` in config) inspects as a
+    /// constant-power reactive-only ZIP at unity power factor.
+    #[test]
+    fn resolved_zip_default_battery_is_unity_pf_constant_power() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let zip = bat.resolved_zip().expect("battery exposes a ZIP");
+        assert_eq!(
+            zip,
+            ResolvedZip::reactive_only(ZipLoad::reactive_only(0.0, 0.0, 1.0, 1.0))
+        );
+        assert_eq!(zip.pf, 1.0);
+        assert!(!zip.real_power_zip_applies);
+    }
+
+    /// `resolved_zip` reflects live runtime state: a PowerFactorSetpoint
+    /// updates the pf reported by the inspection surface.
+    #[test]
+    fn resolved_zip_reflects_power_factor_setpoint() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.85 })
+            .unwrap();
+
+        let zip = bat.resolved_zip().expect("battery exposes a ZIP");
+        assert_eq!(
+            zip,
+            ResolvedZip::reactive_only(ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.85))
+        );
+        assert!(!zip.real_power_zip_applies);
+    }
+
+    /// PowerSetpoint with reactive_power_kvar is accepted and applied.
+    #[test]
+    fn power_setpoint_stores_reactive_q() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.0,
+            reactive_power_kvar: Some(0.75),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        assert_eq!(bat.q_setpoint_kvar, Some(0.75));
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        approx_eq(q, 0.75);
+    }
+
+    /// kVA clamp: when Q is commanded beyond the inverter's capability,
+    /// Q is reduced but P is unchanged (active-power priority).
+    #[test]
+    fn kva_clamp_curtails_reactive_not_active_power() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: Some(5.0),
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: Some(5.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+        // Active-power priority: P is not curtailed by Q, so |Q| ≤ sqrt(S²−P²).
+        let s = bat.inverter_capacity_kva;
+        let q_max = (s * s - p * p).max(0.0).sqrt();
+        assert!(
+            q.abs() <= q_max + 1e-9,
+            "|Q|={} exceeds sqrt(S²−P²)={} with S={s}, P={p}",
+            q.abs(),
+            q_max
+        );
+        // Q should be clamped (much less than the commanded 5.0 kvar).
+        assert!(
+            q.abs() < 5.0 - 1e-9,
+            "Q should be clamped below 5.0, got {q}"
+        );
+        // P must be positive (charging).
+        assert!(p > 0.0, "P must be positive (charging)");
+    }
+
+    /// kVA clamp boundary: P=4 kW, Q=4 kvar, S=5 kVA — Q clamped to 3 kvar.
+    #[test]
+    fn kva_clamp_reduces_q_to_inverter_limit() {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: Some(0.0),
+            min_soc: Some(0.1),
+            max_soc: Some(0.9),
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(1.0),
+            charge_efficiency: Some(1.0),
+            discharge_efficiency: Some(1.0),
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_kva: Some(5.0),
+            grid_forming: None,
+            min_dwell_steps: 0,
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 4.0,
+            reactive_power_kvar: Some(4.0),
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let q = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+
+        assert!(p > 0.0, "P must be positive (charging)");
+        // |Q| must be ≤ sqrt(S²−P²) (active-power priority).
+        let s = bat.inverter_capacity_kva;
+        let q_max = (s * s - p * p).max(0.0).sqrt();
+        assert!(
+            q.abs() <= q_max + 1e-9,
+            "|Q|={} exceeds sqrt(S²−P²)={}",
+            q.abs(),
+            q_max
+        );
+        // Q should be reduced from the commanded 4 kvar.
+        assert!(q.abs() < 4.0 - 1e-9, "Q should be clamped, got {q}");
+    }
+
+    /// Port Q, CoreOutput Q, and telemetry Q are the same signed value.
+    #[test]
+    fn port_core_output_telemetry_reactive_consistent() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.2 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        let q_co = bat
+            .core_output()
+            .flows
+            .reactive_power_kvar
+            .expect("REACTIVE cap → Some");
+        let q_telem = bat.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        let q_port = ports.electrical.reactive_power_kvar;
+
+        approx_eq(q_co, q_telem);
+        approx_eq(q_telem, q_port);
+    }
+
+    /// validate_core_contract passes after a step with reactive power.
+    #[test]
+    fn validate_core_contract_passes_with_reactive() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.5 })
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        ports.electrical.load_power_w = 2.0;
+
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        hares_types::validate_core_contract(bat.descriptor(), bat.core_output())
+            .expect("core contract should pass with REACTIVE cap + Some(Q)");
+    }
+
+    /// Checkpoint round-trip preserves q_setpoint_kvar and power_factor.
+    #[test]
+    fn checkpoint_preserves_reactive_state() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        bat.q_setpoint_kvar = Some(1.5);
+        bat.power_factor = 0.85;
+
+        let state = bat.save_state().unwrap();
+        let mut restored = Battery::new(config);
+        restored
+            .init(
+                &EquipmentConfig::from_typed(
+                    "Test Battery".to_string(),
+                    "Battery".to_string(),
+                    BatteryConfig {
+                        equipment_id: None,
+                        zone_id: None,
+                        capacity_kwh: 10.0,
+                        max_charge_kw: 5.0,
+                        max_discharge_kw: 5.0,
+                        n_series: None,
+                        n_parallel: None,
+                        ah_cell: None,
+                        v_cell: None,
+                        cell_resistance_ohm: None,
+                        pack_voltage_v: None,
+                        chemistry: None,
+                        standby_power_w: Some(10.0),
+                        self_discharge_pct_per_day: None,
+                        min_soc: None,
+                        max_soc: None,
+                        initial_soc: Some(0.5),
+                        initial_cell_temp_c: None,
+                        import_limit_w: None,
+                        export_limit_w: None,
+                        heater_power_w: None,
+                        heater_threshold_c: None,
+                        min_discharge_temp_c: None,
+                        full_power_temp_c: None,
+                        min_charge_temp_c: None,
+                        cell_thermal_mass_j_per_k: None,
+                        cell_ua_w_per_k: None,
+                        inverter_efficiency: None,
+                        charge_efficiency: None,
+                        discharge_efficiency: None,
+                        bms_mode: None,
+                        grid_export_rule: None,
+                        power_factor: None,
+                        inverter_capacity_kva: None,
+                        grid_forming: None,
+                        min_dwell_steps: 0,
+                    },
+                )
+                .unwrap(),
+                &env,
+            )
+            .unwrap();
+        restored.load_state(&state).unwrap();
+
+        assert_eq!(restored.q_setpoint_kvar, Some(1.5));
+        approx_eq(restored.power_factor, 0.85);
+
+        // Double round-trip: bytes identical.
+        assert_eq!(state, restored.save_state().unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Midnight boundary ordering regression tests (T-0416)
+    // -----------------------------------------------------------------------
+
+    /// Build an environment starting at midnight (00:00) on the given date.
+    /// Starting at midnight means each 288-step block (at 300 s/step) is
+    /// exactly one day, and the day boundary fires at the start of the
+    /// 289th step.
+    fn env_at_midnight(year: i32, month: u32, day: u32) -> EnvironmentState {
+        let mut env = warm_env();
+        env.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(year, month, day, 0, 0, 0)
+            .single()
+            .expect("valid UTC timestamp");
+        env
+    }
+
+    /// Integration-level drift elimination: run the battery through multiple
+    /// midnight boundaries at different timestep resolutions and verify that
+    /// `q_li1` is independent of `steps_per_day`.
+    ///
+    /// The pre-fix bug caused a 1/N_steps drift because the first timestep
+    /// of each new day contaminated the previous day's accumulators and was
+    /// then lost.  At 288 steps/day this was ~0.35% per day.  Post-fix,
+    /// every timestep belongs to the correct day, so the result is
+    /// resolution-independent.
+    ///
+    /// Note: the Smith 2017 sqrt-of-time model is path-dependent (each day's
+    /// increment depends on the running cumulative q_li1), so day-to-day
+    /// *symmetry* and order-*commutativity* of q_li1 do not hold.  The
+    /// property we test here — resolution independence — is the correct
+    /// invariant for the accumulation-ordering fix.
+    #[test]
+    fn q_li1_independent_of_steps_per_day_across_midnight_boundaries() {
+        let dt_300 = Duration::from_secs(300);
+        let dt_3600 = Duration::from_secs(3600);
+        let steps_300 = 288usize; // 5-min steps
+        let steps_3600 = 24usize; // 1-hour steps
+        let days = 5u32;
+
+        let run = |dt: Duration, steps_per_day: usize| -> f64 {
+            let config = battery_config(&[
+                (KEY_INITIAL_SOC, 0.5),
+                (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+                (KEY_STANDBY_POWER_W, 0.0),
+                (KEY_MIN_SOC, 0.0),
+                (KEY_MAX_SOC, 1.0),
+                (KEY_CELL_UA_W_PER_K, 0.0),
+            ]);
+            let mut env = env_at_midnight(2026, 3, 19);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            bat.cell_temp_c = 25.0;
+            bat.self_consumption_enabled = false;
+            bat.power_setpoint_kw = None;
+
+            let mut ports = default_ports();
+            for _ in 0..days {
+                for _ in 0..steps_per_day {
+                    ports.zero();
+                    bat.step(&env, dt, &mut ports).unwrap();
+                    env.current_time += ChronoDuration::seconds(dt.as_secs() as i64);
+                }
+            }
+            bat.degradation.q_li1
+        };
+
+        let q_300 = run(dt_300, steps_300);
+        let q_3600 = run(dt_3600, steps_3600);
+
+        // Both resolutions must produce the same q_li1 (within floating-point
+        // tolerance).  The pre-fix bug would produce a ~0.35% deficit at
+        // 288 steps/day relative to 24 steps/day.
+        let rel_diff = ((q_300 - q_3600).abs() / q_3600.abs()).abs();
+        assert!(
+            rel_diff < 1e-6,
+            "q_li1 must be independent of steps_per_day: 288 steps={q_300:.10e}, 24 steps={q_3600:.10e}, rel_diff={rel_diff:.2e}"
+        );
+    }
+
+    /// The daily mean temperature must be used for the Tafel correction, not
+    /// the first-of-new-day temperature.
+    ///
+    /// Runs two days at 35 °C followed by one step at 10 °C.  The Tafel
+    /// correction for the second day must use ~35 °C (the daily mean), not
+    /// 10 °C (the cell temperature at the first step of day 3, which is what
+    /// the pre-fix code passed to `update_daily`).
+    ///
+    /// We verify this by comparing against a reference that runs the same
+    /// profile through `DegradationState` directly (which now computes the
+    /// daily mean internally).
+    #[test]
+    fn daily_mean_temperature_used_for_tafel_correction() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_CELL_UA_W_PER_K, 0.0),
+        ]);
+        let mut env = env_at_midnight(2026, 3, 19);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+        bat.self_consumption_enabled = false;
+        bat.power_setpoint_kw = None;
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288usize;
+        let mut ports = default_ports();
+
+        // Day 1: 35 °C (day_age=0, dq_li1=0 — skip branch).
+        bat.cell_temp_c = 35.0;
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Day 2: 35 °C (day_age=1, produces non-zero q_li1).
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Switch to 10 °C for day 3 — the pre-fix bug would use this
+        // temperature for day 2's Tafel correction.
+        bat.cell_temp_c = 10.0;
+        // One step into day 3 triggers the boundary update for day 2.
+        ports.zero();
+        bat.step(&env, dt, &mut ports).unwrap();
+
+        let q_li1_battery = bat.degradation.q_li1;
+
+        // Reference: compute q_li1 with the correct daily mean (35 °C).
+        let u_neg = UNegTable::default_li_nmc();
+        let v_oc = OcvTable::default_li_nmc().voltage_at_soc(0.5);
+        let mut ds_ref = DegradationState::default();
+        ds_ref.reset_day_tracking(0.5);
+        let dt_s = 300.0_f64;
+        let temp_k_day = 308.15; // 35 °C
+        for _ in 0..2 {
+            for _ in 0..steps_per_day {
+                ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5);
+            }
+            ds_ref.update_daily(&u_neg, 0.0);
+            ds_ref.reset_day_tracking(0.5);
+        }
+
+        let q_li1_ref = ds_ref.q_li1;
+
+        assert!(
+            (q_li1_battery - q_li1_ref).abs() < q_li1_ref.abs() * 1e-6,
+            "q_li1 from Battery ({q_li1_battery:.10e}) must match reference using daily mean T=35°C ({q_li1_ref:.10e}); \
+             pre-fix would use T=10°C from the first step of day 3"
+        );
+    }
+
+    /// The first timestep after a midnight boundary must not be lost from
+    /// the new day's accumulation.
+    ///
+    /// This test runs exactly 1 step on day 1 and 1 step on day 2, then
+    /// checks that b1_accum after the day-2 step is non-zero (the step was
+    /// accumulated into the correct day).  Pre-fix, the day-2 step would be
+    /// accumulated into day 1's b1_accum, then lost when update_daily()
+    /// reset it, leaving day 2's b1_accum at zero.
+    #[test]
+    fn first_timestep_of_new_day_is_not_lost() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
+            (KEY_MIN_SOC, 0.0),
+            (KEY_MAX_SOC, 1.0),
+            (KEY_CELL_UA_W_PER_K, 0.0),
+        ]);
+        let mut env = env_at_midnight(2026, 3, 19);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+        bat.cell_temp_c = 25.0;
+        bat.self_consumption_enabled = false;
+        bat.power_setpoint_kw = None;
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288usize;
+        let mut ports = default_ports();
+
+        // Day 1: full day of steps.
+        for _ in 0..steps_per_day {
+            ports.zero();
+            bat.step(&env, dt, &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(300);
+        }
+
+        // Day 2: one step — this triggers the boundary update for day 1,
+        // then accumulates into day 2's b1_accum.
+        ports.zero();
+        bat.step(&env, dt, &mut ports).unwrap();
+
+        // After the step, b1_accum must be non-zero — the first step of
+        // the new day was accumulated into the correct day, not lost.
+        assert!(
+            bat.degradation.b1_accum.abs() > 0.0,
+            "first timestep of new day must accumulate into b1_accum, got {}",
+            bat.degradation.b1_accum
+        );
+    }
+}

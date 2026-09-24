@@ -1,0 +1,54 @@
+{
+  "category": "config-io",
+  "description": "Config/IO infrastructure — configuration parsing, defaults, equipment registry, serialization, data loading",
+  "reviews": [
+    {
+      "id": "config-io-01",
+      "slug": "config-parsing",
+      "title": "Configuration parsing: TOML deserialization, validation, error messages",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-io/src/config.rs",
+      "prompt": "HARES uses TOML for config. All config fields documented? deny_unknown_fields prevents silent mistyping? Validation errors user-actionable? Environment-specific config (debug/release/testing) correctly layered? Verify that every public field in the configuration structs has corresponding documentation or at minimum a descriptive serde rename/alias that matches the TOML key exactly. The deny_unknown_fields attribute must be active on all top-level config structs to prevent silent ignoring of mistyped TOML keys — a misspelled key like 'simulaton' instead of 'simulation' must produce a hard error, not silently use a default. Validation error messages must include the field name, the invalid value, and the acceptable range or format, so users can fix their config without reading source code. For environment-specific configuration (e.g., different output paths in debug vs. release, different solver tolerances in testing), verify that config layering applies in the correct order and that a lower-priority layer cannot shadow a higher-priority override incorrectly."
+    },
+    {
+      "id": "config-io-02",
+      "slug": "defaults-csv-loading",
+      "title": "Default parameter CSV loading: completeness, fallbacks, unit safety",
+      "vendor_refs": "vendors/OCHRE/ochre/",
+      "files": "crates/hares-io/src/defaults.rs",
+      "prompt": "Defaults from CSV in defaults/. Required CSVs present? Column names stable? Default values physically plausible? Missing/malformed CSV handling? Temperature defaults in Celsius not Fahrenheit? Verify that every CSV file referenced by the defaults module actually exists in the repository's defaults/ directory and that column header names match exactly what the deserialization code expects — a renamed column will silently produce default-initialized values for that field. Each default parameter value must be checked for physical plausibility: U-factors must be positive and below 10 W/m²·K, specific heats must be positive, densities must be realistic for building materials, emissivities must be in [0.01, 1.0]. For temperature values, verify unit consistency — all temperature defaults must be in Celsius (not Fahrenheit, not Kelvin) to match the rest of the codebase. Missing or malformed CSV files must produce clear error messages indicating which file is missing, which column is problematic, and at which row the error occurred."
+    },
+    {
+      "id": "config-io-03",
+      "slug": "equipment-registry",
+      "title": "Equipment type registry: canonical name resolution, config dispatch, error messages",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/__init__.py",
+      "files": "crates/hares-equipment/src/registry.rs crates/hares-equipment/src/config.rs",
+      "prompt": "Registry maps canonical names to constructors. Every name covered? Error messages clear for unrecognized type? TypedConfig vs RawConfig dispatch: does magic-string prohibition actually prevent all raw config access? Check Makefile check-no-magic-config tool. The equipment registry must provide a one-to-one mapping from canonical equipment type names (as they appear in user TOML config) to constructor functions. Verify that every equipment module that registers itself is reachable and that no equipment type is silently omitted from the registry. Error messages for unrecognized equipment types must include the unrecognized name and a list of valid names sorted alphabetically. The TypedConfig vs. RawConfig dispatch is critical for type safety — TypedConfig provides compile-time deserialization into the correct config struct, while RawConfig bypasses type checking. Verify that all code paths use TypedConfig and that the check-no-magic-config Makefile target or CI check scans for and rejects any string-based config access that would circumvent type checking."
+    },
+    {
+      "id": "config-io-04",
+      "slug": "config-round-trip",
+      "title": "Configuration serialization round-trip correctness",
+      "vendor_refs": "vendors/OCHRE/",
+      "files": "crates/hares-io/src/config.rs crates/hares-io/tests/config_round_trip.rs",
+      "prompt": "Config round-trips through TOML without data loss? All structs Serialize+Deserialize? Enum variants stable? Default values preserved through round-trip? Test coverage completeness. A config object serialized to TOML and deserialized back must produce an identical struct — every field including nested ones, optional fields with None values, and default-valued fields must survive the round-trip intact. All enum types used in configuration must have stable serde representations (tag names, variant names) that will not change silently when the enum definition is refactored. Default values from the Default trait implementation must be preserved through the round-trip: serializing a default config must produce TOML that, when deserialized, reproduces the same default struct. Verify that the round-trip test file includes test cases for each top-level config struct, and that edge cases (empty configs, maximum nesting depth, special characters in string fields) are covered."
+    },
+    {
+      "id": "config-io-05",
+      "slug": "resstock-dataset",
+      "title": "ResStock building dataset integration: sampling, fixture loading, AMY pairing",
+      "vendor_refs": "vendors/OCHRE/",
+      "files": "crates/hares-io/src/resstock.rs crates/hares-io/src/resstock_csv.rs python/ochre_next/data/resstock.py",
+      "prompt": "Sampling weighted by housing stock? Building-weather pairings valid (same climate zone)? OEDI S3 download handles missing/corrupted files? Test fixture coverage. The ResStock dataset provides representative building models weighted by the US housing stock. Verify that sampling is performed with correct probability weights derived from the ResStock metadata and that the sampling algorithm handles the case where all weights sum to zero or are missing. Building-weather pairings must be physically consistent: a building from ASHRAE climate zone 4A must be paired with a weather file (AMY or TMY) from the same or a compatible climate zone; cross-zone pairings would produce misleading simulation results. The OEDI S3 download logic must handle network interruptions (retry with exponential backoff), corrupted files (checksum verification before use), and missing files (clear error indicating which building ID failed). Test fixtures should include at minimum one building from each major climate zone and building vintage."
+    },
+    {
+      "id": "config-io-06",
+      "slug": "draw-profile-pv-sizing",
+      "title": "Electrical draw profile construction and PV sizing from HPXML",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/PV.py",
+      "files": "crates/hares-io/src/draw_profile.rs crates/hares-io/src/pv_sizing.rs",
+      "prompt": "draw_profile.rs constructs annual load profiles. All 14+ load types correct? Coincidence factors applied? PV sizing accounts for inverter clipping, system losses, array config? Cross-reference OCHRE PV sizing. Verify that every electrical load type defined in the HPXML standard is represented in the draw profile — lighting (interior, exterior, garage), major appliances (refrigerator, dishwasher, clothes washer, clothes dryer, range, microwave), miscellaneous electric loads (MELs: TVs, computers, etc.), and any dwelling-specific loads. Coincidence factors must be applied correctly when aggregating multiple end uses into a total dwelling load; verify that peak loads are not unrealistically high due to all loads coinciding at maximum draw. For PV sizing, verify that the system accounts for inverter clipping (the ratio of DC array rating to AC inverter rating, typically 1.1–1.4), system losses (soiling, wiring, mismatch, nameplate tolerance), and array configuration (tilt, azimuth, tracking type). Cross-reference the PV sizing outputs against OCHRE's equivalent for a set of test cases to confirm that array capacity, annual generation, and peak power are within 1%."
+    }
+  ]
+}

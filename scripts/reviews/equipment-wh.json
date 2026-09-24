@@ -1,0 +1,46 @@
+{
+  "category": "equipment-wh",
+  "description": "Water heater equipment model reviews: tank stratification, draw tempering, HPWH compressor curves, tankless physics, and skin loss correction.",
+  "reviews": [
+    {
+      "id": "equip-wh-01",
+      "slug": "tank-inversion-correction",
+      "title": "Water heater tank PAV inversion correction effectiveness",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WaterThermalTanks.cc vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-equipment/src/water_heater/tank.rs",
+      "prompt": "The PAV (pointer-and-value) algorithm corrects temperature inversions in stratified tank layers using an energy-conservative redistribution—the total internal energy before and after correction must match. Audit that the correction handles the top-most and bottom-most node boundaries correctly without leaking energy. Under positive displacement draw, mains water injection at the bottom frequently creates inversions where a cold node sits beneath warmer water; verify the algorithm resolves these within a single pass and does not leave residual inversions that would propagate into the next step's conduction calculation. Compare the number of inversion-correction passes and convergence behavior against EnergyPlus WaterHeater:Stratified inversion correction as described in Engineering Reference 14.8—specifically whether E+ uses a simpler one-pass or iterative method and whether HARES should replicate that choice. Also verify the corrected temperature profile is used (not the raw one) when computing skin losses and heat-source coupling in the same step."
+    },
+    {
+      "id": "equip-wh-02",
+      "slug": "draw-tempering-model",
+      "title": "Water heater draw tempering mixing valve model",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-equipment/src/water_heater/tank.rs",
+      "prompt": "The mixing valve model blends the tank outlet (or top-node) hot water with incoming cold mains water to reach the fixture setpoint temperature. Review the tempering logic for unmet_load scenarios: when the tank outlet is below the fixture target but still above mains temperature, the valve should deliver the outlet temperature directly (no cold mixing) and the unmet_load should reflect the remaining temperature deficit times the draw flow rate. Verify that outlet_temp_c is snapshotted at the beginning of the step before any heat input or tank mixing is computed—a failure to snapshot would allow same-step heat injection to inflate the apparent outlet temperature and undercount the load. Check the tempering mass balance: m_hot + m_cold = m_draw, and m_hot * T_hot + m_cold * T_mains = m_draw * T_fixture. If T_hot < T_fixture, then m_cold must be zero and the balance reduces to T_fixture = T_hot. Compare with OCHRE's water heater draw tempering in WaterHeater.py for any differences in the unmixed bypass path."
+    },
+    {
+      "id": "equip-wh-03",
+      "slug": "hpwh-compressor-curves",
+      "title": "HPWH compressor biquadratic curve parameter audit",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-equipment/src/water_heater/heat_pump_wh.rs crates/hares-equipment/src/water_heater/hpwh_compressor.rs",
+      "prompt": "Heat pump water heater COP and heating capacity are modeled as biquadratic curves f(T_air_drybulb, T_water_inlet). Review the independent variable selection: are the dry-bulb and water temperatures entered in the correct order (outdoor air first, tank water second) for both COP and capacity curves? Verify that the six default biquadratic coefficients have a physical source—do they come from a specific manufacturer data set, a published regression, or do they require unit-specific inputs? Audit the low-power HPWH detection path for units with UEF >= 4.9: confirm that the lower compressor power and corresponding capacity derating are applied using a separate coefficient set rather than scaling the standard-curve outputs, and that the transition between standard and low-power curves is smooth without a step discontinuity around UEF = 4.9. Compare coefficient orders and variable ranges against OCHRE's HPWH compressor model in WaterHeater.py."
+    },
+    {
+      "id": "equip-wh-04",
+      "slug": "tankless-model-correctness",
+      "title": "Tankless water heater model physics audit",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-equipment/src/water_heater/tankless.rs",
+      "prompt": "A tankless water heater has zero storage volume and must heat water instantaneously as it flows through the heat exchanger. Review the step() method to confirm that heating power is applied directly to the flow stream without any tank capacitance nodes. Verify that the efficiency curve is expressed as a function of the current flow rate (fraction of rated flow) and that the minimum flow activation threshold prevents heat delivery when zero draw is occurring—there should be no standby heat injection. Is the heat exchanger thermal mass modeled (e.g., a first-order lag on outlet temperature when flow starts/stops) or is the response assumed instantaneous? If no thermal mass, assess whether this simplification could under-predict short-draw water temperatures during the initial seconds of a draw event. Check that the model correctly handles simultaneous draws (multiple fixtures) by summing flow rates before computing single-pass heating. Compare with OCHRE's tankless water heater handling in WaterHeater.py, particularly for gas vs electric tankless efficiency curve shapes."
+    },
+    {
+      "id": "equip-wh-05",
+      "slug": "wh-skin-loss-end-caps",
+      "title": "Water heater tank end-cap skin loss correction",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WaterThermalTanks.cc",
+      "files": "crates/hares-equipment/src/water_heater/tank.rs",
+      "prompt": "In a vertical stratified tank, the top and bottom nodes have additional heat loss through the tank end caps that is not captured by the uniform UA-per-node allocation. Per EnergyPlus Engineering Reference 14.8, each end node receives an additional ua_w_per_k * 0.1 beyond its proportional share. Review that this correction is applied correctly for all supported node counts (1 through 12 nodes). For a single-node tank, both top and bottom corrections might apply to the same node—verify the factor is not double-counted. For a 2-node tank, confirm that the top node gets +0.1 and the bottom node gets +0.1 while the uniform per-node component is UA/2 each. Assess whether the fixed 0.1 multiplier is appropriate across all tank geometries (tall/skinny vs short/wide) or whether it should scale with the tank aspect ratio or end-cap surface area. Compare the end-cap computation in EnergyPlus WaterThermalTanks.cc directly: does E+ use 0.1 or a geometry-derived factor? Also verify that the total UA after correction still sums to the specified tank UA_loss coefficient."
+    }
+  ]
+}

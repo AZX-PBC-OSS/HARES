@@ -1,0 +1,70 @@
+{
+  "category": "equipment-der",
+  "description": "Distributed energy resource model reviews: battery degradation and OCV, EV charging and degradation, PV soiling and inverter, generator CHP, and EV driver archetypes.",
+  "reviews": [
+    {
+      "id": "equip-der-01",
+      "slug": "battery-degradation-daily-boundary",
+      "title": "Battery degradation daily update at midnight boundary",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Battery.py",
+      "files": "crates/hares-equipment/src/battery/degradation.rs crates/hares-equipment/src/battery/mod.rs",
+      "prompt": "The Smith 2017 calendar degradation model updates cumulative degradation once per day, nominally at midnight. Review the degradation step logic to confirm that the daily degradation increment is applied atomically at the midnight boundary rather than accumulating incrementally throughout the day. The RainflowCounter tracks partial cycles across time steps; verify that reset_daily() correctly preserves the reversal buffer so that a half-cycle started just before midnight is not lost when the counter resets—residential battery micro-cycles (e.g., from PV self-consumption) can easily straddle the midnight boundary. Check that the degradation state (capacity fade percentage, resistance growth) is only written at the daily boundary and not on every sub-hourly step, which would cause premature aging. Compare the daily degradation update scheduling against OCHRE's Battery.py Smith2017CalendarDegradation implementation to confirm the same update cadence and handling of mid-cycle midnight crossings."
+    },
+    {
+      "id": "equip-der-02",
+      "slug": "battery-ocv-chemistry-injection",
+      "title": "Battery OCV chemistry selection and custom table injection",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Battery.py",
+      "files": "crates/hares-equipment/src/battery/ocv.rs crates/hares-equipment/src/battery/mod.rs",
+      "prompt": "The battery open-circuit voltage (OCV) model maps state-of-charge to terminal voltage via chemistry-specific curves. Review the four default chemistries (NMC, NMC811, LFP, LTO) to verify that each OCV curve has physically correct shape (monotonic, appropriate voltage range, expected hysteresis if any). NCA may be a fifth default depending on enumeration completeness—check whether all referenced chemistries are actually wired in. The set_ocv_table() method allows injection of a custom SOC-vs-voltage table; verify that this custom table propagates to all downstream consumers: (a) terminal voltage computation during power-based dispatch, (b) the Tafel-equation correction at the graphite anode within the degradation module where OCV affects the open-circuit potential term, and (c) any SOC estimation Kalman filter or coulomb-counting path. A break in propagation would cause the degradation and dispatch models to silently use a different OCV curve than specified. Compare default curve shapes and chemical naming against OCHRE's Battery.py OCV selection."
+    },
+    {
+      "id": "equip-der-03",
+      "slug": "ev-charging-strategy-interaction",
+      "title": "EV charging strategy priority and interaction",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EV.py",
+      "files": "crates/hares-equipment/src/ev/mod.rs crates/hares-equipment/src/ev/charging_curve.rs",
+      "prompt": "EV charging can be constrained simultaneously by multiple strategies: Immediate Hold, TOU avoidance windows, Ready-By deadline requirements, and external PowerLimit signals. Review the priority logic to determine which constraint dominates when multiple are active. If both a TOU avoidance window and a Ready-By deadline are active, does the Ready-By eventually override TOU avoidance as the deadline approaches to ensure departure SOC? The cc_cv_margin parameter (default 0.85) accounts for the constant-voltage region taper where charging power falls below maximum; verify this margin is applied when computing the required charge duration for Ready-By, not just as a simple derating but as a time-dependent power profile that correctly models reduced power above 85% SOC. Audit the V2L (vehicle-to-load) and V2G (vehicle-to-grid) paths for completeness: does the model enforce minimum SOC reservation, maximum discharge power limits distinct from charge limits, and inverter efficiency for bi-directional power flow? Compare constraint priority logic against OCHRE's EV.py to identify any ordering differences that could cause different charge schedules."
+    },
+    {
+      "id": "equip-der-04",
+      "slug": "ev-degradation-sharing-with-battery",
+      "title": "EV degradation model sharing Battery degradation pipeline",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EV.py",
+      "files": "crates/hares-equipment/src/ev/mod.rs crates/hares-equipment/src/battery/degradation.rs",
+      "prompt": "The EV and stationary Battery equipment types share the same DegradationState, RainflowCounter, and Smith2017 degradation pipeline. Review whether this shared pipeline produces physically appropriate results for EV-specific cycling patterns, which differ fundamentally from stationary battery micro-cycling. EVs experience large-depth-of-discharge cycles (discharge during driving, then one large charge session) rather than the frequent shallow micro-cycles of a PV-coupled stationary battery. Verify that the Rainflow counter correctly captures deep (e.g., 60-80% DoD) half-cycles from an EV driving session followed by a full recharge, and that the Smith2017 model's cycle-life curve is evaluated at the correct DoD values rather than being extrapolated beyond its fitted range. Check whether the EV degradation model accounts for calendar aging during extended idle periods (vehicle parked) differently than the stationary battery, given that EV idle periods can span days. Compare the degradation wiring against OCHRE's EV.py to confirm the same DoD counting and calendar aging split."
+    },
+    {
+      "id": "equip-der-05",
+      "slug": "pv-soiling-lut-interaction",
+      "title": "PV soiling with PVWatts vs SAM LUT paths consistency",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/PV.py",
+      "files": "crates/hares-equipment/src/pv/mod.rs crates/hares-equipment/src/pv/soiling.rs crates/hares-equipment/src/pv/lut.rs",
+      "prompt": "HARES supports two DC power computation paths for PV: the simple PVWatts model and the 6-dimensional SAM look-up table (LUT) model. Soiling derating (via the Kimber model or fixed monthly factors) must be applied in both paths, but the point of application matters for physical correctness. In the PVWatts path, soiling is a pre-inverter DC derating; in the LUT path the LUT already captures module-level physics and soiling should also be applied as a DC-level derating before the inverter model. Review the code to verify that the derating step occurs at the same logical point (DC power before inverter) in both paths and is not inadvertently applied post-inverter in one path—a post-inverter soiling would incorrectly bypass the inverter's efficiency curve. Check the Kimber rain-reset soiling model for edge cases: what happens when cumulative rainfall is just below the reset threshold for an extended period? Does the accumulated soiling asymptote correctly or unrealistically diverge? Compare soiling derating placement and accumulation logic against OCHRE's PV.py."
+    },
+    {
+      "id": "equip-der-06",
+      "slug": "pv-inverter-priority-reactive-power",
+      "title": "PV inverter priority mode reactive power limits and PF enforcement",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/PV.py",
+      "files": "crates/hares-equipment/src/pv/mod.rs crates/hares-equipment/src/pv/array_config.rs",
+      "prompt": "PV inverters support priority modes (Watt-priority, Var-priority, and Constant-PF / Cpf) that determine how the inverter resolves conflicts between real power, reactive power, and the apparent power rating limit. Audit the enforcement logic: when the inverter receives a reactive power setpoint via the PowerSetpoint interface, does the priority mode correctly determine whether real power is curtailed to make room for vars (Var-priority) or whether vars are reduced to preserve real power (Watt-priority)? Verify that the minimum power factor enforcement (default 0.8) is applied as a post-processing clip rather than integrated into the optimization—clipping can produce non-physical discontinuities. Check that when both P and Q setpoints are provided simultaneously, the apparent power sqrt(P²+Q²) is computed after applying the priority mode and compared against the inverter rating kVA, with any necessary curtailment obeying the priority mode. Also verify that inverter clipping (DC-to-AC ratio > 1) is computed before reactive power allocation so that the DC derating is correctly accounted for. Compare against OCHRE's PV.py inverter mode handling."
+    },
+    {
+      "id": "equip-der-07",
+      "slug": "generator-chp-thermal-routing",
+      "title": "Generator CHP thermal routing energy balance",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Generator.py",
+      "files": "crates/hares-equipment/src/generator.rs",
+      "prompt": "The generator model supports combined heat and power (CHP) with the energy balance P_fuel = P_electric + Q_thermal + Q_flue + Q_loss. Review this balance for both the fuel cell and internal combustion engine paths: each must account for all energy flows and the sum of heat sinks should not exceed the fuel energy input. Verify that the CHP thermal outputs (supply/return fluid temperatures and mass flow rate) are physically reasonable—supply temperatures for engine-jacket-water recovery (typically 80-95°C) should not exceed the engine coolant boiling point, and fuel cell CHP should reflect the lower-grade heat (60-80°C) from the cell stack. Check whether the model accounts for the parasitic electrical load of CHP pumps and fans. Compare the completeness of the CHP thermal balance against OCHRE's Generator.py, noting that OCHRE's CHP model is described as stubbed/incomplete in parts; also compare against EnergyPlus Generator:FuelCell for a more mature reference implementation of fuel-cell CHP thermal routing."
+    },
+    {
+      "id": "equip-der-08",
+      "slug": "ev-driver-archetype-behavior",
+      "title": "EV driver archetype behavior and SOC estimation divergence",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EV.py",
+      "files": "crates/hares-core/src/actors/ev_driver/ crates/hares-equipment/src/ev/mod.rs",
+      "prompt": "The EvDriverActor maintains an estimated_soc that intentionally diverges from the equipment-level actual SOC to model driver uncertainty and range anxiety. Review the maximum divergence that can accumulate over multi-day periods—if the driver never plugs in to reconcile, could the estimate drift by 10%, 20%, or more? Range anxiety logic fires when the estimated SOC (not actual) falls below a threshold; verify this is correct behavior (the driver acts on what they know, not on reality) but that the threshold is conservative enough to prevent the driver from being stranded. Check that when the vehicle does plug in, the estimated SOC is reconciled to actual SOC, and that reconciliation happens at the start of the charging session not the end. Review the 7 driver archetype probability distributions: are the log-normal parameters (mean, standard deviation) correctly parameterized for daily departure time, daily distance, and arrival SOC? Verify that the random draws from these distributions produce physically plausible values (e.g., no negative distances, departure times within 0-24 hours). Compare the archetype distribution fitting approach against OCHRE's EV.py driver behavior model."
+    }
+  ]
+}

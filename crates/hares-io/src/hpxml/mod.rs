@@ -1,0 +1,246 @@
+//! HPXML building description parser.
+
+use std::fmt;
+use std::fs;
+use std::path::Path;
+
+use thiserror::Error;
+
+pub mod building;
+pub mod data_patches;
+pub mod equipment;
+mod resolve_der;
+pub mod resolve_hvac;
+mod resolve_loads;
+mod resolve_pool;
+mod resolve_water_heater;
+pub mod validation;
+pub mod water_heater_ua;
+pub(crate) mod xml_helpers;
+
+use building::{parse_building_from_node, parse_xml_document};
+use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
+
+pub use building::{
+    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer, Site,
+    SiteType, Window, Zone, ZoneType,
+};
+pub use data_patches::HpxmlDataPatches;
+pub(crate) use equipment::build_spec;
+pub use equipment::{EquipmentSpec, build_typed_spec, nested_update, resolve_equipment};
+pub(crate) use resolve_loads::MICROWAVE_DEFAULT_ANNUAL_KWH;
+pub use resolve_water_heater::{extract_bedroom_count, rebuild_wh_typed_config};
+pub use validation::{ValidationReport, ValidationWarning};
+
+/// Structured parse error carrying position and element context.
+///
+/// When the error originates from `quick_xml` (malformed XML), the byte
+/// offset, line, and column columns are populated from
+/// [`Reader::error_position()`](quick_xml::reader::Reader::error_position).
+/// The `element_name` field records the most recent element on the parse
+/// stack when the error occurred, providing context for debugging.
+///
+/// When the error is a semantic structural issue (e.g. missing required
+/// child element), position fields are zero and only `message` is meaningful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    pub message: String,
+    pub byte_offset: usize,
+    pub line: usize,
+    pub column: usize,
+    pub element_name: Option<String>,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)?;
+        if self.byte_offset > 0 {
+            write!(
+                f,
+                " at byte offset {} (line {}, column {})",
+                self.byte_offset, self.line, self.column
+            )?;
+        }
+        if let Some(ref name) = self.element_name {
+            write!(f, " near element <{name}>")?;
+        }
+        Ok(())
+    }
+}
+
+impl From<String> for ParseError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            element_name: None,
+        }
+    }
+}
+
+impl From<&str> for ParseError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            element_name: None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum HpxmlError {
+    #[error("io error reading `{path}`: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("HPXML parse error: {0}")]
+    Parse(ParseError),
+    #[error("HPXML schema validation error: {0}")]
+    SchemaValidation(ValidationError),
+    #[error("HPXML domain validation failed ({error_count} errors): {errors:?}")]
+    DomainValidation {
+        report: validation::ValidationReport,
+        error_count: usize,
+        errors: Vec<String>,
+    },
+    /// A required physics/engineering field is missing from the HPXML input.
+    ///
+    /// Emitted when the parser would otherwise silently substitute a literal
+    /// default (e.g. AFUE=0.80, PV capacity=0 kW). Includes the HPXML element
+    /// path and, when available, the enclosing system identifier.
+    #[error("HPXML is missing required field `{path}` on {system_kind} `{system_id}` -- {reason}")]
+    MissingField {
+        /// HPXML element path (e.g. `PVSystem/MaxPowerOutput`).
+        path: &'static str,
+        /// Short type label for the enclosing system (e.g. `PV`, `Gas Furnace`).
+        system_kind: &'static str,
+        /// Identifier from `SystemIdentifier/@id` or `unknown` when absent.
+        system_id: String,
+        /// Human-readable explanation of what the field represents and why it
+        /// must be specified explicitly instead of defaulted.
+        reason: &'static str,
+    },
+    /// A supplied HPXML field value is outside the acceptable range.
+    #[error(
+        "HPXML field `{path}` on {system_kind} `{system_id}` has invalid value \
+         `{value_received}` -- {reason}"
+    )]
+    InvalidField {
+        /// HPXML element path (e.g. `HeatingSystem/AnnualHeatingEfficiency`).
+        path: &'static str,
+        /// Short type label for the enclosing system.
+        system_kind: &'static str,
+        /// Identifier from `SystemIdentifier/@id` or `unknown` when absent.
+        system_id: String,
+        /// String representation of the invalid value received.
+        value_received: String,
+        /// Human-readable explanation of the valid range or constraint.
+        reason: &'static str,
+    },
+    /// A unit attribute on an HPXML numeric element is not recognised.
+    #[error("unrecognised unit `{unit}` for value {value} in {context}")]
+    UnrecognisedUnit {
+        /// The numeric value that was being converted.
+        value: f64,
+        /// The unrecognised unit string as it appeared in the HPXML `units` attribute.
+        unit: String,
+        /// The measurement context (e.g. "area", "volume", "length").
+        context: String,
+    },
+    /// Equipment configuration error propagated from hares-equipment.
+    #[error(transparent)]
+    Equipment(#[from] hares_types::HaresError),
+}
+
+pub type Result<T> = std::result::Result<T, HpxmlError>;
+
+/// Parse HPXML from a file path.
+///
+/// Validation order:
+/// 1. Schema/structure checks: 3.x accepted with warning, 4.x silently, below 3 rejected.
+/// 2. Structural extraction into the `Building` model.
+/// 3. Domain range checks.
+pub fn parse_hpxml(path: &Path) -> Result<Building> {
+    let xml = fs::read_to_string(path).map_err(|source| HpxmlError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+
+    parse_hpxml_str(&xml)
+}
+
+/// Parse HPXML from a string input.
+pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
+    let root = parse_xml_document(xml)?;
+
+    let schema_warnings =
+        validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;
+    for w in &schema_warnings {
+        tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
+    }
+
+    let building = parse_building_from_node(&root)?;
+
+    let report = validate_building_ranges(&building);
+    if report.has_errors() {
+        let errors: Vec<String> = report.errors.iter().map(|e| e.to_string()).collect();
+        return Err(HpxmlError::DomainValidation {
+            error_count: report.errors.len(),
+            errors,
+            report,
+        });
+    }
+
+    Ok(building)
+}
+
+/// Extract the IECC climate zone from an HPXML file without a full parse.
+///
+/// Returns the zone string (e.g. `"5B"`, `"2A"`) from the
+/// `ClimateandRiskZones/ClimateZoneIECC/ClimateZone` element,
+/// or `None` if the file is missing or doesn't declare a zone.
+///
+/// Assumes a single `ClimateZoneIECC` entry per HPXML. The HPXML 4.x schema
+/// permits multiple entries (e.g. 2006 and 2021 designations for the same
+/// building). If future ResStock vintages emit multiple entries, the parser
+/// should select the most current year rather than blindly picking the first
+/// match.
+pub fn parse_iecc_climate_zone(path: &Path) -> Option<String> {
+    let xml = fs::read_to_string(path).ok()?;
+    let root = parse_xml_document(&xml).ok()?;
+
+    root.first_descendant("ClimateZone")
+        .map(|node| node.text.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HpxmlError, parse_hpxml_str};
+
+    #[test]
+    fn parse_fails_on_floor_area_out_of_range() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingOfHome>0.5</ShieldingOfHome></Site>
+        <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume></BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let err = parse_hpxml_str(xml).expect_err("expected range validation failure");
+        assert!(matches!(err, HpxmlError::DomainValidation { .. }));
+    }
+}
