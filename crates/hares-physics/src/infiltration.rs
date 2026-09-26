@@ -361,7 +361,7 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 /// # References
 /// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
 /// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct
-/// - EnergyPlus Engineering Reference §15.4: Q = sqrt(Qw² + Qst²)
+/// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: Q = sqrt(Qw² + Qst²)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
 /// - ASHRAE HoF 2009 Ch. 16.14: single-sided Cd = 0.15–0.25; cross-ventilation Cd = 0.60–0.65
 #[allow(clippy::too_many_arguments)]
@@ -460,7 +460,7 @@ pub fn natural_ventilation_flow_m3_s(
     let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
 
     // Quadrature combination: Q_total = adj × sqrt(Q_wind² + Q_stack²)
-    // EnergyPlus ERM §15.4; ASHRAE HoF 2009 Ch. 16.14
+    // EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area; ASHRAE HoF 2009 Ch. 16.14
     let q_total = adj * (q_wind * q_wind + q_stack * q_stack).sqrt();
 
     // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`)
@@ -1635,7 +1635,7 @@ mod tests {
     }
 
     /// Quadrature combination Q_total = sqrt(Q_wind² + Q_stack²) verified against
-    /// hand calculation per EnergyPlus ERM §15.4.
+    /// hand calculation per EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area.
     #[test]
     fn quadrature_combination_matches_energyplus() {
         let q_wind: f64 = 0.3;

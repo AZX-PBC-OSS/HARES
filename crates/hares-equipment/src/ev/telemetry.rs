@@ -5,13 +5,14 @@ use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAU
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
-    let mut t = Telemetry::with_capacity(20);
+    let mut t = Telemetry::with_capacity(21);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
     t.insert(tk::CHARGING_LEVEL, telemetry_code(charging_level));
     t.insert(tk::BATTERY_TEMP_C, 20.0);
     t.insert(tk::HEATER_POWER_W, 0.0);
+    t.insert(tk::OHMIC_LOSS_W, 0.0);
     t.insert(tk::CHARGE_DERATE, 1.0);
     t.insert(tk::CC_CV_DERATE, 1.0);
     t.insert(tk::V2L_ACTIVE, 0.0);
@@ -59,12 +60,24 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::HEATER_POWER_W.to_string(),
             unit: "W".to_string(),
-            description: "Battery heater power draw when active".to_string(),
+            description: "Actual battery heater draw (pack-side DC, post-cap)".to_string(),
+        },
+        TelemetryField {
+            name: tk::OHMIC_LOSS_W.to_string(),
+            unit: "W".to_string(),
+            description: "I2R ohmic heating in the cell resistance during \
+                         charge/discharge/drive (the only pack heating the \
+                         electrical model produces)"
+                .to_string(),
         },
         TelemetryField {
             name: tk::CHARGE_DERATE.to_string(),
             unit: "-".to_string(),
-            description: "Temperature-based charging derate factor [0..1]".to_string(),
+            description: "Linear BMS temperature derate factor [0..1] — the \
+                         applied capability when no charging-curve LUT is \
+                         configured; with a LUT, the LUT's temperature axis is \
+                         the capability and this reports the ramp only"
+                .to_string(),
         },
         TelemetryField {
             name: tk::CC_CV_DERATE.to_string(),

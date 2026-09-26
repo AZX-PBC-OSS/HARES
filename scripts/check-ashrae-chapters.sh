@@ -16,15 +16,31 @@ set -euo pipefail
 # text for provenance.
 
 FAILED=0
-TARGET_DIRS=("crates/" "docs/" "tests/")
-EXCLUDE_DIRS="docs/reviews docs/eplus docs/findings docs/hpxml docs/references docs/tickets vendors"
+TARGET_DIRS=("crates" "docs" "tests")
 
-build_exclude_args() {
-    local args=()
-    for d in $EXCLUDE_DIRS; do
-        args+=(--exclude-dir="$d")
-    done
-    echo "${args[@]}"
+# Path-based pruning — not grep --exclude-dir: grep's --exclude-dir matches
+# directory *basenames*, so exempting the name "hpxml" (the intent: the
+# generated docs/hpxml data-dictionary dumps and the tests/fixtures/hpxml
+# fixture copies, which may quote known-erroneous citations for provenance)
+# also skipped crates/hares-io/src/hpxml — production parser code carrying
+# this gate's exact citation class. find -prune matches full paths, so the
+# exemptions stay pinned to the provenance material they exist for and
+# every production directory stays scanned.
+EXEMPT_PRUNE=(
+    -path 'docs/reviews'
+    -o -path 'docs/eplus'
+    -o -path 'docs/findings'
+    -o -path 'docs/hpxml'
+    -o -path 'docs/references'
+    -o -path 'docs/tickets'
+    -o -path 'tests/fixtures/hpxml'
+    -o -name vendors
+)
+
+scan_matches() {
+    # Every non-exempt file under the target trees, grepped by pattern.
+    find "${TARGET_DIRS[@]}" \( "${EXEMPT_PRUNE[@]}" \) -prune -o -type f -print0 2>/dev/null \
+        | xargs -0 -r grep -n "$1" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -37,9 +53,7 @@ check_pattern() {
     local label="$2"
     local correct="$3"
 
-    mapfile -t MATCHES < <(
-        grep -rn "$pattern" "${TARGET_DIRS[@]}" $(build_exclude_args) 2>/dev/null || true
-    )
+    mapfile -t MATCHES < <(scan_matches "$pattern")
 
     if [ ${#MATCHES[@]} -gt 0 ]; then
         echo "FAIL: Found ${#MATCHES[@]} occurrence(s) of '${label}':"
@@ -83,9 +97,9 @@ check_pattern \
 # the edition year should always be present.
 
 mapfile -t AMBIG_MATCHES < <(
-    grep -rn 'ASHRAE.*HOF\|ASHRAE.*HoF\|ASHRAE.*Handbook.of.Fundamentals' "${TARGET_DIRS[@]}" $(build_exclude_args) 2>/dev/null | \
-        grep -v -E '20[0-9][0-9]' | \
-        grep -v -E 'ASHRAE[[:space:]]+[0-9]+' || true
+    scan_matches 'ASHRAE.*HOF\|ASHRAE.*HoF\|ASHRAE.*Handbook.of.Fundamentals' \
+        | grep -v -E '20[0-9][0-9]' \
+        | grep -v -E 'ASHRAE[[:space:]]+[0-9]+' || true
 )
 
 if [ ${#AMBIG_MATCHES[@]} -gt 0 ]; then

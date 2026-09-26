@@ -156,13 +156,7 @@ pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
-        "Gas Furnace",
-        &gf.name,
-        FuelType::Gas,
-        params,
-        typed_config,
-    ))
+    make_spec("Gas Furnace", &gf.name, FuelType::Gas, params, typed_config)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,13 +326,13 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Air Conditioner",
         &ac.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -509,13 +503,13 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "ASHP Heater",
         &hp.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -656,13 +650,13 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "ASHP Cooler",
         &hp.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -781,13 +775,13 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> PyResult<EquipmentSpe
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Electric Baseboard",
         &bb.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -895,13 +889,13 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Ideal HVAC",
         &ih.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,13 +1012,7 @@ pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
-        "Gas Boiler",
-        &gb.name,
-        FuelType::Gas,
-        params,
-        typed_config,
-    ))
+    make_spec("Gas Boiler", &gb.name, FuelType::Gas, params, typed_config)
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,13 +1131,13 @@ pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> PyResult<Equipment
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Electric Boiler",
         &eb.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,11 +1261,11 @@ pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> PyResult<Equipme
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Electric Furnace",
         &ef.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }

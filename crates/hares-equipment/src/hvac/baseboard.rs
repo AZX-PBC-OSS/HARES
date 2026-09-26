@@ -313,7 +313,35 @@ impl Equipment for ElectricBaseboard {
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the flows from the
+        // checkpointed `electric_kw`/`thermal_output_w`, the mode from
+        // the checkpointed `operating_mode` (the pair the step published
+        // was guard-valid), the setpoint from the restored thermostat
+        // state. The reactive ZIP power is not checkpointed and
+        // publishes as 0. `CoreOutput::default()` (all fields `None`)
+        // violates the presence rules for every declared capability
+        // (ELECTRIC/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT) — the restore
+        // contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts.
+        let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -550,6 +578,32 @@ mod tests {
         let mut env_restored = env(18.0);
         env_restored.current_time += ChronoDuration::minutes(2);
         assert_eq!(eq.update_control(&env_restored), OperatingMode::Heating);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// ELECTRIC/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT capabilities.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        let mut slots = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ElectricBaseboard::new(cfg);
+        restored.init(&config(3_000.0), &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a baseboard checkpoint must restore a contract-valid output");
     }
 
     #[test]

@@ -30,6 +30,12 @@ The central pattern is **Environment / Port / Solver decoupling**: equipment rea
 
 If a constant, formula, or algorithm appears in more than one place, it lives in exactly one place. Shared physical constants belong in `hares-physics::constants`. Shared psychrometric functions belong in `hares-physics::psychrometrics`. Shared conversion factors are not re-derived inline — they are imported.
 
+### One model per physical phenomenon — a reimplementation is duplication
+
+DRY applies to sub-models, not just constants and formulas, and a from-scratch reimplementation is the hardest kind of duplication to see: it shares no identifiers with the original, so no grep finds it. When a second equipment family needs physics the codebase already models — pack thermal mass and loss attribution, heater gating, degradation — port the existing model or extract a shared home (as `hares-equipment::pack_electrical` does for the Battery/EV terminal-voltage solve and I²R heating). Never write a second implementation of the same phenomenon from scratch.
+
+I-07: the EV's pack thermal sub-model was a from-scratch reimplementation of physics the stationary Battery already modeled correctly, and it diverged in three coupled ways (thermal mass ~24× too small, charger conversion losses attributed to the pack as heat, heater heat gated on charge power so preconditioning could never work) — invisible until a cold-climate run produced weeks of charging blackouts. The class-audit direction when such a divergence is found: enumerate every place the same phenomenon is modeled and align them on one implementation, in both directions — the fix's own audit found the *Battery* carrying one member of the class (a charging-curve LUT's temperature axis multiplied on top of its derate) that the EV audit had enumerated only in the EV.
+
 ### Type safety
 
 Use Rust's type system to make illegal states unrepresentable:
@@ -308,6 +314,8 @@ Test observable behaviour — inputs, outputs, visible state transitions, port c
 Prefer integration tests that exercise real paths end-to-end over unit tests that mock every collaborator. One integration test that exercises parse → construct → simulate → assert often replaces five mocked unit tests and gives more signal.
 
 Every bug fix must be accompanied by a regression test that would have caught the bug before the fix. The test asserts correct post-fix behaviour — not merely that the code compiles.
+
+**Assert physical plausibility, not just functional behaviour.** A wrong constant compiles, runs, and passes any test that only checks that a code path executed — what it cannot survive is a bound on the physics. Every simulated physical state has absolute bounds: a Li-ion pack cannot be at 281 °C after a routine charge session; a parked pack cannot flash-freeze to ambient in two hours; a heater that bills 6 kWh cannot leave its load at the same temperature. Asserting those bounds on observable state is nearly free, and it catches the wrong-constant and wrong-attribution classes that functional tests wave through. I-07's three defects all shipped behind green suites because no test ever asked whether the numbers were physical; the regression that pins the class is a single bound on pack temperature during an ordinary L2 session. Where a model has a validated domain — a calibration range, a rated envelope — guard it at the model boundary and fail loudly outside it (the degradation model's cell-temperature domain guard is the pattern), so a future upstream thermal defect breaks the simulation instead of silently corrupting its outputs.
 
 ### What not to test
 

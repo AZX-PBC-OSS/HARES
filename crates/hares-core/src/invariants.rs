@@ -328,18 +328,22 @@ impl InvariantChecker {
         Ok(())
     }
 
-    /// Verifies that the EV's usable pack capacity tracks its degraded state of
-    /// health.
+    /// Verifies that the EV's usable pack capacity tracks its degraded state
+    /// of health and the reversible temperature derate.
     ///
     /// The EV mirrors the Battery model: the usable pack capacity
-    /// (`battery_capacity_kwh`) is recomputed at each day boundary as
-    /// `battery_capacity_kwh_rated · (1 − capacity_fade_fraction)`. This check
-    /// asserts that algebraic relationship holds within `1e-6`:
+    /// (`battery_capacity_kwh`) is
+    /// `battery_capacity_kwh_rated · (1 − capacity_fade_fraction) ·
+    /// derate(pack_temperature)` — the degradation SOH times the
+    /// temperature-capacity contraction (a cold pack holds less charge; the
+    /// same `CapacityDerateModel` the stationary Battery applies). This
+    /// check asserts that algebraic relationship holds within `1e-6`:
     ///
-    /// `|battery_capacity_kwh / battery_capacity_kwh_rated − (1 − capacity_fade_fraction)| < 1e-6`
+    /// `|capacity/rated − (1 − fade)·derate(temp_c)| < 1e-6`
     ///
     /// A violation means SOC arithmetic (driving, charging, V2L/V2G) is using a
-    /// capacity divisor that disagrees with the tracked degradation.
+    /// capacity divisor that disagrees with the tracked degradation or the
+    /// pack temperature.
     ///
     /// Note: this check does **not** assert `battery_capacity_kwh ≤ rated`.
     /// The Smith (2017) degradation model has a beginning-of-life transient
@@ -352,6 +356,7 @@ impl InvariantChecker {
         battery_capacity_kwh: f64,
         battery_capacity_kwh_rated: f64,
         capacity_fade_fraction: f64,
+        pack_temp_c: f64,
     ) -> Result<(), HaresError> {
         const CHECK: &str = "ev_capacity_degraded";
         const TOLERANCE: f64 = 1e-6;
@@ -380,7 +385,8 @@ impl InvariantChecker {
             });
         }
 
-        let expected_soh = 1.0 - capacity_fade_fraction;
+        let expected_soh = (1.0 - capacity_fade_fraction)
+            * hares_equipment::battery::CapacityDerateModel::default().evaluate(pack_temp_c);
         let actual_ratio = battery_capacity_kwh / battery_capacity_kwh_rated;
         let residual = (actual_ratio - expected_soh).abs();
         if residual >= TOLERANCE {
@@ -718,7 +724,13 @@ impl InvariantChecker {
         Ok(())
     }
 
-    pub fn check_ev_capacity_degraded(&self, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
+    pub fn check_ev_capacity_degraded(
+        &self,
+        _: f64,
+        _: f64,
+        _: f64,
+        _: f64,
+    ) -> Result<(), HaresError> {
         Ok(())
     }
 
@@ -1466,16 +1478,20 @@ mod tests {
     // ── ev_capacity_degraded ──────────────────────────────────────────────────
 
     #[test]
-    fn ev_capacity_degraded_passes_when_capacity_matches_soh() {
-        // rated 60 kWh, 10% fade → usable 54 kWh; ratio 0.9 == 1 − 0.1.
-        let result = checker().check_ev_capacity_degraded(54.0, 60.0, 0.10);
+    fn ev_capacity_degraded_passes_when_capacity_matches_soh_and_derate() {
+        // rated 60 kWh, 10% fade, pack at 20 °C: usable = rated·(1−fade)·derate(20).
+        let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(20.0);
+        let result = checker().check_ev_capacity_degraded(60.0 * 0.9 * derate, 60.0, 0.10, 20.0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn ev_capacity_degraded_passes_at_beginning_of_life_when_undegraded() {
-        // Fresh pack: fade 0, usable == rated.
-        let result = checker().check_ev_capacity_degraded(60.0, 60.0, 0.0);
+        // Fresh pack at the 25 °C reference: fade 0, usable = rated·derate
+        // (derate(25) = d0,ref = 1.001 — the model's reference-cell
+        // measured-over-nameplate offset).
+        let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(25.0);
+        let result = checker().check_ev_capacity_degraded(60.0 * derate, 60.0, 0.0, 25.0);
         assert!(result.is_ok());
     }
 
@@ -1486,16 +1502,17 @@ mod tests {
         // holds and must pass — the check must not assume usable ≤ rated.
         let rated = 60.0;
         let fade = -0.024;
-        let usable = rated * (1.0 - fade);
-        let result = checker().check_ev_capacity_degraded(usable, rated, fade);
+        let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(25.0);
+        let usable = rated * (1.0 - fade) * derate;
+        let result = checker().check_ev_capacity_degraded(usable, rated, fade, 25.0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn ev_capacity_degraded_fails_when_capacity_ignores_degradation() {
         // The bug this guards against: usable capacity held at rated while the
-        // tracked fade is 10%. ratio 1.0 ≠ 0.9 → violation.
-        let result = checker().check_ev_capacity_degraded(60.0, 60.0, 0.10);
+        // tracked fade is 10%. ratio 1.0 ≠ 0.9·derate → violation.
+        let result = checker().check_ev_capacity_degraded(60.0, 60.0, 0.10, 25.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -1505,14 +1522,22 @@ mod tests {
     }
 
     #[test]
+    fn ev_capacity_degraded_fails_when_capacity_ignores_temperature() {
+        // A cold pack contracts: a usable capacity that ignores the
+        // temperature derate (rated·SOH at 0 °C) disagrees with the model.
+        let result = checker().check_ev_capacity_degraded(54.0, 60.0, 0.10, 0.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn ev_capacity_degraded_fails_on_nan() {
-        let result = checker().check_ev_capacity_degraded(f64::NAN, 60.0, 0.1);
+        let result = checker().check_ev_capacity_degraded(f64::NAN, 60.0, 0.1, 25.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn ev_capacity_degraded_fails_on_non_positive_rated() {
-        let result = checker().check_ev_capacity_degraded(0.0, 0.0, 0.0);
+        let result = checker().check_ev_capacity_degraded(0.0, 0.0, 0.0, 25.0);
         assert!(result.is_err());
     }
 

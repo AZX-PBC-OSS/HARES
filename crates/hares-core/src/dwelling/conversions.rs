@@ -840,6 +840,69 @@ pub(crate) fn merged_equipment_config(
     Ok(equipment_config_from_spec(&merged_spec))
 }
 
+/// Validate equipment-override keys against the equipment population at
+/// the assembly boundary where the population is known.
+///
+/// Every key must be the `"all"`/`"*"` wildcard or the name of an
+/// equipment whose config is built through the override merge. An unknown
+/// key — e.g. an HPXML `SystemIdentifier` like `"ReproEV1"`, which never
+/// matches a spec name (overrides are matched by `spec.name`, and the EV
+/// resolver names every EV spec `"EV"` regardless of its
+/// SystemIdentifier) — was previously a silent no-op: the override quietly
+/// missed and the equipment ran its defaults, exactly the
+/// silent-substitution failure mode the loud-error rule forbids at parse
+/// and assembly boundaries. `unhandled_names` are spec names that exist in
+/// the population but are consumed outside the registry (no override
+/// channel) — an override keyed by one of those is the same silent no-op
+/// and is rejected with the reason.
+pub(crate) fn validate_equipment_override_keys(
+    overrides: &Value,
+    overridable_names: &[&str],
+    unhandled_names: &[&str],
+) -> Result<()> {
+    // A non-object payload (a bare string, array, or number — reachable
+    // from the Python surface, which converts any Python object into the
+    // `overrides` field) can never name an equipment, so it would silently
+    // no-op the entire override channel: `overrides = "ReproEV1"` is the
+    // same silent miss an unknown key produces, opened by a payload type
+    // the per-key loop below never sees keys from. The canonical
+    // "no overrides" is `overrides: None` (upstream wraps it into an
+    // empty object); `Some(Null)` is a misconfiguration of the same class
+    // and is rejected with everything else non-object. The same rule the
+    // `zip` override channel already enforces ("must be an object", above).
+    let Value::Object(root) = overrides else {
+        return Err(HaresError::Equipment(format!(
+            "equipment overrides payload must be a JSON object mapping \
+             equipment names to override fields, got: {overrides} — a \
+             non-object payload can never match an equipment name and \
+             would silently no-op every override"
+        )));
+    };
+    for key in root.keys() {
+        if key == "all" || key == "*" {
+            continue;
+        }
+        if overridable_names.contains(&key.as_str()) {
+            continue;
+        }
+        if unhandled_names.contains(&key.as_str()) {
+            return Err(HaresError::Equipment(format!(
+                "equipment override key '{key}' names a spec handled outside \
+                 the equipment override path and cannot be overridden; \
+                 overridable equipment names: {}",
+                overridable_names.join(", ")
+            )));
+        }
+        return Err(HaresError::Equipment(format!(
+            "unknown equipment override key '{key}': overrides are matched by \
+             equipment name, not SystemIdentifier; overridable equipment \
+             names: {}",
+            overridable_names.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn apply_equipment_overrides(
     base: &mut Map<String, Value>,
     overrides: &Value,

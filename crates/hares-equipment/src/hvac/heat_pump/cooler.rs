@@ -720,7 +720,18 @@ impl Equipment for GshpCooler {
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        self.inner.load_state(state)
+        self.inner.load_state(state)?;
+        // The outer unit publishes its own `core_output` (folded with the
+        // loop-pump contribution in step), so the restore must rebuild it,
+        // not only the inner's. The pump's contribution depends on live
+        // loop conditions not available at restore, so the restore-instant
+        // output is the inner's restored output as-is — the same
+        // contract-valid output the inner now publishes (its checkpoint
+        // carried the faces). Without this, the outer field keeps its
+        // construction default (all fields `None`) — a presence-rule
+        // violation for every declared capability.
+        self.core_output = self.inner.core_output().clone();
+        Ok(())
     }
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
@@ -1053,7 +1064,15 @@ impl Equipment for WshpCooler {
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        self.inner.load_state(state)
+        self.inner.load_state(state)?;
+        // Same outer-field rebuild as the ground-source cooler: the unit
+        // publishes its own `core_output` (pump-folded in step), so the
+        // restore rebuilds it from the inner's restored, contract-valid
+        // output rather than leaving the construction default (all fields
+        // `None`) — a presence-rule violation for every declared
+        // capability.
+        self.core_output = self.inner.core_output().clone();
+        Ok(())
     }
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
@@ -1077,6 +1096,7 @@ mod tests {
 
     use super::{
         super::super::super::Equipment, super::super::super::EquipmentConfig, GshpCooler, HpCooler,
+        WshpCooler,
     };
     use crate::HvacSetpointConfig;
     use crate::config::ConfigPayload;
@@ -1508,6 +1528,104 @@ mod tests {
     /// The compressor is indoors; no crankcase heater is needed.
     /// Regression test for the finding where crankcase overrides were placed
     /// before `inner.init()` and overwritten by `AirConditioner::init_from_typed`.
+    /// Checkpoint restore contract (the outer-field rebuild face): the GSHP
+    /// cooler's `load_state` delegates to the inner AirConditioner, but the
+    /// unit publishes its own `core_output` (pump-folded in step) — so the
+    /// restore must rebuild the outer field from the inner's restored,
+    /// contract-valid output. Pre-fix it kept the construction default
+    /// (all fields `None`) — a presence-rule violation for every declared
+    /// capability. The WSHP cooler shares the delegation and is exercised
+    /// by the same contract through the workspace suite.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_cooler".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GshpCooler::new(cfg.clone());
+        let env = cooling_env(21.0, 10.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = GshpCooler::new(cfg);
+        restored
+            .init(
+                &EquipmentConfig::from_typed(
+                    "gshp_cooler".to_string(),
+                    "GSHP Cooler".to_string(),
+                    crate::HeatPumpCoolerConfig {
+                        common: crate::HeatPumpCommonConfig {
+                            zone_id: Some(1),
+                            cooling_capacity_w: Some(8_000.0),
+                            cooling_eir: Some(0.33),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+                &env,
+            )
+            .unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a GSHP cooler checkpoint must restore a contract-valid output");
+    }
+
+    /// The WSHP cooler shares the GSHP's delegation mechanism (inner
+    /// restore + outer-field rebuild) and is gated separately: its
+    /// construction path runs through the WSHP config conversion inside
+    /// `init`, not the plain cooler config.
+    #[test]
+    fn wshp_restored_checkpoint_output_satisfies_the_core_contract() {
+        let make_source = || {
+            EquipmentConfig::from_typed(
+                "wshp_cooler".to_string(),
+                "WSHP Cooler".to_string(),
+                crate::HeatPumpCoolerConfig {
+                    common: crate::HeatPumpCommonConfig {
+                        zone_id: Some(1),
+                        cooling_capacity_w: Some(8_000.0),
+                        cooling_eir: Some(0.33),
+                        enter_water_temp_c: Some(20.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let cfg = make_source();
+        let mut eq = WshpCooler::new(cfg.clone());
+        let env = cooling_env(21.0, 10.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = WshpCooler::new(make_source());
+        restored.init(&make_source(), &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a WSHP cooler checkpoint must restore a contract-valid output");
+    }
+
     #[test]
     fn gshp_cooler_crankcase_disabled_after_init() {
         let cfg = EquipmentConfig::from_typed(

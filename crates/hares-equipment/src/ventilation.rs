@@ -131,6 +131,17 @@ impl VentilationConfig {
                 }
             }
         }
+        // The defrost threshold must be finite: a NaN makes
+        // `compute_defrost_fraction`'s `deficit <= 0.0` guard compare false
+        // forever, so the NaN flows into the defrost-time interpolation and
+        // silently poisons the ventilation power and energy totals.
+        if let Some(t) = self.defrost_temp_c
+            && !t.is_finite()
+        {
+            return Err(HaresError::Equipment(format!(
+                "ventilation defrost_temp_c must be finite, got {t}"
+            )));
+        }
         for (name, val) in [
             ("sensible_effectiveness", self.sensible_effectiveness),
             ("latent_effectiveness", self.latent_effectiveness),
@@ -924,12 +935,21 @@ impl Equipment for Ventilation {
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
-        // Reconstruct core_output structure: operating_mode is checkpointed,
-        // and the ventilation always contributes to the electric port (even
-        // when off). The per-step fan power depends on live environmental
-        // conditions (outdoor/indoor temp, humidity) not stored in the
-        // checkpoint, so electric_kw is set to Consumption(0.0) — the next
-        // step() recalculates the correct value. See Known Limitations.
+        // Reconstruct core_output structure: the per-step fan power depends
+        // conditions (outdoor/indoor temp, humidity, schedule fraction) not
+        // stored in the checkpoint, so electric_kw is
+        // set to Consumption(0.0) — the next step() recalculates the correct
+        // value. The mode must be consistent with those zero flows: an `On`
+        // checkpoint (running fan, nonzero flow at save) restored verbatim
+        // would pair an active mode with zero flows — a Rule 1 violation.
+        // The step's own not-running branch applies
+        // `self.mode = self.mode.resolve_idle(false, None)` (active →
+        // `Standby`, which the guard does not count as active) — the
+        // restore applies the same mapping, so `update_control` (which
+        // reports `self.mode`) and the published output agree on the
+        // restore-instant state, and the next step re-derives from
+        // ambient (`Standby` is a non-Off mode, so the unit still runs).
+        self.mode = self.mode.resolve_idle(false, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(0.0)),
@@ -1683,6 +1703,26 @@ mod tests {
         let mut cfg = minimal_ventilation_config();
         cfg.sensible_effectiveness = Some(1.5);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn ventilation_config_validate_rejects_non_finite_defrost_temp() {
+        // A NaN defrost threshold makes `compute_defrost_fraction`'s
+        // `deficit <= 0.0` guard compare false forever, so the NaN flows
+        // into the defrost-time interpolation and silently poisons the
+        // ventilation power and energy totals.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut cfg = minimal_ventilation_config();
+            cfg.defrost_temp_c = Some(bad);
+            assert!(
+                cfg.validate().is_err(),
+                "non-finite defrost_temp_c ({bad}) must be rejected"
+            );
+        }
+        // Boundary-legal: a physically extreme but finite threshold passes.
+        let mut cfg = minimal_ventilation_config();
+        cfg.defrost_temp_c = Some(-40.0);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -2845,6 +2885,69 @@ mod tests {
         assert_eq!(
             eff_l, 0.0,
             "latent effectiveness should be 0.0 with zero schedule, got {eff_l}"
+        );
+    }
+
+    /// The checkpoint-restore contract on the fourth mode-checkpointing
+    /// equipment: `VentilationCheckpoint` persists `mode`, and
+    /// `load_state` restores it while zeroing every flow
+    /// (`Consumption(0.0)`, reactive `Some(0.0)` — the per-step fan power
+    /// depends on live conditions the checkpoint does not store). A
+    /// checkpoint taken while the fan reports `On` (reachable through the
+    /// public control surface: `ModeOverride::On`, `LoadFraction > 0`, or
+    /// an `Off` → running transition) therefore restores to `On` with
+    /// all-zero flows — the pair `check_mode_flow_consistency` Rule 1
+    /// rejects as a hard error (`On` is active; `Standby`/`Off` are the
+    /// only inactive modes). A checkpoint must restore a state the
+    /// workspace's own guard accepts (the contract the EV var-support and
+    /// Battery mid-charge restore fixes established); the fix is free to
+    /// choose either face — publish a truthful inactive mode when the
+    /// rebuilt flows are zero, or keep the checkpointed mode and recompute
+    /// a nonzero flow.
+    #[test]
+    fn running_ventilation_checkpoint_restores_an_output_the_guard_accepts() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        hrv.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step running");
+        assert_eq!(
+            hrv.core_output().state.operating_mode,
+            Some(OperatingMode::On),
+            "precondition: the saved state is the running On mode"
+        );
+        assert!(
+            hrv.core_output()
+                .flows
+                .electric_kw
+                .is_some_and(|p| !p.is_zero()),
+            "precondition: the saved state carries nonzero fan flow"
+        );
+
+        let checkpoint = hrv.save_state().expect("save ventilation checkpoint");
+        let mut restored = Ventilation::new(hrv_config());
+        restored.init(&hrv_config(), &env(0.0, 20.0)).expect("init");
+        restored
+            .load_state(&checkpoint)
+            .expect("restore checkpoint");
+
+        hares_types::equipment::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+        )
+        .expect(
+            "a running fan's checkpoint must restore to a state the mode/flow guard \
+             accepts (the EV/Battery restore contract)",
         );
     }
 }

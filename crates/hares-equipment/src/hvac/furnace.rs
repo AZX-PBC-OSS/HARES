@@ -458,7 +458,38 @@ impl Equipment for ElectricFurnace {
         self.telemetry
             .insert(tk::MAIN_POWER_KW, decoded.main_power_kw);
         self.telemetry.insert(tk::DUCT_LOSS_W, decoded.duct_loss_w);
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the flows from the
+        // checkpointed `electric_kw`/`thermal_output_w`, the mode from the
+        // checkpointed `operating_mode` (the pair the step published was
+        // guard-valid), the setpoint from the restored thermostat state.
+        // The reactive ZIP power is not checkpointed and publishes as 0.
+        // `CoreOutput::default()` (all fields `None`) violates the
+        // presence rules for every declared capability
+        // (ELECTRIC/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT) — the restore
+        // contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts.
+        let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: None,
+                main_power_kw: Some(decoded.main_power_kw),
+            },
+        };
         Ok(())
     }
 
@@ -860,7 +891,37 @@ impl Equipment for GasFurnace {
         self.telemetry
             .insert(tk::MAIN_POWER_KW, decoded.main_power_kw);
         self.telemetry.insert(tk::DUCT_LOSS_W, decoded.duct_loss_w);
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the gas step's own literal (fuel and speed
+        // arms included): the flows from the checkpointed
+        // `electric_kw`/`thermal_output_w`/`fuel_input_w`, the mode from
+        // the checkpointed `operating_mode`, the speed from the restored
+        // `last_speed_index`, the setpoint from the restored thermostat
+        // state. Same restore contract as the electric furnace.
+        let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: Some(FuelPower {
+                    fuel_type: self.fuel_type,
+                    consumption_w: decoded.fuel_input_w.max(0.0),
+                }),
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: None,
+                main_power_kw: Some(decoded.main_power_kw),
+            },
+        };
         Ok(())
     }
 
@@ -1630,6 +1691,80 @@ mod tests {
             eq.hvac.config.supply_air_temp_c > 0.0,
             "supply_air_temp_c must be set after init"
         );
+    }
+
+    /// Checkpoint restore contract (both furnace variants): a restored
+    /// core output must satisfy the workspace's own
+    /// `validate_core_contract` (presence rules and the mode/flow guard).
+    /// Pre-fix, the restore published `CoreOutput::default()` — all fields
+    /// `None` against the declared capabilities (electric:
+    /// ELECTRIC/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT; gas: plus FUEL and
+    /// HAS_SPEED).
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        // Electric furnace face.
+        {
+            let cfg = ef_config(8_000.0, 1.05);
+            let mut eq = ElectricFurnace::new(cfg.clone());
+            let env = env(18.0);
+            eq.init(&cfg, &env).unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.update_control(&env);
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let state = eq.save_state().unwrap();
+
+            let mut restored = ElectricFurnace::new(cfg);
+            restored.init(&ef_config(8_000.0, 1.05), &env).unwrap();
+            restored.load_state(&state).unwrap();
+            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+                .expect("an electric furnace checkpoint must restore a contract-valid output");
+        }
+        // Gas furnace face (the fuel and speed arms).
+        {
+            let cfg = EquipmentConfig::from_typed(
+                "GF".to_string(),
+                "Gas Furnace".to_string(),
+                GasFurnaceConfig {
+                    afue: 0.8,
+                    capacity_w: 10_000.0,
+                    fan_power_w: Some(0.0),
+                    zone_id: Some(1),
+                    ..GasFurnaceConfig::default()
+                },
+            )
+            .unwrap();
+            let mut eq = GasFurnace::new(cfg.clone());
+            let env = env(18.0);
+            eq.init(&cfg, &env).unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.update_control(&env);
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let state = eq.save_state().unwrap();
+
+            let gas_cfg = EquipmentConfig::from_typed(
+                "GF".to_string(),
+                "Gas Furnace".to_string(),
+                GasFurnaceConfig {
+                    afue: 0.8,
+                    capacity_w: 10_000.0,
+                    fan_power_w: Some(0.0),
+                    zone_id: Some(1),
+                    ..GasFurnaceConfig::default()
+                },
+            )
+            .unwrap();
+            let mut restored = GasFurnace::new(gas_cfg);
+            restored.init(&cfg, &env).unwrap();
+            restored.load_state(&state).unwrap();
+            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+                .expect("a gas furnace checkpoint must restore a contract-valid output");
+        }
     }
 
     #[test]

@@ -100,7 +100,16 @@ def test_enter_executing_mode_times_out_and_aborts() -> None:
         enter_executing_mode_with_timeout(fed, timeout_s=0.2, fed_name="fed_b")
     elapsed = time.monotonic() - start
 
-    assert elapsed < 5.0, "timeout should fire promptly"
+    # Load-insensitive wall-clock bound: the assertion's purpose is that
+    # the timeout path FIRES rather than blocks — which `pytest.raises`
+    # above already proves — not that it fires within a fixed wall-clock
+    # budget. Under the suite's default `-n auto` (one xdist worker per
+    # core, 28 here) GIL and scheduler contention can stretch a 0.2 s
+    # poll loop well past a tight budget, which made this test flake
+    # non-deterministically (different tests per run). The generous bound
+    # still catches a pathological slow-fire; a true hang is caught by
+    # this file's `pytest.mark.timeout(60, method="thread")`.
+    assert elapsed < 30.0, "timeout should fire rather than block"
     assert ("disconnect_async",) in fed.calls, "stuck federate must be aborted non-blockingly"
     assert ("enter_executing_mode_complete",) not in fed.calls
 

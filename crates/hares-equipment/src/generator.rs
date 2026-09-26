@@ -1879,7 +1879,21 @@ impl Equipment for Generator {
             self.descriptor().id,
         )?;
         self.current_power_kw = cp.current_power_kw;
-        self.mode = cp.mode;
+        // The restored mode is re-derived from the restored output power
+        // (the same derivation `update_control` applies), not restored
+        // verbatim: the checkpointed mode can be a *provisional* value
+        // `update_control` derived from a pending setpoint while the
+        // output was still flowing (a zeroing `PowerSetpoint(0)` latches,
+        // `update_control` flips the mode to `Off` before the ramp-down
+        // step runs) — restoring that pair publishes `Off` alongside
+        // `Generation(power)` + fuel, which the mode/flow guard rejects
+        // (Rule 2: Off with non-zero flows). The mode consistent with
+        // the restored flows is a pure function of the restored power.
+        self.mode = if cp.current_power_kw > IDLE_KW_THRESHOLD {
+            OperatingMode::Standby
+        } else {
+            OperatingMode::Off
+        };
         self.power_setpoint_kw = cp.power_setpoint_kw;
         self.self_consumption_enabled = cp.self_consumption_enabled;
 
@@ -6549,5 +6563,147 @@ mod tests {
             ],
         };
         assert!((model.evaluate(1.0) - 1.0).abs() < 1e-12);
+    }
+
+    /// A checkpoint taken mid-generation, restored, must publish a
+    /// mode/flow pair the workspace's own guard accepts — the restore
+    /// contract the EV (var support) and Battery (mid-charge) restore
+    /// fixes established for their siblings. The Generator is the third
+    /// equipment that checkpoints an operating mode
+    /// (`GeneratorCheckpoint.mode`); its restore rebuilds flows from the
+    /// restored `current_power_kw`, so the mid-generation face pairs
+    /// `Standby` (guard-inactive) with nonzero generation — consistent.
+    /// Pinned here so a future restore change (e.g. restoring a mode the
+    /// rebuilt flows contradict) fails loudly instead of silently
+    /// tripping `check_mode_flow_consistency` in a dwelling run.
+    #[test]
+    fn generating_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
+        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert_eq!(
+            generator.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "precondition: the saved state is the generating mode"
+        );
+        assert!(
+            generator
+                .core_output()
+                .flows
+                .electric_kw
+                .is_some_and(|p| !p.is_zero()),
+            "precondition: the saved state carries nonzero generation flow"
+        );
+
+        let checkpoint = generator.save_state().expect("save generator checkpoint");
+        let mut restored = Generator::new(config, GeneratorKind::GasGenerator);
+        restored
+            .init(
+                &gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]),
+                &base_env(),
+            )
+            .unwrap();
+        restored
+            .load_state(&checkpoint)
+            .expect("restore checkpoint");
+
+        assert_eq!(
+            restored.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "the restored mode must be the checkpointed generating mode"
+        );
+        assert!(
+            restored
+                .core_output()
+                .flows
+                .electric_kw
+                .is_some_and(|p| !p.is_zero()),
+            "the restore rebuilds the generation flow from the restored power"
+        );
+        hares_types::equipment::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+        )
+        .expect(
+            "a restored generating checkpoint must satisfy the core contract \
+             (mode/flow guard)",
+        );
+    }
+
+    /// The restore contract's second face: a checkpoint saved in the
+    /// window between a zeroing setpoint's arrival and the ramp-down
+    /// step. The dwelling loop's between-steps order latches the setpoint
+    /// (`apply_control` → `power_setpoint_kw = Some(0.0)`) and then runs
+    /// `update_control`, which derives the provisional mode from the
+    /// *pending* setpoint — `Off` — while `current_power_kw` is still at
+    /// full output. A checkpoint saved in that window carries
+    /// `{current_power_kw: 5, mode: Off}`, and the restore rebuilds
+    /// `Generation(5.0)` + fuel from the restored power while publishing
+    /// the checkpointed `Off` — the pair `check_mode_flow_consistency`
+    /// Rule 2 rejects as a hard error. A checkpoint must restore a state
+    /// the workspace's own guard accepts (the contract the EV var-support
+    /// and Battery mid-charge restore fixes established); the fix is free
+    /// to choose either face — recompute the mode from the restored power
+    /// (`load_state` already computes `is_running`), or clamp the
+    /// published flow when the restored mode is `Off`.
+    #[test]
+    fn zeroing_setpoint_window_checkpoint_restores_an_output_the_guard_accepts() {
+        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // The between-steps order: the zeroing setpoint latches, then
+        // update_control derives the provisional mode from it before the
+        // ramp-down step runs.
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 0.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        let provisional = generator.update_control(&base_env());
+        assert_eq!(
+            provisional,
+            OperatingMode::Off,
+            "precondition: update_control derives Off from the pending zero setpoint"
+        );
+        assert!(
+            generator.current_power_kw > 1.0,
+            "precondition: output is still at full power in the window, got {:.3} kW",
+            generator.current_power_kw
+        );
+
+        let checkpoint = generator.save_state().expect("save generator checkpoint");
+        let mut restored = Generator::new(config, GeneratorKind::GasGenerator);
+        restored
+            .init(
+                &gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]),
+                &base_env(),
+            )
+            .unwrap();
+        restored
+            .load_state(&checkpoint)
+            .expect("restore checkpoint");
+
+        hares_types::equipment::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+        )
+        .expect(
+            "a checkpoint saved in the zeroing-setpoint window must restore to a state \
+             the mode/flow guard accepts (the EV/Battery restore contract)",
+        );
     }
 }

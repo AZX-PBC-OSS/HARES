@@ -137,6 +137,15 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             heater_threshold_c: get_f64(&[KEY_HEATER_THRESHOLD_C]),
             thermal_mass_j_per_k: get_f64(&[KEY_THERMAL_MASS_J_PER_K]),
             ua_w_per_k: get_f64(&[KEY_UA_W_PER_K]),
+            n_series: raw
+                .get(KEY_N_SERIES)
+                .and_then(crate::config::ConfigValue::as_f64)
+                .map(|v| v as u32),
+            n_parallel: raw
+                .get(KEY_N_PARALLEL)
+                .and_then(crate::config::ConfigValue::as_f64)
+                .map(|v| v as u32),
+            cell_resistance_ohm: get_f64(&[KEY_CELL_RESISTANCE_OHM]),
             v2l_enabled: get_bool(KEY_V2L_ENABLED),
             v2l_soc_reserve: get_f64(&[KEY_V2L_SOC_RESERVE]),
             v2l_max_discharge_kw: get_f64(&[KEY_V2L_MAX_DISCHARGE_KW]),
@@ -161,6 +170,15 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
         },
     )
     .unwrap()
+}
+
+/// The reversible temperature-capacity derate factor at `temp_c` — the
+/// same model `Ev::refresh_usable_capacity` applies (the stationary
+/// Battery's default `CapacityDerateModel`: the NREL SSC d0 Arrhenius,
+/// d0,ref = 1.001 at T_ref = 25 °C). For deriving exact usable-capacity
+/// expectations: `capacity = rated · SOH · capacity_derate_at(temp_c)`.
+fn capacity_derate_at(temp_c: f64) -> f64 {
+    crate::battery::CapacityDerateModel::default().evaluate(temp_c)
 }
 
 fn base_raw() -> HashMap<String, crate::config::ConfigValue> {
@@ -315,7 +333,7 @@ fn hpxml_range_to_capacity_derivation_uses_verified_constant() {
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
 
-    assert!((ev.battery_capacity_kwh - 65.0).abs() < 1e-9);
+    assert!((ev.battery_capacity_kwh_rated - 65.0).abs() < 1e-9);
 }
 
 #[test]
@@ -386,7 +404,7 @@ fn supports_hpxml_key_aliases() {
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
 
-    assert!((ev.battery_capacity_kwh - 64.0).abs() < 1e-9);
+    assert!((ev.battery_capacity_kwh_rated - 64.0).abs() < 1e-9);
     assert!((ev.rated_power_kw - 11.5).abs() < 1e-9);
     assert_eq!(ev.charging_level, ChargingLevel::L2);
 }
@@ -497,6 +515,10 @@ fn thermal_decay_occurs_when_disconnected() {
 
 #[test]
 fn cold_temperature_blocks_charging_without_heater() {
+    // Heater pinned off: the subject is the plating-cutoff charge block
+    // itself — the preconditioning path that pairs with it has its own
+    // coverage (battery_heater_warms_pack_while_cold_derate_blocks_charging
+    // and the heater tests below).
     let mut raw = base_raw();
     raw.insert(
         KEY_BATTERY_TEMP_C.to_string(),
@@ -504,6 +526,7 @@ fn cold_temperature_blocks_charging_without_heater() {
     );
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -515,8 +538,21 @@ fn cold_temperature_blocks_charging_without_heater() {
     assert_eq!(ev.telemetry().get("charge_derate"), Some(0.0));
 }
 
+/// The additional-load identity (pre-fix pin was the defective physics:
+/// heater draw was deducted from the charge leg's DC, slowing SOC gain
+/// while the charger billed it). With the heater as a pack-side DC load
+/// covered by the charger's raised import, the pack-side charge rate —
+/// and therefore the SOC gain — is identical to the no-heater case while
+/// the cap is slack, and the port draws the heater's AC-equivalent on top.
 #[test]
-fn heater_draw_slows_soc_gain() {
+fn heater_draw_bills_ac_equivalent_without_slowing_pack_charge_rate() {
+    // Cold band (−2..10 °C): charging and preconditioning run together;
+    // the supply cap stays slack (0.6 kW charge + 1.33 kW heater ≪ 7.2 kW
+    // rating), which is the identity's precondition — at a binding cap the
+    // clamp legitimately diverges and is covered separately.
+    let heater_w = 1200.0_f64;
+    let eta = 0.9_f64;
+
     let mut raw = base_raw();
     raw.insert(
         KEY_BATTERY_TEMP_C.to_string(),
@@ -527,7 +563,7 @@ fn heater_draw_slows_soc_gain() {
         crate::config::ConfigValue::Float(-2.0),
     );
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
-    raw.insert(KEY_HEATER_POWER_W.to_string(), 1200.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), heater_w.into());
     raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 0.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -538,6 +574,7 @@ fn heater_draw_slows_soc_gain() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let soc_delta_with_heater = ev.soc - soc_before;
+    let power_with_heater = ev.telemetry().get("active_power_kw").unwrap();
 
     let mut raw_no_heater = base_raw();
     raw_no_heater.insert(
@@ -549,6 +586,7 @@ fn heater_draw_slows_soc_gain() {
         crate::config::ConfigValue::Float(-2.0),
     );
     raw_no_heater.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw_no_heater.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
     let config_no_heater = ev_config(raw_no_heater);
     let mut ev_no_heater = Ev::new(config_no_heater.clone());
     ev_no_heater.init(&config_no_heater, &sample_env()).unwrap();
@@ -558,13 +596,29 @@ fn heater_draw_slows_soc_gain() {
         .step(&env, Duration::minutes(60), &mut ports)
         .unwrap();
     let soc_delta_no_heater = ev_no_heater.soc - soc_before_no_heater;
+    let power_no_heater = ev_no_heater.telemetry().get("active_power_kw").unwrap();
 
-    assert!(soc_delta_with_heater < soc_delta_no_heater);
+    // Same pack-side charge rate → same SOC gain.
+    assert!(
+        (soc_delta_with_heater - soc_delta_no_heater).abs() < 1e-9,
+        "SOC gain must equal the no-heater case while the cap is slack: \
+         {soc_delta_with_heater} vs {soc_delta_no_heater}"
+    );
+    // Port power is higher by exactly the heater's AC-equivalent.
+    let heater_ac_eq_kw = (heater_w / 1000.0) / eta;
+    assert!(
+        (power_with_heater - power_no_heater - heater_ac_eq_kw).abs() < 1e-6,
+        "port draw must exceed the no-heater case by the heater's \
+         AC-equivalent ({heater_ac_eq_kw} kW): {power_with_heater} vs \
+         {power_no_heater}"
+    );
     assert!(ev.telemetry().get("heater_power_w").unwrap() > 0.0);
 }
 
 #[test]
 fn heater_only_grid_draw_when_fully_cold_derated() {
+    // UA pinned to 0 so the warming assertion is attributable to the heater
+    // alone (ambient coupling would otherwise confound it).
     let mut raw = base_raw();
     raw.insert(
         KEY_BATTERY_TEMP_C.to_string(),
@@ -577,41 +631,1737 @@ fn heater_only_grid_draw_when_fully_cold_derated() {
         KEY_HEATER_THRESHOLD_C.to_string(),
         crate::config::ConfigValue::Float(-4.0),
     );
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
     let soc_before = ev.soc;
+    let temp_before = ev.battery_temp_c;
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
+    // The heater is a pack-side DC load fed by the charger's raised import:
+    // the port bills the heater's AC-equivalent (heater_dc / η), and the
+    // pack nets exactly zero — the cells neither gain nor lose while the
+    // heater warms them. The pre-fix identity (port = heater nameplate)
+    // omitted the η conversion.
     let power_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let expected_heater_kw = 500.0 / 1000.0;
+    let expected_heater_ac_kw = 500.0 / 1000.0 / 0.9;
     assert!(
-        (power_kw - expected_heater_kw).abs() < 1e-9,
-        "grid draw should equal heater power only ({} kW), got {} kW",
-        expected_heater_kw,
-        power_kw
+        (power_kw - expected_heater_ac_kw).abs() < 1e-9,
+        "grid draw should equal the heater's AC-equivalent ({expected_heater_ac_kw} kW), \
+         got {power_kw} kW"
     );
     assert_eq!(
         ev.soc, soc_before,
-        "SOC must not change when charge_derate=0 (pre-heat only)"
+        "SOC must not change when charge_derate=0 (heater-only state: the \
+         charger's raised import covers the heater, netting the pack to zero)"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        500.0,
+        "heater telemetry reports the actual post-cap draw"
+    );
+    // The heater actually warms the pack (a gate that keys heater heat on
+    // charge power bills energy while warming nothing exactly when warming
+    // is needed — below the charge cutoff).
+    // The tiny extra beyond Q_heater·dt/C — there is none: the pack nets
+    // zero in this state, so no current crosses the cell internal
+    // resistance. The heater is a parallel DC load on the charger bus
+    // (not a series element through the cells); its heat reaches the
+    // pack through the thermal equation, and a nonzero ohmic loss here
+    // would count the heater's current as cell heating while SOC nets it
+    // out of the pack — the same heat-misattribution class D2 closed
+    // (one effect, attributed once).
+    let delta_k = ev.battery_temp_c - temp_before;
+    let mass = ev.thermal_mass_j_per_k;
+    let ohmic_w = ev.telemetry().get("ohmic_loss_w").unwrap();
+    assert_eq!(
+        ohmic_w, 0.0,
+        "the heater-only state nets the cells to zero current — its I2R must be exactly zero, got {ohmic_w} W"
+    );
+    let expected_delta_k = 500.0 * 900.0 / mass;
+    assert!(
+        (delta_k - expected_delta_k).abs() < 1e-9,
+        "heater-only step must warm the pack by Q_heater·dt/C = \
+         {expected_delta_k} K, got {delta_k} K"
+    );
+}
+
+/// The charging arm's I²R basis is the cells' net DC power alone: while
+/// connected the heater is a parallel DC load on the charger bus, so its
+/// current never crosses the cell internal resistance and must not enter
+/// the shared ohmic solve — its heat reaches the pack through the thermal
+/// equation instead. The heater-only face of this rule is pinned above
+/// (ohmic exactly zero); this pins the charging face: with the supply cap
+/// slack, a simultaneous charge + heater step reports the same cell ohmic
+/// loss as the same step with the heater off. Feeding the heater-inclusive
+/// bus draw to the solve (one current, attributed twice — the D2 shape)
+/// would add the heater's own I²R (~0.17 W at this 1.2 kW draw) on top of
+/// the charge leg's ~0.03 W.
+#[test]
+fn heater_current_never_enters_cell_ohmic_loss_while_charging() {
+    // Premise mirrors `heater_draw_bills_ac_equivalent_without_slowing_pack_charge_rate`:
+    // cold derate band (−1 °C, ramp −2..10 °C → charge leg ≈ 0.6 kW), heater
+    // 1.2 kW below its 0 °C threshold, supply cap slack (0.6 + 1.33 ≪ 7.2 kW
+    // rating) — the identity's precondition, so the charge leg is identical
+    // with and without the heater and any ohmic difference is attribution,
+    // not allocation.
+    let ohmic_after_one_charge_step = |heater_w: f64| -> f64 {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_BATTERY_TEMP_C.to_string(),
+            crate::config::ConfigValue::Float(-1.0),
+        );
+        raw.insert(
+            KEY_MIN_CHARGE_TEMP_C.to_string(),
+            crate::config::ConfigValue::Float(-2.0),
+        );
+        raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+        raw.insert(KEY_HEATER_POWER_W.to_string(), heater_w.into());
+        raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).unwrap();
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+        ev.telemetry().get("ohmic_loss_w").unwrap()
+    };
+
+    let with_heater = ohmic_after_one_charge_step(1200.0);
+    let without_heater = ohmic_after_one_charge_step(0.0);
+    assert!(
+        without_heater > 0.0,
+        "the charge leg's own I2R must be nonzero (premise guard: the charge leg flows)"
+    );
+    assert!(
+        (with_heater - without_heater).abs() < 1e-6,
+        "the heater's current must not enter the cell ohmic loss while connected: \
+         charge + heater reported {with_heater} W vs charge-only {without_heater} W — \
+         the heater-inclusive bus draw is being fed to the I2R solve again \
+         (one current, attributed twice)"
+    );
+}
+
+// ── Pack thermal / preconditioning mechanism coverage ──────────────
+
+/// A configured charging-curve LUT's temperature axis IS the
+/// temperature-dependent charge capability — a measured curve already
+/// contains the manufacturer's low-temperature derate — so the linear BMS
+/// ramp is not multiplied on top of it. The `min_charge_temp_c` safety
+/// cutoff survives unconditionally: a curve cannot grant permission to
+/// charge below the plating boundary.
+#[test]
+fn lut_temperature_axis_is_the_capability_not_the_linear_ramp() {
+    // LUT: fraction 0.6 at 0 °C rising to 1.0 at 25 °C, flat in SOC.
+    let lut = crate::ndinterp::RegularGridInterpolator::new(
+        vec![
+            vec![0.0, 1.0],  // soc
+            vec![0.0, 25.0], // temperature
+            vec![1.0],       // c-rate
+            vec![1.0],       // soh
+        ],
+        vec![0.6f32, 1.0, 0.6, 1.0],
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
+    )
+    .unwrap();
+
+    // Pack at 5 °C (linear ramp would derate to 0.5); LUT axis at 5 °C
+    // interpolates to 0.6 + 0.4·(5/25) = 0.68.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 5.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.set_charging_curve_lut(Some(lut)).unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let expected = 7.2 * 0.68;
+    assert!(
+        (power_kw - expected).abs() < 1e-6,
+        "LUT temperature axis must be the capability: expected {expected} kW \
+         (rated x LUT fraction), got {power_kw} — the linear ramp is being \
+         multiplied on top (one physical effect applied twice)"
+    );
+
+    // Safety floor: below the plating cutoff the LUT cannot grant
+    // permission to charge.
+    let mut raw_cold = base_raw();
+    raw_cold.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw_cold.insert(KEY_BATTERY_TEMP_C.to_string(), (-1.0f64).into());
+    raw_cold.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw_cold.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw_cold.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    raw_cold.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config_cold = ev_config(raw_cold);
+    let mut ev_cold = Ev::new(config_cold.clone());
+    ev_cold.init(&config_cold, &sample_env()).unwrap();
+    let lut2 = crate::ndinterp::RegularGridInterpolator::new(
+        vec![vec![0.0, 1.0], vec![0.0, 25.0], vec![1.0], vec![1.0]],
+        vec![0.6f32, 1.0, 0.6, 1.0],
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
+    )
+    .unwrap();
+    ev_cold.set_charging_curve_lut(Some(lut2)).unwrap();
+    let mut ports = PortSlots::default();
+    ev_cold
+        .step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev_cold.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "the min_charge_temp_c cutoff must zero charge power below the \
+         plating boundary even when a LUT is present"
+    );
+}
+
+/// Cap binding in the derate band (the normal control path for cold
+/// charging with a pack-duty heater): charging draws first within the
+/// supply bound, the heater takes the remainder, the port never exceeds
+/// the EVSE rating, and the hand-off completes once the pack passes the
+/// heater threshold.
+#[test]
+fn cold_charge_session_allocates_supply_bound_with_charge_priority() {
+    // 8 °C pack: derate 0.8 → charge demand 5.76 kW; heater 5 kW → 5.56 kW
+    // AC-equivalent; total demand 11.3 kW > the 7.2 kW rating → binding.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 8.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    // Default heater (5 kW) and threshold (5 °C): 8 °C ≤ … no — 8 > 5, the
+    // heater is off. Use a threshold above the pack temperature so the
+    // heater participates: threshold 10 °C.
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 10.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_w = ev.telemetry().get("heater_power_w").unwrap();
+    let heater_ac_kw = heater_w / 1000.0 / 0.9;
+    let charge_leg_kw = port_kw - heater_ac_kw;
+
+    // The invariant: the heater never takes budget charging could use —
+    // the charge leg holds its full derated demand, the heater is
+    // throttled to the remainder, and the port respects the rating.
+    assert!(
+        (charge_leg_kw - 5.76).abs() < 1e-6,
+        "charging draws first within the bound: expected the full derated \
+         demand 5.76 kW, got {charge_leg_kw}"
+    );
+    assert!(
+        heater_w > 0.0,
+        "the heater takes the remainder of the bound"
+    );
+    assert!(
+        port_kw <= 7.2 + 1e-9,
+        "port draw must never exceed the EVSE rating, got {port_kw}"
+    );
+
+    // Hand-off: step until the pack passes the threshold — the heater
+    // stops and the full bound returns to charging.
+    for _ in 0..40 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        if ev.battery_temp_c > 10.0 {
+            break;
+        }
+    }
+    assert!(
+        ev.battery_temp_c > 10.0,
+        "the heater must warm the pack through the threshold (hand-off)"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "above the threshold the heater is off — the whole bound returns \
+         to charging"
+    );
+}
+
+/// The DR fraction is a multiplier on the allocated AC total, never a
+/// ceiling term in the bound: with the pack-demand already below the
+/// rating (the derated cold regime), `High` halves the *allocated draw*
+/// and `GridEmergency` zeroes the port. The withdrawn ceiling form
+/// `min(rated, limit, dr·rated)` would have no effect on a demand already
+/// below half the rating.
+#[test]
+fn dr_scales_the_allocated_total_as_a_multiplier() {
+    let make_ev = || {
+        let mut raw = base_raw();
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+        raw.insert(KEY_BATTERY_TEMP_C.to_string(), 8.0.into());
+        raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+        raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+        raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+        raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).unwrap();
+        ev
+    };
+
+    // Baseline: derated demand 5.76 kW (no heater, cap slack).
+    let mut ev = make_ev();
+    let env = sample_env();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let baseline = ev.telemetry().get("active_power_kw").unwrap();
+    assert!((baseline - 5.76).abs() < 1e-6);
+
+    // High (0.5): the allocated total is halved — 2.88 kW, not the ceiling
+    // form's min(7.2, 3.6) = 3.6 (which would leave a below-half-rating
+    // demand completely uncurtailed).
+    let mut ev = make_ev();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::High,
+        duration_s: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5.76 * 0.5).abs() < 1e-6);
+
+    // Critical (0.25): quartered.
+    let mut ev = make_ev();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::Critical,
+        duration_s: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5.76 * 0.25).abs() < 1e-6);
+
+    // GridEmergency (0.0): a commanded zero zeroes the port.
+    let mut ev = make_ev();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
+}
+
+/// The taper bound lands the pack exactly on its commanded target with
+/// the heater running — the heater's diversion is covered by the charger's
+/// raised import, so no overshoot and no systematic shortfall.
+#[test]
+fn charging_with_heater_lands_exactly_on_target() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut reached = false;
+    for _ in 0..200 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        if ev.soc >= 0.9 - 1e-9 {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "the session must reach the 0.9 target");
+    assert!(
+        ev.soc <= 0.9 + 1e-9,
+        "no overshoot past the commanded target with the heater running: \
+         got {}",
+        ev.soc
+    );
+}
+
+/// A commanded `power_setpoint_kw` is a total-draw bound: with the heater
+/// running, its AC-equivalent is carved out within the command and the
+/// charge leg receives the remainder — the port never draws more than the
+/// dispatch commands, and once the pack is warm the full command returns
+/// to charging.
+#[test]
+fn commanded_power_setpoint_bounds_total_draw_with_heater_running() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: 3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut charge_leg_seen = 0.0_f64;
+    for _ in 0..40 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+        assert!(
+            port_kw <= 3.0 + 1e-9,
+            "total draw must never exceed the commanded setpoint, got {port_kw}"
+        );
+        let heater_ac_kw = ev.telemetry().get("heater_power_w").unwrap() / 900.0;
+        charge_leg_seen = charge_leg_seen.max(port_kw - heater_ac_kw);
+        if ev.battery_temp_c > 5.0 {
+            break;
+        }
+    }
+    // Once warm the heater is off and the whole command charges.
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(port_kw <= 3.0 + 1e-9);
+    assert!(
+        port_kw > 2.0,
+        "with the pack warm the commanded setpoint returns to charging, \
+         got {port_kw}"
+    );
+    assert!(charge_leg_seen >= 0.0);
+}
+
+/// The deadline-raise exception to the setpoint bound, with the heater
+/// running — the combination the allocator's `!deadline_raise_active`
+/// filter exists for, and the one surface neither sibling test touches:
+/// the setpoint-bound-with-heater test has no deadline, and the
+/// deadline-raise test has no heater. While a `DeadlineGuarantee` raise
+/// is active the commanded setpoint is a soft floor (the total may
+/// legitimately exceed it — clamping it would defeat the deadline, the
+/// exact contract conflict the resolution recorded), and the
+/// supply-bound priority rule governs instead: within the EVSE rating
+/// charging draws first and the heater takes the remainder — the heater
+/// never takes budget charging could use, deadline or not.
+#[test]
+fn urgent_deadline_with_heater_exceeds_soft_setpoint_within_the_supply_bound() {
+    // Cold derate band: 2 °C → derate 0.2 → charge demand 7.2 × 0.2 =
+    // 1.44 kW AC; heater 1.5 kW → 1.667 kW AC-equivalent (its carve-out
+    // alone exceeds the 1.0 kW setpoint, so the charge leg under the
+    // setpoint would be zero — the deadline raise is what restores it).
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 2.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 1.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_ac_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0 / 0.9;
+
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        1500.0,
+        "preconditioning continues during a deadline raise — the heater \
+         must not be starved by the raise either"
+    );
+    assert!(
+        port_kw > 1.0 + 1e-9,
+        "the deadline raise legitimately exceeds the soft 1.0 kW setpoint \
+         (clamping it would defeat the DeadlineGuarantee), got {port_kw} kW"
+    );
+    assert!(
+        port_kw <= 7.2 + 1e-9,
+        "the raise is bounded by the supply-bound rule (the EVSE rating), \
+         not free — got {port_kw} kW"
+    );
+    // The priority invariant survives the raise: charging draws first —
+    // the charge leg is the full derated demand, the heater takes the
+    // remainder on top (a heater monopolizing the budget during a
+    // deadline fails here).
+    let charge_leg_kw = port_kw - heater_ac_kw;
+    assert!(
+        (charge_leg_kw - 7.2 * 0.2).abs() < 1e-6,
+        "charging must draw first at the derated demand (1.44 kW AC), got \
+         charge leg {charge_leg_kw} kW"
+    );
+    assert!(
+        (port_kw - (7.2 * 0.2 + 1500.0 / 1000.0 / 0.9)).abs() < 1e-6,
+        "the port is the composed total charge + heater AC-equivalent \
+         (≈3.107 kW), got {port_kw} kW"
+    );
+}
+
+/// A cold V2L step conserves energy across the vehicle boundary: the
+/// pack's debit equals the export converted at `charging_efficiency` plus
+/// the heater's unconverted DC draw, the port carries the export alone,
+/// and at the reserve floor both the export and the heater stop.
+#[test]
+fn cold_v2l_export_conserves_pack_energy_and_stops_at_floor() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let soc_before = ev.soc;
+    let capacity = ev.battery_capacity_kwh;
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0;
+    assert!(
+        (port_kw + 3.0).abs() < 1e-9,
+        "the port carries the export alone, got {port_kw}"
+    );
+    assert!(
+        heater_kw > 0.0,
+        "a cold pack discharging still preconditions"
+    );
+    // Conservation: debit = export/eta + heater (pack-side DC).
+    let debit_kw = 3.0 / 0.9 + heater_kw;
+    let expected_delta = debit_kw * 0.25 / capacity;
+    assert!(
+        (soc_before - ev.soc - expected_delta).abs() < 1e-9,
+        "pack debit must equal export/eta + heater draw: expected SOC delta \
+         {expected_delta}, got {}",
+        soc_before - ev.soc
+    );
+
+    // Floor invariant: run to the reserve — the pack never lands below it,
+    // and at the floor both the export and the heater stop.
+    let mut hit_floor = false;
+    for _ in 0..400 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        assert!(
+            ev.soc >= 0.2 - 1e-9,
+            "the pack must never land below the effective floor, got {}",
+            ev.soc
+        );
+        if ev.soc <= 0.2 + 1e-9 {
+            hit_floor = true;
+            break;
+        }
+    }
+    assert!(
+        hit_floor,
+        "the discharge must reach the floor within the run"
+    );
+    // The landing step legitimately tapers the export to land exactly ON
+    // the floor; the step after it is the assertion that both stop.
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "at the floor the export stops"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "at the floor the heater stops with the export — preconditioning \
+         must not drain the pack below the departure floor"
+    );
+    assert!(ev.soc >= 0.2 - 1e-9);
+}
+
+/// The discharge arm is the one state where the heater's current crosses
+/// the cell terminals — the pack is the source for both the export
+/// conversion and the heater's DC draw — so the shared ohmic solve's
+/// basis there is the pack-side total (export/η + heater). The charging
+/// arm excludes the heater (pinned in
+/// `heater_current_never_enters_cell_ohmic_loss_while_charging` and the
+/// heater-only gate above); this pins the deliberate asymmetry from the
+/// other side, so a future "symmetry cleanup" that excludes the heater on
+/// both arms loses the heater's I²R exactly where the pack genuinely
+/// carries the current. The oracle is the same shared solve production
+/// uses, evaluated on the pack-side total draw at the post-debit SOC's
+/// OCV.
+#[test]
+fn cold_discharge_ohmic_loss_covers_export_and_heater_terminal_currents() {
+    // Premise mirrors `cold_v2l_export_conserves_pack_energy_and_stops_at_floor`:
+    // a 2 °C pack (threshold 5 °C) exporting 3 kW with the heater running,
+    // UA 0 so the thermal channel carries no confound.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    let heater_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0;
+    assert!(
+        heater_kw > 0.0,
+        "premise guard: a cold pack discharging still preconditions"
+    );
+    // The port carries the export alone — the export magnitude observable.
+    let export_kw = -ev.telemetry().get("active_power_kw").unwrap();
+
+    // Oracle: the shared solve on the pack-side total draw (export
+    // converted at η plus the heater's DC draw — both terminal currents in
+    // this state) at the post-debit SOC's OCV, exactly what production
+    // feeds it on the discharge arm.
+    let eta = ev.charging_efficiency.max(0.01);
+    let pack_dc_w = hares_physics::units::power_kw_to_w(export_kw / eta + heater_kw);
+    let ocv = ev.ocv_table.voltage_at_soc(ev.soc);
+    let expected_with_heater = ev.pack_electrical().solve(ocv, -pack_dc_w).ohmic_loss_w;
+    let published = ev.telemetry().get("ohmic_loss_w").unwrap();
+    assert!(
+        (published - expected_with_heater).abs() < 1e-6,
+        "the discharge arm's ohmic loss must be I2R of the pack-side total draw \
+         (export/η + heater): expected {expected_with_heater} W, got {published} W"
+    );
+
+    // Non-vacuous discrimination: excluding the heater's current (the
+    // regression this gate exists to catch) drops the ohmic loss by the
+    // heater's full I²R — the 5 kW heater's ~14 A is a large share of the
+    // terminal current at a 3 kW export.
+    let export_dc_w = hares_physics::units::power_kw_to_w(export_kw / eta);
+    let expected_export_only = ev.pack_electrical().solve(ocv, -export_dc_w).ohmic_loss_w;
+    assert!(
+        expected_with_heater > expected_export_only + 1.0,
+        "the heater's terminal current must contribute measurably on the \
+         discharge arm: {expected_with_heater} W with it vs {expected_export_only} W \
+         without — a discrimination gap too small to catch the regression"
+    );
+}
+
+/// A preconditioning pack (charge leg zero, heater drawing, charger import
+/// raised to the heater's AC-equivalent) reports `Heating`, not
+/// `Charging`, and the mode/flow guard accepts the state.
+#[test]
+fn preconditioning_pack_reports_heating_mode() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), (-5.0f64).into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = -5.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Heating)
+    );
+    // The production guard (the same validation the dwelling runs on every
+    // CoreOutput) accepts the state: an active mode with nonzero electric
+    // flow, no thermal sign to check (the EV emits no thermal_output_w).
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
+        .expect("the preconditioning state must satisfy the core contract");
+}
+
+/// An EV commanded to vars at zero real power (plugged in, at target,
+/// heater off) is genuinely active — the inverter is exchanging reactive
+/// power — and reports `On`, with the guard's active-mode flow rule
+/// satisfied through the reactive term.
+#[test]
+fn commanded_vars_at_zero_real_power_report_on_mode() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    // At target (default ready_soc = soc_max = 1.0 > 0.9 — pin soc_max so
+    // 0.9 is the target and no charge demand exists).
+    ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 2.0 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::On)
+    );
+    assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
+    assert_eq!(ev.telemetry().get("reactive_power_kvar").unwrap(), 2.0);
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "standby var support must satisfy the core contract (Rule 1 \
+                 counts reactive flow)",
+    );
+}
+
+/// The away arm's CoreOutput is the dwelling-side truth: zero electric
+/// flows (an off-site load must not enter the dwelling's electrical
+/// summary, which feeds BMS dispatch) with a mode consistent with them —
+/// `Off` — whether the vehicle is charging away or preconditioning. The
+/// mode/flow guard validates every CoreOutput; an away `Charging`/`Heating`
+/// mode with zero flows fails the simulation (caught by the Python
+/// integration suite during the fix; pinned here at the equipment level).
+/// Away activity stays observable through `AWAY_CHARGE_POWER_KW` and
+/// `HEATER_POWER_W`.
+#[test]
+fn away_activity_reports_off_mode_consistent_with_zero_dwelling_flows() {
+    // Cold pack: preconditioning while away-charging — the heater runs.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), (-5.0f64).into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 11.5 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Off)
     );
     assert!(
         ev.telemetry().get("heater_power_w").unwrap() > 0.0,
-        "heater should be active"
+        "the away heater runs (supply = the commanded away charger)"
     );
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "no residential port contribution while away"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "away activity with zero dwelling flows must satisfy the \
+                 core contract",
+    );
+
+    // Warm pack: away charging — same dwelling-side contract.
+    let mut raw_warm = base_raw();
+    raw_warm.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    raw_warm.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    let config_warm = ev_config(raw_warm);
+    let mut ev_warm = Ev::new(config_warm.clone());
+    ev_warm.init(&config_warm, &sample_env()).unwrap();
+    ev_warm
+        .apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::Disconnected,
+        })
+        .unwrap();
+    ev_warm
+        .apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::AwayPluggedIn,
+        })
+        .unwrap();
+    ev_warm
+        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 11.5 })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    ev_warm
+        .step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev_warm.core_output().state.operating_mode,
+        Some(OperatingMode::Off)
+    );
+    assert!(ev_warm.telemetry().get("away_charge_power_kw").unwrap() > 0.0);
+    hares_types::equipment::validate_core_contract(ev_warm.descriptor(), ev_warm.core_output())
+        .expect(
+            "away charging with zero dwelling flows must satisfy the core \
+             contract",
+        );
+}
+
+/// Preconditioning needs a supply: the heater gate keys on pack
+/// temperature *whenever the vehicle is connected with an energized
+/// supply* — so with the contact open (`Disconnected`) or plugged in away
+/// with no charger commanded, a cold pack must not draw or warm anything.
+/// The D3 fix removed the gate's charge-demand keying; these are the
+/// no-supply arms of the same gate, where the correct behavior is still
+/// "off" — the inverse regression (a heater that runs from nothing)
+/// would bill phantom energy at the port or silently drain the pack to
+/// warm itself.
+#[test]
+fn heater_does_not_run_without_a_supply_disconnected_or_away_idle() {
+    // UA pinned to 0 so "warmed nothing" is exact: with no drift term the
+    // pack temperature can only move if heat was actually applied.
+    let make_cold_ev = || {
+        let mut raw = base_raw();
+        raw.insert(KEY_BATTERY_TEMP_C.to_string(), (-5.0f64).into());
+        raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+        raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+        raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).unwrap();
+        ev
+    };
+
+    // Disconnected: contact open, drift only.
+    let mut ev = make_cold_ev();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    let soc_before = ev.soc;
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "a disconnected pack has no supply — the heater must stay off"
+    );
+    assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
+    assert_eq!(ev.soc, soc_before, "nothing may debit a disconnected pack");
+    assert_eq!(
+        ev.battery_temp_c, -5.0,
+        "with UA = 0 the temperature can only move if heat was applied — \
+         a disconnected pack must warm nothing"
+    );
+
+    // Away and idle: plugged in off-site but no away charger commanded —
+    // the only modeled away supply is the commanded away charger.
+    let mut ev = make_cold_ev();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 0.0 })
+        .unwrap();
+    let soc_before = ev.soc;
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "an away pack with no commanded charger has no supply — the heater \
+         must stay off"
+    );
+    assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
+    assert_eq!(ev.soc, soc_before);
+    assert_eq!(
+        ev.battery_temp_c, -5.0,
+        "no supply means no warming: the pack must hold its temperature"
+    );
+}
+
+/// A de-energized home bus removes the EVSE supply: during a utility
+/// outage a cold plugged-in pack must not draw the heater (the EVSE is
+/// dead — nothing to convert, nothing to bill), while the same pack
+/// *discharging* (V2L — the vehicle itself is the supply; the cold-
+/// weather outage with the vehicle backing up the home is the flagship
+/// collision the floor invariant exists for) keeps preconditioning.
+/// Pins both arms of the gate's dead-bus supply resolution.
+#[test]
+fn grid_outage_suspends_preconditioning_except_while_the_vehicle_discharges() {
+    // Idle-at-home segment: cold pack, heater configured, charge
+    // commanded, dead bus, no discharge.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), (-5.0f64).into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut env_outage = sample_env();
+    env_outage.grid.voltage_pu = 0.0;
+    let mut ports = PortSlots::default();
+    ev.step(&env_outage, Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ports.electrical.load_power_w, 0.0,
+        "a dead EVSE bills nothing"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "the heater must not draw during an outage — the EVSE supply is \
+         dead, so thermal management is suspended (recovering after the \
+         event is bounded and modeled)"
+    );
+    assert_eq!(
+        ev.battery_temp_c, -5.0,
+        "with UA = 0 the temperature can only move if heat was applied — \
+         an outage pack must warm nothing"
+    );
+
+    // V2L segment: same dead bus, but the vehicle is discharging — it is
+    // its own supply, so preconditioning continues.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env_outage, Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert!(
+        ev.telemetry().get("active_power_kw").unwrap() < 0.0,
+        "V2L discharge is not gated by the dead bus (the EV is the source)"
+    );
+    assert!(
+        ev.telemetry().get("heater_power_w").unwrap() > 0.0,
+        "a discharging vehicle is its own supply — a cold pack keeps \
+         preconditioning through the outage (the flagship cold-weather \
+         outage case), and the floor invariant bounds the draw"
+    );
+}
+
+/// The heater gate is independent of charge demand: a pack already at
+/// its target (zero charge demand — nothing to charge, nothing blocked
+/// by the derate) still preconditions while cold. The pre-fix gate keyed
+/// heater activity on charge demand (`would_charge_underated`), which is
+/// dead exactly when the vehicle is satisfied-and-cold: this is that
+/// face of the D3 defect, distinct from the derate-blocked face the
+/// reproduction pins.
+#[test]
+fn heater_preconditions_an_idle_pack_with_no_charge_demand() {
+    // SOC at the target (soc_max default 1.0): charge demand is zero.
+    // Pack at 3 °C: above the plating cutoff, below the 5 °C heater
+    // threshold. UA = 0 isolates the heater as the only thermal term.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 3.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+    let soc_before = ev.soc;
+
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        1500.0,
+        "a cold pack preconditions even with zero charge demand — the \
+         heater gate keys on pack temperature, not on charge demand"
+    );
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_ac_eq_kw = 1500.0 / 1000.0 / 0.9;
+    assert!(
+        (port_kw - heater_ac_eq_kw).abs() < 1e-9,
+        "the idle heater-only state bills the heater's AC-equivalent \
+         ({heater_ac_eq_kw} kW) at the port, got {port_kw} kW"
+    );
+    assert_eq!(
+        ev.soc, soc_before,
+        "the charger's raised import covers the heater exactly — the pack \
+         nets zero and SOC must not move"
+    );
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Heating),
+        "the idle heater-only state (charge leg zero, heater drawing) \
+         reports Heating, not Charging/Off"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
+        .expect("idle preconditioning must satisfy the core contract");
+}
+
+/// The DR fraction is a multiplier on the *allocated AC total* — the
+/// charge leg plus the heater's AC-equivalent — and a commanded zero
+/// (GridEmergency) suspends thermal management entirely: port and heater
+/// both go to zero. The heater-composed total is the allocation the cold
+/// charging session's normal control path actually runs; the withdrawn
+/// ceiling form (`min(rating, limit, dr·rated)`) would have left a
+/// below-half-rating demand completely uncurtailed in exactly this
+/// regime, and the composition is pinned here against reintroduction.
+#[test]
+fn dr_scales_the_charge_plus_heater_total_and_grid_emergency_suspends_preconditioning() {
+    // Pack at 4 °C → derate 0.4 → charge leg 7.2 × 0.4 = 2.88 kW AC;
+    // heater 1.5 kW → 1.667 kW AC-equivalent; total 4.547 kW, cap slack.
+    let make_ev = || {
+        let mut raw = base_raw();
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+        raw.insert(KEY_BATTERY_TEMP_C.to_string(), 4.0.into());
+        raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+        raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+        raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+        raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+        raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).unwrap();
+        ev
+    };
+    let expected_total = 7.2 * 0.4 + 1500.0 / 1000.0 / 0.9;
+
+    // Baseline: the composed total, undistorted.
+    let mut ev = make_ev();
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    let baseline = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (baseline - expected_total).abs() < 1e-6,
+        "baseline must be the charge+heater composed total {expected_total} \
+         kW, got {baseline} kW"
+    );
+
+    // High (0.5): the *allocated total* is halved — both legs scale.
+    let mut ev = make_ev();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::High,
+        duration_s: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    let high = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (high - expected_total * 0.5).abs() < 1e-6,
+        "High DR must halve the charge+heater total to \
+         {} kW, got {high} kW",
+        expected_total * 0.5
+    );
+    assert!(
+        ev.telemetry().get("heater_power_w").unwrap() > 0.0,
+        "routine DR throttles the heater, it does not starve it — the \
+         steady-state hold is comfortably inside High's allocation"
+    );
+
+    // GridEmergency (a commanded zero): the port zeroes AND the heater
+    // suspends — thermal management is suspended entirely until the
+    // event clears, which is commanded behavior, not a defect.
+    let mut ev = make_ev();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "a commanded zero zeroes the port"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "a commanded zero suspends preconditioning with it — the DR \
+         multiplier applies to the allocated total, heater included"
+    );
+}
+
+/// A commanded zero (`GridEmergency`) during a commanded V2L/V2G discharge
+/// zeroes the exported AC power — the port — while the discharge dispatch
+/// and the pack-side heater stay active by design (the heater's
+/// discharge-side draw is bounded by the floor invariant, not the DR
+/// fraction). The pack then nets negative on the heater's DC draw alone,
+/// and `classify_mode` — keying on the pack-side net rate — reports
+/// `Discharging` with every published flow at zero: the exported AC power
+/// is `-0.0`, no reactive is served (unity power factor on a zero inverter
+/// leg), and the EV emits no thermal or fuel. The mode-flow guard's Rule 1
+/// (an active mode requires a nonzero flow) rejects that (mode, flows)
+/// pair, and the dwelling's post-step `validate_core_contract` fails the
+/// simulation — the cold-weather V2L backup event, the plan's flagship
+/// discharge case, is exactly where a grid emergency and a cold pack
+/// collide.
+#[test]
+fn grid_emergency_discharge_with_running_heater_publishes_a_guard_valid_output() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    // The V2L dispatch: a negative setpoint with V2L enabled.
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    // The commanded zero: the DR fraction zeroes the export while the
+    // heater's pack-side draw is deliberately left DR-unbounded.
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    // The corner's observable shape: the heater draws from the pack while
+    // the port exports nothing.
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "the commanded zero must zero the port export"
+    );
+    assert!(
+        ev.telemetry().get("heater_power_w").unwrap() > 0.0,
+        "the discharge-side heater is bounded by the floor invariant, not \
+         the DR fraction — it keeps preconditioning through the event"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "a GridEmergency V2L step with the pack heater running must publish \
+             a (mode, flows) pair the core contract accepts",
+    );
+}
+
+/// The same GridEmergency discharge corner through the V2G leg: both
+/// discharge legs share `compute_discharge` and the pack-side heater
+/// netting, so the class spans them — a fix keyed to the V2L leg alone
+/// would leave the grid-service leg failing the same guard.
+#[test]
+fn grid_emergency_v2g_discharge_with_running_heater_publishes_a_guard_valid_output() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.3.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -5.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "the commanded zero must zero the port export on the V2G leg too"
+    );
+    assert!(
+        ev.telemetry().get("heater_power_w").unwrap() > 0.0,
+        "the V2G leg's pack-side heater is bounded by the floor invariant, \
+         not the DR fraction"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "a GridEmergency V2G step with the pack heater running must publish \
+             a (mode, flows) pair the core contract accepts",
+    );
+}
+
+/// The GridEmergency discharge corner's *label* is the fix's semantic
+/// content, and the contract-validity gates above cannot pin it: `Off`
+/// with zero flows passes `validate_core_contract` exactly as `Standby`
+/// does, so a regression that relabels the pack-fed preconditioning pack
+/// (the export commanded to zero while the discharge-side heater draws
+/// from the pack) as `Off` would stay green above while losing the label
+/// the fix defines — energized and connected, exchanging nothing at the
+/// port, the same label the stationary Battery reports for a
+/// commanded-zero discharge and the guard's own `resolve_idle` maps
+/// active-with-zero-flow states to. This gate pins the mode **value** on
+/// the shared `classify_mode` choke point (one call site, both discharge
+/// legs through `compute_discharge` — the V2G leg's gate above proves
+/// the corner is reached on that leg too), and — in the restore family's
+/// round-trip pattern — the checkpointed label at restore: a restore
+/// that re-derived the mode from the zero port (`Off`) would silently
+/// lose the saved state's discharge dispatch, guard-valid, uncaught by
+/// the mid-discharge restore gate (whose premise exports nonzero).
+#[test]
+fn pack_fed_preconditioning_reports_and_restores_standby_mode() {
+    // Premise mirrors `grid_emergency_discharge_with_running_heater…`
+    // (the V2L leg): a cold pack discharging with the heater running,
+    // the export commanded to zero by a GridEmergency DR event.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 2.0;
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    // Non-vacuous preconditions: the corner is really the corner (zero
+    // port, running heater — the same shape the gates above assert).
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "precondition: the commanded zero zeroes the port export"
+    );
+    assert!(
+        ev.telemetry().get("heater_power_w").unwrap() > 0.0,
+        "precondition: the discharge-side heater keeps preconditioning \
+         through the event"
+    );
+    // The gate's own content: the step's label is `Standby` — not `Off`,
+    // which the contract would accept just as silently.
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Standby),
+        "a pack-fed preconditioning pack must report `Standby` — energized \
+         and connected, exchanging nothing at the port — not `Off`"
+    );
+
+    // The restore face: the checkpointed label survives the round-trip
+    // (the restore publishes the checkpointed `last_mode` verbatim, so
+    // the restored state matches the saved state — the family's contract).
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+    assert_eq!(
+        restored.core_output().state.operating_mode,
+        Some(OperatingMode::Standby),
+        "a checkpoint saved in the pack-fed preconditioning corner must \
+         restore the `Standby` label — a restore that re-derives the mode \
+         from the zero port loses the saved state's discharge dispatch"
+    );
+    hares_types::equipment::validate_core_contract(restored.descriptor(), restored.core_output())
+        .expect("the restored (mode, flows) pair must satisfy the core contract");
+}
+
+/// A charge leg below the mode classifier's `1e-9` kW charging threshold
+/// must still publish a (mode, flows) pair the core contract accepts.
+/// The taper limit is a continuum — `(soc_limit − soc) · capacity / dt /
+/// η` — so any SOC residue below the target produces a nonzero charge
+/// leg, and a residue small enough (float dust after a taper landing, or
+/// a hand-set SOC 1e-12 below target) puts the pack-side net below the
+/// classifier's charging threshold while the published electric flow is
+/// still nonzero: `classify_mode` reports `Off`, and the mode-flow
+/// guard's Rule 2 (Off forbids non-zero flows) rejects the pair — the
+/// dwelling's post-step `validate_core_contract` fails the simulation.
+/// Pre-fix the classifier keyed on the port power's sign (any positive
+/// power charged — active mode with a nonzero flow, guard-safe); the
+/// threshold introduced the window.
+#[test]
+fn sub_threshold_charge_leg_off_mode_still_publishes_a_nonzero_flow() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.899_999_999_999_f64.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    // Target 0.9 with the SOC 1e-12 below it: the taper limit is
+    // ~2.7e-10 kW, inside the classifier's sub-threshold window (0, 1e-9]
+    // kW — nonzero at the port, below the charging classification.
+    ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+        target_soc: 0.9,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    // The corner's observable shape: the charge leg really flowed — a
+    // nonzero, sub-threshold port draw.
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        port_kw > 0.0 && port_kw <= 1e-9,
+        "precondition: the charge leg must be nonzero and within the \
+         classifier's sub-threshold window (0, 1e-9] kW, got {port_kw}"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "a sub-threshold charge leg must publish a (mode, flows) pair the \
+             core contract accepts — Off with a nonzero flow fails Rule 2",
+    );
+}
+
+/// The natural-reachability face of the sub-threshold window: a real
+/// charging session's last step before the target is taper-limited
+/// (headroom below one step's demand-limited SOC gain), and the residue
+/// the landing leaves is float-dust — one to a few ULPs of the target
+/// SOC. The violation window is `residue ≲ 4.2e-12 SOC` (the charge
+/// leg's post-η net ≤ the classifier's 1e-9 kW threshold while the
+/// pre-η port flow stays nonzero), so a landing that rounds short by
+/// even one ULP of 0.9 (≈1.1e-16) lands inside it. This sweep drives
+/// landings from legal starting SOCs across the whole residue range —
+/// a single ULP below the target up to demand-limited overshoots —
+/// collecting (not failing fast on) any step whose published (mode,
+/// flows) pair the dwelling's contract rejects, then asserts none. The
+/// failure message is the measured boundary map; the 1e-12 residue is
+/// intentionally absent (the dedicated gate above owns it). A clean
+/// sweep would be the evidence that the corner needs an adversarial
+/// SOC rather than an ordinary charging session.
+#[test]
+fn taper_landings_across_a_soc_sweep_publish_contract_valid_outputs() {
+    let one_ulp_below_target = f64::from_bits(0.9_f64.to_bits() - 1);
+    let residues = [
+        0.9 - one_ulp_below_target,
+        1e-15,
+        1e-13,
+        4e-12,
+        1e-11,
+        1e-10,
+        1e-8,
+        1e-6,
+        1e-4,
+        1e-3,
+        1e-2,
+        0.027,
+    ];
+    let mut violating: Vec<f64> = Vec::new();
+    for residue in residues {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_SOC.to_string(),
+            (0.9 - residue).clamp(0.0, 1.0).into(),
+        );
+        raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+        raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).unwrap();
+        ev.apply_control_unchecked(&ControlSignal::SOCTarget {
+            target_soc: 0.9,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        for _ in 0..24 {
+            let mut ports = PortSlots::default();
+            ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+            if hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
+                .is_err()
+            {
+                violating.push(residue);
+                break;
+            }
+            if ev.soc >= 0.9 {
+                break;
+            }
+        }
+        assert!(
+            ev.soc >= 0.9,
+            "precondition: the charge from residue {residue} must reach \
+             the target within the step budget, got {}",
+            ev.soc
+        );
+    }
+    assert!(
+        violating.is_empty(),
+        "taper landings from these SOC residues below the charge target \
+         published (mode, flows) pairs the dwelling's core contract \
+         rejects (Off mode with a nonzero sub-threshold charge flow — \
+         the violation window measured against the classifier's 1e-9 kW \
+         threshold): {violating:?}"
+    );
+}
+
+/// The discharge-side mirror of
+/// `sub_threshold_charge_leg_off_mode_still_publishes_a_nonzero_flow`:
+/// the same exact-sign keying on the export leg — a V2L landing that
+/// rounds short of the reserve floor leaves the next step's export
+/// capped to the float-dust headroom (inside (−1e-9, 0) kW, nonzero at
+/// the port), and the pre-fix `< −1e-9` epsilon classified it `Off`
+/// while the published electric flow carried the value — the same
+/// Rule 2 violation (Off forbids nonzero flows) the charge-side gate
+/// pins from the other leg. One gate on the shared `classify_mode`
+/// choke point: the charge-side gate cannot catch an export-leg epsilon
+/// regression (its premise is a charge leg), so this is a distinct face
+/// of the same mechanism, not a repeat.
+#[test]
+fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
+    // The floor mirror of the charge gate's premise: the SOC sits 1e-12
+    // ABOVE the reserve floor, so the discharge budget caps the export
+    // to the float-dust headroom — ~2.2e-10 kW at this capacity, inside
+    // (−1e-9, 0) — nonzero at the port, below the old classification
+    // threshold.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.200_000_000_001_f64.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    // The corner's observable shape: the export really flowed — a
+    // nonzero, sub-threshold negative port flow.
+    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (-1e-9..0.0).contains(&port_kw),
+        "precondition: the export leg must be nonzero and within the \
+         classifier's sub-threshold window (−1e-9, 0] kW, got {port_kw}"
+    );
+    // The label: the tiny export is a grid-facing discharge — `Discharging`,
+    // never `Off` (which the guard would reject with the nonzero flow).
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Discharging),
+        "a sub-threshold export leg must report `Discharging` — not `Off`, \
+         which pairs with the nonzero published flow into a Rule 2 violation"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+        "a sub-threshold export leg must publish a (mode, flows) pair the \
+             core contract accepts — Off with a nonzero flow fails Rule 2",
+    );
+}
+
+/// A latched var setpoint must not be served by a de-energized EVSE: the
+/// dead-bus gate zeroes the reactive flow (`compute_reactive_kvar` is
+/// skipped when the bus is dead and the leg is not discharging), so an
+/// outage step while charging-idle publishes `Off` with all-zero flows —
+/// a vars leak here would publish the vars-only `On` mode on a dead bus
+/// (physically impossible: a dead EVSE cannot exchange vars), so the
+/// mode and the reactive flow are pinned together with the contract.
+#[test]
+fn dead_bus_suppresses_a_latched_var_setpoint_flows_all_zero() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    // Warm pack (ambient-resolved at the 10 °C test environment, above the
+    // 5 °C heater threshold): charging-idle, no heater, only the latched
+    // var command.
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+        .unwrap();
+    let mut env_outage = sample_env();
+    env_outage.grid.voltage_pu = 0.0;
+
+    let mut ports = PortSlots::default();
+    ev.step(&env_outage, Duration::minutes(15), &mut ports)
+        .unwrap();
+
+    assert_eq!(
+        ev.telemetry().get("reactive_power_kvar").unwrap(),
+        0.0,
+        "a de-energized EVSE must serve no vars — the dead-bus gate zeroes \
+         the latched setpoint"
+    );
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Off),
+        "with the reactive flow zeroed by the dead bus, the mode must be \
+         Off — not the vars-only `On` label a served setpoint would earn"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
+        .expect("the dead-bus step must publish a guard-valid pair");
+}
+
+/// The away arm zeroes the reactive flow: a latched var setpoint must not
+/// leak into the away state, whose mode is `Off` with zero dwelling flows
+/// — a leak would pair `Off` with a nonzero reactive flow (Rule 2) and
+/// kill every dwelling step while the vehicle is off-site.
+#[test]
+fn away_arm_zeroes_a_latched_var_setpoint_off_mode_flows_all_zero() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+        .unwrap();
+    // The away transition goes through Disconnected (the same path the
+    // away-charging tests take).
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    assert_eq!(
+        ev.telemetry().get("reactive_power_kvar").unwrap(),
+        0.0,
+        "the away arm must zero the latched var setpoint — an off-site \
+         vehicle contributes no reactive flow to the dwelling"
+    );
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Off),
+        "the away mode is `Off`, the dwelling-side truth — and it must \
+         pair with the zeroed flows or Rule 2 fails every dwelling step"
+    );
+    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
+        .expect("the away step must publish a guard-valid pair");
+}
+
+/// The out-of-domain whipsaw pathology stays gone: through ten days of
+/// physical-temperature charge/drive cycling the usable capacity stays
+/// within a physical band of rated and day-over-day changes stay bounded.
+/// Pre-fix, misattributed charger losses drove the pack to 165–281 °C and
+/// the Smith 2017 fit returned negative fade — capacity whipsawing
+/// 75 → 208 → 75 kWh day over day.
+#[test]
+fn usable_capacity_stays_physical_through_daily_cycling() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    // A step helper that advances the clock: the degradation model's
+    // capacity recomputation fires at day boundaries, so a test that never
+    // crosses midnight exercises a degenerate path (capacity never
+    // recomputed) and proves nothing.
+    let step = |ev: &mut Ev, env: &mut EnvironmentState| {
+        let mut ports = PortSlots::default();
+        ev.step(env, Duration::minutes(15), &mut ports).unwrap();
+        env.current_time += ChronoDuration::minutes(15);
+    };
+    ev.init(&config, &env).unwrap();
+
+    let rated = ev.battery_capacity_kwh_rated;
+    let mut prev_capacity = ev.battery_capacity_kwh;
+    for _day in 0..10 {
+        // Overnight at target (calendar aging at rest, physical temps).
+        for _ in 0..64 {
+            step(&mut ev, &mut env);
+        }
+        // Daily drive: 15 kWh delivered while disconnected (drive I²R
+        // through the pack electrical model).
+        ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::Disconnected,
+        })
+        .unwrap();
+        ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
+            .unwrap();
+        step(&mut ev, &mut env);
+        // Home, charge back to target.
+        ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::HomePluggedIn,
+        })
+        .unwrap();
+        for _ in 0..32 {
+            step(&mut ev, &mut env);
+            if ev.soc >= 0.9 - 1e-9 {
+                break;
+            }
+        }
+        let capacity = ev.battery_capacity_kwh;
+        assert!(
+            (0.5 * rated..=1.5 * rated).contains(&capacity),
+            "usable capacity must stay within a physical band of rated \
+             ({rated} kWh), got {capacity}"
+        );
+        assert!(
+            // The physical day-over-day bound: the reversible temperature
+            // derate spans ≈8% across the residential cold band (0.86 at
+            // 0 °C to ~1.0 at 25 °C) plus the break-in loss's first-day
+            // step (≤2.8%) — anything beyond ~11% is the whipsaw class.
+            (capacity - prev_capacity).abs() <= 0.11 * rated,
+            "day-over-day capacity change must stay bounded (<= 11% of \
+             rated: the derate span plus the break-in transient), changed \
+             by {}",
+            capacity - prev_capacity
+        );
+        prev_capacity = capacity;
+    }
 }
 
 #[test]
 fn charge_derate_applied_before_taper_limit() {
+    // Heater pinned off: the subject is the derate-before-taper ordering,
+    // and the heater's AC-equivalent on the port would confound the power
+    // comparison.
     let mut raw = base_raw();
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 5.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
     let config_cold = ev_config(raw);
 
     let mut raw_warm = base_raw();
@@ -620,6 +2370,7 @@ fn charge_derate_applied_before_taper_limit() {
     raw_warm.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw_warm.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
     raw_warm.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw_warm.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
     let config_warm = ev_config(raw_warm);
 
     let mut ev_cold = Ev::new(config_cold.clone());
@@ -1443,11 +3194,70 @@ fn ev_drive_reduces_soc() {
     ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 10.0 })
         .unwrap();
 
-    let expected_drop = 10.0 / 60.0;
+    // The drive debits against the usable capacity — rated scaled by the
+    // reversible temperature derate at the pack's temperature (the
+    // unpinned config initializes at the 10 °C ambient).
+    let expected_drop = 10.0 / (60.0 * capacity_derate_at(10.0));
     assert!(
         (ev.soc - (soc_before - expected_drop)).abs() < 1e-9,
         "SOC should drop by ~{expected_drop}, got {}",
         soc_before - ev.soc
+    );
+}
+
+/// Drive energy heats the pack at its equivalent discharge current
+/// through the same shared I²R solve — the drive-side instance of the
+/// loss-attribution rule. The `EvDrive` kWh is consumed by the next step
+/// as an equivalent power through the pack electrical model. UA pinned to
+/// 0 with the pack at ambient so the entire temperature rise is the
+/// drive's I²R: a regression that drops the pending-drive consumption (or
+/// zeroes its heat) leaves the pack exactly at ambient and fails here.
+/// Material for the cold-charge contract: at the post-alignment day-scale
+/// time constant, most of a commute's heat is still in the pack at the
+/// charge-window start — single-digit kelvin on the 0–10 °C derate ramp.
+#[test]
+fn drive_energy_heats_the_pack_at_its_equivalent_discharge_current() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env(); // ambient 10 °C — equal to the pinned pack temperature
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    let temp_before = ev.battery_temp_c;
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    // Oracle: the same shared solve, on the drive's equivalent discharge
+    // power at the post-debit SOC's OCV. The SOC debit happened at signal
+    // time and the disconnected step nets zero, so production's solve saw
+    // exactly this (SOC, power) pair.
+    let drive_dc_w = hares_physics::units::power_kw_to_w(15.0 / 0.25);
+    let expected_ohmic = ev
+        .pack_electrical()
+        .solve(ev.ocv_table.voltage_at_soc(ev.soc), -drive_dc_w)
+        .ohmic_loss_w;
+    let expected_rise = expected_ohmic * 900.0 / ev.thermal_mass_j_per_k;
+    let rise = ev.battery_temp_c - temp_before;
+    assert!(
+        (rise - expected_rise).abs() < 1e-9,
+        "the drive's temperature rise must equal its I2R·dt/C = {expected_rise} K \
+         (I2R {expected_ohmic} W over 900 s into {} J/K), got {rise} K",
+        ev.thermal_mass_j_per_k
+    );
+    assert!(
+        rise > 0.1,
+        "a 15 kWh drive must warm the pack measurably through its equivalent \
+         discharge current (expected ~{expected_rise} K), got {rise} K — the pending-drive \
+         I2R mechanism is not reaching the thermal equation"
     );
 }
 
@@ -3131,7 +4941,12 @@ fn telemetry_has_capacity_and_fuel_economy() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    assert_eq!(ev.telemetry().get("capacity_kwh"), Some(60.0));
+    // CAPACITY_KWH reports the usable capacity (rated × SOH × the
+    // temperature derate at the ambient-resolved pack temperature).
+    assert!(
+        (ev.telemetry().get("capacity_kwh").unwrap() - 60.0 * capacity_derate_at(10.0)).abs()
+            < 1e-9
+    );
     assert_eq!(
         ev.telemetry().get("fuel_economy_kwh_per_mi"),
         Some(DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
@@ -3259,7 +5074,16 @@ fn actor_seed_nightly_returns_ev_seed() {
                 hares_types::ChargingStrategy::Nightly { .. }
             ));
             assert_eq!(plug_in_policy, hares_types::PlugInPolicy::Always);
-            assert!((capacity_kwh - 60.0).abs() < 1e-6);
+            // The seed carries the degradation-adjusted rating (rated × SOH,
+            // temperature-independent) — never the live usable capacity, so
+            // the driver's belief model does not freeze the init-time
+            // ambient into the whole run. Fresh pack: SOH 1.0 → exactly the
+            // 60 kWh rating, at any init temperature.
+            assert!(
+                (capacity_kwh - 60.0).abs() < 1e-9,
+                "the seed capacity must be the degradation-adjusted rating \
+                 (temperature-independent), got {capacity_kwh} kWh"
+            );
             assert!((max_charge_kw - 7.2).abs() < 1e-6);
         }
         _ => panic!("expected Ev seed"),
@@ -3293,7 +5117,10 @@ fn l2_charging_energy_accounting() {
         ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
     }
 
-    let expected_soc = 0.932;
+    // 4 h × 7.2 kW × η 0.9 of DC energy over the usable capacity (rated ×
+    // the temperature derate at the unpinned 10 °C ambient, constant via
+    // UA = 0), from SOC 0.5.
+    let expected_soc = 0.5 + (7.2 * 0.9 * 4.0) / (60.0 * capacity_derate_at(10.0));
     assert!(
         (ev.soc - expected_soc).abs() < 0.005,
         "After 4h L2 charging: expected SOC ~ {expected_soc}, got {}",
@@ -3328,9 +5155,14 @@ fn charging_reaches_full_at_correct_time() {
     }
 
     let step: i32 = full_step.expect("EV should reach full within 400 minutes");
+    // DC energy needed = 0.5 × usable capacity (rated × the temperature
+    // derate at the unpinned 10 °C ambient, held constant by UA = 0);
+    // time = energy / (7.2 × 0.9).
+    let usable_kwh = 60.0 * capacity_derate_at(10.0);
+    let expected_steps = (0.5 * usable_kwh / (7.2 * 0.9) * 60.0).ceil() as i32;
     assert!(
-        (step - 278).abs() <= 2,
-        "Expected full at step ~278, got {step}"
+        (step - expected_steps).abs() <= 2,
+        "Expected full at step ~{expected_steps}, got {step}"
     );
 }
 
@@ -3360,7 +5192,9 @@ fn driving_soc_decrease_matches_fuel_economy() {
     ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
         .unwrap();
 
-    let expected_drop = 0.1625;
+    // SOC drop = drive energy / usable capacity (rated × the temperature
+    // derate at the unpinned 10 °C ambient initialization).
+    let expected_drop = drive_kwh / (60.0 * capacity_derate_at(10.0));
     let actual_drop = 1.0 - ev.soc;
     assert!(
         (actual_drop - expected_drop).abs() < 0.005,
@@ -3480,14 +5314,15 @@ fn soc_clamps_at_boundaries() {
         ev2.soc
     );
     assert_eq!(
-        ev2.drive_shortfall_kwh, 1.0,
+        ev2.drive_shortfall_kwh,
+        4.0 - 0.05 * 60.0 * capacity_derate_at(10.0),
         "the undeliverable remainder must be accounted, not dropped"
     );
     let mut ports = PortSlots::default();
     ev2.step(&env, Duration::minutes(1), &mut ports).unwrap();
     assert_eq!(
         ev2.telemetry().get("drive_shortfall_kwh"),
-        Some(1.0),
+        Some(4.0 - 0.05 * 60.0 * capacity_derate_at(10.0)),
         "the drive shortfall must be published as observable telemetry"
     );
 }
@@ -3508,15 +5343,18 @@ fn drive_shortfall_accumulates_and_survives_checkpoint() {
     })
     .unwrap();
 
-    // 3.0 kWh available: first drive overdraws by 1.0, second (at SOC 0)
-    // is entirely undeliverable.
+    // Available = 0.05 × usable capacity (rated × the temperature derate
+    // at the unpinned 10 °C ambient initialization); first drive overdraws,
+    // second (at SOC 0) is entirely undeliverable.
+    let available = 0.05 * 60.0 * capacity_derate_at(10.0);
     ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 4.0 })
         .unwrap();
     ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 2.0 })
         .unwrap();
-    assert_eq!(
-        ev.drive_shortfall_kwh, 3.0,
-        "successive shortfalls must accumulate, got {}",
+    assert!(
+        (ev.drive_shortfall_kwh - (6.0 - available)).abs() < 1e-9,
+        "successive shortfalls must accumulate to 6.0 − available \
+         ({available:.4}), got {}",
         ev.drive_shortfall_kwh
     );
 
@@ -3524,8 +5362,8 @@ fn drive_shortfall_accumulates_and_survives_checkpoint() {
     let mut restored = Ev::new(config.clone());
     restored.init(&config, &env).unwrap();
     restored.load_state(&state).unwrap();
-    assert_eq!(
-        restored.drive_shortfall_kwh, 3.0,
+    assert!(
+        (restored.drive_shortfall_kwh - ev.drive_shortfall_kwh).abs() < 1e-12,
         "checkpoint round-trip must preserve the cumulative shortfall"
     );
     assert_eq!(restored.soc, 0.0);
@@ -3591,11 +5429,14 @@ fn connection_state_transitions_are_valid() {
     );
 }
 
-/// At 7.2 kW AC with 90% efficiency:
-/// DC stored = 6.48 kW, waste heat = 0.72 kW = 720 W
-/// Verify temperature rise matches the waste heat injected into the thermal mass.
+/// Pack heating during a charge session is I²R through the cell resistance
+/// — the only cell heat the electrical model produces — never the charger's
+/// AC→DC conversion loss. Pre-fix, `(1−η)·P` (720 W here) was injected into
+/// the pack, producing a 129.6 K rise in one hour; the physical I²R at
+/// Level 2 currents is O(10 W), a ~1 K rise into this test's 20 kJ/K mass
+/// (sub-kelvin into a real ~384 kJ/K pack).
 #[test]
-fn charging_waste_heat_matches_efficiency_loss() {
+fn charge_session_pack_heating_is_i2r_only() {
     let mut raw = base_raw();
     raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
     raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
@@ -3615,16 +5456,31 @@ fn charging_waste_heat_matches_efficiency_loss() {
     ev.step(&env, Duration::from_secs(3600), &mut ports)
         .unwrap();
 
-    // Waste heat = AC_kW * (1 - eta) = 7.2 * 0.10 = 0.72 kW = 720 W
-    // Temperature rise = Q * dt / thermal_mass = 720 * 3600 / 20000 = 129.6 C
-    // That is the 1-hour integral with zero UA losses.
-    let waste_heat_w = 7.2 * (1.0 - 0.9) * 1000.0;
-    let expected_dt = waste_heat_w * 3600.0 / 20_000.0;
-    let actual_dt = ev.battery_temp_c - temp_before;
+    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(power_kw > 0.0, "EV should be charging");
 
+    // The I²R magnitude rule: single-digit watts at Level 2 — two orders of
+    // magnitude below the conversion loss (720 W) the pre-fix model
+    // attributed to the pack.
+    let ohmic_w = ev.telemetry().get("ohmic_loss_w").unwrap();
     assert!(
-        (actual_dt - expected_dt).abs() < 0.5,
-        "Waste heat temperature rise: expected {expected_dt:.1} C, got {actual_dt:.1} C"
+        (1.0..20.0).contains(&ohmic_w),
+        "I2R at Level 2 currents must be O(10 W), got {ohmic_w} W — \
+         conversion losses are being attributed to the pack again"
+    );
+
+    // ΔT = Q·dt/C exactly, from the reported ohmic loss.
+    let actual_dt = ev.battery_temp_c - temp_before;
+    let expected_dt = ohmic_w * 3600.0 / 20_000.0;
+    assert!(
+        (actual_dt - expected_dt).abs() < 1e-9,
+        "pack rise must equal I2R·dt/C = {expected_dt} K, got {actual_dt} K"
+    );
+    // Single-digit kelvin, never the 129.6 K of the conversion-loss model.
+    assert!(
+        actual_dt < 10.0,
+        "a one-hour Level 2 session must warm the pack single-digit kelvin \
+         (into this 20 kJ/K mass), got {actual_dt} K"
     );
 }
 
@@ -3806,6 +5662,10 @@ fn ev_soc_decreases_during_driving() {
     ev.init(&config, &env).unwrap();
 
     let drive_kwh = 15.0;
+    // The drive debits against the signal-time usable capacity; its own
+    // I²R heat (a 15 kWh one-minute burst is a ~900 kW discharge) warms
+    // the pack within the step, so the post-step capacity differs.
+    let cap_at_drive = ev.battery_capacity_kwh;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
@@ -3816,7 +5676,7 @@ fn ev_soc_decreases_during_driving() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
 
-    let expected_soc = 0.8 - drive_kwh / ev.battery_capacity_kwh;
+    let expected_soc = 0.8 - drive_kwh / cap_at_drive;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
         "SOC after {drive_kwh} kWh drive should be ~{expected_soc:.4}, got {}",
@@ -3908,6 +5768,9 @@ fn ev_drive_after_full_day_charging() {
         ev.soc
     );
 
+    // The drive debits against the signal-time usable capacity (rated ×
+    // SOH × the temperature derate at the ambient-resolved pack temperature).
+    let cap_at_drive = ev.battery_capacity_kwh;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
@@ -3918,7 +5781,11 @@ fn ev_drive_after_full_day_charging() {
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
 
-    let expected_soc = 1.0 - 10.0 / ev.battery_capacity_kwh;
+    // The drive's own I²R heat is real physics and several kelvin here: a
+    // 10 kWh burst in one 1-minute step is a ~600 kW discharge (~1700 A
+    // into the pack), so the post-step capacity reflects a warmer pack than
+    // the signal-time divisor the debit correctly used.
+    let expected_soc = 1.0 - 10.0 / cap_at_drive;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
         "SOC after drive should be ~{expected_soc:.4}, got {}",
@@ -4105,6 +5972,9 @@ fn minimal_ev_config() -> EvConfig {
         heater_threshold_c: None,
         thermal_mass_j_per_k: None,
         ua_w_per_k: None,
+        n_series: None,
+        n_parallel: None,
+        cell_resistance_ohm: None,
         v2l_enabled: None,
         v2l_soc_reserve: None,
         v2l_max_discharge_kw: None,
@@ -4186,6 +6056,121 @@ fn ev_config_validate_passes_for_valid_config() {
     assert!(cfg.validate().is_ok());
 }
 
+/// The pack-thermal and topology fields the I-07 alignment added are
+/// config-surface boundary inputs: an unphysical value that silently
+/// falls through to the physics (a zero thermal mass, a negative
+/// resistance, a zero series count) produces NaN temperatures or
+/// division-by-zero deep in the step loop instead of a named error at
+/// the boundary. Each rule rejects its invalid value, and the paired
+/// boundary-legal value passes — so an inverted comparison or a dropped
+/// rule fails loudly here, not silently in a 45-day run.
+#[test]
+fn ev_config_validate_rejects_invalid_pack_thermal_and_topology_fields() {
+    let rejects = |mutate: &dyn Fn(&mut EvConfig)| {
+        let mut cfg = minimal_ev_config();
+        mutate(&mut cfg);
+        cfg.validate()
+    };
+
+    // Thermal mass: non-positive and non-finite are both unphysical
+    // (zero mass means any heat produces infinite temperature).
+    assert!(
+        rejects(&|c| c.thermal_mass_j_per_k = Some(0.0)).is_err(),
+        "thermal_mass_j_per_k = 0 must be rejected (infinite temperature rise)"
+    );
+    assert!(
+        rejects(&|c| c.thermal_mass_j_per_k = Some(f64::NAN)).is_err(),
+        "non-finite thermal_mass_j_per_k must be rejected"
+    );
+    // Boundary-legal: any positive finite mass passes.
+    assert!(rejects(&|c| c.thermal_mass_j_per_k = Some(1.0)).is_ok());
+
+    // UA: negative coupling would heat a pack warmer than ambient;
+    // zero (perfect insulation) is a legal pinned test premise.
+    assert!(rejects(&|c| c.ua_w_per_k = Some(-0.1)).is_err());
+    assert!(rejects(&|c| c.ua_w_per_k = Some(0.0)).is_ok());
+
+    // Heater power: negative power is a fridge, not a heater; zero (no
+    // heater) is the explicit heaterless configuration.
+    assert!(rejects(&|c| c.heater_power_w = Some(-1.0)).is_err());
+    assert!(rejects(&|c| c.heater_power_w = Some(0.0)).is_ok());
+
+    // Topology: zero series/parallel counts collapse the pack voltage and
+    // resistance to zero; a non-positive cell resistance breaks the
+    // terminal-voltage quadratic (division by R).
+    assert!(rejects(&|c| c.n_series = Some(0)).is_err());
+    assert!(rejects(&|c| c.n_series = Some(1)).is_ok());
+    assert!(rejects(&|c| c.n_parallel = Some(0)).is_err());
+    assert!(rejects(&|c| c.n_parallel = Some(1)).is_ok());
+    assert!(rejects(&|c| c.cell_resistance_ohm = Some(0.0)).is_err());
+    assert!(rejects(&|c| c.cell_resistance_ohm = Some(-0.005)).is_err());
+    assert!(
+        rejects(&|c| c.cell_resistance_ohm = Some(f64::NAN)).is_err(),
+        "non-finite cell_resistance_ohm must be rejected"
+    );
+    assert!(rejects(&|c| c.cell_resistance_ohm = Some(0.005)).is_ok());
+}
+
+#[test]
+fn ev_config_validate_rejects_non_finite_temperature_fields() {
+    let rejects = |mutate: &dyn Fn(&mut EvConfig)| {
+        let mut cfg = minimal_ev_config();
+        mutate(&mut cfg);
+        cfg.validate()
+    };
+
+    // A non-finite pack or threshold temperature must fail loudly at the
+    // config boundary: NaN falls through both comparison branches of
+    // `linear_temp_derate` into the interpolation, so a NaN
+    // `battery_temp_c` yields a NaN charge derate and silently poisons
+    // charging power, SOC, and every downstream energy total.
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            rejects(&|c| c.battery_temp_c = Some(bad)).is_err(),
+            "non-finite battery_temp_c ({bad}) must be rejected"
+        );
+        assert!(
+            rejects(&|c| c.min_charge_temp_c = Some(bad)).is_err(),
+            "non-finite min_charge_temp_c ({bad}) must be rejected"
+        );
+        assert!(
+            rejects(&|c| c.full_power_temp_c = Some(bad)).is_err(),
+            "non-finite full_power_temp_c ({bad}) must be rejected"
+        );
+        assert!(
+            rejects(&|c| c.heater_threshold_c = Some(bad)).is_err(),
+            "non-finite heater_threshold_c ({bad}) must be rejected"
+        );
+    }
+
+    // An inverted derate ramp is a misconfiguration, not a model choice:
+    // with min > full, `linear_temp_derate`'s `temp >= temp_max` branch
+    // wins everywhere above temp_max, so a swapped pair silently charges
+    // at full power across the band the user meant to derate.
+    assert!(
+        rejects(&|c| {
+            c.min_charge_temp_c = Some(20.0);
+            c.full_power_temp_c = Some(10.0);
+        })
+        .is_err(),
+        "min_charge_temp_c > full_power_temp_c must be rejected"
+    );
+
+    // Boundary-legal: physically extreme but finite temperatures pass,
+    // and an equal min/full pair is a legal (if abrupt) step cutoff.
+    assert!(rejects(&|c| c.battery_temp_c = Some(-40.0)).is_ok());
+    assert!(rejects(&|c| c.min_charge_temp_c = Some(-20.0)).is_ok());
+    assert!(rejects(&|c| c.full_power_temp_c = Some(60.0)).is_ok());
+    assert!(rejects(&|c| c.heater_threshold_c = Some(45.0)).is_ok());
+    assert!(
+        rejects(&|c| {
+            c.min_charge_temp_c = Some(10.0);
+            c.full_power_temp_c = Some(10.0);
+        })
+        .is_ok()
+    );
+}
+
 #[test]
 fn ev_init_typed_sets_fields_from_ev_config() {
     let cfg = EvConfig {
@@ -4201,7 +6186,11 @@ fn ev_init_typed_sets_fields_from_ev_config() {
     let mut ev = Ev::new(ec.clone());
     let env = sample_env();
     ev.init(&ec, &env).unwrap();
-    assert_eq!(ev.battery_capacity_kwh, 60.0);
+    assert_eq!(ev.battery_capacity_kwh_rated, 60.0);
+    // The usable capacity at init: rated × SOH(1) × the temperature derate
+    // at the ambient-resolved pack temperature (minimal_ev_config leaves
+    // battery_temp_c unset → the 10 °C outdoor ambient).
+    assert!((ev.battery_capacity_kwh - 60.0 * capacity_derate_at(10.0)).abs() < 1e-9);
     assert!((ev.charging_efficiency - 0.92).abs() < 1e-9);
     assert!((ev.soc - 0.5).abs() < 1e-9);
     assert_eq!(ev.charging_level, ChargingLevel::L2);
@@ -4284,12 +6273,104 @@ fn raw_config_cold_charging_defaults_preserved() {
     assert_eq!(ev.full_power_temp_c, DEFAULT_FULL_POWER_TEMP_C);
     assert_eq!(ev.heater_power_w, DEFAULT_HEATER_POWER_W);
     assert_eq!(ev.heater_threshold_c, DEFAULT_HEATER_THRESHOLD_C);
-    assert_eq!(ev.thermal_mass_j_per_k, DEFAULT_THERMAL_MASS_J_PER_K);
-    assert_eq!(ev.ua_w_per_k, DEFAULT_UA_W_PER_K);
+    // Thermal defaults are capacity-derived (pack mass × cell specific
+    // heat; area-scaled UA), not flat constants.
+    assert_eq!(ev.thermal_mass_j_per_k, default_thermal_mass_j_per_k(60.0));
+    assert_eq!(ev.ua_w_per_k, default_ua_w_per_k(60.0));
     assert_eq!(
         ev.charging_strategy(),
         &ChargingStrategy::Immediate { target_soc: 1.0 }
     );
+}
+
+/// A dispatched `power_limit_kw = 0` is the second entry to the
+/// commanded-zero invariant (GridEmergency is the first, covered in the
+/// DR test): the limit enters through the *supply bound* —
+/// `min(rating, power_limit)` at ev/mod.rs — not through the DR
+/// multiplier, so a regression that applies the dispatched limit only to
+/// the charge leg (leaving the heater drawing under a commanded zero)
+/// is invisible to the DR test and caught here. The port zeroes and the
+/// heater suspends with it: the commanded zero removes the supply, and
+/// spending dispatch budget on warming is not available without one.
+#[test]
+fn commanded_power_limit_zero_suspends_preconditioning_with_the_port() {
+    // Cold derate band (4 °C → charge demand 2.88 kW AC) with the heater
+    // on: without the limit this draws the composed total; the commanded
+    // zero must take both legs to zero.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 4.0.into());
+    raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
+    raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
+    raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_POWER_LIMIT_KW.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+    let temp_before = ev.battery_temp_c;
+
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .unwrap();
+    assert_eq!(
+        ev.telemetry().get("active_power_kw").unwrap(),
+        0.0,
+        "a dispatched power_limit_kw = 0 must zero the port"
+    );
+    assert_eq!(
+        ev.telemetry().get("heater_power_w").unwrap(),
+        0.0,
+        "the commanded zero must suspend the heater with the port — the \
+         limit bounds the charger's whole AC input (charge leg + heater \
+         AC-equivalent), not the charge leg alone"
+    );
+    assert_eq!(
+        ev.battery_temp_c, temp_before,
+        "with UA = 0 the temperature can only move if heat was applied — \
+         a zero-limited step must warm nothing"
+    );
+}
+
+/// The capacity-derived thermal defaults carry their cited densities, and
+/// the derivation *scales* with capacity — the anti-flat-constant
+/// invariant. D1's defect was a flat 20 kJ/K mass for every pack; a
+/// regression to any flat constant can pass the 75 kWh parked-pack
+/// regression's window while silently mis-scaling every other vehicle
+/// size (a 14.8 kWh PHEV is not a 75 kWh BEV). Cited values: pack mass
+/// 6.4 kg/kWh × 1000 J/(kg·K) Li-ion cell specific heat → 480 kJ/K at
+/// 75 kWh; UA 5.0 W/K × (capacity/13.5)^(2/3) area scaling anchored at
+/// the stationary Battery's enclosed-pack default → ≈15.7 W/K at 75 kWh;
+/// n_parallel = ceil(pack Ah / 5 Ah 21700 cell) → 43 at 75 kWh on 96S.
+/// The paired-capacity assertions pin the scaling law itself: mass
+/// linear, UA a 2/3 power law.
+#[test]
+fn capacity_derived_thermal_defaults_match_cited_densities_and_scale_with_capacity() {
+    let mass_75 = default_thermal_mass_j_per_k(75.0);
+    assert_eq!(
+        mass_75, 480_000.0,
+        "75 kWh × 6.4 kg/kWh × 1000 J/(kg·K) = 480 kJ/K exactly"
+    );
+    let ua_75 = default_ua_w_per_k(75.0);
+    assert!(
+        (ua_75 - 15.7).abs() < 0.1,
+        "UA at 75 kWh is 5.0 × (75/13.5)^(2/3) ≈ 15.7 W/K, got {ua_75}"
+    );
+    assert_eq!(
+        default_n_parallel(75.0),
+        43,
+        "75 kWh on 96S at 3.7 V nominal is 211 Ah → ceil(211/5 Ah) = 43P"
+    );
+
+    // The scaling law, not just one point: half the capacity → half the
+    // mass (linear) and UA × (1/2)^(2/3) (area scaling). A flat constant
+    // fails both.
+    let mass_37 = default_thermal_mass_j_per_k(37.5);
+    assert_eq!(mass_37, mass_75 / 2.0);
+    let ua_37 = default_ua_w_per_k(37.5);
+    assert!((ua_37 - ua_75 * 0.5f64.powf(2.0 / 3.0)).abs() < 1e-9);
+    assert!(mass_37 < mass_75 && ua_37 < ua_75);
 }
 
 #[test]
@@ -4363,11 +6444,17 @@ fn raw_and_typed_config_cold_derate_equivalence() {
 fn raw_and_typed_default_battery_temp_c_are_consistent() {
     let env = sample_env();
 
-    // Raw path: no battery_temp_c key → DEFAULT_BATTERY_TEMP_C set in Ev::new()
+    // Raw construction (registry factory path — cannot init, raw configs
+    // are refused at init): no battery_temp_c key → the pre-init
+    // placeholder DEFAULT_BATTERY_TEMP_C, which init replaces by cascade.
     let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), base_raw());
     let raw_ev = Ev::new(raw_config);
+    assert_eq!(raw_ev.battery_temp_c, DEFAULT_BATTERY_TEMP_C);
 
-    // Typed path: None battery_temp_c → DEFAULT_BATTERY_TEMP_C set in init_typed()
+    // Typed path (the production init path): None battery_temp_c →
+    // outdoor ambient (the Battery's cascade — explicit config, else
+    // ambient; the EV has no zone). The placeholder never survives into
+    // the simulation.
     let cfg = EvConfig {
         battery_temp_c: None,
         ..minimal_ev_config()
@@ -4375,13 +6462,7 @@ fn raw_and_typed_default_battery_temp_c_are_consistent() {
     let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg).unwrap();
     let mut typed_ev = Ev::new(typed.clone());
     typed_ev.init(&typed, &env).unwrap();
-
-    assert_eq!(raw_ev.battery_temp_c, DEFAULT_BATTERY_TEMP_C);
-    assert_eq!(typed_ev.battery_temp_c, DEFAULT_BATTERY_TEMP_C);
-    assert_eq!(
-        raw_ev.battery_temp_c, typed_ev.battery_temp_c,
-        "raw and typed paths must produce the same battery_temp_c when the key is absent"
-    );
+    assert_eq!(typed_ev.battery_temp_c, env.weather.outdoor_temp_c);
 }
 
 /// Both paths honour an explicit `battery_temp_c` value when present in config.
@@ -5363,10 +7444,10 @@ fn daily_degradation_rescales_usable_capacity() {
         "30 days of aging should produce a non-zero capacity fade, got {fade}"
     );
 
-    let expected = ev.battery_capacity_kwh_rated * (1.0 - fade);
+    let expected = ev.battery_capacity_kwh_rated * (1.0 - fade) * capacity_derate_at(25.0);
     assert!(
         (ev.battery_capacity_kwh - expected).abs() < 1e-9,
-        "usable capacity {} must equal rated·(1−fade) = {expected}",
+        "usable capacity {} must equal rated·(1−fade)·derate = {expected}",
         ev.battery_capacity_kwh
     );
     // The runtime divisor must differ from the rated value — otherwise SOC
@@ -5387,18 +7468,20 @@ fn daily_degradation_rescales_usable_capacity() {
 fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
     let drive_kwh = 6.0;
 
-    // Fresh pack: SOH = 1, capacity = rated.
+    // Fresh pack: SOH = 1, usable capacity = rated × derate (the packs sit
+    // at the aged_ev fixture's pinned 25 °C).
     let mut fresh = aged_ev(0);
     fresh.soc = 0.9;
     let rated = fresh.battery_capacity_kwh_rated;
-    assert!((fresh.battery_capacity_kwh - rated).abs() < 1e-12);
+    let cap_fresh = rated * capacity_derate_at(25.0);
+    assert!((fresh.battery_capacity_kwh - cap_fresh).abs() < 1e-12);
     let soc_before_fresh = fresh.soc;
     fresh
         .apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
         .unwrap();
     let swing_fresh = soc_before_fresh - fresh.soc;
 
-    // Aged pack: SOH ≠ 1, capacity = rated·SOH.
+    // Aged pack: SOH ≠ 1, usable capacity = rated·SOH·derate.
     let mut aged = aged_ev(40);
     aged.soc = 0.9;
     let cap_aged = aged.battery_capacity_kwh;
@@ -5410,23 +7493,25 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
 
     // Each swing equals energy / usable_capacity.
     assert!(
-        (swing_fresh - drive_kwh / rated).abs() < 1e-9,
-        "fresh swing {swing_fresh} should equal energy/rated"
+        (swing_fresh - drive_kwh / cap_fresh).abs() < 1e-9,
+        "fresh swing {swing_fresh} should equal energy/fresh-usable-capacity"
     );
     assert!(
         (swing_aged - drive_kwh / cap_aged).abs() < 1e-9,
-        "aged swing {swing_aged} should equal energy/degraded-capacity"
+        "aged swing {swing_aged} should equal energy/aged-usable-capacity"
     );
 
-    // The scaling law: swing ratio equals the capacity ratio = 1/SOH.
+    // The scaling law: both packs share the pinned temperature, so the
+    // derate cancels and the swing ratio equals 1/SOH exactly.
     let swing_ratio = swing_aged / swing_fresh;
     assert!(
-        (swing_ratio - rated / cap_aged).abs() < 1e-9,
-        "swing ratio {swing_ratio} must match rated/aged capacity = 1/SOH"
+        (swing_ratio - cap_fresh / cap_aged).abs() < 1e-9,
+        "swing ratio {swing_ratio} must match the capacity ratio"
     );
     assert!(
         (swing_ratio - 1.0 / soh).abs() < 1e-9,
-        "swing ratio {swing_ratio} must equal 1/SOH = {}",
+        "swing ratio {swing_ratio} must equal 1/SOH = {} (the shared \
+         temperature derate cancels)",
         1.0 / soh
     );
 
@@ -5470,9 +7555,12 @@ fn load_state_recomputes_degraded_capacity_from_rated_and_soh() {
     );
     let fade = restored.degradation.capacity_fade_fraction();
     assert!(
-        (restored.battery_capacity_kwh - restored.battery_capacity_kwh_rated * (1.0 - fade)).abs()
+        (restored.battery_capacity_kwh
+            - restored.battery_capacity_kwh_rated * (1.0 - fade) * capacity_derate_at(25.0))
+        .abs()
             < 1e-9,
-        "restored usable capacity must equal rated·(1−fade)"
+        "restored usable capacity must equal rated·(1−fade)·derate (the \
+         restored 25 °C pack temperature)"
     );
 }
 
@@ -5849,6 +7937,40 @@ fn actor_seed_immediate_strategy_returns_ev_seed() {
         }
         other => panic!("expected Some(ActorSeed::Ev) for Immediate strategy, got {other:?}"),
     }
+}
+
+/// The driver's seeded capacity is a temperature-independent rating, not
+/// the live usable capacity. `refresh_usable_capacity` scales
+/// `battery_capacity_kwh` by the reversible cold-capacity derate each step
+/// with the pack's *current* temperature; seeding the actor with that
+/// per-step value freezes the init-time ambient into the driver's
+/// anxiety/needed-hours/recoup arithmetic for the whole run and makes the
+/// seed depend on the weather at init. The degradation-adjusted
+/// (temperature-independent) capacity is the value the actor's own docs
+/// describe (`observed_pack_kwh`: "this actor's rated capacity").
+#[test]
+fn actor_seed_capacity_is_independent_of_init_weather() {
+    let config = ev_config(base_raw());
+    let mut warm = Ev::new(config.clone());
+    warm.init(&config, &sample_env()).unwrap();
+
+    let mut cold_env = sample_env();
+    cold_env.weather.outdoor_temp_c = -7.0;
+    let mut cold = Ev::new(config.clone());
+    cold.init(&config, &cold_env).unwrap();
+
+    let seed_kwh = |ev: &Ev| match ev.actor_seed() {
+        Some(crate::ActorSeed::Ev { capacity_kwh, .. }) => capacity_kwh,
+        other => panic!("expected ActorSeed::Ev, got {other:?}"),
+    };
+    let warm_kwh = seed_kwh(&warm);
+    let cold_kwh = seed_kwh(&cold);
+    assert!(
+        (warm_kwh - cold_kwh).abs() < 1e-9,
+        "the driver's seeded capacity must be the temperature-independent \
+         degradation-adjusted rating, not the live usable capacity: init at \
+         10 C seeded {warm_kwh} kWh but init at -7 C seeded {cold_kwh} kWh"
+    );
 }
 
 /// Class rule: no `ChargingStrategy` variant may suppress the driver seed.
@@ -6296,4 +8418,588 @@ fn init_errors_on_unknown_departure_constraint_fields() {
             "error must name the offending key for override '{bad}', got {err:?}"
         );
     }
+}
+
+/// A checkpoint taken while the EV stands in var support (`On` mode: SOC at
+/// target, heater off, a nonzero reactive command served at zero real
+/// power) must restore a core output that satisfies the workspace's own
+/// mode/flow guard. `load_state` restores the step-outcome `last_mode`
+/// (checkpoint v5) but zeroes `reactive_power_kvar` as a step outcome, so
+/// the rebuilt output pairs an active mode with all-zero flows — exactly
+/// the pair `validate_core_contract`'s Rule 1 treats as a hard error.
+/// Pre-fix, the restored mode was re-derived from the restored port power
+/// and could never disagree with its own flows; restore-time consistency
+/// is a contract of the state that exists between `load_state` and the
+/// first post-restore step (observer snapshots, fleet restart tooling,
+/// and `update_control`'s report all read it there).
+#[test]
+fn var_support_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
+    let config = ev_config(raw);
+    let env = sample_env();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &env).unwrap();
+
+    // SOC at target → zero charge demand; 10 °C pack → heater off. The
+    // only live flow is the commanded reactive power: the standby
+    // var-support state, mode `On`.
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::On),
+        "precondition: the saved state is the standby var-support mode"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+        "a restored core output must satisfy the mode/flow guard: the v5 \
+              restore re-pairs the step-outcome `On` mode with zeroed flows, \
+              which Rule 1 rejects as an active mode with no flow",
+    );
+}
+
+/// The charging-curve LUT's c-rate input must see the pack's SOH scaling
+/// exactly once. `compute_charging_power_kw` derives
+/// `effective_kwh = battery_capacity_kwh · soh`, but `refresh_usable_capacity`
+/// has already folded the SOH into `battery_capacity_kwh` (usable =
+/// rated · SOH · temperature derate), so an aged pack's c-rate is computed
+/// over the SOH-squared capacity — the degradation factor applied twice,
+/// skewing every configured LUT's c-rate axis (the second application grew
+/// when this fix layered the temperature derate into the same field's
+/// meaning without re-deriving this consumer).
+#[test]
+fn lut_c_rate_axis_receives_the_soh_scaled_capacity_once() {
+    // The c-rate axis steps between the correct single-SOH c-rate
+    // (7.2 kW / (60 kWh · 0.9 · derate(25 °C)) = 0.1332 — full power) and
+    // the double-SOH c-rate (7.2 kW / (60 · 0.9² · derate(25 °C)) = 0.1480
+    // — zero power), so the two derivations are unambiguously
+    // distinguishable in the delivered power.
+    let lut = crate::ndinterp::RegularGridInterpolator::new(
+        vec![
+            vec![0.0, 1.0],    // soc (flat)
+            vec![25.0],        // temperature (flat at the derate reference)
+            vec![0.14, 0.145], // c-rate
+            vec![1.0],         // soh (flat)
+        ],
+        vec![1.0f32, 0.0, 1.0, 0.0],
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
+    )
+    .unwrap();
+
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 25.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.set_charging_curve_lut(Some(lut)).unwrap();
+    // 10 % fade, injected directly: the degradation state is otherwise
+    // fresh, and no multi-year simulation is needed to age the pack.
+    ev.degradation.capacity_fade = 0.10;
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    let capacity = ev.telemetry().get(tk::CAPACITY_KWH).unwrap();
+    // The expected capacity is derived from the pack's ACTUAL post-step
+    // temperature (published in the same telemetry): the fix under test
+    // delivers full charge power, whose I²R heat warms the pack ~0.012 K
+    // over the step, and the usable capacity is temperature-dependent —
+    // hardcoding the 25 °C step-start temperature here would fail by
+    // ~3.7e-3 kWh under the CORRECT behavior (it only held pre-fix because
+    // the defect zeroed the power, so no current flowed and no heat was
+    // produced). Deriving from the actual temperature keeps the
+    // precondition's purpose — the injected fade must be in effect — at
+    // the same 1e-9 tolerance.
+    let expected_capacity =
+        60.0 * 0.9 * capacity_derate_at(ev.telemetry().get(tk::BATTERY_TEMP_C).unwrap());
+    assert!(
+        (capacity - expected_capacity).abs() < 1e-9,
+        "precondition: the pack must carry the injected fade (usable \
+         capacity {expected_capacity} kWh), got {capacity}"
+    );
+
+    let power_kw = ev
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active power telemetry after a step");
+    assert!(
+        (power_kw - 7.2).abs() < 1e-6,
+        "the LUT's c-rate axis must see the SOH scaling exactly once \
+         (c_rate = 7.2 kW / {expected_capacity:.3} kWh ≈ 0.1332, inside the \
+         LUT's full-power band): expected 7.2 kW, got {power_kw} — the \
+         c-rate was computed over the SOH-squared capacity (≈0.148, clamped \
+         into the zero-power band), applying the degradation factor twice"
+    );
+}
+
+/// The charging-LUT c-rate divisor is the degradation-adjusted rating, and
+/// temperature enters the lookup only through the LUT's own temperature
+/// axis — never through the divisor. `refresh_usable_capacity` scales
+/// `battery_capacity_kwh` by the reversible cold-capacity derate every step,
+/// so dividing by it (the pre-alignment behavior) would apply the
+/// temperature twice through two channels — the c-rate axis and the LUT's
+/// temperature axis — inflating the c-rate ≈1.3× at 0 °C (≈1.5× at −7 °C)
+/// and bin-shifting every configured lookup (the same
+/// one-physical-effect-applied-once rule the sibling Battery's LUT follows
+/// through the same shared `pack_electrical::charging_lut_c_rate` home).
+#[test]
+fn lut_c_rate_divisor_is_temperature_independent() {
+    // Bands chosen mid-band for both derivations so neither lands on a grid
+    // boundary: 7.2 kW over the 60 kWh rating is c_rate = 0.12 (mid-band →
+    // half power = 3.6 kW); over the temperature-derated usable capacity
+    // (60 × derate(5 °C) ≈ 49.8 kWh) it is ≈0.145 (above the 0.14 axis end →
+    // zero power).
+    let lut = crate::ndinterp::RegularGridInterpolator::new(
+        vec![vec![0.0, 1.0], vec![5.0], vec![0.10, 0.14], vec![1.0]],
+        vec![1.0f32, 0.0, 1.0, 0.0],
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
+    )
+    .unwrap();
+
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 5.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.set_charging_curve_lut(Some(lut)).unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+
+    let power_kw = ev
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active power telemetry after a step");
+    assert!(
+        (power_kw - 3.6).abs() < 1e-6,
+        "the LUT's c-rate axis must see the temperature-independent rating \
+         (c_rate = 7.2/60 = 0.12, mid-band → half power = 3.6 kW): got \
+         {power_kw} kW — the divisor was the temperature-derated usable \
+         capacity (c_rate ≈ 0.145 → zero power), applying the reversible \
+         derate twice through two channels"
+    );
+}
+
+/// A checkpoint taken mid-preconditioning must restore the reactive flow
+/// the step published. The step keys the reactive computation on the
+/// *inverter leg* — the charge/export conversion only — because the pack
+/// heater is a DC-fed resistive load that is not inverter-coupled: it
+/// produces no vars and consumes no kVA headroom (the same rule the
+/// stationary Battery's step documents). The restore instead recomputes
+/// `compute_reactive_kvar(self.active_power_kw)` over the *port total* —
+/// the heater-inclusive basis the step's own rule forbids — so an idle
+/// preconditioning checkpoint (inverter leg exactly zero) that published
+/// no vars restores 2.7 kVAR of vars from nothing at the default 5 kW
+/// heater and pf 0.9.
+#[test]
+fn heater_active_checkpoint_restores_the_reactive_flow_the_step_published() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
+    // Explicit pack temperature wins the init cascade: 3 °C is above the
+    // plating cutoff (charging legal) and below the 5 °C heater threshold
+    // (preconditioning active) with SOC at target — the idle-preconditioning
+    // state.
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 3.0.into());
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Heating),
+        "precondition: the saved state is mid-preconditioning"
+    );
+    let q_saved = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    assert_eq!(
+        q_saved, 0.0,
+        "precondition: the step publishes no vars while preconditioning — \
+         the inverter leg is zero and the DC-fed heater produces none"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    let q_restored = restored.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q_restored, q_saved);
+}
+
+/// The heater-draw face of the same restore-fidelity contract the v6
+/// reactive fix established: the leg/heater split of the port total is
+/// transient step state that is not derivable at restore — the identical
+/// underivable-basis argument the v6 comment makes for the reactive flow —
+/// so the step-published heater draw must be restored verbatim too, not
+/// zeroed. The restore currently zeroes `heater_draw_w` while restoring
+/// the heater-funded port power (`active_power_kw`), the `Heating` mode,
+/// and the verbatim reactive flow — publishing a state no live step can
+/// produce: `classify_mode` yields `Heating` only when `heater_draw_w > 0`,
+/// so a live step always pairs the mode with a real draw, and its billing
+/// rule always decomposes the port as charge leg + heater AC-equivalent.
+/// The restored pair (mode `Heating`, port 5.56 kW, heater column 0 W,
+/// pack netting zero) is heater-funded port power with the heater column
+/// at zero — the same published-state infidelity the reactive fix removed
+/// for the q column.
+#[test]
+fn heater_active_checkpoint_restores_the_heater_draw_the_step_published() {
+    // The idle-preconditioning state: SOC at target (no charge demand),
+    // 3 °C pack (above the plating cutoff, below the 5 °C heater
+    // threshold), default 5 kW heater.
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 3.0.into());
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Heating),
+        "precondition: the saved state is mid-preconditioning"
+    );
+    let port_saved = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let heater_saved = ev.telemetry().get(tk::HEATER_POWER_W).unwrap();
+    assert!(
+        (heater_saved - 5000.0).abs() < 1e-6 && port_saved > 5.0,
+        "precondition: the step publishes the heater's true draw (5000 W) \
+         funding the port total, got heater {heater_saved} W, port \
+         {port_saved} kW"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    let heater_restored = restored.telemetry().get(tk::HEATER_POWER_W).unwrap();
+    assert_eq!(
+        heater_restored, heater_saved,
+        "a heater-active checkpoint must restore the step-published heater \
+         draw: the leg/heater split of the restored port power is not \
+         derivable at restore (the same underivable-basis argument the v6 \
+         reactive restore makes), and zeroing it pairs the `Heating` mode — \
+         which `classify_mode` only ever produces with a nonzero draw — \
+         with a zero heater column"
+    );
+}
+
+/// The away-intake face of the same restore-fidelity family: the away arm's
+/// actual charge intake (`away_charge_actual_kw`, published as
+/// `AWAY_CHARGE_POWER_KW` — the documented way away charging is observed)
+/// is a step-computed value whose basis (the away charge leg) is not
+/// derivable from the checkpoint — `active_power_kw` is 0 in the away
+/// state, and nothing else checkpointed reconstructs the intake. Its
+/// discharge-side sibling (`v2l_power_kw`) is checkpointed verbatim (v8)
+/// for exactly this reason; the away intake is not, so a checkpoint saved
+/// mid-away-session restores publishing 0 kW of intake. The same
+/// underivable-basis criterion the v7/v8 fixes applied to the heater draw
+/// and the V2L dispatch state.
+#[test]
+fn away_charging_checkpoint_restores_the_intake_the_step_published() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Away, charger commanded at the 7.2 kW rating, SOC below target: the
+    // away session charges at the full rating (pack at the 10 °C ambient
+    // init → derate ramp fully open). The connection state machine
+    // requires the transition to run through Disconnected.
+    ev.apply_control(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let intake_saved = ev.telemetry().get(tk::AWAY_CHARGE_POWER_KW).unwrap();
+    assert!(
+        (intake_saved - 7.2).abs() < 1e-6,
+        "precondition: the step publishes the away session's actual intake \
+         (7.2 kW), got {intake_saved}"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    let intake_restored = restored.telemetry().get(tk::AWAY_CHARGE_POWER_KW).unwrap();
+    assert_eq!(
+        intake_restored, intake_saved,
+        "an away-charging checkpoint must restore the step-published intake: \
+         its basis (the away charge leg) is not derivable from the \
+         checkpoint — the same underivable-basis criterion the v7/v8 fixes \
+         applied to the heater draw and the V2L dispatch state — and the \
+         zero it currently publishes misreports an active away session"
+    );
+}
+
+/// A checkpoint restart that steps across a midnight boundary must be
+/// transparent: the restored day anchor (`last_daily_update_day`), the
+/// restored rainflow history, and the restored degradation accumulators
+/// must drive `update_degradation`'s day-boundary update exactly as the
+/// uninterrupted run's own state does — one boundary, fed the pre-restart
+/// day's SOC history. Twin equivalence: two EVs stepped in lockstep across
+/// midnight, one checkpoint-restored between the steps, must end
+/// byte-identical or the restart changed the simulation.
+#[test]
+fn checkpoint_restart_across_a_day_boundary_matches_the_uninterrupted_twin() {
+    let config = ev_config(base_raw());
+    let mut env_pre = sample_env();
+    env_pre.current_time = dt(2026, 1, 1, 23, 0, 0);
+    let mut env_post = sample_env();
+    env_post.current_time = dt(2026, 1, 2, 0, 0, 0);
+
+    // Twin A: the uninterrupted run — one pre-midnight step, one
+    // post-midnight step (the second fires the day boundary).
+    let mut twin_a = Ev::new(config.clone());
+    twin_a.init(&config, &env_pre).unwrap();
+    let mut ports = PortSlots::default();
+    twin_a
+        .step(&env_pre, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let mut ports = PortSlots::default();
+    twin_a
+        .step(&env_post, Duration::minutes(15), &mut ports)
+        .unwrap();
+
+    // Twin B: checkpoint-restart between the same two steps.
+    let mut twin_b = Ev::new(config.clone());
+    twin_b.init(&config, &env_pre).unwrap();
+    let mut ports = PortSlots::default();
+    twin_b
+        .step(&env_pre, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let saved = twin_b.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env_pre).unwrap();
+    restored.load_state(&saved).unwrap();
+    let mut ports = PortSlots::default();
+    restored
+        .step(&env_post, Duration::minutes(15), &mut ports)
+        .unwrap();
+
+    assert_eq!(
+        restored.save_state().unwrap(),
+        twin_a.save_state().unwrap(),
+        "a checkpoint restart across a day boundary must be transparent: \
+         the restored day anchor and the restored rainflow/degradation \
+         state must drive the midnight boundary exactly as the \
+         uninterrupted run's own state does — a diverging checkpoint means \
+         the restore changed the simulation"
+    );
+}
+
+/// The discharge face of the same restore-fidelity family: a checkpoint
+/// taken mid-V2L-discharge must restore the island-source availability
+/// the step published. `island_source_available` reads `v2l_active`, so
+/// a restore that leaves it false (the pre-derivation placeholder)
+/// reports no island source for the whole restore-to-first-step window —
+/// a dwelling mid-outage would conclude its backup vehicle is not a
+/// source exactly when it is. The restore now derives the pair losslessly
+/// from already-checkpointed state (`v2l_active ⟺ last_mode ==
+/// Discharging`, the export being the only negative-net path; and
+/// `v2l_power_kw = −active_power_kw`, the port carrying the export
+/// alone) — this gate pins that derivation: no schema change to guard,
+/// just the restored-state-matches-saved-state contract.
+#[test]
+fn mid_discharge_checkpoint_restores_island_source_availability() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.core_output().state.operating_mode,
+        Some(OperatingMode::Discharging),
+        "precondition: the saved state is mid-discharge"
+    );
+    assert!(
+        ev.island_source_available(),
+        "precondition: the discharging step reports island-source availability"
+    );
+    let v2l_power_saved = ev.telemetry().get(tk::V2L_POWER_KW).unwrap();
+    assert!(
+        v2l_power_saved > 0.0,
+        "the step publishes the export magnitude"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    assert_eq!(
+        restored.core_output().state.operating_mode,
+        Some(OperatingMode::Discharging),
+        "the restored mode is the checkpointed discharge mode"
+    );
+    assert!(
+        restored.island_source_available(),
+        "a mid-discharge checkpoint must restore island-source availability — \
+         the dwelling's islanding reads it, and a restore window that \
+         reports no source is a restored state no live step produced"
+    );
+    assert_eq!(
+        restored.telemetry().get(tk::V2L_ACTIVE).unwrap(),
+        1.0,
+        "the V2L_ACTIVE telemetry must publish the derived state"
+    );
+    let v2l_power_restored = restored.telemetry().get(tk::V2L_POWER_KW).unwrap();
+    assert_eq!(
+        v2l_power_restored, v2l_power_saved,
+        "the restored export magnitude is −active_power_kw (the port carries \
+         the export alone), matching the step-published value"
+    );
+}
+
+/// The restore-fidelity contract's floor-held face: a discharge stays
+/// dispatched (negative setpoint latched, V2L enabled) with the pack at
+/// the reserve floor. `compute_discharge` returns (0, 0) at the floor,
+/// but the step still publishes `v2l_active = true` — the field keys on
+/// the *dispatch* (`is_discharge`, set whenever the discharge leg
+/// exists), not the exported power — alongside a zero net rate and
+/// therefore `last_mode = Off`. The restore derives `v2l_active` from
+/// `last_mode == Discharging`, which is false here: the restored state
+/// diverges from the saved one, and `island_source_available` (which
+/// reads `v2l_active`) flips false for the restore window. Same family
+/// as the F4/F5 restore infidelities — a derivation that approximates
+/// rather than reproduces the step-published state; the faithful fix
+/// mirrors the v6/v7 pattern (checkpoint the published values verbatim),
+/// since the export flow cannot disambiguate this corner either (it is
+/// exactly zero). The test pins fidelity, not the mechanism.
+#[test]
+fn floor_held_discharge_checkpoint_restores_the_published_v2l_state() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    // SOC exactly at the reserve: the floor-held discharge corner.
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    assert_eq!(
+        ev.telemetry().get(tk::V2L_ACTIVE).unwrap(),
+        1.0,
+        "precondition: the floor-held step still publishes the dispatch-active state"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::V2L_POWER_KW).unwrap(),
+        0.0,
+        "precondition: at the floor the export is exactly zero"
+    );
+    assert!(
+        ev.island_source_available(),
+        "precondition: the step reports island-source availability"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    assert_eq!(
+        restored.telemetry().get(tk::V2L_ACTIVE).unwrap(),
+        ev.telemetry().get(tk::V2L_ACTIVE).unwrap(),
+        "the restore must reproduce the step-published V2L_ACTIVE state"
+    );
+    assert_eq!(
+        restored.island_source_available(),
+        ev.island_source_available(),
+        "island-source availability must survive the checkpoint round-trip"
+    );
+}
+
+/// The charging-with-heater face of the same restore-basis defect: at a
+/// bound-binding cold session the port equals the kVA rating, so the
+/// restore's port-total basis leaves zero kVA headroom and a commanded
+/// q-setpoint the step served in full restores clamped to zero — the
+/// commanded var support vanishes across the checkpoint round-trip.
+#[test]
+fn commanded_vars_served_at_a_bound_binding_checkpoint_survive_restore() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 3.0.into());
+    raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 6.5 })
+        .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    // Cold-derated charge demand 7.2·0.3 = 2.16 kW; heater AC-equivalent
+    // 5.56 kW; both fit inside the 7.2 kVA rating's port bound = 7.2 kW.
+    let q_saved = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    assert!(
+        (q_saved - 6.5).abs() < 1e-6,
+        "precondition: the step serves the commanded 6.5 kVAR in full (the \
+         inverter-leg basis leaves headroom), got {q_saved}"
+    );
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &env).unwrap();
+    restored.load_state(&state).unwrap();
+
+    let q_restored = restored.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+    approx_eq(q_restored, q_saved);
 }

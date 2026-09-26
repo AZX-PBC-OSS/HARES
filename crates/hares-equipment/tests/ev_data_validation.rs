@@ -168,6 +168,9 @@ fn l1_ev_config(
             heater_threshold_c: None,
             thermal_mass_j_per_k: None,
             ua_w_per_k: None,
+            n_series: None,
+            n_parallel: None,
+            cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
             v2l_max_discharge_kw: None,
@@ -390,12 +393,17 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
         .expect("soc should be present in telemetry");
 
     let dt_hours = dt.as_secs_f64() / 3600.0;
-    let expected_soc_delta = wall_kw * dt_hours * TYPICAL_L1_EFFICIENCY / capacity_kwh;
+    // The divisor is the usable capacity (rated × the temperature derate
+    // at the ambient-resolved 20 °C pack temperature), not the rated value.
+    let usable_kwh =
+        capacity_kwh * hares_equipment::battery::CapacityDerateModel::default().evaluate(20.0);
+    let expected_soc_delta = wall_kw * dt_hours * TYPICAL_L1_EFFICIENCY / usable_kwh;
     let actual_soc_delta = soc_after - soc_before;
 
     assert!(
         (actual_soc_delta - expected_soc_delta).abs() < 1e-9,
-        "SOC delta {actual_soc_delta} should match wall_power × time × efficiency / capacity = {expected_soc_delta}"
+        "SOC delta {actual_soc_delta} should match wall_power × time × efficiency / \
+         usable-capacity = {expected_soc_delta}"
     );
 
     // Verify the battery-side effective power matches the CSV convention:

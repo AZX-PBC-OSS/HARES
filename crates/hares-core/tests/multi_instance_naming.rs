@@ -12,10 +12,10 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::Dwelling;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, ElectricPower,
-    EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
-    HaresError, OperatingMode, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots, Soc, Telemetry,
+    TelemetryField, telemetry_keys as tk,
 };
 
 fn nanos_suffix() -> String {
@@ -91,6 +91,11 @@ struct TelemetryRecordSpy {
 
 impl TelemetryRecordSpy {
     fn new(name: &str, end_use: EndUse, id: u32) -> Self {
+        // A storage-end-use spy mirrors the real Battery it stands in for:
+        // it declares HAS_SOC and publishes SOC at every step, because the
+        // dwelling's soc_bounds monitor fails loudly on an absent SOC for
+        // the BATTERY/EV population. Non-storage spies stay SOC-less.
+        let is_storage = end_use == EndUse::BATTERY || end_use == EndUse::EV;
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(id),
             name: name.to_string(),
@@ -100,7 +105,11 @@ impl TelemetryRecordSpy {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::CURTAILMENT_PERCENT,
-            core_capabilities: CoreCapabilities::ELECTRIC,
+            core_capabilities: if is_storage {
+                CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC
+            } else {
+                CoreCapabilities::ELECTRIC
+            },
             telemetry_fields: vec![TelemetryField {
                 name: tk::AC_POWER_KW.to_string(),
                 unit: "kW".to_string(),
@@ -118,14 +127,13 @@ impl TelemetryRecordSpy {
                     electric_kw: Some(ElectricPower::Generation(0.0)),
                     ..Default::default()
                 },
+                state: CoreState {
+                    soc: is_storage.then(|| Soc::try_from(0.5).expect("0.5 is within [0, 1]")),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         }
-    }
-
-    #[allow(dead_code)]
-    fn recorded_value(&self) -> f64 {
-        self.telemetry.get(tk::AC_POWER_KW).unwrap_or(0.0)
     }
 }
 

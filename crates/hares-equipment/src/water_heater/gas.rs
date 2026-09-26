@@ -849,7 +849,44 @@ impl Equipment for GasWH {
         );
         self.telemetry.insert(tk::PILOT_HEAT_TO_WATER_W, 0.0);
         self.telemetry.insert(tk::PILOT_HEAT_TO_AMBIENT_W, 0.0);
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the flows from the
+        // checkpointed `fan_electric_w`/`reactive_power_kvar`/
+        // `fuel_input_w`, the mode re-derived by the step's own rule
+        // (burner dispatch → `resolve_idle` on the restored nonzero
+        // flow). `CoreOutput::default()` (all fields `None`) violates the
+        // capability-presence rules for every declared capability
+        // (ELECTRIC/REACTIVE/FUEL/HAS_MODE) — the restore contract is that
+        // a checkpoint restores a state `validate_core_contract` accepts.
+        let has_nonzero_flow = decoded.fan_electric_w > 0.0 || decoded.fuel_input_w > 0.0;
+        let restored_mode = (if decoded.burner_on {
+            OperatingMode::Heating
+        } else {
+            OperatingMode::Off
+        })
+        .resolve_idle(has_nonzero_flow, None);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(
+                    power_w_to_kw(decoded.fan_electric_w).max(0.0),
+                )),
+                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                fuel_w: Some(FuelPower {
+                    fuel_type: self.fuel_type,
+                    consumption_w: decoded.fuel_input_w.max(0.0),
+                }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         Ok(())
     }
@@ -1520,6 +1557,29 @@ mod tests {
             "Burner must fire when all nodes are below max_tank_temp_c"
         );
         assert!(eq.burner_on);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// ELECTRIC/REACTIVE/FUEL/HAS_MODE capabilities.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let mut eq = GasWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = GasWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a gas WH checkpoint must restore a contract-valid output");
     }
 
     #[test]

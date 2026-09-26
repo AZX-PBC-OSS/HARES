@@ -52,7 +52,10 @@ use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::extract_datetime;
 use crate::utils::extract_seconds;
+use crate::utils::finite_f64_optional;
 use crate::utils::parse_resample_method;
+use crate::utils::python_to_json_value;
+use crate::utils::validate_finite;
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
@@ -549,13 +552,16 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         l1_voltage_v: None,
         soc_max: None,
         initial_soc: ev.initial_soc,
-        battery_temp_c: None,
-        min_charge_temp_c: None,
-        full_power_temp_c: None,
-        heater_power_w: None,
-        heater_threshold_c: None,
-        thermal_mass_j_per_k: None,
-        ua_w_per_k: None,
+        battery_temp_c: ev.battery_temp_c,
+        min_charge_temp_c: ev.min_charge_temp_c,
+        full_power_temp_c: ev.full_power_temp_c,
+        heater_power_w: ev.heater_power_w,
+        heater_threshold_c: ev.heater_threshold_c,
+        thermal_mass_j_per_k: ev.thermal_mass_j_per_k,
+        ua_w_per_k: ev.ua_w_per_k,
+        n_series: ev.n_series,
+        n_parallel: ev.n_parallel,
+        cell_resistance_ohm: ev.cell_resistance_ohm,
         v2l_enabled: None,
         v2l_soc_reserve: None,
         v2l_max_discharge_kw: None,
@@ -867,10 +873,15 @@ impl PyDwelling {
     }
 
     pub fn set_price_signal(&self, signal: &Bound<'_, PyDict>) -> PyResult<()> {
+        // Loud on non-finite prices at the boundary (the shared
+        // validators' section rationale, `utils.rs`): a NaN price's
+        // comparisons are always false, so the price actors'
+        // conditionals (the EvDriver's price logic) silently stop
+        // firing in release builds.
         let price = PriceSignal {
-            electricity_price: dict_optional(signal, "electricity_price")?,
-            export_price: dict_optional(signal, "export_price")?,
-            ghg_intensity: dict_optional(signal, "ghg_intensity")?,
+            electricity_price: finite_f64_optional(signal, "electricity_price")?,
+            export_price: finite_f64_optional(signal, "export_price")?,
+            ghg_intensity: finite_f64_optional(signal, "ghg_intensity")?,
         };
         let mut dwelling = self.acquire()?;
         dwelling.set_price_signal(price);
@@ -878,6 +889,12 @@ impl PyDwelling {
     }
 
     pub fn set_grid_voltage(&self, voltage_pu: f64) -> PyResult<()> {
+        // Loud on non-finite per-unit voltage at the boundary (the
+        // shared validators' section rationale, `utils.rs`): a NaN
+        // voltage silently lands in the grid state and stops every
+        // per-unit comparison downstream. Finiteness only — the
+        // nominal-range contract is the grid model's.
+        validate_finite(voltage_pu, "voltage_pu")?;
         let mut dwelling = self.acquire()?;
         dwelling.set_grid_voltage(voltage_pu);
         Ok(())
@@ -1213,6 +1230,9 @@ impl PyDwelling {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
                 v2l_max_discharge_kw: None,
@@ -1552,6 +1572,39 @@ impl PyDwelling {
 
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let solar_data = parse_solar_override(py, data)?;
+        // Loud on non-finite irradiance, at the boundary that received
+        // the value — never relying on the downstream screens: the
+        // dwelling's finiteness screens are cfg-gated to
+        // debug/`check_invariants` builds, so in release builds a
+        // non-finite value that crosses here silently poisons the solar
+        // gains (NaN propagates into the zone/surface energy balance).
+        // This is the documented external-pipeline channel (pvlib/PySAM
+        // injection — see
+        // tests/python/generate_pvlib_solar_override.py), where a NaN
+        // riding in from missing satellite data is the normal failure
+        // mode. The walk runs on the parsed table, not on any arm's
+        // extraction internals, so it covers every parse arm (path,
+        // list, polars/pandas DataFrame, ndarray, dict) by construction.
+        for (step, surfaces) in solar_data.iter().enumerate() {
+            for (surface, s) in surfaces.iter().enumerate() {
+                for (field, value) in [
+                    ("direct_w_m2", s.direct_w_m2),
+                    ("diffuse_w_m2", s.diffuse_w_m2),
+                    ("reflected_w_m2", s.reflected_w_m2),
+                    ("angle_of_incidence_rad", s.angle_of_incidence_rad),
+                ] {
+                    if !value.is_finite() {
+                        return Err(PyValueError::new_err(format!(
+                            "solar override '{field}' at timestep {step}, surface index \
+                             {surface} is non-finite ({value}): a non-finite irradiance \
+                             silently poisons the solar gains in release builds (the \
+                             downstream finiteness screens are debug-only) — pass \
+                             finite values or omit the entry"
+                        )));
+                    }
+                }
+            }
+        }
         let mut dwelling = self.acquire()?;
         dwelling.environment.set_solar_override(solar_data);
         Ok(())
@@ -2458,7 +2511,14 @@ pub(crate) fn build_config(
         .as_ref()
         .and_then(|k| k.get_item("overrides").ok().flatten())
         .map(|obj| python_to_json_value(&obj))
-        .transpose()?;
+        .transpose()?
+        // Python `None` is the idiomatic "not provided" — translate it to
+        // the Rust contract's `Option::None` (no overrides) rather than
+        // `Some(Value::Null)`, which the dwelling-assembly validator
+        // rejects as a misconfigured non-object payload. A JSON `null`
+        // nested INSIDE a provided dict keeps its meaning (a null override
+        // field, rejected per-key downstream).
+        .and_then(|v| if v.is_null() { None } else { Some(v) });
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
@@ -2474,22 +2534,6 @@ pub(crate) fn build_config(
     })
 }
 
-fn dict_optional<T>(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<T>>
-where
-    T: for<'a, 'py> FromPyObject<'a, 'py>,
-{
-    let Some(value) = d.get_item(key)? else {
-        return Ok(None);
-    };
-    if value.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some(value.extract::<T>().map_err(|_| {
-            PyValueError::new_err(format!("invalid value for `{key}`"))
-        })?))
-    }
-}
-
 fn default_start() -> PyResult<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
         PyValueError::new_err(format!(
@@ -2497,49 +2541,6 @@ fn default_start() -> PyResult<DateTime<FixedOffset>> {
             e
         ))
     })
-}
-
-fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    if obj.is_none() {
-        return Ok(serde_json::Value::Null);
-    }
-    if let Ok(b) = obj.extract::<bool>() {
-        return Ok(serde_json::Value::Bool(b));
-    }
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(serde_json::json!(i));
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return Ok(serde_json::json!(f));
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(serde_json::Value::String(s));
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let items: Vec<serde_json::Value> = list
-            .iter()
-            .map(|item| python_to_json_value(&item))
-            .collect::<PyResult<_>>()?;
-        return Ok(serde_json::Value::Array(items));
-    }
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut map = serde_json::Map::new();
-        for (key, value) in dict.iter() {
-            let key_str: String = key
-                .extract()
-                .map_err(|_| PyValueError::new_err("overrides dict keys must be strings"))?;
-            map.insert(key_str, python_to_json_value(&value)?);
-        }
-        return Ok(serde_json::Value::Object(map));
-    }
-    let type_name = obj
-        .get_type()
-        .name()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|_| "?".to_string());
-    Err(PyValueError::new_err(format!(
-        "cannot convert Python object of type '{type_name}' to JSON for overrides",
-    )))
 }
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
@@ -2722,12 +2723,43 @@ fn py_to_config_value(value: &Bound<'_, PyAny>) -> PyResult<ConfigValue> {
         return Ok(ConfigValue::Bool(b));
     }
     if let Ok(f) = value.extract::<f64>() {
+        // Non-finite floats are rejected at this boundary — the same
+        // contract the equipment typed-config boundary (`from_typed`'s
+        // finite walk) and the shared Python→JSON converter enforce.
+        // Actor params feed BUILT-IN seeds (the IdealThermostat's
+        // setpoints, the EvDriver's mileage/event-ratio/seed), so an
+        // unguarded NaN arms a real actor with a poisoned value
+        // (`with_heating_setpoint(NaN)`), and the failure surfaces only
+        // mid-simulation: a telemetry panic in debug builds, a silently
+        // never-acting controller behind a `tracing::error!` line in
+        // release builds (the panic branch is cfg-gated). NaN comparisons
+        // are always false, so the actor's conditionals silently stop
+        // firing — the exact silent-substitution behavior the other
+        // boundaries reject.
+        if !f.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "actor parameter value ({f}) is non-finite: non-finite floats poison \
+                 the actor's simulation-time behavior (NaN comparisons are always \
+                 false, so its conditionals silently stop firing) — pass a finite \
+                 value or omit the parameter"
+            )));
+        }
         return Ok(ConfigValue::Float(f));
     }
     if let Ok(s) = value.extract::<String>() {
         return Ok(ConfigValue::Text(s));
     }
     if let Ok(arr) = value.extract::<Vec<f64>>() {
+        // The same guard for list values: a non-finite element poisons
+        // every consumer of the array parameter downstream (same class,
+        // one deeper).
+        if let Some((i, v)) = arr.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "actor parameter list value [{i}] ({v}) is non-finite: non-finite \
+                 floats poison the actor's simulation-time behavior — pass finite \
+                 values or omit the element"
+            )));
+        }
         return Ok(ConfigValue::FloatArray(arr));
     }
     Err(PyValueError::new_err(

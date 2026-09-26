@@ -595,7 +595,44 @@ impl Equipment for TanklessWH {
                 0.0
             },
         );
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the flows from the
+        // checkpointed `fuel_input_w`/`parasitic_electric_w`/
+        // `reactive_power_kvar` (the fuel-vs-electric arm the step itself
+        // selects on `fuel_type`), the mode re-derived by the step's own
+        // rule (`Heating.resolve_idle` on the restored nonzero flow).
+        // `CoreOutput::default()` (all fields `None`) violates the
+        // capability-presence rules for every declared capability — the
+        // restore contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts.
+        let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
+            power_w_to_kw(decoded.fuel_input_w).max(0.0)
+        } else {
+            power_w_to_kw(decoded.parasitic_electric_w).max(0.0)
+        };
+        let fuel_w_for_core = (self.fuel_type != FuelType::Electric).then_some(FuelPower {
+            fuel_type: self.fuel_type,
+            consumption_w: decoded.fuel_input_w.max(0.0),
+        });
+        let has_nonzero_flow = electric_kw_for_core > 0.0 || decoded.fuel_input_w > 0.0;
+        let restored_mode = OperatingMode::Heating.resolve_idle(has_nonzero_flow, None);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                fuel_w: fuel_w_for_core,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         Ok(())
     }
@@ -1042,6 +1079,28 @@ mod tests {
             0.0,
             "thermal_output_w must be zero when off"
         );
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// capabilities (ELECTRIC/REACTIVE/HAS_MODE, plus FUEL for gas units).
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let mut eq = TanklessWH::new(config());
+        eq.init(&config(), &env()).unwrap();
+
+        let mut p = PortSlots::default();
+        eq.step(&env(), Duration::from_secs(60), &mut p).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = TanklessWH::new(config());
+        restored.init(&config(), &env()).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a tankless WH checkpoint must restore a contract-valid output");
     }
 
     #[test]

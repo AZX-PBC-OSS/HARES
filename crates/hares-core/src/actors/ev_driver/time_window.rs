@@ -73,6 +73,7 @@ mod tests {
             current_minute: minute,
             next_departure_minute: None,
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         }
     }
 

@@ -909,7 +909,52 @@ impl Equipment for IdealHvac {
         self.load_fraction = decoded.load_fraction;
         self.last_sim_time = decoded.last_sim_time;
         self.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted values —
+        // mirroring the step's own literal. `ideal_capacity_w` (the
+        // persisted thermal output) and `current_target_c` (the
+        // HAS_SETPOINT-required setpoint) are both checkpointed; the
+        // electric fan power is not, so its contribution publishes as 0.
+        // The operating mode is derived from the persisted thermal sign
+        // exactly as the step derives it (capacity > 0 → heating, < 0 →
+        // cooling, 0 → Off). The pair is guard-consistent by
+        // construction: nonzero thermal → an active mode; zero thermal →
+        // `Off`. `CoreOutput::default()` (all fields `None`) violates the
+        // presence rules for every declared capability
+        // (ELECTRIC/HAS_MODE/THERMAL/HAS_SETPOINT/REACTIVE) — the restore
+        // contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts.
+        let restored_mode = match (decoded.mode, decoded.ideal_capacity_w) {
+            // The step's own mapping (mode × capacity sign, with the
+            // un-checkpointed fan power at 0): an active thermostat mode
+            // with zero delivered capacity resolves to `Standby` (on but
+            // nothing flowing) — not `Off` — so `update_control` (which
+            // reports the FSM mode) and the published output agree on the
+            // restore-instant state.
+            (ThermostatMode::Heating, c) if c > 0.0 => OperatingMode::Heating,
+            (ThermostatMode::Cooling, c) if c < 0.0 => OperatingMode::Cooling,
+            (ThermostatMode::Deadband, c) if c > 0.0 => OperatingMode::Heating,
+            (ThermostatMode::Deadband, c) if c < 0.0 => OperatingMode::Cooling,
+            (ThermostatMode::Deadband, _) => OperatingMode::Off,
+            (_, 0.0) => OperatingMode::Standby,
+            (_, _) => OperatingMode::Standby,
+        };
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(decoded.ideal_capacity_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: Some(decoded.current_target_c),
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -1525,6 +1570,39 @@ mod tests {
         restored.load_state(&state).unwrap();
 
         assert!((restored.ideal_capacity_w - 4200.0).abs() < 1e-9);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// ELECTRIC/HAS_MODE/THERMAL/HAS_SETPOINT/REACTIVE capabilities.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 60, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = 4200.0;
+        // One real step so the saved output is a step-published pair.
+        let mut slots = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = IdealHvac::new(cfg);
+        restored.init(&config("IH"), &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("an ideal HVAC checkpoint must restore a contract-valid output");
     }
 
     #[test]

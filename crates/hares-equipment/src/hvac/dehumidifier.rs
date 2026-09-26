@@ -828,6 +828,15 @@ impl Equipment for Dehumidifier {
         } else {
             OperatingMode::Off
         };
+        // The checkpoint carries no committed electric power (only the
+        // `is_on` dispatch and the RH control state), so the restore
+        // publishes zero flow — and the mode must be resolved to the
+        // zero-flow truth the same way (active → `Standby`, which the
+        // mode/flow guard does not count as active), keeping
+        // `update_control` (which reports `self.operating_mode`) and the
+        // published output on the same restore-instant state. The next
+        // step re-derives the mode from the restored `is_on` dispatch.
+        self.operating_mode = self.operating_mode.resolve_idle(false, None);
         self.write_step_telemetry(PerformanceSnapshot {
             water_removal_l_day: self.telemetry.get(tk::WATER_REMOVAL_L_DAY).unwrap_or(0.0),
             electric_power_w: self.telemetry.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0),
@@ -838,7 +847,36 @@ impl Equipment for Dehumidifier {
             rtf: 0.0,
             parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
         });
-        self.core_output = CoreOutput::default();
+        self.core_output = CoreOutput {
+            // Rebuild the restore-instant output from the persisted state
+            // — the zero-flow truth: the checkpoint does not carry the
+            // committed electric power (only the `is_on` dispatch and the
+            // RH control state), so a running checkpoint cannot
+            // consistently publish its flow, and an active mode (`Cooling`)
+            // with zero flow is a Rule 1 violation. Publish `Off` with zero
+            // flows — the honest restore-instant state; the next step
+            // re-derives the mode from the restored `is_on` dispatch and
+            // recomputes the flow. `CoreOutput::default()` (all fields
+            // `None`) violates the presence rules for every declared
+            // capability (ELECTRIC/HAS_MODE/REACTIVE) — the restore
+            // contract is that a checkpoint restores a state
+            // `validate_core_contract` accepts.
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -1319,6 +1357,33 @@ mod tests {
         approx_eq(slots.electrical.load_power_w, electric_power_w);
         approx_eq(slots.thermal[0].sensible_gain_w, sensible_gain_w);
         approx_eq(slots.thermal[0].latent_gain_w, -latent_removal_w);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// ELECTRIC/HAS_MODE/REACTIVE capabilities. The dehumidifier's
+    /// checkpoint carries no committed power, so the restore publishes the
+    /// zero-flow truth (mode `Off`) — the same face the fix implements.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.62)).unwrap();
+
+        eq.update_control(&env(0.62));
+        let mut slots = ports();
+        eq.step(&env(0.62), Duration::from_secs(60), &mut slots)
+            .unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = Dehumidifier::new(cfg);
+        restored.init(&config(), &env(0.62)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a dehumidifier checkpoint must restore a contract-valid output");
     }
 
     #[test]

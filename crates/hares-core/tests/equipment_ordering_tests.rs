@@ -23,9 +23,9 @@ use hares_core::Dwelling;
 use hares_core::dwelling::stage_rank;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
-    ControlCapabilities, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
+    ControlCapabilities, CoreCapabilities, CoreOutput, CoreState, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortDeclaration, PortSlots, Telemetry,
+    PortDeclaration, PortSlots, Soc, Telemetry,
 };
 
 fn assert_strictly_before(earlier: ExecutionStage, later: ExecutionStage) {
@@ -284,6 +284,11 @@ struct StepOrderSpy {
 
 impl StepOrderSpy {
     fn new(name: &str, stage: ExecutionStage, log: StepOrderLog, end_use: EndUse) -> Self {
+        // A storage-end-use spy mirrors the real Battery it stands in for:
+        // it declares HAS_SOC and publishes SOC at every step, because the
+        // dwelling's soc_bounds monitor fails loudly on an absent SOC for
+        // the BATTERY/EV population. Non-storage spies stay SOC-less.
+        let is_storage = end_use == EndUse::BATTERY || end_use == EndUse::EV;
         Self {
             descriptor: EquipmentDescriptor {
                 id: next_equipment_id(),
@@ -294,11 +299,21 @@ impl StepOrderSpy {
                 fuel: FuelType::Electric,
                 stage,
                 control_capabilities: ControlCapabilities::empty(),
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: if is_storage {
+                    CoreCapabilities::HAS_SOC
+                } else {
+                    CoreCapabilities::empty()
+                },
                 telemetry_fields: vec![],
                 zone_type: None,
             },
-            core_output: CoreOutput::default(),
+            core_output: CoreOutput {
+                state: CoreState {
+                    soc: is_storage.then(|| Soc::try_from(0.5).expect("0.5 is within [0, 1]")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             telemetry: Telemetry::with_capacity(0),
             log,
         }

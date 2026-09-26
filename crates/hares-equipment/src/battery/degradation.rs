@@ -1,5 +1,19 @@
-//! Battery degradation model (Smith et al. 2017, IEEE 7963578) and rainflow cycle counter.
+//! Battery degradation model (Smith et al. 2017, IEEE 7963578 / NREL
+//! CP-5400-67102, "Life Prediction Model for Grid-Connected Li-ion Battery
+//! Energy Storage System", 2017 American Control Conference) and rainflow
+//! cycle counter.
+//!
+//! Provenance of the constants: every value was verified against BOTH the
+//! NREL preprint of the paper and NREL's own reference implementation of
+//! it — SSC `shared/lib_battery_lifetime_nmc.{h,cpp}`, the model EnergyPlus
+//! reaches through its SSC delegation. The PDF's inner-fraction minus
+//! glyphs are unmapped in every text extractor, so the paper alone cannot
+//! settle the sign conventions; the reference implementation is decisive
+//! and it confirms α_b1 = −1 (the physically-correct direction: a
+//! more-lithiated anode ages faster) while fixing b3_ref and θ as positive
+//! and b0 = 1.07 — the constants below match it exactly.
 
+use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 
 use super::SECONDS_PER_DAY;
@@ -103,13 +117,32 @@ impl RainflowCounter {
         self.cycle_count
     }
 
-    /// Weighted sum of squared DOD values accumulated today: Σ(count_i × DOD_i²).
-    /// Used by the Smith 2017 cycle-aging mechanism (b2 term).
-    pub(crate) fn sum_squared_dod_daily(&self) -> f64 {
+    /// Weighted DOD-power sum accumulated today: Σ(count_i × DOD_i^beta).
+    /// Used by the degradation model's cycle terms — beta = 2 for the Li
+    /// branch's Miner-rule damage (Smith 2017 Eq. 4's b2·N weighting),
+    /// beta = βc2 = 4.54 for the negative-electrode site-loss branch
+    /// (Eq. 11).
+    pub(crate) fn sum_dod_pow_daily(&self, beta: f64) -> f64 {
         self.daily_cycle_dods
             .iter()
-            .map(|&(range, count)| count * range * range)
+            .map(|&(range, count)| {
+                // Exact multiply for the integer-power case (bit-identical
+                // to the pre-generalization Σ count·range² the Li branch
+                // has always used); powf for the fractional βc2 = 4.54.
+                let dod_pow = if beta == 2.0 {
+                    range * range
+                } else {
+                    range.powf(beta)
+                };
+                count * dod_pow
+            })
             .sum()
+    }
+
+    /// Σ(count_i × DOD_i²) — the Li branch's cycle-damage sum (`beta = 2`
+    /// specialization of [`Self::sum_dod_pow_daily`]).
+    pub(crate) fn sum_squared_dod_daily(&self) -> f64 {
+        self.sum_dod_pow_daily(2.0)
     }
 
     pub(crate) fn reset_daily(&mut self) {
@@ -124,44 +157,111 @@ impl RainflowCounter {
 // Degradation model (Smith et al. 2017, IEEE 7963578)
 // ---------------------------------------------------------------------------
 
-/// Physical constants shared by the degradation model.
+/// Model coefficients — Smith 2017 (NREL/CP-5400-67102, Eq. 4–11 and the
+/// fitted-parameter list), verified against NREL's reference implementation
+/// of the paper (SSC `lib_battery_lifetime_nmc.{h,cpp}`).
 mod deg_const {
+    // Reference constants — Smith 2017 §II: "common reference constants
+    // Tref = 298.15 K, Vref = 3.7 V, and U-,ref = 0.08 V".
     pub const R_GAS: f64 = 8.314; // J/(K·mol)
     pub const F_FARADAY: f64 = 96_485.0; // A·s/mol
     pub const T_REF: f64 = 298.15; // K (25 °C)
     pub const V_REF: f64 = 3.7; // V reference OCV
     pub const U_NEG_REF: f64 = 0.08; // V reference negative electrode potential
 
-    // Mechanism 1: Calendar / SEI growth (sqrt-of-time)
+    // Li branch, mechanism 1 — calendar SEI growth (sqrt-of-time, Eq. 5).
+    // Fitted list: b1,ref = 3.503e-3 day^-0.5, Ea,b1 = 35392 J/mol,
+    // γ = 2.472, βb1 = 2.157. αb1 = −1 per SSC (`alpha_a_b1 = -1`); also
+    // the physically-correct direction: a more-lithiated anode (lower
+    // U_neg) ages faster, which exp(−αF/R·(U/T − Uref/Tref)) gives only
+    // for α < 0.
     pub const B1_REF: f64 = 3.503e-3; // day^-0.5
     pub const EA_B1: f64 = 35_392.0; // J/mol
     pub const ALPHA_B1: f64 = -1.0; // Tafel symmetry factor
     pub const BETA_B1: f64 = 2.157; // DOD power-law exponent
     pub const GAMMA_B1: f64 = 2.472; // DOD coupling coefficient
 
-    // Mechanism 2: Cycle aging
+    // Li branch, mechanism 2 — cycle aging (Eq. 4's −b2·N, b2 from Eq. 6).
+    // Fitted list: b2,ref = 1.541e-5, Ea,b2 = −42800 J/mol
+    // (negative ⟹ faster at lower T).
     pub const B2_REF: f64 = 1.541e-5; // cycle^-1
     pub const EA_B2: f64 = -42_800.0; // J/mol (negative ⟹ faster at lower T)
 
-    // Mechanism 3: BOL transient / early-life lithium loss
-    pub const B3_REF: f64 = -2.805e-2; // dimensionless
+    // Li branch, mechanism 3 — break-in Li loss at BOL (Eq. 7): a small Li
+    // loss growing over the first ~τ days and deepening with DOD — Eq. 4's
+    // −b3(1−exp(−t/τ)). Fitted list: b3,ref = 2.805e-2, Ea,b3 = 42800
+    // J/mol, αb3 = 0.0066, τb3 = 5 days, θ = 0.135 (both positive per SSC:
+    // `b3_ref = 0.02805`, `theta = 0.135`).
+    pub const B3_REF: f64 = 2.805e-2; // dimensionless
     pub const EA_B3: f64 = 42_800.0; // J/mol
     pub const ALPHA_B3: f64 = 0.0066; // Tafel factor for V_oc
     pub const TAU_B3: f64 = 5.0; // days
-    pub const THETA: f64 = -0.135; // DOD coupling
+    pub const THETA: f64 = 0.135; // DOD coupling
 
-    // Initial lithium inventory (OCHRE value)
-    pub const B0: f64 = 1.0;
+    // Li branch, BOL intercept — fitted list: b0 = 1.07 (the sqrt-time
+    // fit's extrapolated t=0 intercept), scaled by d0,ref/Ah,ref =
+    // 75.075 Ah / 75 Ah (SSC: d0_ref, Ah_ref — the reference cell's
+    // measured-over-nameplate ratio). Eq. 3's temperature dependence of d0
+    // (Ea,d0,1 = 4126, Ea,d0,2 = 9.752e6 J/mol) is NOT applied here: the
+    // stationary Battery already carries that exact Arrhenius as its
+    // `CapacityDerateModel` (battery/mod.rs), so applying it in both layers
+    // would double-count; this model uses the T-reference ratio and each
+    // equipment applies its own reversible temperature derate.
+    pub const B0: f64 = 1.07;
+    /// d0,ref / Ah,ref — the reference cell's measured-over-nameplate
+    /// capacity ratio (SSC: 75.075 Ah / 75 Ah).
+    pub const D0_REL: f64 = 75.075 / 75.0;
+
+    // Negative-electrode site-loss branch (Eq. 8–11): active sites lost per
+    // cycle, inversely proportional to the remaining sites (the graphite
+    // anode's ~8 % volume change per full discharge stresses remaining
+    // sites more as they are lost). SSC fitted values: c0,ref = 75.675 Ah,
+    // c2,ref = 5.226e-5 Ah/cycle (Ea,c2 = −48260 J/mol), βc2 = 4.54 —
+    // taken from **current SSC trunk**
+    // (github.com/NREL/ssc@develop,
+    // `lib_battery_lifetime_nmc.h`), which carries the rainflow cycle
+    // model and these fitted values. The SSC copy vendored under
+    // `vendors/EnergyPlus/third_party/ssc` is an OLDER revision (c0,ref
+    // = 75.64, c2,ref = 0.0039193, pre-rainflow daily formulation) —
+    // verifying against the vendored copy will show a mismatch; trunk
+    // is the lineage the ticket names as decisive.
+    // The branch's capacity LEVEL is evaluated at its T-reference ratio
+    // (c0,ref/Ah,ref): SSC scales the level with c0's own Arrhenius
+    // (Ea,c0 = 2224 J/mol), but HARES factors all reversible
+    // temperature-capacity scaling out of the degradation fade — the
+    // stationary Battery already carries the NREL d0 Arrhenius (Ea,d0,1 =
+    // 4126, Ea,d0,2 = 9.752e6 J/mol) as its `CapacityDerateModel`, and
+    // applying a second scaling inside the fade would double-count. The
+    // divergence is bounded and reversible: at 15 °C SSC's level scale is
+    // arr_c0 = 0.963 vs the d0 Arrhenius 0.943 — a ≤2 % difference in the
+    // BOL regime where the negative-electrode branch binds. The DAMAGE
+    // path (c2's Arrhenius, βc2 weighting) is unaffected — it is
+    // temperature-scaled exactly as SSC scales it.
+    pub const C0_REF_AH: f64 = 75.675; // Ah — initial negative-site capacity
+    pub const C2_REF_AH_PER_CYCLE: f64 = 5.226e-5; // Ah/cycle
+    pub const EA_C2: f64 = -48_260.0; // J/mol (negative ⟹ faster at lower T)
+    pub const BETA_C2: f64 = 4.54; // DOD power-law exponent
+    /// Nameplate capacity of the Smith 2017 reference cell (SSC: Ah_ref).
+    pub const AH_REF: f64 = 75.0;
 }
 
-/// Full Smith 2017 (IEEE 7963578) three-mechanism battery degradation model.
+/// Full Smith 2017 (IEEE 7963578 / NREL CP-5400-67102) battery degradation
+/// model: the Li-limiting branch (three loss mechanisms, Eq. 4–7) and the
+/// negative-electrode site-loss branch (Eq. 8–11), with the usable
+/// capacity fraction `min(QLi, Qneg)` per Eq. 1.
 ///
-/// Three lithium-loss mechanisms:
+/// Li-limiting mechanisms (per-unit losses accumulated against the BOL
+/// intercept):
 ///   `q_li1` -- calendar SEI growth (sqrt-of-time, Arrhenius + Tafel + DOD)
-///   `q_li2` -- cycle-induced lithium loss (Arrhenius + rainflow DOD² sum)
-///   `q_li3` -- beginning-of-life transient (exponential decay)
+///   `q_li2` -- cycle-induced lithium loss (Arrhenius + rainflow DOD damage)
+///   `q_li3` -- break-in Li loss at BOL (exponential relaxation, Eq. 4's
+///              −b3(1−exp(−t/τ)): a small LOSS growing over the first ~τ
+///              days, deepening with DOD)
 ///
-/// Capacity fade = 1 − (b0 − q_li1 − q_li2 − q_li3).clamp(0, ∞)
+/// Negative-electrode branch: site capacity lost per cycle inversely
+/// proportional to remaining sites (`dq_neg_ah`, Ah — the graphite anode's
+/// volume-change fatigue), with the same Arrhenius-in-time accumulation
+/// pattern the Li branch uses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct DegradationState {
     // ---- Per-timestep accumulators (reset each day) ----
@@ -169,8 +269,12 @@ pub(crate) struct DegradationState {
     pub(crate) b1_accum: f64,
     /// Σ exp(−Ea_b2/R · (1/T − 1/T_ref)) · dt_day
     b2_accum: f64,
-    /// Σ b3_ref · exp(−Ea_b3/R · (1/T − 1/T_ref)) · exp(α_b3·F/R · (V_oc/T − V_ref/T_ref)) · (1 + θ·DOD) · dt_day
+    /// Σ b3_ref · arr_b3 · tafel_b3 · (1 + θ·DOD_max) · dt_day
     b3_accum: f64,
+    /// Σ c2_ref · exp(−Ea_c2/R · (1/T − 1/T_ref)) · dt_day — the site-loss
+    /// damage-rate integral (the branch's capacity level is evaluated at
+    /// its T-reference ratio; see the `deg_const` notes).
+    c2_accum: f64,
 
     // ---- Daily temperature tracking (reset each day) ----
     // Smith 2017 Eq.4: the Tafel correction for mechanism 1 (tafel_b1) is applied
@@ -185,7 +289,13 @@ pub(crate) struct DegradationState {
     // ---- Cumulative lithium losses ----
     pub(crate) q_li1: f64,
     pub(crate) q_li2: f64,
+    /// Break-in Li loss at BOL (Eq. 4's b3 term, a positive loss relaxing
+    /// toward the running b3 integral over ~τ days).
     pub(crate) q_li3: f64,
+
+    // ---- Negative-electrode site-loss branch (Eq. 8–11) ----
+    /// Cumulative negative-electrode site loss [Ah].
+    pub(crate) dq_neg_ah: f64,
 
     // ---- Day-level tracking ----
     /// Age of the cell in whole days (incremented at each midnight update).
@@ -198,8 +308,12 @@ pub(crate) struct DegradationState {
     soc_min_today: f64,
     /// SOC at the trough point when max DOD was reached (used for U_neg Tafel correction).
     soc_at_max_dod: f64,
-    /// Computed capacity fade fraction [0..1].
-    capacity_fade: f64,
+    /// Computed capacity fade fraction — 1 − min(QLi, Qneg) per Eq. 1,
+    /// floored at a 0 usable-capacity lower bound. Negative values mean
+    /// the modeled capacity is (transiently) above the nameplate rating —
+    /// the reference model's BOL state (b0 = 1.07 intercept, capped by the
+    /// negative-electrode branch at ≈ +0.9 %).
+    pub(crate) capacity_fade: f64,
 }
 
 impl Default for DegradationState {
@@ -208,11 +322,13 @@ impl Default for DegradationState {
             b1_accum: 0.0,
             b2_accum: 0.0,
             b3_accum: 0.0,
+            c2_accum: 0.0,
             sum_cell_temp_k: 0.0,
             n_temp_samples: 0,
             q_li1: 0.0,
             q_li2: 0.0,
             q_li3: 0.0,
+            dq_neg_ah: 0.0,
             day_age: 0,
             dod_max_today: 0.0,
             soc_max_today: 0.5,
@@ -249,8 +365,53 @@ impl DegradationState {
     /// `cell_temp_k` -- cell temperature in kelvin
     /// `v_oc`        -- cell open-circuit voltage at current SOC (V)
     /// `soc`         -- current state of charge [0..1]
-    pub(crate) fn accumulate(&mut self, dt_s: f64, cell_temp_k: f64, v_oc: f64, soc: f64) {
+    ///
+    /// # Cell-temperature domain guard
+    ///
+    /// Two layers, stated separately:
+    ///
+    /// 1. **Error bounds** — [−100 °C, +130 °C]. Outside this envelope no
+    ///    simulated Li-ion pack can exist (below −100 °C the electrolyte has
+    ///    frozen solid; above ~130 °C the cell has entered thermal runaway
+    ///    and ceased to exist as a battery), so a temperature outside it is
+    ///    a broken thermal model upstream, and it errors loudly rather than
+    ///    being fed to the fit. An EV model that attributes charger
+    ///    conversion losses to the pack produces 165–281 °C pack temperatures
+    ///    — this guard is the defense-in-depth that makes that class fail the
+    ///    simulation instead of silently returning negative capacity fade.
+    /// 2. **Validated domain** — Smith 2017's aging tests span 0 °C to 55 °C
+    ///    (NREL/CP-5400-67102 Table I: 0, 23, 30, 45, 55 °C conditions).
+    ///    HARES deliberately operates below 0 °C in cold climates — erroring
+    ///    there would refuse to simulate the cold-climate regime residential
+    ///    load simulation must cover. The extrapolation is owned, not silent:
+    ///    with the negative `EA_B2` the cycle term runs ≈8× the 25 °C rate at
+    ///    −7 °C (≈32× at −25 °C), while the calendar and BOL terms slow down;
+    ///    preconditioning moves plugged-in packs into the validated domain
+    ///    for the charging hours that dominate the aging arithmetic.
+    pub(crate) fn accumulate(
+        &mut self,
+        dt_s: f64,
+        cell_temp_k: f64,
+        v_oc: f64,
+        soc: f64,
+    ) -> Result<(), HaresError> {
         use deg_const::*;
+
+        const CELL_TEMP_ERROR_MIN_K: f64 = 173.15; // −100 °C: frozen electrolyte
+        const CELL_TEMP_ERROR_MAX_K: f64 = 403.15; // +130 °C: thermal runaway
+        if !(cell_temp_k.is_finite()
+            && (CELL_TEMP_ERROR_MIN_K..=CELL_TEMP_ERROR_MAX_K).contains(&cell_temp_k))
+        {
+            return Err(HaresError::Equipment(format!(
+                "battery degradation called with cell temperature {} K ({} °C) \
+                 outside the physically implausible envelope [-100, +130] °C; \
+                 the upstream thermal model is broken (e.g. conversion losses \
+                 attributed to the pack as heat)",
+                cell_temp_k,
+                cell_temp_k - 273.15
+            )));
+        }
+
         let dt_day = dt_s / SECONDS_PER_DAY;
         let t = cell_temp_k;
         let inv_diff = 1.0 / t - 1.0 / T_REF;
@@ -283,10 +444,19 @@ impl DegradationState {
         // Mechanism 2: cycle (Arrhenius temperature factor)
         self.b2_accum += (-(EA_B2 / R_GAS) * inv_diff).exp() * dt_day;
 
-        // Mechanism 3: BOL transient -- use running dod_max_today as best estimate
+        // Mechanism 3: BOL break-in loss -- use running dod_max_today as best estimate
         let tafel_b3 = ((ALPHA_B3 * F_FARADAY / R_GAS) * (v_oc / t - V_REF / T_REF)).exp();
         self.b3_accum +=
             B3_REF * (-(EA_B3 / R_GAS) * inv_diff).exp() * tafel_b3 * (1.0 + THETA * dod) * dt_day;
+
+        // Negative-electrode branch (Eq. 8-11): the site-loss damage-rate
+        // integral (c2 carries its reference coefficient, exactly as b1
+        // does). The branch's capacity level carries no temperature
+        // integral — it is evaluated at the T-reference ratio in
+        // `update_daily` (see the `deg_const` notes on the factored
+        // reversible-temperature architecture).
+        self.c2_accum += C2_REF_AH_PER_CYCLE * (-(EA_C2 / R_GAS) * inv_diff).exp() * dt_day;
+        Ok(())
     }
 
     /// Reset daily tracking fields at the start of each new day.
@@ -323,18 +493,32 @@ impl DegradationState {
     /// computed internally from the running mean accumulated by `accumulate()`,
     /// eliminating the previous bug where the caller could pass the
     /// first-of-new-day temperature.
-    pub(crate) fn update_daily(&mut self, u_neg_table: &UNegTable, sum_squared_dod: f64) {
+    /// Called once per day (at midnight) to compute the day's loss
+    /// increments and update the cumulative capacity fade — the Li branch
+    /// (Eq. 4–7) and the negative-electrode branch (Eq. 8–11), usable
+    /// capacity = min(QLi, Qneg) per Eq. 1.
+    ///
+    /// `u_neg_table` -- negative electrode potential lookup table
+    /// `rainflow`    -- the cycle counter; the DOD-damage sums are computed
+    ///                 here so callers cannot mix up the two betas
+    ///                 (2 for the Li branch, βc2 for the site-loss branch).
+    ///
+    /// The representative daily cell temperature for the Tafel correction is
+    /// computed internally from the running mean accumulated by `accumulate()`,
+    /// eliminating the previous bug where the caller could pass the
+    /// first-of-new-day temperature.
+    pub(crate) fn update_daily(&mut self, u_neg_table: &UNegTable, rainflow: &RainflowCounter) {
         use deg_const::*;
 
         let t_day = self.daily_mean_temp_k();
         let dod_max = self.dod_max_today;
 
-        // ---- Step 1: Tafel and DOD corrections for mechanism 1 ----
+        // ---- Li branch, mechanism 1: Tafel and DOD corrections ----
         let u_neg = u_neg_table.potential_at_soc(self.soc_at_max_dod);
         let tafel_b1 = ((ALPHA_B1 * F_FARADAY / R_GAS) * (u_neg / t_day - U_NEG_REF / T_REF)).exp();
         let b1_eff = self.b1_accum * tafel_b1 * (GAMMA_B1 * dod_max.powf(BETA_B1)).exp();
 
-        // ---- Step 2: Three lithium-loss increments ----
+        // ---- Li branch: the day's loss increments ----
 
         // Mechanism 1: calendar SEI (sqrt-of-time progression)
         let dq_li1 = if self.q_li1.abs() < 1e-5 && self.day_age > 0 {
@@ -346,7 +530,8 @@ impl DegradationState {
             0.0
         };
 
-        // ── Mechanism 2: cycle aging -- Smith et al. 2017, IEEE 7963578 Eq.13 ──
+        // ── Mechanism 2: cycle aging -- Smith 2017 Eq. 4's −b2·N, b2 from
+        // Eq. 6, with the cycle count DOD-weighted per Miner's rule ──
         //
         // dq_li2 = b2_ref × Σ_t[arr(T_t) × dt_t] × √Σ_i[count_i × DOD_i²]
         //
@@ -357,37 +542,53 @@ impl DegradationState {
         //       cycle contribute identical fade, violating Miner's rule.
         //   HARES: accumulates Arrhenius every timestep (finer time resolution),
         //     then weights cycle damage by Σ(count × DOD²) per Miner's linear
-        //     damage rule (fatigue damage ∝ stress amplitude squared).
-        //
-        // The DOD² weighting matches Smith 2017 Eq.13 and is standard in
-        // electrochemical cycle-life models (Schmalstieg 2014, Xu 2018).
-        let dq_li2 = B2_REF * self.b2_accum * sum_squared_dod.sqrt();
+        //     damage rule (fatigue damage ∝ stress amplitude squared) — the
+        //     standard electrochemical cycle-life aggregation (Schmalstieg
+        //     2014, Xu 2018). NREL's SSC aggregates this term differently
+        //     again (b2_ref·b2²·√Σ(DOD·count)²); the three forms differ only
+        //     in the damage aggregation, and HARES's is the documented
+        //     deliberate choice.
+        let dq_li2 = B2_REF * self.b2_accum * rainflow.sum_squared_dod_daily().sqrt();
 
-        // Mechanism 3: BOL transient -- exponential relaxation of q_li3 toward b3_accum.
-        // b3_accum < 0 (B3_REF < 0), so q_li3 decreases toward a negative equilibrium.
-        // A negative q_li3 subtracts from the capacity loss sum, producing a transient
-        // capacity boost at beginning-of-life (Smith 2017, Eq.15).
-        // Use .min(0.0) so the step is always negative (moving toward negative b3_accum).
-        let dq_li3 = (self.b3_accum - self.q_li3).min(0.0) / TAU_B3;
+        // Mechanism 3: break-in Li loss -- exponential relaxation of the
+        // loss toward the running b3 integral (Eq. 4's −b3(1−exp(−t/τ))).
+        // The step is non-negative: a loss that accumulates over the first
+        // ~τ days and stops once it reaches the integral — never a reversal.
+        let dq_li3 = (self.b3_accum - self.q_li3).max(0.0) / TAU_B3;
 
-        // ---- Step 3: Update cumulative lithium losses ----
         self.q_li1 += dq_li1;
         self.q_li2 += dq_li2;
         self.q_li3 += dq_li3;
 
-        // Prevent q_li3 from overshooting past b3_accum equilibrium (OCHRE floor).
-        if self.q_li3 < self.b3_accum {
-            self.q_li3 = self.b3_accum;
-        }
+        // Li-branch usable capacity: d0,ref/Ah,ref × (b0 − Σ losses).
+        let q_li_rel = D0_REL * (B0 - self.q_li1 - self.q_li2 - self.q_li3);
 
-        // ---- Step 4: Capacity fade fraction ----
-        let remaining = (B0 - self.q_li1 - self.q_li2 - self.q_li3).max(0.0);
-        self.capacity_fade = 1.0 - remaining;
+        // ---- Negative-electrode branch (Eq. 8–11) ----
+        // Site capacity lost per cycle, inversely proportional to the
+        // remaining sites (the runaway term c0/(c0 − dq): as sites are lost,
+        // the survivors are stressed more). DOD-weighted with βc2.
+        let c2_ah = self.c2_accum * rainflow.sum_dod_pow_daily(BETA_C2).sqrt();
+        let dq_neg = if self.dq_neg_ah < C0_REF_AH {
+            c2_ah * C0_REF_AH / (C0_REF_AH - self.dq_neg_ah)
+        } else {
+            0.0
+        };
+        self.dq_neg_ah += dq_neg;
+        // The branch's capacity level at its T-reference ratio (SSC's
+        // c0,ref/Ah,ref — see the `deg_const` notes for why the
+        // temperature scaling is factored out to the equipment layer),
+        // times the remaining-site fraction.
+        let q_neg_rel = (C0_REF_AH / AH_REF) * (1.0 - self.dq_neg_ah);
+
+        // ---- Usable capacity: min(QLi, Qneg) per Eq. 1, floored at 0 ----
+        let q_relative = q_li_rel.min(q_neg_rel).max(0.0);
+        self.capacity_fade = 1.0 - q_relative;
 
         // ---- Reset accumulators for next day ----
         self.b1_accum = 0.0;
         self.b2_accum = 0.0;
         self.b3_accum = 0.0;
+        self.c2_accum = 0.0;
         self.sum_cell_temp_k = 0.0;
         self.n_temp_samples = 0;
         self.day_age += 1;
@@ -592,15 +793,20 @@ mod tests {
         let u_neg = make_u_neg_table();
         let mut ds = DegradationState::default();
         let dt_s = SECONDS_PER_DAY;
+        let rf = RainflowCounter::default();
         for _ in 0..days {
-            ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
-            ds.update_daily(&u_neg, 0.0);
+            ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
+            ds.update_daily(&u_neg, &rf);
             ds.reset_day_tracking(soc);
         }
         ds
     }
 
-    /// Helper: run N days with a fixed sum_squared_dod per day.
+    /// Helper: run N days with a fixed DOD-damage sum per day: one
+    /// half-cycle of range (2·sum_squared_dod)^½, whose 0.5·range² damage
+    /// equals `sum_squared_dod_per_day`. The same counter is presented
+    /// every day (its daily pairs are not reset), so both cycle branches
+    /// (Li β=2 and negative-electrode βc2) see consistent daily damage.
     fn run_cycling_aging(
         days: u32,
         cell_temp_k: f64,
@@ -611,9 +817,14 @@ mod tests {
         let u_neg = make_u_neg_table();
         let mut ds = DegradationState::default();
         let dt_s = SECONDS_PER_DAY;
+        let mut rf = RainflowCounter::default();
+        let r = (2.0 * sum_squared_dod_per_day).sqrt();
+        rf.push(0.2);
+        rf.push(0.2 + r);
+        rf.push(0.2); // completes the reversal → half-cycle of range r
         for _ in 0..days {
-            ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
-            ds.update_daily(&u_neg, sum_squared_dod_per_day);
+            ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
+            ds.update_daily(&u_neg, &rf);
             ds.reset_day_tracking(soc);
         }
         ds
@@ -632,7 +843,7 @@ mod tests {
     fn arrhenius_factor_at_reference_temperature_is_unity() {
         let mut ds = DegradationState::default();
         let dt_s = SECONDS_PER_DAY;
-        ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+        ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
 
         // b1_accum = B1_REF * arr(T_REF) * dt_day = B1_REF * 1.0 * 1.0
         let expected_b1 = B1_REF;
@@ -716,25 +927,39 @@ mod tests {
         );
     }
 
-    /// Smith 2017 Eq. 5: cycle aging with 1 full cycle/day (DOD=1.0) at 25C.
-    /// dq_li2 = B2_REF * b2_accum * sqrt(sum_sq_dod)
-    /// At T_REF: b2_accum = 1.0/day, sum_sq_dod = 1.0 (one cycle, DOD=1)
-    /// After N days: q_li2 ~ B2_REF * N * 1.0 = 1.541e-5 * N
-    /// After 1000 days: q_li2 ~ 0.01541 (1.541%)
+    /// Smith 2017 Eq. 4–6 and 8–11: cycle aging with 1 full cycle/day
+    /// (DOD=1.0) at 25C. The Li branch's cycle loss is
+    /// dq_li2 = B2_REF·b2_accum·√Σ(count·DOD²) → after 1000 days ≈ 1.541 %;
+    /// the negative-electrode branch's site loss accumulates in Ah on top
+    /// (deep daily cycling is exactly the regime that branch exists for —
+    /// the graphite anode's fatigue). Both are asserted on the mechanism
+    /// state directly: through `fade` the min(QLi, Qneg) structure mixes
+    /// the branches.
     #[test]
     fn cycling_aging_single_cycle_per_day() {
         let ds = run_cycling_aging(1000, T_REF, V_REF, 0.5, 1.0);
         let ds_cal = run_calendar_aging(1000, T_REF, V_REF, 0.5);
 
-        let cycling_contribution = ds.capacity_fade_fraction() - ds_cal.capacity_fade_fraction();
-        let expected_cycling = B2_REF * 1000.0;
+        // Li-branch cycle loss: the Miner-rule arithmetic, exact.
+        let expected_q_li2 = B2_REF * 1000.0;
         assert!(
-            (cycling_contribution - expected_cycling).abs() < 0.005,
-            "Cycling fade contribution after 1000d should be ~{:.5} ({:.3}%), got {:.5} ({:.3}%)",
-            expected_cycling,
-            expected_cycling * 100.0,
-            cycling_contribution,
-            cycling_contribution * 100.0,
+            (ds.q_li2 - expected_q_li2).abs() < 1e-9,
+            "q_li2 after 1000 days of 1-cycle/day should be {expected_q_li2:.6}, got {:.6}",
+            ds.q_li2
+        );
+        assert_eq!(ds_cal.q_li2, 0.0, "no cycling, no Li cycle loss");
+
+        // Negative-electrode site loss: present only in the cycling run,
+        // accumulating in Ah (the runaway c0/(c0−dq) factor keeps the step
+        // essentially at c2·√Σ(count·DOD^βc2) per day here).
+        assert_eq!(ds_cal.dq_neg_ah, 0.0);
+        let r = 2.0_f64.sqrt(); // the helper's half-cycle range for sum_sq = 1.0
+        let c2_damage_per_day = 0.5 * r.powf(BETA_C2);
+        let expected_dq_neg = 1000.0 * C2_REF_AH_PER_CYCLE * c2_damage_per_day.sqrt();
+        assert!(
+            (ds.dq_neg_ah - expected_dq_neg).abs() < 0.05 * expected_dq_neg,
+            "dq_neg after 1000 days should be ~{expected_dq_neg:.6} Ah, got {:.6}",
+            ds.dq_neg_ah
         );
     }
 
@@ -749,8 +974,8 @@ mod tests {
 
         let mut prev_q_li1 = 0.0_f64;
         for day in 0..3 {
-            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, 0.0);
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+            ds.update_daily(&u_neg, &RainflowCounter::default());
 
             assert_eq!(
                 ds.day_age,
@@ -803,8 +1028,8 @@ mod tests {
         let mut prev_q_li1 = 0.0_f64;
 
         for day in 0..10_u32 {
-            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, 0.0);
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+            ds.update_daily(&u_neg, &RainflowCounter::default());
             let q_li1 = ds.q_li1;
             assert!(
                 q_li1 >= prev_q_li1,
@@ -818,11 +1043,20 @@ mod tests {
             prev_q_li1 > 0.0,
             "q_li1 must be positive after 10 days of calendar aging, got {prev_q_li1}"
         );
-        // q_li3 must be negative (BOL boost active).
+        // The break-in loss is positive and converging (a LOSS, per the
+        // reference model — not the pre-fix negative "boost").
         assert!(
-            ds.q_li3 < 0.0,
-            "q_li3 must be negative during BOL transient, got {}",
+            ds.q_li3 > 0.0,
+            "q_li3 must be a positive break-in loss, got {}",
             ds.q_li3
+        );
+        // And the BOL usable capacity sits above nameplate (negative fade,
+        // the min(QLi, Qneg) state: Li ≈ +7 %, capped by the negative-
+        // electrode branch at ≈ +0.9 %).
+        assert!(
+            ds.capacity_fade < 0.0,
+            "capacity fade at BOL must be negative (capacity above nameplate), got {}",
+            ds.capacity_fade
         );
     }
 
@@ -863,8 +1097,8 @@ mod tests {
         let mut ds = DegradationState::default();
 
         // Accumulate day 1 at SOC 0.8 so extremes are non-trivial.
-        ds.accumulate(dt_s, T_REF, V_REF, 0.8);
-        ds.update_daily(&u_neg, 0.0);
+        ds.accumulate(dt_s, T_REF, V_REF, 0.8).unwrap();
+        ds.update_daily(&u_neg, &RainflowCounter::default());
 
         // Capture lifetime state before crossing the day boundary.
         let fade_after_day1 = ds.capacity_fade_fraction();
@@ -915,8 +1149,8 @@ mod tests {
         // Day 2 aging must continue to accumulate -- q_li1 is monotonically increasing.
         // (capacity_fade itself is negative during the BOL transient.)
         let q_li1_after_day1 = ds.q_li1;
-        ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-        ds.update_daily(&u_neg, 0.0);
+        ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+        ds.update_daily(&u_neg, &RainflowCounter::default());
         assert!(
             ds.q_li1 >= q_li1_after_day1,
             "q_li1 after day 2 ({:.10}) must be >= day 1 ({q_li1_after_day1:.10})",
@@ -990,51 +1224,87 @@ mod tests {
     }
 
     /// Run 7 days of combined calendar + cycling aging and verify:
-    ///   1. Cumulative fade equals the sum of daily increments (bookkeeping invariant).
-    ///   2. q_li3 is negative after day 0 (BOL transient is active, not dead code).
-    ///   3. Quantitative day-1 increment matches Smith 2017 Eq.2 + Eq.13 + Eq.15.
+    ///   1. Cumulative fade equals the sum of daily increments (bookkeeping
+    ///      invariant).
+    ///   2. The usable capacity is min(QLi, Qneg): at BOL the
+    ///      negative-electrode branch binds at ≈ +0.9 % above nameplate, so
+    ///      capacity fade is negative while the Li branch sits higher still
+    ///      (the b0 = 1.07 intercept) — the reference model's BOL state.
+    ///   3. The day-1 Li-branch mechanism increments match Smith 2017
+    ///      Eq. 4–7 exactly (checked against the mechanism state directly:
+    ///      the binding branch hides the Li arithmetic from `fade`).
     ///
-    /// Each day: one full discharge–charge cycle (DOD = 1.0 → sum_squared_dod = 1.0)
-    /// at 25°C.  During the BOL transient phase (~first 27 days), capacity_fade is
-    /// negative (capacity temporarily above nominal) because the Mechanism 3 term
-    /// (B3_REF < 0) dominates the smaller calendar + cycle contributions.
+    /// Each day: one full cycle (DOD = 1.0) at 25 °C, SOC held at 0.5 (the
+    /// cycles enter through the rainflow counter, so dod_max_today = 0).
     #[test]
     fn degradation_accumulate_multi_day() {
         let u_neg = make_u_neg_table();
         let dt_s = SECONDS_PER_DAY;
         let mut ds = DegradationState::default();
 
-        // One full cycle per day: sum_squared_dod = count × DOD² = 1.0 × 1.0² = 1.0.
-        let sum_sq_dod_per_day = 1.0_f64;
+        // One full cycle per day: [0, 1, 0, 1] extracts one full cycle of
+        // range 1.0 → Σ count·DOD² = 1.0 and Σ count·DOD^βc2 = 1.0.
+        let mut rf = RainflowCounter::default();
+        rf.push(0.0);
+        rf.push(1.0);
+        rf.push(0.0);
+        rf.push(1.0);
+        assert!((rf.sum_squared_dod_daily() - 1.0).abs() < 1e-12);
+
         let mut daily_fade: Vec<f64> = Vec::with_capacity(7);
         let mut prev_fade = 0.0_f64;
+        let mut prev_q_li1 = 0.0_f64;
+        let mut prev_q_li2 = 0.0_f64;
+        let mut prev_q_li3 = 0.0_f64;
 
         for day in 0..7u32 {
-            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, sum_sq_dod_per_day);
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+            ds.update_daily(&u_neg, &rf);
 
             let fade = ds.capacity_fade_fraction();
 
-            // During the BOL transient (~first 27 days at these conditions), capacity_fade
-            // is negative because Mechanism 3 (B3_REF < 0) gives a larger anti-fade
-            // contribution than the positive calendar + cycle terms.
+            // At BOL the negative-electrode branch binds above nameplate.
             assert!(
                 fade < 0.0,
-                "day {day}: capacity_fade should be negative during BOL transient, got {fade:.8}"
+                "day {day}: capacity fade should be negative at BOL (capacity \
+                 above nameplate, the reference model's min(QLi, Qneg) state), \
+                 got {fade:.8}"
             );
 
-            // q_li3 must be strictly negative after day 0 -- Mechanism 3 is active.
-            let q_li3_val = ds.q_li3;
-            if day >= 1 {
+            // The break-in loss is active — a positive, accumulating loss.
+            assert!(
+                ds.q_li3 > 0.0,
+                "day {day}: q_li3 must be a positive break-in loss, got {:.8}",
+                ds.q_li3
+            );
+
+            // Day-1 mechanism increments against Smith 2017 Eq. 4-7 at
+            // T_REF, V_REF, dod_max = 0:
+            //   dq_li1 = B1_REF·tafel_b1/√day_age (day_age = 1)
+            //   dq_li2 = B2_REF·arr·√Σ(count·DOD²) = B2_REF
+            //   dq_li3 = (b3_day − q_li3_prev)/τ with b3_day = B3_REF
+            if day == 1 {
+                let tafel_day1 = tafel_b1_factor(0.5, T_REF);
+                let expected_dq_li1 = B1_REF * tafel_day1;
                 assert!(
-                    q_li3_val < 0.0,
-                    "day {day}: q_li3 must be negative (BOL boost), got {q_li3_val:.8}"
+                    (ds.q_li1 - prev_q_li1 - expected_dq_li1).abs() < 1e-12,
+                    "day-1 dq_li1: expected {expected_dq_li1:.10}, got {:.10}",
+                    ds.q_li1 - prev_q_li1
+                );
+                assert!((ds.q_li2 - prev_q_li2 - B2_REF).abs() < 1e-12);
+                let expected_dq_li3 = (B3_REF - prev_q_li3) / TAU_B3;
+                assert!(
+                    (ds.q_li3 - prev_q_li3 - expected_dq_li3).abs() < 1e-12,
+                    "day-1 dq_li3: expected {expected_dq_li3:.10}, got {:.10}",
+                    ds.q_li3 - prev_q_li3
                 );
             }
 
-            // Record the daily increment.
             daily_fade.push(fade - prev_fade);
             prev_fade = fade;
+            prev_q_li1 = ds.q_li1;
+            prev_q_li2 = ds.q_li2;
+            prev_q_li3 = ds.q_li3;
             ds.reset_day_tracking(0.5);
         }
 
@@ -1045,79 +1315,56 @@ mod tests {
             (final_fade - sum_of_increments).abs() < 1e-12,
             "final capacity_fade ({final_fade:.10}) must equal sum of daily increments ({sum_of_increments:.10})"
         );
-
-        // Quantitative check for day-1 increment against Smith 2017 Eq. 2 + Eq. 13 + Eq. 15.
-        //
-        // At day=1 (day_age==1):
-        //   b1_accum = B1_REF (Arrhenius=1 at T_REF, dt_day=1)
-        //   tafel_b1 = exp(ALPHA_B1 * F/R * (u_neg/T_REF − U_NEG_REF/T_REF))
-        //   dod_max_today = 0 → dod_corr = exp(GAMMA_B1 * 0^BETA_B1) = 1.0
-        //   dq_li1 = B1_REF * tafel_b1 / sqrt(day_age=1)
-        //   dq_li2 = B2_REF * 1.0 * sqrt(1.0) = B2_REF
-        //   dq_li3_day0 = B3_REF / TAU_B3   (first daily update, q_li3_init = 0)
-        //   dq_li3_day1 = (B3_REF − dq_li3_day0) / TAU_B3  (day-1, q_li3 = dq_li3_day0)
-        let tafel_day1 = tafel_b1_factor(0.5, T_REF);
-        let b1_eff_day1 = B1_REF * tafel_day1; // dod_corr=1, Arrhenius=1, dt_day=1
-        let dq_li3_day0 = B3_REF / TAU_B3; // q_li3 after day 0
-        let dq_li3_day1 = (B3_REF - dq_li3_day0) / TAU_B3;
-        let expected_day1_increment = b1_eff_day1 + B2_REF + dq_li3_day1;
-        assert!(
-            (daily_fade[1] - expected_day1_increment).abs() < 1e-10,
-            "day-1 increment: expected {expected_day1_increment:.10} (Eq.2+13+15), got {:.10}",
-            daily_fade[1]
-        );
     }
 
-    /// Mechanism 3 (BOL transient): q_li3 must converge toward an equilibrium determined
-    /// by the daily b3_accum value (B3_REF at T_REF). After sufficient days the incremental
-    /// change in q_li3 should shrink (exponential convergence with τ = TAU_B3 = 5 days).
+    /// Mechanism 3 (break-in loss): q_li3 converges toward the equilibrium
+    /// set by the daily b3 integral (B3_REF at T_REF, dod_max = 0) with the
+    /// exponential τ = TAU_B3 = 5-day time constant — monotonically
+    /// increasing increments that shrink geometrically.
     #[test]
-    fn degradation_bol_transient_converges() {
+    fn degradation_break_in_loss_converges() {
         let u_neg = make_u_neg_table();
         let dt_s = SECONDS_PER_DAY;
         let mut ds = DegradationState::default();
-        let sum_sq_dod_per_day = 1.0_f64;
+        // No cycling: the break-in mechanism in isolation.
+        let rf = RainflowCounter::default();
 
-        let mut prev_dq_li3 = f64::NEG_INFINITY;
+        let mut prev_dq_li3 = f64::INFINITY;
         let mut prev_q_li3 = 0.0_f64;
 
         for day in 0..30u32 {
-            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
-            ds.update_daily(&u_neg, sum_sq_dod_per_day);
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+            ds.update_daily(&u_neg, &rf);
             let dq_li3 = ds.q_li3 - prev_q_li3;
 
-            // q_li3 is monotonically decreasing (negative increments) during convergence.
+            // The loss is positive and its increments are positive but
+            // shrinking (exponential convergence).
             assert!(
-                ds.q_li3 < 0.0,
-                "day {day}: q_li3 must be negative (BOL boost active), got {}",
+                ds.q_li3 > 0.0,
+                "day {day}: q_li3 must be a positive break-in loss, got {}",
                 ds.q_li3
             );
             assert!(
-                dq_li3 < 0.0,
-                "day {day}: dq_li3 must be negative (q_li3 decreasing), got {dq_li3:.8}"
+                dq_li3 > 0.0,
+                "day {day}: dq_li3 must be positive (loss accumulating), got {dq_li3:.8}"
             );
-
-            if day >= 1 {
-                // Increments shrink each day: |dq_li3[d]| < |dq_li3[d-1]| (exponential decay).
+            if day > 0 {
                 assert!(
-                    dq_li3.abs() < prev_dq_li3.abs(),
-                    "day {day}: |dq_li3| ({:.8}) should decrease each day (was {:.8})",
-                    dq_li3.abs(),
-                    prev_dq_li3.abs()
+                    dq_li3 < prev_dq_li3 + 1e-15,
+                    "day {day}: increments must shrink ({} vs prev {prev_dq_li3:.8})",
+                    dq_li3
                 );
             }
-
             prev_dq_li3 = dq_li3;
             prev_q_li3 = ds.q_li3;
             ds.reset_day_tracking(0.5);
         }
 
-        // After 30 days (6τ), q_li3 should be within 1% of its equilibrium (B3_REF at T_REF).
-        // Equilibrium: q_li3_eq = B3_REF (the daily b3_accum at T_REF with dod=0, v_oc=V_REF).
-        let equilibrium = B3_REF; // at T_REF, arr=1, tafel=1, dod=0: b3_accum/day = B3_REF
+        // Converged onto the daily integral: the remaining relaxation gap
+        // is (1 − 1/τ)^30 of the equilibrium — far under 1 %.
         assert!(
-            (ds.q_li3 - equilibrium).abs() < equilibrium.abs() * 0.01,
-            "After 30 days q_li3 ({:.6}) should be within 1% of equilibrium ({equilibrium:.6})",
+            (ds.q_li3 - B3_REF).abs() < 0.01 * B3_REF,
+            "q_li3 should converge to the b3 integral ({B3_REF}) by day 30, got {}",
             ds.q_li3
         );
     }
@@ -1132,11 +1379,12 @@ mod tests {
         let ds_25 = run_cycling_aging(100, T_REF, V_REF, 0.5, 1.0);
         let ds_0c = run_cycling_aging(100, 273.15, V_REF, 0.5, 1.0);
 
-        let ds_25_cal = run_calendar_aging(100, T_REF, V_REF, 0.5);
-        let ds_0c_cal = run_calendar_aging(100, 273.15, V_REF, 0.5);
-
-        let cycling_25 = ds_25.capacity_fade_fraction() - ds_25_cal.capacity_fade_fraction();
-        let cycling_0c = ds_0c.capacity_fade_fraction() - ds_0c_cal.capacity_fade_fraction();
+        // Mechanism-2 state directly: through `fade` the min(QLi, Qneg)
+        // structure mixes in the negative-electrode branch, whose own
+        // negative activation energy (Ea_c2 = −48260) would blur the
+        // ratio this test exists to pin.
+        let cycling_25 = ds_25.q_li2;
+        let cycling_0c = ds_0c.q_li2;
 
         assert!(
             cycling_0c > cycling_25,
@@ -1149,59 +1397,61 @@ mod tests {
         let expected_ratio = arr_0c; // arr_b2(25C) = 1.0
         let ratio = cycling_0c / cycling_25;
         assert!(
-            (ratio - expected_ratio).abs() < 0.5,
-            "0C/25C cycling fade ratio should be ~{expected_ratio:.2}, got {ratio:.3}"
+            (ratio - expected_ratio).abs() < 1e-9,
+            "0C/25C cycling loss ratio should be exactly {expected_ratio:.4}, got {ratio:.4}"
         );
     }
 
-    /// Run 30 days of calendar aging at 25 C with no cycling.
-    /// q_li3 should go negative after day 1, always respect the b3_accum floor,
-    /// and converge toward b3_accum by day 30.
+    /// Run 30 days of calendar aging at 25 C with no cycling. The break-in
+    /// loss (q_li3) must be a positive loss after day 1, never overshoot the
+    /// day's b3 integral, and converge to it by day 30 (~6 τ).
     #[test]
-    fn bol_transient_q_li3_reaches_equilibrium() {
+    fn break_in_loss_q_li3_reaches_equilibrium() {
         let u_neg = make_u_neg_table();
         let mut ds = DegradationState::default();
         let cell_temp_k = 298.15; // 25 C
         let dt_s = 300.0; // 5-min steps
         let steps_per_day = 288;
 
-        // Accumulate and update one day at a time (no cycling: sum_squared_dod = 0).
+        // Accumulate and update one day at a time (no cycling).
         for day in 0..30 {
             for _ in 0..steps_per_day {
                 let v_oc = 3.8; // mid-SOC NMC
-                ds.accumulate(dt_s, cell_temp_k, v_oc, 0.5);
+                ds.accumulate(dt_s, cell_temp_k, v_oc, 0.5).unwrap();
             }
             let b3_accum_before_update = ds.b3_accum;
-            ds.update_daily(&u_neg, 0.0);
+            ds.update_daily(&u_neg, &RainflowCounter::default());
 
-            // After day 1, q_li3 should be negative (BOL transient effect).
+            // After day 1, the break-in loss is positive and underway.
             if day == 0 {
                 assert!(
-                    ds.q_li3 < 0.0,
-                    "q_li3 should be negative after day 1, got {}",
+                    ds.q_li3 > 0.0,
+                    "q_li3 should be a positive break-in loss after day 1, got {}",
                     ds.q_li3
                 );
             }
 
-            // Floor must always be respected: q_li3 >= b3_accum from before the update.
-            // After update_daily, b3_accum is reset to 0 for the next day, so check
-            // against the value that was used during the update.
+            // The loss never overshoots the integral it relaxes toward
+            // (after update_daily, b3_accum is reset for the next day, so
+            // check against the value the update consumed).
             assert!(
-                ds.q_li3 >= b3_accum_before_update,
-                "day {day}: q_li3 ({}) must not overshoot below b3_accum ({b3_accum_before_update})",
+                ds.q_li3 <= b3_accum_before_update + 1e-12,
+                "day {day}: q_li3 ({}) must not overshoot the b3 integral \
+                 ({b3_accum_before_update})",
                 ds.q_li3
             );
 
             ds.reset_day_tracking(0.5);
         }
 
-        // By day 30 (~6x TAU_B3=5 days), q_li3 should have converged close to
-        // the daily b3_accum equilibrium. The exact value depends on Arrhenius and
-        // Tafel terms, but the magnitude should be bounded and stable.
-        // With the floor in place, q_li3 cannot overshoot past b3_accum.
+        // By day 30 (~6x TAU_B3 = 5 days), the loss has converged onto the
+        // per-day integral (the relaxation remainder is e^-6 ≈ 0.25 %).
+        let b3_day =
+            0.02805_f64 * (0.0066_f64 * 96_485.0 / 8.314 * (3.8 / 298.15 - 3.7 / 298.15)).exp();
         assert!(
-            ds.q_li3 < 0.0,
-            "q_li3 should remain negative at equilibrium, got {}",
+            (ds.q_li3 - b3_day).abs() < 0.01 * b3_day,
+            "q_li3 should converge to the daily b3 integral ({b3_day:.6}) by \
+             day 30, got {}",
             ds.q_li3
         );
     }
@@ -1229,9 +1479,9 @@ mod tests {
         let dt_s = SECONDS_PER_DAY / steps_per_day as f64;
         for _ in 0..days {
             for _ in 0..steps_per_day {
-                ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+                ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            ds.update_daily(&u_neg, 0.0);
+            ds.update_daily(&u_neg, &RainflowCounter::default());
             ds.reset_day_tracking(soc);
         }
         ds
@@ -1314,9 +1564,9 @@ mod tests {
             };
             ds.reset_day_tracking(soc);
             for _ in 0..steps_per_day {
-                ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+                ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            ds.update_daily(&u_neg, 0.0);
+            ds.update_daily(&u_neg, &RainflowCounter::default());
             let increment = ds.q_li1 - running_q_li1;
             daily_increments.push(increment);
             running_q_li1 = ds.q_li1;
@@ -1388,5 +1638,32 @@ mod tests {
             ds.q_li1,
             ref_q_li1
         );
+    }
+
+    /// The cell-temperature domain guard: a temperature outside the
+    /// physically implausible envelope ([−100, +130] °C) errors loudly
+    /// instead of being fed to the Arrhenius fit. Pre-fix, the EV's
+    /// misattributed charger losses drove packs to 165–281 °C and the fit
+    /// returned negative capacity fade silently.
+    #[test]
+    fn accumulate_rejects_cell_temperatures_outside_the_physical_envelope() {
+        let mut ds = DegradationState::default();
+        // 300 °C = 573.15 K — the conversion-loss-attribution excursion.
+        let err = ds
+            .accumulate(900.0, 573.15, V_REF, 0.5)
+            .expect_err("573 K cell temperature must error, not degrade");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside the physically implausible envelope"),
+            "error must name the envelope violation: {msg}"
+        );
+        // Symmetric cryogenic floor: −120 °C.
+        assert!(ds.accumulate(900.0, 153.15, V_REF, 0.5).is_err());
+        // In-envelope cold (−7 °C) is accepted — HARES deliberately operates
+        // the fit below its 0 °C validated domain in cold climates, with the
+        // extrapolation documented at the guard.
+        assert!(ds.accumulate(900.0, 266.15, V_REF, 0.5).is_ok());
+        // In-envelope hot (55 °C — the top of Smith 2017's tested range).
+        assert!(ds.accumulate(900.0, 328.15, V_REF, 0.5).is_ok());
     }
 }

@@ -243,7 +243,11 @@ impl OperatingMode {
         !matches!(self, Self::Off | Self::Standby)
     }
 
-    /// Heating variants deliver positive (into-zone) thermal power.
+    /// Heating variants produce positive thermal power. For zoned
+    /// equipment this is into-zone delivery; the EV reuses `Heating` for
+    /// pack preconditioning — thermal production at the equipment level
+    /// with `zone: None` and no zone thermal output — so the into-zone
+    /// reading applies only where a zone is attached.
     pub fn is_heating_variant(&self) -> bool {
         matches!(
             self,
@@ -1549,7 +1553,7 @@ pub fn validate_core_contract(
         // setpoint_c: [-50, 80] °C is the plausible residential HVAC range.
         // Values outside this are physically possible (extreme arctic climates,
         // industrial process heat) but rare — warn rather than reject.
-        // ASHRAE HoF 2021 Ch.18: residential heating setpoints rarely below 15°C;
+        // ASHRAE HoF 2021 Ch. 17: residential heating setpoints rarely below 15°C;
         // ASHRAE 55-2020 §5.3: typical occupied range 20-30°C.
         if let Some(sp) = co.state.setpoint_c {
             if !(-50.0..=80.0).contains(&sp) {

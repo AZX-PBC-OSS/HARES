@@ -1902,9 +1902,48 @@ impl CoolingCore {
         self.telemetry.insert(tk::SHR, decoded.shr);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
-        // Telemetry fields are recomputed on next step; not restored from checkpoint.
-        // Setpoints, COP, fan_kw, etc. will be updated on the next step() call.
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal where the checkpoint
+        // carries the face: electric from `electric_kw`, sensible/latent
+        // cooling from their checkpointed values, mode from the
+        // checkpointed `operating_mode` (the pair the step published was
+        // guard-valid), speed from the restored `last_speed_index`,
+        // setpoint from the restored thermostat state (mode-keyed, as the
+        // step keys it). COP and the fan-heat share of the thermal output
+        // are not checkpointed: COP publishes as 0.0 (the guard-allowed
+        // not-yet-recomputed value, recomputed on the next step) and the
+        // thermal output publishes the checkpointed sensible+latent sum
+        // without the small fan-heat correction. `CoreOutput::default()`
+        // (all fields `None`) violates the presence rules for every
+        // declared capability
+        // (ELECTRIC/HAS_MODE/THERMAL/HAS_SPEED/HAS_SETPOINT/HAS_COP/
+        // REACTIVE) — the restore contract is that a checkpoint restores
+        // a state `validate_core_contract` accepts.
+        let sp = self.hvac.effective_setpoints();
+        let active_setpoint_c = match decoded.operating_mode {
+            OperatingMode::Heating => sp.heating_c,
+            _ => sp.cooling_c,
+        };
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(-(decoded.sensible_cooling_w + decoded.latent_cooling_w)),
+                sensible_cooling_w: Some(-decoded.sensible_cooling_w),
+                latent_cooling_w: Some(-decoded.latent_cooling_w),
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: Some(0.0),
+                main_power_kw: None,
+            },
+        };
 
         Ok(())
     }
@@ -2740,6 +2779,37 @@ mod tests {
             eq.core.hvac.config.duct_zone_id.is_none(),
             "Room AC must have no duct zone"
         );
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// capabilities (ELECTRIC/HAS_MODE/THERMAL/HAS_SPEED/HAS_SETPOINT/
+    /// HAS_COP/REACTIVE). The GSHP/WSHP cooler wrappers (which delegate
+    /// `load_state` to this type) are gated in cooler.rs's own tests —
+    /// their outer-field rebuild is a distinct mechanism.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg);
+        restored.init(&ac_config(), &environment).unwrap();
+        restored.load_state(&state).unwrap();
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("an air conditioner checkpoint must restore a contract-valid output");
     }
 
     #[test]

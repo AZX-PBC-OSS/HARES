@@ -1017,7 +1017,24 @@ impl EvDriverActor {
             current_minute,
             next_departure_minute: self.todays_event.map(|e| e.departure_minute),
             time_res_minutes: self.time_res_minutes,
+            observed_charge_derate: self.observed_charge_derate(env),
         }
+    }
+
+    /// The equipment's own published cold-charge capability factor
+    /// (`CHARGE_DERATE` telemetry) when the target equipment is
+    /// observable — the physical state the needed-hours estimate keys on
+    /// (see `DecisionContext::observed_charge_derate`). Not a driver
+    /// belief: observing the equipment's capability does not touch the
+    /// belief-vs-observed SOC contract that dispatch control runs on.
+    fn observed_charge_derate(&self, env: &EnvironmentState) -> Option<f64> {
+        // allowed: CHARGE_DERATE is the equipment's published temperature
+        // capability, telemetry-only (CoreOutput has no derate field); the
+        // same name-keyed telemetry contract `observed_pack_kwh` reads
+        // under.
+        env.equipment_telemetry
+            .get(self.target_name())
+            .and_then(|t| t.get(tk::CHARGE_DERATE))
     }
 
     /// Build the context that feeds the `needed_charge_hours` **telemetry**
@@ -1051,6 +1068,24 @@ impl EvDriverActor {
         let (anxiety_soc, _) = self.anxiety_band(env);
         let hours =
             needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx);
+        // +∞ (charging physically impossible right now — observed derate 0,
+        // preconditioning in progress) cannot cross the telemetry channel's
+        // finiteness contract; publish the ambient-curve fallback for the
+        // same gap, the same encoding `Composer::refresh_needed_charge_hours`
+        // uses. The override's own decision logic compares the true estimate
+        // directly and treats ∞ as maximum urgency.
+        let hours = if hours.is_finite() {
+            hours
+        } else {
+            needed_charge_hours_to_target(
+                anxiety_soc.clamp(0.0, 1.0),
+                CHARGING_EFFICIENCY,
+                &DecisionContext {
+                    observed_charge_derate: None,
+                    ..ctx.clone()
+                },
+            )
+        };
         self.composer.set_needed_charge_hours(hours);
     }
 
@@ -2845,6 +2880,123 @@ mod tests {
             needed_after_rollover.abs() < 1e-9,
             "the rollover step must keep reporting the observed at-target gap (≈0 h), got \
              {needed_after_rollover}"
+        );
+    }
+
+    /// The needed-hours estimate keys on the equipment's own published
+    /// cold-charge capability (`CHARGE_DERATE` telemetry) when observable —
+    /// one source of truth with the model that actually moves the power —
+    /// not the ambient driving-range curve. A pack derated to half power
+    /// doubles the estimate.
+    #[test]
+    fn needed_charge_hours_keys_on_equipment_charge_derate() {
+        let mut actor = make_actor_with_event_ratio(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.0, // never a driving day — stays HomePluggedIn
+            42,
+        );
+        actor.estimated_soc = 0.5;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut env = env_at_minute(22 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.5);
+        let mut t = Telemetry::new();
+        t.insert(tk::CHARGE_DERATE, 0.5);
+        env.equipment_telemetry.insert("EV1".to_string(), t);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        // 0.5 → 0.9 gap = 24 kWh at 7.2 kW × η 0.9 × derate 0.5 → 7.41 h
+        // (the minute-resolution ceiling absorbs the rounding).
+        let expected = 0.4 * 60.0 / (7.2 * 0.9 * 0.5);
+        assert!(
+            (needed - expected).abs() < 0.02,
+            "with the equipment's derate at 0.5 the estimate must double the \
+             full-capability hours ({expected:.3} h), got {needed:.3} — the ambient \
+             fallback curve is being used instead of the observed capability"
+        );
+    }
+
+    /// With charging physically impossible right now (the equipment's
+    /// published derate is 0 — pack at/below the plating cutoff,
+    /// preconditioning in progress), the estimate itself must read +∞ —
+    /// impossible, never "slower" — while the telemetry channel publishes
+    /// the finite ambient-curve fallback (its finiteness contract), with
+    /// the blocked state carried exactly by the equipment's own
+    /// `CHARGE_DERATE` column. An estimate keyed only on the ambient curve
+    /// caps at ~2× while the equipment correctly zeroes charge power below
+    /// the cutoff — the needed-hours channel then climbs nightly while
+    /// nothing charges, the exact diagnostic signature this design removes.
+    #[test]
+    fn needed_charge_hours_reports_impossible_when_charge_is_physically_blocked() {
+        let mut actor =
+            make_actor_with_event_ratio(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.0, 42);
+        actor.estimated_soc = 0.5;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut env = env_at_minute(22 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.5);
+        let mut t = Telemetry::new();
+        t.insert(tk::CHARGE_DERATE, 0.0);
+        env.equipment_telemetry.insert("EV1".to_string(), t);
+
+        // The estimate itself: +∞ on the observed context (the control
+        // consumers — the anxiety gate and the departure deadline — call
+        // this directly and read maximum urgency).
+        let ctx = DecisionContext {
+            current_soc: 0.5,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 7.2,
+            env: &env,
+            current_minute: 22 * 60,
+            next_departure_minute: None,
+            time_res_minutes: 1.0,
+            observed_charge_derate: Some(0.0),
+        };
+        let estimate = needed_charge_hours_to_target(0.9, 0.9, &ctx);
+        assert!(
+            estimate.is_infinite() && estimate.is_sign_positive(),
+            "a zero published derate means charging is impossible right now — the \
+             estimate must be +∞, got {estimate} (a finite value reports a \
+             nonzero capability where there is none)"
+        );
+
+        // The telemetry channel: the finite ambient-curve fallback for the
+        // same gap (10 °C ambient → multiplier 1.11).
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        let expected = 0.4 * 60.0 / (7.2 * 0.9 / 1.11);
+        assert!(
+            needed.is_finite() && (needed - expected).abs() < 0.02,
+            "the channel must publish the finite ambient fallback ({expected:.3} h) \
+             while charging is blocked, got {needed} — the telemetry layer's \
+             finiteness contract cannot carry the +∞ control truth"
+        );
+
+        // At target, the same blocked pack reads 0 h — nothing is needed,
+        // regardless of capability.
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.9);
+        out.clear();
+        actor.decide(&env, &mut out);
+        let needed = actor
+            .telemetry()
+            .expect("driver telemetry")
+            .get("needed_charge_hours")
+            .expect("needed_charge_hours key");
+        assert_eq!(
+            needed, 0.0,
+            "a zero SOC gap needs zero hours even while charging is blocked"
         );
     }
 
@@ -6731,6 +6883,9 @@ mod tests {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
                 v2l_max_discharge_kw: None,
@@ -7280,6 +7435,7 @@ mod tests {
             current_minute: 19 * 60,
             next_departure_minute: Some(480),
             time_res_minutes: 5.0,
+            observed_charge_derate: None,
         };
 
         let strategy = ChargingStrategy::V2G {
@@ -7316,6 +7472,7 @@ mod tests {
             current_minute: 19 * 60,
             next_departure_minute: Some(480),
             time_res_minutes: 5.0,
+            observed_charge_derate: None,
         };
 
         let strategy = ChargingStrategy::V2H {
@@ -7436,6 +7593,9 @@ mod tests {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
                 v2l_max_discharge_kw: None,
@@ -7547,6 +7707,9 @@ mod tests {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: Some(true),
                 v2l_soc_reserve: None, // default 0.2 — strictly below the 0.5 floor
                 v2l_max_discharge_kw: None,

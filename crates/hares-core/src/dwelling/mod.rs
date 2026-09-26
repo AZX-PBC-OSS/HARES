@@ -114,7 +114,7 @@ use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
     chrono_to_std_duration, default_output_path, duration_to_u32_secs, equipment_config_from_spec,
     merged_equipment_config, required_datetime, required_duration, required_path,
-    validate_sim_config,
+    validate_equipment_override_keys, validate_sim_config,
 };
 use solver_builder::build_default_solvers;
 use synthetic::{
@@ -2132,6 +2132,19 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         .overrides
         .clone()
         .unwrap_or_else(|| Value::Object(Map::new()));
+    // Loud override validation at the assembly boundary where the
+    // population is known: an overrides key that matches no equipment name
+    // (e.g. an HPXML SystemIdentifier) was previously a silent no-op. Runs
+    // before any equipment is constructed so the build fails before
+    // side effects, not partway through the population.
+    {
+        let overridable: Vec<&str> = equipment_specs
+            .iter()
+            .map(|s| s.name.as_str())
+            .filter(|n| !HANDLED_OUTSIDE_REGISTRY.contains(n))
+            .collect();
+        validate_equipment_override_keys(&override_root, &overridable, HANDLED_OUTSIDE_REGISTRY)?;
+    }
 
     // Read number_of_occupants from the Occupancy spec to scale the raw
     // schedule fraction (0–1) into a person count for internal heat gains.
@@ -7089,9 +7102,23 @@ impl Dwelling {
             if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
                 continue;
             }
-            if let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) {
-                checker.check_soc(soc, 0.0)?;
-            }
+            // Loud on absence: every real Battery and EV publishes SOC in
+            // its core output at every step (the publish sites null the
+            // channel only when the internal SOC is non-finite or outside
+            // [0, 1] — itself a defect), so an absent SOC is a wiring or
+            // state defect, not a value condition — a silent skip would
+            // blind the bounds check to exactly the observation failure
+            // it exists to catch (the same monitor rule the
+            // ev_capacity_degraded gate below enforces for its keys).
+            let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) else {
+                return Err(HaresError::Dwelling(format!(
+                    "soc_bounds: equipment '{}' published no core-output SOC \
+                     (every real Battery and EV publishes SOC at every step; \
+                     absence is a wiring or state defect)",
+                    eq.descriptor().name
+                )));
+            };
+            checker.check_soc(soc, 0.0)?;
             // EV usable capacity must track its degraded SOH: the runtime SOC
             // divisor (`capacity_kwh`) must equal rated · (1 − capacity_fade).
             // These are static EV telemetry keys populated at init and every
@@ -7100,15 +7127,42 @@ impl Dwelling {
             // is a percentage.
             if *end_use == EndUse::EV {
                 let telem = eq.telemetry();
-                let current = telem.get(tk::CAPACITY_KWH);
                 // allowed: capacity_kwh is a static EV telemetry key set at init.
-                let rated = telem.get(tk::CAPACITY_KWH_RATED);
+                let current = telem.get(tk::CAPACITY_KWH);
                 // allowed: capacity_kwh_rated is a static EV telemetry key set at init.
-                let fade_pct = telem.get(tk::CAPACITY_FADE_PCT);
+                let rated = telem.get(tk::CAPACITY_KWH_RATED);
                 // allowed: capacity_fade_pct is a static EV telemetry key set at init.
-                if let (Some(current), Some(rated), Some(fade_pct)) = (current, rated, fade_pct) {
-                    checker.check_ev_capacity_degraded(current, rated, fade_pct / 100.0)?;
-                }
+                let fade_pct = telem.get(tk::CAPACITY_FADE_PCT);
+                // allowed: battery_temp_c is a static EV telemetry key set at init.
+                let pack_temp_c = telem.get(tk::BATTERY_TEMP_C);
+                let (current, rated, fade_pct, temp_c) =
+                    match (current, rated, fade_pct, pack_temp_c) {
+                        (Some(c), Some(r), Some(f), Some(t)) => (c, r, f, t),
+                        _ => {
+                            // Loud on absence: these are static keys published at
+                            // init and every step, so a missing key is a wiring
+                            // defect, not a value condition — a silent skip would
+                            // blind this check to exactly the misbinding it
+                            // exists to catch (a monitor must detect the absence
+                            // of expected input, not merely anomalous values).
+                            let missing = [
+                                (tk::CAPACITY_KWH, current),
+                                (tk::CAPACITY_KWH_RATED, rated),
+                                (tk::CAPACITY_FADE_PCT, fade_pct),
+                                (tk::BATTERY_TEMP_C, pack_temp_c),
+                            ]
+                            .into_iter()
+                            .find(|(_, v)| v.is_none());
+                            return Err(HaresError::Dwelling(format!(
+                                "ev_capacity_degraded: EV equipment '{}' is missing \
+                                 static telemetry key '{}' (published at init and \
+                                 every step; absence is a wiring defect)",
+                                eq.descriptor().name,
+                                missing.map(|(key, _)| key).unwrap_or("<unknown>")
+                            )));
+                        }
+                    };
+                checker.check_ev_capacity_degraded(current, rated, fade_pct / 100.0, temp_c)?;
             }
         }
 
@@ -9158,6 +9212,9 @@ fn cfg_gated_helper() {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: Some(true),
                 v2l_soc_reserve: Some(0.2),
                 v2l_max_discharge_kw: Some(3.0),

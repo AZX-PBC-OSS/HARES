@@ -89,6 +89,16 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.0),
         ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
         ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
+        // cz5a_ev_charging: the charging-EV fixture — same building as
+        // cz5a_ev_only, so the same inherited drift (zone-temp → T-0075
+        // envelope conformance; HVAC energy → the step-0 ideal-capacity
+        // back-solve), sized to observed residual + ~1% exactly like its
+        // sibling. The metric this fixture exists for — short-window total
+        // site energy, now dominated by the EV's 11.5 kW charge — passes at
+        // the 25% DEFAULT band (measured 1.36%): the EV charging power
+        // cross-check against OCHRE's event-driven charge needs no override.
+        ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
+        ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(112.0),
         // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
         ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
         ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.9),
@@ -115,6 +125,34 @@ struct FixtureConfig {
     initialization_duration_seconds: Option<i64>,
     #[serde(default)]
     property_parity: Option<PropertyParityExpectations>,
+    /// EV fixture policy (see `ev_override`): models the vehicle the
+    /// heaterless, thermally-unmodeled OCHRE reference models, and — for
+    /// charging fixtures — the discharged vehicle both simulators charge
+    /// deterministically in-window.
+    #[serde(default)]
+    ev: Option<EvFixturePolicy>,
+}
+
+/// The per-fixture `[ev]` section: keys merged into the `"Electric
+/// Vehicle"` equipment override. `heater_power_w = 0` is forced for every
+/// EV fixture (OCHRE's EV model has no pack thermal state at all — running
+/// HARES's preconditioning heater against the reference would be a
+/// one-sided divergence blowing the bands by design). `initial_soc`,
+/// `battery_temp_c`, and `charging_strategy` pin the deterministic
+/// charging scenario on the HARES side; the OCHRE side is pinned by the
+/// event file named in the section's `ochre_event_file` key, which the
+/// Python reference generator consumes and this harness deliberately
+/// ignores (it is not an equipment-override key).
+#[derive(Debug, Deserialize, Default)]
+struct EvFixturePolicy {
+    #[serde(default)]
+    initial_soc: Option<f64>,
+    #[serde(default)]
+    battery_temp_c: Option<f64>,
+    #[serde(default)]
+    charging_strategy: Option<String>,
+    #[serde(default)]
+    heater_power_w: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -348,6 +386,67 @@ fn fixture_property_inputs(fixture: &DiscoveredFixture) -> Option<(String, PathB
     }
 }
 
+/// The per-fixture EV equipment override (see `EvFixturePolicy`):
+/// `None` — a behavior-preserving no-op — for fixtures whose building
+/// carries no EV plug load. Detection reads the same element the HPXML
+/// resolver keys on (`PlugLoadType` = "electric vehicle charging"), so a
+/// future EV fixture picks the policy up automatically instead of
+/// silently diverging from its heaterless OCHRE reference. A fixture that
+/// declares an `[ev]` section without an EV plug load is a
+/// misconfiguration and fails loudly.
+fn ev_override(
+    config: &FixtureConfig,
+    building_xml: &Path,
+) -> Result<Option<serde_json::Value>, String> {
+    let xml = fs::read_to_string(building_xml).map_err(|err| {
+        format!(
+            "failed to read fixture building '{}': {err}",
+            building_xml.display()
+        )
+    })?;
+    let has_ev = xml
+        .to_ascii_lowercase()
+        .contains("<plugloadtype>electric vehicle charging</plugloadtype>");
+    if !has_ev {
+        if config.ev.is_some() {
+            return Err(
+                "fixture declares an [ev] section but its building has no EV \
+                 plug load (PlugLoadType = 'electric vehicle charging')"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let mut fields = serde_json::Map::new();
+    // Forced for every EV fixture: the heaterless vehicle the OCHRE
+    // reference models (OCHRE's EV has no pack thermal state — running
+    // HARES's preconditioning heater against it is a one-sided divergence
+    // that blows the drift-locked bands by design). The divergence HARES
+    // does carry (real preconditioning, beyond the OCHRE floor) is
+    // exercised and pinned by the EV thermal regression suite instead.
+    fields.insert("heater_power_w".to_string(), serde_json::json!(0.0));
+    if let Some(ev) = &config.ev {
+        if let Some(soc) = ev.initial_soc {
+            fields.insert("initial_soc".to_string(), serde_json::json!(soc));
+        }
+        if let Some(temp_c) = ev.battery_temp_c {
+            fields.insert("battery_temp_c".to_string(), serde_json::json!(temp_c));
+        }
+        if let Some(strategy) = &ev.charging_strategy {
+            fields.insert("charging_strategy".to_string(), serde_json::json!(strategy));
+        }
+        if let Some(heater_w) = ev.heater_power_w {
+            fields.insert("heater_power_w".to_string(), serde_json::json!(heater_w));
+        }
+    }
+    // The HPXML resolver names the EV spec "Electric Vehicle" (overrides
+    // are matched by spec name, not SystemIdentifier).
+    Ok(Some(serde_json::json!({
+        "Electric Vehicle": serde_json::Value::Object(fields)
+    })))
+}
+
 fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, String> {
     let config_contents = fs::read_to_string(&fixture.config_toml).map_err(|err| {
         format!(
@@ -369,7 +468,14 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         weather_path: fixture.weather_epw.clone(),
         sim_config,
         defaults_path: Some(defaults_path),
-        overrides: None,
+        // One-sided divergence, forced and documented: see
+        // `ev_override` — every EV fixture models the heaterless vehicle
+        // its OCHRE reference models, and charging fixtures (`[ev]`
+        // section) additionally pin the deterministic discharged-at-start
+        // scenario both simulators charge identically (the reference's
+        // event file pins the OCHRE side; initial SOC, a warm pack, and an
+        // Immediate strategy pin the HARES side).
+        overrides: ev_override(&config, &fixture.building_xml)?,
         bldg_id: config.bldg_id.unwrap_or(1),
         initialization_duration: config
             .initialization_duration_seconds

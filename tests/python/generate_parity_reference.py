@@ -75,11 +75,31 @@ def _discover_fixtures() -> list[Path]:
     return fixtures
 
 
+def _load_ev_config(config_path: Path) -> dict:
+    """Load the fixture's optional [ev] section (the parity harness's EV
+    policy; only `ochre_event_file` is consumed here — the override keys
+    pin the HARES side, handled by the Rust harness)."""
+    cfg = tomllib.loads(config_path.read_text())
+    return cfg.get("ev", {})
+
+
 def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
     """Run OCHRE on a fixture and return the minute-resolution output DataFrame."""
     from ochre import Dwelling as OchreDwelling
 
     sim_cfg = _load_sim_config(fixture_dir / "config.toml")
+    ev_cfg = _load_ev_config(fixture_dir / "config.toml")
+
+    # A charging-EV fixture pins OCHRE's event-driven EV with a fixed
+    # event list (see the fixture's config.toml [ev] section). The kwarg
+    # propagates to every EventBasedLoad, but only event loads WITHOUT a
+    # schedule column consume it — exactly the EV (the fixture's other
+    # event loads are schedule-driven).
+    extra: dict = {}
+    if ev_cfg.get("ochre_event_file"):
+        extra["equipment_event_file"] = str(
+            (fixture_dir / ev_cfg["ochre_event_file"]).resolve()
+        )
 
     dwelling = OchreDwelling(
         name=f"parity_ref_{fixture_dir.name}",
@@ -91,6 +111,7 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
         weather_file=str((fixture_dir / "weather.epw").resolve()),
         verbosity=sim_cfg["verbosity"],
         save_results=False,
+        **extra,
     )
     df, _metrics, _hourly = dwelling.simulate()
     return df

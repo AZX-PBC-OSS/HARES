@@ -163,6 +163,7 @@ mod tests {
             current_minute: minute,
             next_departure_minute: Some(420),
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         }
     }
 
@@ -362,6 +363,7 @@ mod tests {
             current_minute: 300,
             next_departure_minute: Some(420),
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
 
         let ctx_large = DecisionContext {
@@ -373,6 +375,7 @@ mod tests {
             current_minute: 300,
             next_departure_minute: Some(420),
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
 
         let result_small = pref.constraint(&ctx_small);
@@ -417,6 +420,7 @@ mod tests {
             current_minute: 300,
             next_departure_minute: None,
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
 
         // Context A with same SOC=0.8: next_departure=360, 60 min left
@@ -431,6 +435,7 @@ mod tests {
             current_minute: 300,
             next_departure_minute: Some(360),
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
 
         let result_a = pref.constraint(&ctx_a_high_soc);
@@ -460,6 +465,7 @@ mod tests {
             current_minute: 465, // 07:45
             next_departure_minute: None,
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
         assert!(
             matches!(pref.constraint(&ctx_c), Constraint::Inactive),

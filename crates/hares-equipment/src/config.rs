@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod finite_walk;
+
 /// Machine-readable record of per-hour setpoint widening performed by
 /// HPXML setpoint reconciliation during parsing.  Carried on `EquipmentConfig`
 /// so downstream consumers (dashboards, Python introspection, CSV diagnostics)
@@ -462,6 +464,28 @@ impl EquipmentConfig {
         ochre_class: String,
         config: T,
     ) -> crate::Result<Self> {
+        // Loud on non-finite floats, before the serialization that would
+        // silently null them: serde_json maps non-finite floats to `null`
+        // (JSON cannot represent them), so a `Some(NaN)` in an
+        // `Option<f64>` field would silently become `None` and the
+        // field's documented default would apply with no error anywhere —
+        // measured end to end at the Python boundary (I-07): a NaN
+        // `battery_temp_c` silently attached a differently-configured
+        // vehicle. One choke point, every typed config, every field, every
+        // entry path. A nested serialization failure falls through to
+        // serde_json's own error below (the same `Serialize` impl fails
+        // there with the canonical message).
+        if let Err(finite_walk::WalkError::NonFinite { path }) =
+            config.serialize(finite_walk::Walker::root())
+        {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "typed config for {} rejected a non-finite float at '{path}': \
+                 serde_json would silently null it (JSON cannot represent \
+                 non-finite floats) and the field's default would apply — \
+                 pass a finite value or omit the field",
+                T::equipment_type_name()
+            )));
+        }
         let data = serde_json::to_value(config).map_err(|e| {
             hares_types::HaresError::Equipment(format!(
                 "typed config serialization failed for {}: {e}",
@@ -686,6 +710,29 @@ mod tests {
     impl EquipmentTypedConfig for OtherConfig {
         fn equipment_type_name() -> &'static str {
             "OtherEquipment"
+        }
+    }
+
+    /// A typed config with optional float fields — the shape the
+    /// non-finite guard protects: a `Some(NaN)` would be silently nulled
+    /// by serde_json's serialization (JSON cannot represent non-finite
+    /// floats) and the field's default would apply with no error anywhere.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct TestOptionConfig {
+        value: Option<f64>,
+        inner: Option<InnerOptionConfig>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct InnerOptionConfig {
+        list: Vec<f64>,
+    }
+
+    impl EquipmentTypedConfig for TestOptionConfig {
+        fn equipment_type_name() -> &'static str {
+            "TestOptionEquipment"
         }
     }
 
@@ -971,6 +1018,74 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("typed config serialization failed"));
         assert!(err.contains("FailEquipment"));
+    }
+
+    /// A non-finite float in a typed config must fail `from_typed` loudly
+    /// with its field path — serde_json would silently null it (JSON
+    /// cannot represent non-finite floats) and the field's documented
+    /// default would apply with no error anywhere. Measured end to end at
+    /// the Python boundary (I-07): `EV("…", battery_temp_c=float("nan"))`
+    /// silently attached a differently-configured vehicle.
+    #[test]
+    fn from_typed_rejects_non_finite_floats_loudly_with_the_field_path() {
+        let config = TestOptionConfig {
+            value: Some(f64::NAN),
+            inner: None,
+        };
+        let err = EquipmentConfig::from_typed(
+            "test_nan".to_string(),
+            "TestOptionClass".to_string(),
+            config,
+        )
+        .expect_err("a NaN field value must fail from_typed loudly");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite float") && msg.contains("'value'"),
+            "the rejection must name the non-finite value and its field path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_typed_rejects_non_finite_floats_nested_in_containers() {
+        let config = TestOptionConfig {
+            value: None,
+            inner: Some(InnerOptionConfig {
+                list: vec![1.0, f64::INFINITY],
+            }),
+        };
+        let err = EquipmentConfig::from_typed(
+            "test_inf".to_string(),
+            "TestOptionClass".to_string(),
+            config,
+        )
+        .expect_err("an infinite float nested in a container must fail from_typed loudly");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'inner.list[1]'"),
+            "the rejection must carry the full container path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_typed_accepts_finite_and_absent_optional_floats() {
+        let finite = EquipmentConfig::from_typed(
+            "test_finite".to_string(),
+            "TestOptionClass".to_string(),
+            TestOptionConfig {
+                value: Some(1.5),
+                inner: Some(InnerOptionConfig { list: vec![0.0] }),
+            },
+        );
+        assert!(finite.is_ok(), "finite floats must pass: {finite:?}");
+        let absent = EquipmentConfig::from_typed(
+            "test_absent".to_string(),
+            "TestOptionClass".to_string(),
+            TestOptionConfig {
+                value: None,
+                inner: None,
+            },
+        );
+        assert!(absent.is_ok(), "absent fields must pass: {absent:?}");
     }
 
     #[test]

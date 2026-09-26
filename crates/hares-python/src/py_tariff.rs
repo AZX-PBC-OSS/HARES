@@ -13,6 +13,7 @@ use pyo3::types::{PyDict, PyList, PyType};
 use crate::py_telemetry::PyBillingPeriodSummary;
 use crate::utils::extract_datetime;
 use crate::utils::extract_seconds;
+use crate::utils::python_to_json_value;
 
 fn parse_season(s: &str) -> PyResult<SeasonFilter> {
     match s.to_lowercase().as_str() {
@@ -114,40 +115,6 @@ fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<Py<
     }
 }
 
-fn py_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<serde_json::Value> {
-    if obj.is_none() {
-        return Ok(serde_json::Value::Null);
-    }
-    if let Ok(b) = obj.extract::<bool>() {
-        return Ok(serde_json::Value::Bool(b));
-    }
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(serde_json::json!(i));
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return Ok(serde_json::json!(f));
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(serde_json::Value::String(s));
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let arr: Result<Vec<_>, _> = list.iter().map(|item| py_to_json_value(&item)).collect();
-        return Ok(serde_json::Value::Array(arr?));
-    }
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut map = serde_json::Map::new();
-        for (k, v) in dict.iter() {
-            let key: String = k.extract()?;
-            map.insert(key, py_to_json_value(&v)?);
-        }
-        return Ok(serde_json::Value::Object(map));
-    }
-    Err(PyValueError::new_err(format!(
-        "cannot convert Python object of type '{}' to JSON",
-        obj.get_type().name()?
-    )))
-}
-
 // ---------------------------------------------------------------------------
 // PyElectricTariff
 // ---------------------------------------------------------------------------
@@ -181,7 +148,7 @@ impl PyElectricTariff {
 
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let val = py_to_json_value(&dict.clone().into_any())?;
+        let val = python_to_json_value(&dict.clone().into_any())?;
         let json_str = serde_json::to_string(&val)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {e}")))?;
         let tariff: ElectricTariff = serde_json::from_str(&json_str)
@@ -734,7 +701,7 @@ pub struct PyGasTariff {
 impl PyGasTariff {
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let val = py_to_json_value(&dict.clone().into_any())?;
+        let val = python_to_json_value(&dict.clone().into_any())?;
         let json_str = serde_json::to_string(&val)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {e}")))?;
         let tariff: GasTariff = serde_json::from_str(&json_str)

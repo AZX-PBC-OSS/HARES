@@ -864,11 +864,36 @@ impl Equipment for EventBasedLoad {
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
         }
-        self.core_output = CoreOutput::default();
-        // CoreOutput cannot be reconstructed from checkpoint data because
-        // active_power_kw (the per-step committed power) is not stored in
-        // EventBasedLoadState.  Reconstruction would require a checkpoint
-        // format change.  See ticket Known Limitations.
+        // The per-step committed power is not stored in the checkpoint
+        // (it depends on the event phase, the live schedule, and the RNG
+        // stream), so the restore-instant output publishes the zero-flow
+        // truth — gated on the declared capabilities exactly as the
+        // step's own literal gates them. `CoreOutput::default()` (all
+        // fields `None`) violates the presence rules for the declared
+        // ELECTRIC/REACTIVE/FUEL capabilities — the restore contract is
+        // that a checkpoint restores a state `validate_core_contract`
+        // accepts. The next step recomputes the committed power.
+        let caps = self.descriptor.core_capabilities;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: caps.contains(CoreCapabilities::REACTIVE).then_some(0.0),
+                fuel_w: caps.contains(CoreCapabilities::FUEL).then_some(FuelPower {
+                    fuel_type: self.fuel_type,
+                    consumption_w: 0.0,
+                }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         // This avoids stale values when month_multipliers are configured.
@@ -1582,11 +1607,31 @@ impl Equipment for WetAppliance {
             &mut self.event_probability_source,
             &decoded.event_probability_source_state,
         )?;
-        self.core_output = CoreOutput::default();
-        // CoreOutput cannot be reconstructed from checkpoint data because
-        // per-step committed power is not stored in WetApplianceState.
-        // Reconstruction would require a checkpoint format change.
-        // See ticket Known Limitations.
+        // The per-step committed power is not stored in the checkpoint (it
+        // depends on the event phase, the live schedule, and the RNG
+        // stream), so the restore-instant output publishes the zero-flow
+        // truth. `CoreOutput::default()` (all fields `None`) violates the
+        // presence rule for the declared ELECTRIC capability — the restore
+        // contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts. The next step recomputes the
+        // committed power.
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         Ok(())
@@ -3490,6 +3535,34 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// capabilities. The committed per-step power is not checkpointed
+    /// (it depends on the event phase, the live schedule, and the RNG),
+    /// so the restore publishes the zero-flow truth — the same face the
+    /// fix implements.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let env = base_env();
+        let config = event_config("restore_contract", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let checkpoint = eq.save_state().unwrap();
+
+        let mut restored = EventBasedLoad::new(config);
+        restored
+            .init(&event_config("restore_contract", "EventBasedLoad"), &env)
+            .unwrap();
+        restored.load_state(&checkpoint).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("an event load checkpoint must restore a contract-valid output");
+    }
 
     /// save_state captures delay_remaining_s; load_state restores it so the event
     /// remains blocked for the same number of steps as it would have been without

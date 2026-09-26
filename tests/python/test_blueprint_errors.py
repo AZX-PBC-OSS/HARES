@@ -51,6 +51,41 @@ def test_missing_capacity_raises():
         ElectricBaseboard("NoCap", autosize=False)
 
 
+def test_non_finite_spec_parameter_fails_loudly():
+    """A NaN/±inf float in a typed equipment object's spec parameters must
+    fail loudly at `add_equipment` — never silently become the field's
+    default. The spec-parameters channel (the blueprint's typed equipment
+    objects) builds a JSON params map with `json!`, which writes
+    non-finite floats as `null` (JSON cannot represent them); downstream
+    the null merges into the typed config where an `Option<f64>` field
+    deserializes `None` and the field's documented default applies with
+    no error anywhere — the silent-substitution class the shared
+    Python→JSON converter rejects at the free-form channels (overrides,
+    tariffs) and `make_spec` rejects at the spec choke point (one guard,
+    every `*_spec_from_py` builder). `oversizing_factor` is the
+    discriminator: it is unvalidated at construction and flows into the
+    `autosize_heating_factor` spec parameter exactly when `autosize=True`.
+    """
+    # Control: a finite factor crosses cleanly and builds.
+    bp = _make_blueprint()
+    bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
+    bp.add_equipment(
+        GasFurnace("FiniteFactor", autosize=True, afue=0.95, oversizing_factor=1.2)
+    )
+    dw = bp.build()
+    dw.initialize()
+
+    # The defect face: non-finite values must raise at the boundary, not
+    # silently default.
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bp = _make_blueprint()
+        bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
+        with pytest.raises(ValueError, match="non-finite"):
+            bp.add_equipment(
+                GasFurnace("BadFactor", autosize=True, afue=0.95, oversizing_factor=bad)
+            )
+
+
 def test_explicit_capacity_heating():
     bp = _make_blueprint()
     bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])

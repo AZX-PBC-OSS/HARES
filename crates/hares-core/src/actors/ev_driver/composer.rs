@@ -98,10 +98,14 @@ impl ChargingComposer {
     }
 
     /// The most recent needed-charge-hours estimate from preferences
-    /// (minimum across all preferences). Returns `0.0` if no preference
-    /// provides an estimate (the fold starts at `f64::INFINITY` and
-    /// collapses to the minimum; the getter maps non-finite results to
-    /// `0.0` so the telemetry value is always finite).
+    /// (minimum across all preferences), in the telemetry channel's
+    /// encoding: finite when any preference produced a finite estimate —
+    /// including the ambient-curve fallback the refresh substitutes when
+    /// the observed-capability estimate is +∞ (charging physically
+    /// impossible right now; see `refresh_needed_charge_hours`). Returns
+    /// `0.0` only when no preference provides any estimate at all (the
+    /// empty-stack case, unreachable in production), preserving the
+    /// channel's finiteness contract.
     pub fn last_needed_charge_hours(&self) -> f64 {
         if self.last_needed_charge_hours.is_finite() {
             self.last_needed_charge_hours
@@ -117,11 +121,33 @@ impl ChargingComposer {
     /// fold, because its context carries the driver's perceived SOC for
     /// dispatch and would clobber the observed-based estimate.
     pub(super) fn refresh_needed_charge_hours(&mut self, ctx: &DecisionContext) {
-        self.last_needed_charge_hours = self
-            .preferences
-            .iter()
-            .map(|p| p.needed_charge_hours(ctx))
-            .fold(f64::INFINITY, f64::min);
+        let fold = |ctx: &DecisionContext| {
+            self.preferences
+                .iter()
+                .map(|p| p.needed_charge_hours(ctx))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let observed = fold(ctx);
+        // +∞ from the observed-capability estimate means charging is
+        // physically impossible right now (the equipment's published
+        // derate is 0 — pack at/below the plating cutoff, preconditioning
+        // in progress). The control consumers call the estimate directly
+        // and get the true ∞ (maximum urgency); this cached value feeds
+        // the telemetry channel, whose finiteness contract requires a
+        // finite encoding — the ambient-curve fallback (the cold-rate
+        // approximation for the same gap). The blocked state itself is
+        // carried exactly by the equipment's own `CHARGE_DERATE` and
+        // power columns, so the diagnostic contrast (estimate sane,
+        // power zero, derate zero) stays visible where it belongs.
+        self.last_needed_charge_hours = if observed.is_finite() {
+            observed
+        } else {
+            let fallback = DecisionContext {
+                observed_charge_derate: None,
+                ..ctx.clone()
+            };
+            fold(&fallback)
+        };
     }
 
     /// Record the time-to-charge estimate for a plan resolved outside the
@@ -460,6 +486,7 @@ mod tests {
             current_minute: 720,
             next_departure_minute: None,
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         }
     }
 
@@ -1437,6 +1464,7 @@ mod tests {
             current_minute: 0,
             next_departure_minute: Some(420),
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         };
 
         let departure_pref = crate::actors::ev_driver::departure::DepartureDeadline {

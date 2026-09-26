@@ -42,7 +42,7 @@ pub(crate) struct ModeFlowViolation {
 ///
 /// Rules:
 /// 1. Active-mode power guard — active mode (not Off/Standby) requires at
-///    least one non-zero flow (electric, thermal, or fuel).
+///    least one non-zero flow (electric, thermal, fuel, or reactive).
 /// 2. Off-mode zero-flow guard — Off mode forbids non-zero flows.
 /// 3. Thermal sign vs mode — positive thermal output requires a heating
 ///    variant; negative thermal output requires a cooling variant.
@@ -56,7 +56,13 @@ pub(crate) fn check_mode_flow_consistency(
     let caps = desc.core_capabilities;
 
     if let Some(mode) = co.state.operating_mode {
-        // Rule 1: active-mode power guard
+        // Rule 1: active-mode power guard. Reactive power counts as flow:
+        // an inverter exchanging vars at zero real power is genuinely
+        // active (standby var support — IEEE 1547-2018 smart-inverter
+        // mode), the same term Rule 2 already counts. Pre-fix this was an
+        // internal asymmetry: Rule 2 counted reactive flow while Rule 1
+        // did not, so equipment reporting an active mode backed only by
+        // vars could never satisfy Rule 1.
         if mode.is_active() {
             let has_flow = co.flows.electric_kw.as_ref().is_some_and(|p| !p.is_zero())
                 || co.flows.thermal_output_w.is_some_and(|v| v != 0.0)
@@ -64,7 +70,8 @@ pub(crate) fn check_mode_flow_consistency(
                     .flows
                     .fuel_w
                     .as_ref()
-                    .is_some_and(|f| f.consumption_w > 0.0);
+                    .is_some_and(|f| f.consumption_w > 0.0)
+                || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
             if !has_flow {
                 record_rejection();
                 return Err(ModeFlowViolation {

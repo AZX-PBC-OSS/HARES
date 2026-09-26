@@ -5,6 +5,7 @@ use hares_types::EnvironmentState;
 use super::efficiency::temp_efficiency_multiplier;
 
 /// Context passed to each preference for per-step evaluation.
+#[derive(Clone, Debug)]
 pub struct DecisionContext<'a> {
     pub current_soc: f64,
     pub capacity_kwh: f64,
@@ -14,6 +15,18 @@ pub struct DecisionContext<'a> {
     pub current_minute: u16,
     pub next_departure_minute: Option<u16>,
     pub time_res_minutes: f64,
+    /// The equipment's own published cold-charge capability factor
+    /// (`CHARGE_DERATE` telemetry, [0..1]) when the equipment is
+    /// observable; `None` when no equipment telemetry is live (the
+    /// ambient-curve fallback applies). This is the equipment's physical
+    /// state, not a driver belief: `0.0` means charging is impossible
+    /// right now (pack at/below the plating cutoff, preconditioning in
+    /// progress), which the needed-hours estimate must read as infinite —
+    /// never as "slower": an estimate keyed only on an ambient
+    /// driving-range curve caps at ~2× while the equipment correctly zeroes
+    /// charge power below the cutoff, so the estimate would climb nightly
+    /// while nothing charged.
+    pub observed_charge_derate: Option<f64>,
 }
 
 /// A preference's recommendation for this timestep.
@@ -124,11 +137,32 @@ pub(super) fn needed_charge_hours_to_target(
 ) -> f64 {
     let soc_gap = (target_soc - ctx.current_soc).max(0.0);
     let energy_kwh = soc_gap * ctx.capacity_kwh;
+    if energy_kwh <= 0.0 {
+        return 0.0;
+    }
     if ctx.max_charge_kw <= 0.0 || charging_efficiency <= 0.0 {
         return f64::INFINITY;
     }
-    let effective_efficiency =
-        charging_efficiency / temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c);
+    // Cold-charge capability: the equipment's own published derate when
+    // observable (one source of truth with the model that actually moves
+    // the power), else the ambient driving-range curve. Zero derate =
+    // charging physically impossible right now = infinite needed hours —
+    // the honest reading while the equipment's preconditioning warms the
+    // pack (the derate becomes positive within a fraction of an hour and
+    // the estimate tracks it down). With a positive derate the estimate is
+    // the instantaneous-capability bound: conservative in the safe
+    // direction (the pack warms while charging, so the realized session is
+    // faster than the estimate — an over-estimate charges earlier, never
+    // strands the driver).
+    let effective_efficiency = match ctx.observed_charge_derate {
+        Some(derate) if derate > 0.0 => charging_efficiency * derate,
+        Some(0.0) => return f64::INFINITY,
+        // Unobserved equipment (no EV registered): the ambient curve —
+        // calibrated for driving energy consumption (AAA 2019, Geotab
+        // 2020, DOE/Argonne 2024, Recurrent Auto) but applicable to
+        // charging because the same physical mechanisms degrade both.
+        _ => charging_efficiency / temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c),
+    };
     let raw_hours = energy_kwh / (ctx.max_charge_kw * effective_efficiency);
     let hours = if ctx.time_res_minutes > 0.0 {
         let step_hours = ctx.time_res_minutes / 60.0;
@@ -139,9 +173,11 @@ pub(super) fn needed_charge_hours_to_target(
 
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
+        // +∞ is a legitimate value (charging impossible right now); NaN
+        // and negatives are estimate bugs.
         debug_assert!(
-            hours.is_finite() && hours >= 0.0,
-            "needed_charge_hours: result is not a finite non-negative number; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
+            hours.is_infinite() && hours.is_sign_positive() || (hours.is_finite() && hours >= 0.0),
+            "needed_charge_hours: result must be a non-negative finite number or +∞; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
             ctx.max_charge_kw,
         );
     }

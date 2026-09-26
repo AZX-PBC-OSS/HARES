@@ -41,6 +41,57 @@ class TestConstructionRoundTrip:
         assert cfg.time_res_s == 60
         assert cfg.master_seed == 0
 
+    def test_overrides_none_builds_and_non_object_overrides_raise(self):
+        """The overrides channel's Python contract: None is the idiomatic
+        "not provided" (must build cleanly — a regression here rejected
+        Python None as a misconfigured payload), and a non-object payload
+        (a bare string) must fail loudly at the assembly boundary rather
+        than silently no-op every override."""
+        from ochre_next import Dwelling
+
+        # None → no overrides → builds.
+        dw = make_dwelling(overrides=None)
+        assert dw is not None
+
+        # A bare string payload → loud failure naming the overrides.
+        with pytest.raises(Exception, match="(?i)override"):
+            make_dwelling(overrides="ReproEV1")
+
+    def test_non_finite_override_value_fails_loudly(self):
+        """A NaN/±inf float VALUE inside an overrides object must fail
+        loudly — never silently become the field's default. The boundary
+        converter (`python_to_json_value`) routes non-finite floats through
+        `serde_json::json!(f)`, which writes them as `null` (JSON cannot
+        represent them); the null is then dropped as absent downstream, so
+        the field's documented default applies with no error anywhere —
+        the silent-substitution class the typed-config boundary rejects
+        through the `from_typed` finite walk. `setpoint_c` is the
+        discriminator: a finite out-of-range value (200.0) is rejected by
+        the water heater's `check_range` validation, so the field is
+        observably validated *when it arrives*; the non-finite value must
+        meet the same loud fate instead of vanishing."""
+        overrides_key = {"Electric Resistance Water Heater": {}}
+
+        # Control 1: a valid override builds (the channel itself works).
+        dw = make_dwelling(
+            overrides={"Electric Resistance Water Heater": {"setpoint_c": 60.0}}
+        )
+        assert dw is not None
+
+        # Control 2: a finite out-of-range value raises — the field is
+        # validated when it arrives as a number.
+        with pytest.raises(Exception):
+            make_dwelling(
+                overrides={"Electric Resistance Water Heater": {"setpoint_c": 200.0}}
+            )
+
+        # The defect: non-finite values must raise like any other invalid
+        # value, not be nulled into the field's default.
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            overrides_key["Electric Resistance Water Heater"]["setpoint_c"] = bad
+            with pytest.raises(Exception):
+                make_dwelling(overrides=overrides_key)
+
 
 # ---------------------------------------------------------------------------
 # Full simulation
@@ -683,7 +734,12 @@ class TestEvControlSignals:
         from ochre_next import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=75.0, initial_soc=0.5)
+        # Pack temperature pinned (see test_ev_away_charge_no_residential_power):
+        # the subject is the SOC debit arithmetic. Unpinned, the pack
+        # initializes at the (Denver, January, -18 C) outdoor ambient and
+        # the usable capacity carries the reversible cold-temperature
+        # contraction, shifting the debit.
+        ev = EV("EV1", capacity_kwh=75.0, initial_soc=0.5, battery_temp_c=20.0)
         dw.add_ev(ev)
         # Disconnect then drive
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
@@ -692,15 +748,20 @@ class TestEvControlSignals:
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
         soc = tel["soc"][idx]
-        # SOC should drop by ~10/75 ≈ 0.133
+        # SOC drops by 10 / usable-capacity; at the pinned 20 C the
+        # reversible derate is ~0.97, so ~10/72.7 = ~0.137.
         assert soc < 0.5, f"SOC should decrease after driving, got {soc}"
-        assert abs(soc - (0.5 - 10.0 / 75.0)) < 0.02
+        assert abs(soc - (0.5 - 10.0 / 72.7)) < 0.02
 
     def test_ev_away_charge_no_residential_power(self):
         from ochre_next import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3)
+        # Pack temperature pinned: the subject is away charging's
+        # residential-power and SOC behavior. Unpinned, the pack now
+        # initializes at the (Denver, January) outdoor ambient and the
+        # first steps are preconditioning, not charging.
+        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3, battery_temp_c=20.0)
         dw.add_ev(ev)
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
@@ -719,7 +780,11 @@ class TestEvControlSignals:
         from ochre_next import EV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3)
+        # Pack temperature pinned (see test_ev_away_charge_no_residential_power):
+        # the subject is default home charging, not ambient-aware thermal init.
+        ev = EV(
+            "EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3, battery_temp_c=20.0
+        )
         dw.add_ev(ev)
         for _ in range(5):
             dw.step()

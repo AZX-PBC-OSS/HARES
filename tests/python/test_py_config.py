@@ -189,6 +189,100 @@ class TestDwellingConfig:
             assert cfg.resample_overrides is not None
             assert cfg.resample_overrides.get("dry_bulb") == method
 
+    def test_non_finite_overrides_value_fails_loudly(self):
+        """A NaN/±inf float inside a DwellingConfig `overrides` object
+        must fail loudly at construction. The shared Python→JSON boundary
+        converter guards this channel (the config-object entry point for
+        the same equipment-override semantics
+        `Dwelling.from_hpxml(overrides=...)` carries): a non-finite value
+        it let through would be written as `null` by serde_json (JSON
+        cannot represent non-finite floats), silently becoming the
+        field's documented default — the silent-substitution class the
+        sibling entry points gate (`Dwelling.from_hpxml`'s overrides,
+        the tariff dicts) and the spec channel's `make_spec` rejects.
+        A separate gate from the dwelling-level one because the channel
+        is a separate entry point.
+
+        The huge-int face (a Python int too large for i64, e.g. 10**400)
+        is asserted only as "an exception is raised", never which layer
+        raised it — the boundary-test convention: it is rejected loudly
+        by the converter's unsupported-type catch-all ("cannot convert
+        Python object of type 'int' to JSON"), which is the same
+        loud-never-silent contract by a different arm than the
+        non-finite-float rejection.
+        """
+        # Control: a finite override value crosses cleanly and constructs.
+        cfg = DwellingConfig(
+            hpxml="path/to/building.xml",
+            schedule="path/to/schedules.csv",
+            weather="path/to/weather.epw",
+            overrides={"EV": {"battery_temp_c": 15.0}},
+        )
+        assert cfg.overrides is not None
+
+        # The defect face: non-finite float values must raise the
+        # converter's non-finite rejection, not silently default.
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="non-finite"):
+                DwellingConfig(
+                    hpxml="path/to/building.xml",
+                    schedule="path/to/schedules.csv",
+                    weather="path/to/weather.epw",
+                    overrides={"EV": {"battery_temp_c": bad}},
+                )
+
+        # The huge-int face: too large for i64, rejected loudly by the
+        # converter's unsupported-type arm — never silently defaulted.
+        with pytest.raises((ValueError, TypeError)):
+            DwellingConfig(
+                hpxml="path/to/building.xml",
+                schedule="path/to/schedules.csv",
+                weather="path/to/weather.epw",
+                overrides={"EV": {"battery_temp_c": 10**400}},
+            )
+
+    def test_non_string_overrides_key_fails_loudly(self):
+        """A non-string key inside a DwellingConfig `overrides` dict must
+        fail loudly, never be silently skipped — a skipped key would
+        silently drop that equipment's overrides with no error anywhere,
+        the same silent-substitution class the value guard rejects.
+
+        The two key faces are pinned per layer, both loud: a non-string
+        key *nested* inside a value dict is rejected by the shared
+        converter's dict arm ("dict keys must be strings"); a non-string
+        *top-level* key is rejected at pyo3's string extraction in the
+        config channel's own key loop — asserted only as "an exception
+        is raised", never which layer raised it (the boundary-test
+        convention).
+        """
+        # Control: string keys cross cleanly and construct.
+        cfg = DwellingConfig(
+            hpxml="path/to/building.xml",
+            schedule="path/to/schedules.csv",
+            weather="path/to/weather.epw",
+            overrides={"EV": {"battery_temp_c": 15.0}},
+        )
+        assert cfg.overrides is not None
+
+        # Nested face: the converter's own dict-arm rejection.
+        with pytest.raises(ValueError, match="dict keys must be strings"):
+            DwellingConfig(
+                hpxml="path/to/building.xml",
+                schedule="path/to/schedules.csv",
+                weather="path/to/weather.epw",
+                overrides={"EV": {1: 1.0}},
+            )
+
+        # Top-level face: rejected loudly at the channel's key extraction
+        # (pyo3's own TypeError), never silently skipped.
+        with pytest.raises((ValueError, TypeError)):
+            DwellingConfig(
+                hpxml="path/to/building.xml",
+                schedule="path/to/schedules.csv",
+                weather="path/to/weather.epw",
+                overrides={1: 1.0},
+            )
+
     def test_with_simulation_config_round_trips(self):
         """Verify DwellingConfig with config parameter round-trips."""
         sim_cfg = SimulationConfig()

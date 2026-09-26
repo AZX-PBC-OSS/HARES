@@ -485,7 +485,37 @@ impl Equipment for ElectricBoiler {
             .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the flows from the
+        // checkpointed `electric_kw`/`thermal_output_w`, the mode from the
+        // checkpointed `operating_mode` (the pair the step published was
+        // guard-valid, and the checkpoint carries both faces), the
+        // setpoint from the restored thermostat state (the same
+        // `effective_setpoints` the step reads, now reflecting the
+        // restored `runtime_setpoints`). The reactive ZIP power is not
+        // checkpointed and publishes as 0. `CoreOutput::default()` (all
+        // fields `None`) violates the presence rules for every declared
+        // capability (ELECTRIC/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT) —
+        // the restore contract is that a checkpoint restores a state
+        // `validate_core_contract` accepts.
+        let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -908,7 +938,37 @@ impl Equipment for GasBoiler {
             .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the gas step's own literal (fuel arm
+        // included): the flows from the checkpointed
+        // `electric_kw`/`thermal_output_w`/`fuel_input_w`, the mode from
+        // the checkpointed `operating_mode`, the setpoint from the
+        // restored thermostat state. The reactive ZIP power is not
+        // checkpointed and publishes as 0. Same restore contract as the
+        // electric boiler — `CoreOutput::default()` violates the
+        // presence rules for every declared capability
+        // (ELECTRIC/FUEL/REACTIVE/HAS_MODE/THERMAL/HAS_SETPOINT).
+        let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: Some(FuelPower {
+                    fuel_type: self.fuel_type,
+                    consumption_w: decoded.fuel_input_w.max(0.0),
+                }),
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -1486,6 +1546,62 @@ mod tests {
         let cond_eff = 1.0 / cond_boiler.telemetry().get(tk::EIR).unwrap();
         let non_eff = 1.0 / non_boiler.telemetry().get(tk::EIR).unwrap();
         assert!(cond_eff > non_eff);
+    }
+
+    /// Checkpoint restore contract (both boiler variants): a restored core
+    /// output must satisfy the workspace's own `validate_core_contract`
+    /// (presence rules and the mode/flow guard). Pre-fix, the restore
+    /// published `CoreOutput::default()` — all fields `None` against the
+    /// declared capabilities (electric: ELECTRIC/REACTIVE/HAS_MODE/THERMAL/
+    /// HAS_SETPOINT; gas: plus FUEL).
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        // Electric boiler face.
+        {
+            let cfg = eb_config(10_000.0, 0.80);
+            let mut eq = ElectricBoiler::new(cfg.clone());
+            let env = env(18.0);
+            eq.init(&cfg, &env).unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                fluid: vec![hares_types::FluidAccumulator::new(
+                    LoopId(1),
+                    FluidType::Water,
+                )],
+                ..PortSlots::default()
+            };
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let state = eq.save_state().unwrap();
+
+            let mut restored = ElectricBoiler::new(cfg);
+            restored.init(&eb_config(10_000.0, 0.80), &env).unwrap();
+            restored.load_state(&state).unwrap();
+            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+                .expect("an electric boiler checkpoint must restore a contract-valid output");
+        }
+        // Gas boiler face (the fuel arm).
+        {
+            let cfg = gb_config(10_000.0, 0.80);
+            let mut eq = GasBoiler::new(cfg.clone());
+            let env = env(18.0);
+            eq.init(&cfg, &env).unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                fluid: vec![hares_types::FluidAccumulator::new(
+                    LoopId(1),
+                    FluidType::Water,
+                )],
+                ..PortSlots::default()
+            };
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let state = eq.save_state().unwrap();
+
+            let mut restored = GasBoiler::new(cfg);
+            restored.init(&gb_config(10_000.0, 0.80), &env).unwrap();
+            restored.load_state(&state).unwrap();
+            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+                .expect("a gas boiler checkpoint must restore a contract-valid output");
+        }
     }
 
     #[test]

@@ -168,6 +168,17 @@ impl VehicleSpec {
                 heater_threshold_c: None,
                 thermal_mass_j_per_k: None,
                 ua_w_per_k: None,
+                // Pack topology: derived from capacity_kwh at init (96S,
+                // n_parallel from the 21700 5 Ah cell class). No per-model
+                // electrical parameters are carried in the catalog: no
+                // sourceable per-model topology data exists for the fleet
+                // (the physical quantities the literature reports are
+                // cell-level, shared through the chemistry tables), so the
+                // capacity-consistent default with config override covers
+                // the physics without fabricating datasheet values.
+                n_series: None,
+                n_parallel: None,
+                cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
                 v2l_max_discharge_kw: None,

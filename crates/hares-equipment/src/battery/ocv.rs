@@ -145,6 +145,27 @@ impl OcvTable {
     }
 
     pub fn new(soc_points: Vec<f64>, voltage_v: Vec<f64>) -> crate::Result<Self> {
+        // Finite first: a NaN slips every one-sided comparison below
+        // (the strictly-increasing and positivity legs), and a ±inf SOC
+        // or voltage silently poisons the pack terminal-voltage solve
+        // in release builds (the downstream finiteness screens are
+        // debug-only). Mirrors `RegularGridInterpolator::new`'s
+        // axis/value finiteness legs — the sibling constructor's
+        // convention.
+        for (i, s) in soc_points.iter().enumerate() {
+            if !s.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "OCV table soc_points[{i}] is not finite: {s}"
+                )));
+            }
+        }
+        for (i, v) in voltage_v.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "OCV table voltage_v[{i}] is not finite: {v}"
+                )));
+            }
+        }
         if soc_points.len() != voltage_v.len() {
             return Err(HaresError::Equipment(format!(
                 "OCV table soc_points and voltage_v must have same length, got {} and {}",
@@ -275,19 +296,31 @@ impl UNegTable {
                 "UNeg table cannot be empty".to_string(),
             ));
         }
+        // Finite first for soc_points (a NaN slips the strictly-increasing
+        // leg below); `potential_v`'s finiteness leg is retained from the
+        // original validation, normalized to the indexed convention the
+        // OCV table and `RegularGridInterpolator::new` use (the former
+        // `|| v.is_nan()` clause was dead — `is_finite()` already
+        // rejects NaN).
+        for (i, s) in soc_points.iter().enumerate() {
+            if !s.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "UNeg table soc_points[{i}] is not finite: {s}"
+                )));
+            }
+        }
+        for (i, v) in potential_v.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "UNeg table potential_v[{i}] is not finite: {v}"
+                )));
+            }
+        }
         for i in 1..soc_points.len() {
             if soc_points[i] <= soc_points[i - 1] {
                 return Err(HaresError::Equipment(format!(
                     "UNeg table soc_points must be strictly increasing, got {:?}",
                     soc_points
-                )));
-            }
-        }
-        for v in &potential_v {
-            if !v.is_finite() || v.is_nan() {
-                return Err(HaresError::Equipment(format!(
-                    "UNeg table potential_v must be finite, got {:?}",
-                    potential_v
                 )));
             }
         }

@@ -846,7 +846,41 @@ impl Equipment for ResistanceWH {
                 0.0
             },
         );
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal (the pair the step
+        // published was guard-valid, and the checkpoint carries both
+        // faces): the flows from the checkpointed `electric_kw`/
+        // `reactive_power_kvar`, the mode re-derived by the step's own
+        // rule (`update_control`'s element dispatch → `resolve_idle` on
+        // the restored flow). `CoreOutput::default()` (all fields `None`)
+        // violates the capability-presence rules for every field the
+        // descriptor declares (ELECTRIC/REACTIVE/HAS_MODE) — the restore
+        // contract is that a checkpoint restores a state the workspace's
+        // own `validate_core_contract` accepts.
+        let has_nonzero_flow = decoded.electric_kw > 0.0;
+        let restored_mode = if decoded.upper_element_on || decoded.lower_element_on {
+            OperatingMode::Heating
+        } else {
+            OperatingMode::Off
+        }
+        .resolve_idle(has_nonzero_flow, None);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -2585,6 +2619,42 @@ mod element_priority_tests {
             restored.max_combined_power_w,
             Some(6_500.0),
             "max_combined_power_w must survive save/load round-trip"
+        );
+    }
+
+    /// The checkpoint-restore contract on the default-reset restorers:
+    /// `load_state` ends with `self.core_output = CoreOutput::default()` —
+    /// every field `None` — while the descriptor declares `ELECTRIC |
+    /// REACTIVE | HAS_MODE`. `validate_core_contract`'s presence rules
+    /// (`equipment.rs`: a declared capability with a `None` field is a
+    /// hard error — `missing state.operating_mode`, `missing
+    /// flows.electric_kw`, `missing flows.reactive_power_kvar`) therefore
+    /// reject the restored output. A checkpoint must restore a state the
+    /// workspace's own contract validation accepts (the contract the EV
+    /// var-support and Battery mid-charge restore fixes established);
+    /// sibling restores that rebuild a populated, guard-consistent output
+    /// (Battery) meet it, and the next step always can — the restore
+    /// should publish a populated idle output rather than a default one.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = cold_config("MasterSlave");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        let mut p = ports();
+        wh.step(&env_state(), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let checkpoint = wh.save_state().expect("save water heater checkpoint");
+        let mut restored = ResistanceWH::new(cold_config("MasterSlave"));
+        let cfg2 = cold_config("MasterSlave");
+        restored.init(&cfg2, &env_state()).unwrap();
+        restored
+            .load_state(&checkpoint)
+            .expect("restore checkpoint");
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+            "a restored checkpoint must satisfy the core contract (presence rules \
+                 and mode/flow guard)",
         );
     }
 }

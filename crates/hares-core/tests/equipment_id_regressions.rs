@@ -40,13 +40,13 @@ use hares_io::OutputFormat;
 use hares_types::{
     BmsMode, ControlCapabilities, CoreCapabilities, CoreOutput, ElectricPower, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
-    HaresError, OperatingMode, PortSlots, Telemetry, TelemetryField,
+    HaresError, OperatingMode, PortSlots, Soc, Telemetry, TelemetryField,
 };
+
+mod common;
 
 /// 900 s timestep → 96 rows per simulated day in the output CSV.
 const STEPS_PER_DAY: usize = 96;
-/// A 900 s step is 0.25 h (900 s / 3600 s per hour) — kWh = kW × 0.25.
-const STEP_HOURS: f64 = 0.25;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -201,53 +201,14 @@ fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
     );
 }
 
-/// Scans the run's CSV output: the number of days on which the EV equipment
-/// drew more than 1 kWh (a real charging session — a nightly top-up is
-/// ~9.8 kWh while parasitic draw is far below 1 kWh), and the peak of the
-/// driver's drive-cancelled counter.
+/// Scans the run's CSV output: the number of days on which the EV pack's
+/// stored energy actually rose, and the peak of the driver's drive-cancelled
+/// counter — the shared charging-isolating metric (see
+/// `common::ev_charge_days_and_peak_cancelled`; the pre-fix local copy
+/// counted any day with > 1 kWh of positive port power, which a heater-only
+/// day also satisfies).
 fn summarize_ev_run(csv_path: &Path) -> (usize, f64) {
-    let contents = std::fs::read_to_string(csv_path).expect("read output CSV");
-    let mut lines = contents.lines();
-    let header: Vec<&str> = lines
-        .next()
-        .expect("output CSV has a header")
-        .split(',')
-        .collect();
-    let idx_power = header
-        .iter()
-        .position(|c| *c == "EV Electric Power (kW)")
-        .expect("output contains 'EV Electric Power (kW)'");
-    let idx_cancelled = header
-        .iter()
-        .position(|c| *c == "actor:EvDriver:EV:drive_cancelled")
-        .expect("output contains 'actor:EvDriver:EV:drive_cancelled'");
-
-    let mut daily_charge_kwh: Vec<f64> = Vec::new();
-    let mut cancelled_max = 0.0f64;
-    for (row, line) in lines.enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(',').collect();
-        let power_kw: f64 = fields[idx_power]
-            .trim()
-            .parse()
-            .expect("EV power column parses as f64");
-        let day = row / STEPS_PER_DAY;
-        while daily_charge_kwh.len() <= day {
-            daily_charge_kwh.push(0.0);
-        }
-        // Charging only: driving discharge shows up as negative power.
-        if power_kw > 0.0 {
-            daily_charge_kwh[day] += power_kw * STEP_HOURS;
-        }
-        if let Ok(cancelled) = fields[idx_cancelled].trim().parse::<f64>() {
-            cancelled_max = cancelled_max.max(cancelled);
-        }
-    }
-
-    let charge_days = daily_charge_kwh.iter().filter(|kwh| **kwh > 1.0).count();
-    (charge_days, cancelled_max)
+    common::ev_charge_days_and_peak_cancelled(csv_path, STEPS_PER_DAY)
 }
 
 // ===========================================================================
@@ -419,6 +380,28 @@ impl IdentityProbeEquipment {
         self.electric_load_kw = kw;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC;
         self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(kw));
+        self
+    }
+
+    /// Pose as another end use: the descriptor's `end_use` drives
+    /// end-use-keyed dwelling machinery (invariant checks, dispatch
+    /// fan-out, output aggregation) — this builder lets a test probe that
+    /// machinery without a real equipment of that type.
+    fn with_end_use(mut self, end_use: EndUse) -> Self {
+        self.descriptor.end_use = end_use;
+        self
+    }
+
+    /// Publish a core-output SOC with the matching HAS_SOC capability,
+    /// mirroring the real storage equipment the probe stands in for (every
+    /// real Battery/EV publishes SOC at every step, and the dwelling's
+    /// soc_bounds monitor fails loudly on an absent SOC for that
+    /// population) — so a probe isolating a different gate stays green
+    /// there.
+    fn with_published_soc(mut self, soc: f64) -> Self {
+        self.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
+        self.core_output.state.soc =
+            Some(Soc::try_from(soc).expect("probe SOC must be within [0, 1]"));
         self
     }
 }
@@ -2477,5 +2460,81 @@ fn actor_binding_recovers_when_its_equipment_arrives_later() {
              registered before its equipment would otherwise stay in the \
              no-SOC-feedback mode forever (the pre-fix user-actor gap), \
              got soc = {soc}"
+    );
+}
+
+/// A dwelling-level safety net must fail loudly when its observation channel
+/// is absent, not silently skip the check: `ev_capacity_degraded` reads four
+/// static keys every real EV publishes at construction and every step, so an
+/// EV-end-use equipment missing them is a wiring defect — the same
+/// monitor-blindness class (I-06) the other regressions in this file pin
+/// from the misattributed-reading end. Pre-fix, the gate silently skipped
+/// the check whenever any key was missing, so a misbound EV passed
+/// invariants unobserved.
+#[test]
+fn ev_capacity_check_fails_loudly_when_ev_telemetry_keys_are_absent() {
+    let mut dwelling = build_fixture_dwelling(&fixture_dir(), false, None);
+    // An EV-end-use probe whose telemetry carries none of the four static
+    // keys — reachable only through a wiring defect, never through the real
+    // EV constructor (which publishes them at construction, `Ev::new`).
+    dwelling
+        .add_equipment(Box::new(
+            IdentityProbeEquipment::new("ProbeEvAbsentTelemetry", 0)
+                .with_end_use(EndUse::EV)
+                .with_published_soc(0.5),
+        ))
+        .expect("probe must register");
+    let err = dwelling
+        .step()
+        .expect_err("absent static EV telemetry must fail the step loudly");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ev_capacity_degraded") && msg.contains("ProbeEvAbsentTelemetry"),
+        "the failure must name the check and the equipment, got: {msg}"
+    );
+}
+
+/// The same monitor-blindness class, one gate up in the same invariant
+/// loop: `check_soc` silently skipped when an EV-end-use equipment's
+/// core-output SOC was absent — reachable only through a wiring defect
+/// (every real EV and Battery publishes SOC at every step, and
+/// `Soc::try_from(..).ok()` additionally nulls it on a non-finite
+/// internal SOC), so the SOC-bounds monitor was blind exactly on the
+/// observation failure it existed to catch — the anti-pattern the
+/// adjacent `ev_capacity_degraded` gate was made loud against. The four
+/// static capacity keys are present and consistent so that adjacent gate
+/// passes, isolating the `soc_bounds` behavior under test.
+///
+/// The gate is now loud (the fix landed: the `let-else` at the top of the
+/// loop fails the step naming the check and the equipment); this gate
+/// was the round-9 routed finding's must_fail form and flipped green
+/// with the fix, per the constitution's self-destructing-annotation
+/// discipline. It asserts the full loud-error contract — the failure
+/// names the check (`soc_bounds`) and the offending equipment, mirroring
+/// the sibling `ev_capacity_degraded` gate's message assertion — so a
+/// regression to a generic error message goes red here too.
+#[test]
+fn ev_soc_check_fails_loudly_when_core_output_soc_is_absent() {
+    let mut dwelling = build_fixture_dwelling(&fixture_dir(), false, None);
+    let mut probe = IdentityProbeEquipment::new("ProbeEvAbsentSoc", 0).with_end_use(EndUse::EV);
+    // Consistent values — usable = rated × (1 − fade) × derate(25 °C), the
+    // exact pass condition of `check_ev_capacity_degraded` — so the
+    // adjacent gate stays green and the only behavior under test is the
+    // `soc_bounds` loud failure on the absent SOC.
+    let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(25.0);
+    probe.telemetry.insert("capacity_kwh", 60.0 * derate);
+    probe.telemetry.insert("capacity_kwh_rated", 60.0);
+    probe.telemetry.insert("capacity_fade_pct", 0.0);
+    probe.telemetry.insert("battery_temp_c", 25.0);
+    dwelling
+        .add_equipment(Box::new(probe))
+        .expect("probe must register");
+    let err = dwelling
+        .step()
+        .expect_err("absent core-output SOC must fail the step loudly");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("soc_bounds") && msg.contains("ProbeEvAbsentSoc"),
+        "the failure must name the check and the equipment, got: {msg}"
     );
 }

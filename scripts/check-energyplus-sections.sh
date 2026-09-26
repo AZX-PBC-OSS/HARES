@@ -6,21 +6,31 @@ set -euo pipefail
 # §-style citations (e.g. "EnergyPlus Engineering Reference §15.4") are
 # unverifiable against the web-hosted docs which use heading-based navigation.
 
-TARGET_DIRS=("crates/" "tests/" "docs/")
-EXCLUDE_DIRS="docs/reviews docs/tickets docs/findings docs/eplus vendors"
+TARGET_DIRS=("crates" "tests" "docs")
+
+# Path-based pruning — not grep --exclude-dir: grep's --exclude-dir matches
+# directory *basenames*, so an exempted docs directory name would also skip
+# any production directory that happens to share it (the ASHRAE gate's
+# "hpxml" exemption did exactly that to crates/hares-io/src/hpxml — the
+# HPXML parser). find -prune matches full paths, so the exemptions stay
+# pinned to the provenance docs they exist for and every production
+# directory stays scanned.
+EXEMPT_PRUNE=(
+    -path 'docs/reviews'
+    -o -path 'docs/tickets'
+    -o -path 'docs/findings'
+    -o -path 'docs/eplus'
+    -o -name vendors
+)
 FAILED=0
 
-build_exclude_args() {
-    local args=()
-    for d in $EXCLUDE_DIRS; do
-        args+=(--exclude-dir="$d")
-    done
-    echo "${args[@]}"
+scan_matches() {
+    # Every non-exempt file under the target trees, grepped by pattern.
+    find "${TARGET_DIRS[@]}" \( "${EXEMPT_PRUNE[@]}" \) -prune -o -type f -print0 2>/dev/null \
+        | xargs -0 -r grep -n "$1" 2>/dev/null || true
 }
 
-mapfile -t MATCHES < <(
-    grep -rn 'EnergyPlus.*§' "${TARGET_DIRS[@]}" $(build_exclude_args) 2>/dev/null || true
-)
+mapfile -t MATCHES < <(scan_matches 'EnergyPlus.*§')
 
 if [ ${#MATCHES[@]} -gt 0 ]; then
     echo "FAIL: Found ${#MATCHES[@]} §-style EnergyPlus references:"

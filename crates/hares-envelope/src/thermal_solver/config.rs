@@ -169,7 +169,8 @@ pub struct MechanicalVentilationParams {
 ///
 /// Implements the EnergyPlus `ZoneVentilation:WindandStackOpenArea` model:
 /// wind and stack flow components are computed separately and combined in
-/// quadrature following the EnergyPlus Engineering Reference §15.4 formula
+/// quadrature following the EnergyPlus ERM 26.1 — Zone Ventilation Wind and
+/// Stack Open Area formula
 /// `Q = sqrt(Q_wind² + Q_stack²)` and ASHRAE HoF 2009 Ch. 16.14.
 ///
 /// The stack term depends on the [`OpeningType`]:
@@ -200,7 +201,7 @@ pub struct MechanicalVentilationParams {
 /// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
 /// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct (DH, DiscCoef)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: `Q = Cw × A × U`
-/// - EnergyPlus Engineering Reference §15.4: `Q = sqrt(Qw² + Qst²)`
+/// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: `Q = sqrt(Qw² + Qst²)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaturalVentilationConfig {
     /// Effective operable window area [m²].

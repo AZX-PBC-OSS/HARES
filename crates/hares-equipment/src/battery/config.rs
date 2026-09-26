@@ -150,6 +150,58 @@ impl BatteryConfig {
                 }
             }
         }
+        // Temperature fields must be finite: a NaN cell temperature falls
+        // through both comparison branches of `linear_temp_derate` (lib.rs)
+        // into the interpolation, yielding a NaN discharge derate; a NaN
+        // `min_charge_temp_c` makes `charge_allowed`'s `>=` comparison false
+        // forever, silently disabling the plating-cutoff guard. Physically
+        // extreme but finite temperatures are legal — the runtime
+        // plausibility envelope is the degradation guard's job, not the
+        // config boundary's.
+        for (name, val) in [
+            ("initial_cell_temp_c", self.initial_cell_temp_c),
+            ("min_discharge_temp_c", self.min_discharge_temp_c),
+            ("full_power_temp_c", self.full_power_temp_c),
+            ("min_charge_temp_c", self.min_charge_temp_c),
+            ("heater_threshold_c", self.heater_threshold_c),
+        ] {
+            if let Some(t) = val
+                && !t.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "battery {name} must be finite, got {t}"
+                )));
+            }
+        }
+        // Both derate ramps must be ordered: with an inverted
+        // min > full pair, `linear_temp_derate`'s `temp >= temp_max`
+        // branch wins everywhere above temp_max, silently returning full
+        // power across the band the configuration meant to derate. Equal
+        // pairs are legal — step cutoffs, not ramps.
+        for (min_name, min_c, full_name, full_c) in [
+            (
+                "min_discharge_temp_c",
+                self.min_discharge_temp_c,
+                "full_power_temp_c",
+                self.full_power_temp_c,
+            ),
+            (
+                "min_charge_temp_c",
+                self.min_charge_temp_c,
+                "full_power_temp_c",
+                self.full_power_temp_c,
+            ),
+        ] {
+            if let (Some(lo), Some(hi)) = (min_c, full_c)
+                && lo > hi
+            {
+                return Err(HaresError::Equipment(format!(
+                    "battery {min_name} ({lo} °C) must not exceed \
+                     {full_name} ({hi} °C) — the derate ramp would be \
+                     inverted and return full power across the derate band"
+                )));
+            }
+        }
         for (name, val) in [
             ("inverter_efficiency", self.inverter_efficiency),
             ("charge_efficiency", self.charge_efficiency),
@@ -319,5 +371,75 @@ mod tests {
         cfg.power_factor = Some(0.95);
         cfg.inverter_capacity_kva = Some(7.0);
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Temperature fields must be finite and both derate ramps ordered —
+    /// the same validation class as the EV's config (a NaN temperature
+    /// poisons `linear_temp_derate` and `charge_allowed` comparisons
+    /// silently; an inverted min > full ramp returns full power across
+    /// the derate band). Finite extremes and equal (step-cutoff) pairs
+    /// stay legal.
+    #[test]
+    fn battery_config_validate_rejects_non_finite_or_inverted_temperature_fields() {
+        let rejects = |mutate: &dyn Fn(&mut BatteryConfig)| {
+            let mut cfg = minimal_battery_config();
+            mutate(&mut cfg);
+            cfg.validate()
+        };
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                rejects(&|c| c.initial_cell_temp_c = Some(bad)).is_err(),
+                "non-finite initial_cell_temp_c ({bad}) must be rejected"
+            );
+            assert!(
+                rejects(&|c| c.min_discharge_temp_c = Some(bad)).is_err(),
+                "non-finite min_discharge_temp_c ({bad}) must be rejected"
+            );
+            assert!(
+                rejects(&|c| c.full_power_temp_c = Some(bad)).is_err(),
+                "non-finite full_power_temp_c ({bad}) must be rejected"
+            );
+            assert!(
+                rejects(&|c| c.min_charge_temp_c = Some(bad)).is_err(),
+                "non-finite min_charge_temp_c ({bad}) must be rejected"
+            );
+            assert!(
+                rejects(&|c| c.heater_threshold_c = Some(bad)).is_err(),
+                "non-finite heater_threshold_c ({bad}) must be rejected"
+            );
+        }
+
+        assert!(
+            rejects(&|c| {
+                c.min_charge_temp_c = Some(20.0);
+                c.full_power_temp_c = Some(10.0);
+            })
+            .is_err(),
+            "inverted min_charge_temp_c > full_power_temp_c must be rejected"
+        );
+        assert!(
+            rejects(&|c| {
+                c.min_discharge_temp_c = Some(-15.0);
+                c.full_power_temp_c = Some(-20.0);
+            })
+            .is_err(),
+            "inverted min_discharge_temp_c > full_power_temp_c must be rejected"
+        );
+
+        // Boundary-legal: physically extreme but finite temperatures, and
+        // equal (step-cutoff) ramp pairs.
+        assert!(rejects(&|c| c.initial_cell_temp_c = Some(-40.0)).is_ok());
+        assert!(rejects(&|c| c.min_discharge_temp_c = Some(-25.0)).is_ok());
+        assert!(rejects(&|c| c.full_power_temp_c = Some(60.0)).is_ok());
+        assert!(rejects(&|c| c.heater_threshold_c = Some(45.0)).is_ok());
+        assert!(
+            rejects(&|c| {
+                c.min_charge_temp_c = Some(10.0);
+                c.full_power_temp_c = Some(10.0);
+            })
+            .is_ok(),
+            "an equal min/full pair is a legal step cutoff"
+        );
     }
 }

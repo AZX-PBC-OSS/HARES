@@ -163,13 +163,13 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Gas Water Heater",
         &wh.name,
         FuelType::Gas,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +321,13 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<Equipme
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Electric Resistance Water Heater",
         &wh.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -494,13 +494,13 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Heat Pump Water Heater",
         &wh.name,
         FuelType::Electric,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -632,13 +632,13 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Tankless Water Heater",
         &wh.name,
         FuelType::Gas,
         params,
         typed_config,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -775,11 +775,11 @@ pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> PyResult<EquipmentSpec
         )
     };
 
-    Ok(make_spec(
+    make_spec(
         "Indirect Tank",
         &it.name,
         FuelType::Gas,
         params,
         typed_config,
-    ))
+    )
 }

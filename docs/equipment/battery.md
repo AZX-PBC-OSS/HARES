@@ -58,35 +58,55 @@ Where:
 
 ## Degradation Model (Smith et al. 2017)
 
-**Source**: `battery/degradation.rs`
+**Source**: `battery/degradation.rs`. Constants verified against both the
+NREL preprint (NREL/CP-5400-67102) and NREL's own implementation of the
+paper (SSC `lib_battery_lifetime_nmc.{h,cpp}`).
 
-Three-mechanism electrochemical capacity fade model updated daily:
+Two capacity-limiting branches, updated daily, with usable capacity =
+min(QLi, Qneg) per the paper's Eq. 1:
 
-### Mechanism 1: Calendar/SEI Growth (sqrt-of-time)
+### Li branch, Mechanism 1: Calendar/SEI Growth (sqrt-of-time)
 
 - Solid-electrolyte-interface layer growth on anode
 - Arrhenius temperature dependence: `EA_B1 = 35,392 J/mol`
-- Tafel voltage correction at graphite anode potential
+- Tafel voltage correction at graphite anode potential (`α_b1 = −1`)
 - DOD power-law coupling: `exp(gamma * dod_max^beta)`
 
-### Mechanism 2: Cycle-Induced Lithium Loss
+### Li branch, Mechanism 2: Cycle-Induced Lithium Loss
 
 - Rainflow cycle counting (ASTM E1049-85 three-point method)
 - Daily increment: `dq_li2 = b2_ref * b2_accum * sqrt(sum_squared_dod)`
 - Arrhenius dependence: `EA_B2 = -42,800 J/mol` (faster degradation at lower temperatures)
 
-### Mechanism 3: Beginning-of-Life Transient
+### Li branch, Mechanism 3: Break-In Li Loss at BOL
 
-- Exponential relaxation toward equilibrium: `dq_li3 = (b3_accum - q_li3) / tau_b3`
-- `tau_b3 = 5.0 days`
+- A positive loss relaxing toward the b3 integral:
+  `dq_li3 = (b3_accum - q_li3) / tau_b3` with `b3,ref = +2.805e-2`,
+  `θ = +0.135` (DOD coupling), `tau_b3 = 5.0 days`
+
+### Negative-Electrode Branch (Eq. 8-11)
+
+- Site capacity lost per cycle, inversely proportional to remaining sites
+- DOD-weighted with `β_c2 = 4.54`; rate `c2,ref = 5.226e-5 Ah/cycle`,
+  `EA_c2 = -48,260 J/mol`; initial sites `c0,ref = 75.675 Ah`
 
 ### Capacity Fade
 
 ```
-capacity_fade = 1.0 - (B0 - q_li1 - q_li2 - q_li3)
+q_li_rel = d0_rel * (B0 - q_li1 - q_li2 - q_li3)      # B0 = 1.07
+q_neg_rel = (c0_ref / Ah_ref) * (1 - dq_neg)
+capacity_fade = 1.0 - min(q_li_rel, q_neg_rel)
 ```
 
-Where B0 = 1.0 (initial normalized lithium inventory).
+BOL usable capacity sits ≈ +0.9 % above nameplate (the b0 = 1.07 Li
+intercept capped by the negative-electrode branch) and decays from there.
+
+### Reversible Temperature Scaling
+
+The temperature dependence of d0 (Eq. 3) is NOT baked into the fade: the
+stationary Battery applies it as its separate `CapacityDerateModel`
+(Arrhenius, `d0,ref = 1.001`, `EA,d0,1 = 4126`, `EA,d0,2 = 9.752e6 J/mol`),
+so the fade and the derate each apply exactly once.
 
 ## Control Modes
 
@@ -112,6 +132,17 @@ graph TD
 - `import_limit_kw`: max charge power from grid (optional)
 - `export_limit_kw`: max discharge power to grid (optional)
 - Enforced as hard minimum with hardware limits (tightest wins)
+- With a configured charging-curve LUT, its temperature axis IS the
+  temperature-dependent charge capability — the capacity derate is not
+  multiplied on top (one physical effect, applied once; the same rule as the
+  EV's charging model). The `min_charge_temp_c` plating cutoff applies
+  unconditionally in `step` regardless.
+- The LUT's c-rate axis is computed over `capacity_kwh_nominal` (the
+  SOH-adjusted, temperature-independent rating) through the shared
+  `pack_electrical::charging_lut_c_rate` home — the same divisor rule as the
+  EV's charging model, so the siblings cannot diverge: temperature and
+  degradation enter the lookup only through the LUT's own axes, never
+  through the divisor.
 
 ## Port Interactions
 

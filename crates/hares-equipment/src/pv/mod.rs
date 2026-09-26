@@ -1456,12 +1456,33 @@ impl Equipment for PV {
         } else {
             self.system_losses_fraction
         };
-        self.core_output = CoreOutput::default();
-        // CoreOutput cannot be reconstructed from checkpoint data because
-        // PV generation depends on live irradiance and environmental
-        // conditions (cell temperature, DC power curves) that are not
-        // stored in PvCheckpoint.  Reconstruction would require a
-        // checkpoint format change.  See ticket Known Limitations.
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                // PV generation depends on live irradiance and environmental
+                // conditions (cell temperature, DC power curves) that are
+                // not stored in PvCheckpoint, so the restore-instant
+                // output publishes the zero-flow truth rather than a
+                // reconstructed generation. `CoreOutput::default()` (all
+                // fields `None`) violates the capability-presence rules
+                // for the declared ELECTRIC/REACTIVE capabilities — the
+                // restore contract is that a checkpoint restores a state
+                // `validate_core_contract` accepts. The next step
+                // recomputes generation from live irradiance.
+                electric_kw: Some(ElectricPower::Generation(0.0)),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -2168,6 +2189,30 @@ mod tests {
         approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0), 1.5);
         assert!(pv.telemetry().get(tk::CURTAILMENT_KW).unwrap_or(0.0) > 0.0);
         approx_eq(ports.electrical.generation_power_w, -1500.0);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// ELECTRIC/REACTIVE capabilities. PV generation depends on live
+    /// irradiance the checkpoint does not carry, so the restore publishes
+    /// the zero-flow truth — the same face the fix implements.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let mut pv = PV::new(config_single());
+        pv.apply_control(&ControlSignal::PowerLimit {
+            max_power_kw: 2.3,
+            ramp_rate_kw_per_s: None,
+        })
+        .unwrap();
+        let state = pv.save_state().unwrap();
+
+        let mut restored = PV::new(config_single());
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a PV checkpoint must restore a contract-valid output");
     }
 
     #[test]

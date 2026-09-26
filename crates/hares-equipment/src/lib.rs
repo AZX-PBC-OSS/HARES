@@ -10,6 +10,7 @@ pub mod event_load;
 pub mod generator;
 pub mod hvac;
 pub mod ndinterp;
+pub(crate) mod pack_electrical;
 pub mod protocol_bridge;
 pub mod pv;
 pub mod registry;

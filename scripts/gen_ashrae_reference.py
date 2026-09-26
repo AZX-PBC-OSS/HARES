@@ -1017,16 +1017,16 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
                     "LWR exchange module, not by R_film_int."
                 ),
                 "exterior_film_r": (
-                    "EnergyPlus Engineering Reference v25.1.0 §9.5 "
-                    "(DOE-2 forced convection, r_f=1.67 'Rough' per the "
-                    "§9.5 Surface Roughness Multipliers table -- residential "
-                    "BEopt/OCHRE convention for shingle/clapboard)."
+                    "EnergyPlus ERM 26.1 — Exterior Convection: "
+                    "DOE-2 forced convection, r_f=1.67 'Rough' per the "
+                    "Surface Roughness Multipliers table -- residential "
+                    "BEopt/OCHRE convention for shingle/clapboard."
                 ),
                 "window_u_factor_ip_to_si": (
                     "ASHRAE 90.1-2022 Appendix A unit-conversion factor "
                     "5.678263 W/(m^2*K) per Btu/(hr*ft^2*F); Simple Glazing "
-                    "interior-film decomposition per EnergyPlus Eng. Ref. §3.2 "
-                    "(Arasteh et al., LBNL 2009)."
+                    "interior-film decomposition per EnergyPlus ERM 26.1 — "
+                    "Window Calculation Module (Arasteh et al., LBNL 2009)."
                 ),
                 "assembly_layer_r_and_capacitance": (
                     "ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 4 "
@@ -1058,8 +1058,8 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
                     "(triangular gable roof, 0.5 * footprint * sqrt(gable_area * tan_pitch))."
                 ),
                 "typical_zone_temperatures": (
-                    "EnergyPlus Engineering Reference §9.4 idealised "
-                    "interior/exterior anchors (conditioned 20 C, "
+                    "EnergyPlus ERM 26.1 — Inside Heat Balance (TARP) "
+                    "idealised interior/exterior anchors (conditioned 20 C, "
                     "outdoor = avg_ambient + 5 C, ground = avg_ground); "
                     "linear interpolation for unconditioned intermediate zones."
                 ),

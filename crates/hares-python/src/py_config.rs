@@ -8,8 +8,9 @@ use hares_core::DwellingConfig;
 use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList};
+use pyo3::types::PyDict;
 
+use crate::utils::python_to_json_value;
 use crate::utils::{parse_datetime_str, parse_resample_method};
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
@@ -17,48 +18,6 @@ const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
 const DEFAULT_STEP_S: i64 = 60;
 const DEFAULT_CHUNK_SIZE: usize = 10_000;
 pub(crate) const MAX_CHRONO_SECONDS: i64 = i64::MAX / 1_000;
-
-fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    if obj.is_none() {
-        return Ok(serde_json::Value::Null);
-    }
-    // Bool must be checked before int/f64 because Python bool is a subclass of int.
-    if obj.is_instance_of::<PyBool>() {
-        return Ok(serde_json::Value::Bool(obj.extract::<bool>()?));
-    }
-    // Check for int before f64 since integers can extract as f64.
-    if let Ok(n) = obj.extract::<i64>() {
-        return Ok(serde_json::Value::Number(n.into()));
-    }
-    if let Ok(n) = obj.extract::<f64>() {
-        if let Some(num) = serde_json::Number::from_f64(n) {
-            return Ok(serde_json::Value::Number(num));
-        }
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(serde_json::Value::String(s));
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let mut values = Vec::new();
-        for item in list.iter() {
-            values.push(python_to_json(&item)?);
-        }
-        return Ok(serde_json::Value::Array(values));
-    }
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut obj_map = serde_json::Map::new();
-        for (k, v) in dict.iter() {
-            let k_str: String = k.extract()?;
-            let json_val = python_to_json(&v)?;
-            obj_map.insert(k_str, json_val);
-        }
-        return Ok(serde_json::Value::Object(obj_map));
-    }
-    Err(PyValueError::new_err(format!(
-        "unsupported Python type for JSON conversion: {:?}",
-        obj.get_type().name()
-    )))
-}
 
 fn default_start_time() -> PyResult<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
@@ -670,7 +629,7 @@ impl PyDwellingConfig {
                     PyValueError::new_err(format!("missing value for override key: {}", key_str))
                 })?;
                 let py_any = value.as_ref();
-                let json_value = python_to_json(py_any)?;
+                let json_value = python_to_json_value(py_any)?;
                 map.insert(key_str, json_value);
             }
             if map.is_empty() { None } else { Some(map) }

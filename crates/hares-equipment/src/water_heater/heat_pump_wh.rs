@@ -1328,7 +1328,41 @@ impl Equipment for HeatPumpWH {
                 (false, false) => 0.0,
             },
         );
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal. The mode is the same
+        // pure function of the persisted `(compressor_on, backup_on)`
+        // dispatch that `update_control` returns, resolved against the
+        // persisted flow (`resolve_idle`, as the step does); the flows are
+        // the checkpointed `electric_kw`/`reactive_power_kvar`. The pair
+        // the step published was guard-valid, and the checkpoint carries
+        // both faces. `CoreOutput::default()` (all fields `None`) violates
+        // the capability-presence rules for every declared capability
+        // (ELECTRIC/REACTIVE/HAS_MODE) — the restore contract is that a
+        // checkpoint restores a state `validate_core_contract` accepts.
+        let restored_mode = match (decoded.compressor_on, decoded.backup_on) {
+            (true, true) => OperatingMode::HeatingHPAndER,
+            (true, false) => OperatingMode::HeatPumpWH,
+            (false, true) => OperatingMode::BackupElement,
+            (false, false) => OperatingMode::Off,
+        }
+        .resolve_idle(decoded.electric_kw > 0.0, None);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         Ok(())
     }
@@ -2181,6 +2215,24 @@ mod tests {
     /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of ELECTRIC_KW and other per-step telemetry.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = HeatPumpWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a heat pump WH checkpoint must restore a contract-valid output");
+    }
+
     #[test]
     fn state_round_trip_preserves_reactive_power_kvar() {
         let mut eq = HeatPumpWH::new(config());

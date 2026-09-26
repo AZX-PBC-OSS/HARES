@@ -55,6 +55,7 @@ mod tests {
             current_minute: 720,
             next_departure_minute: None,
             time_res_minutes: 1.0,
+            observed_charge_derate: None,
         }
     }
 
@@ -125,13 +126,16 @@ mod tests {
             "negative max charge rate must yield INFINITY (cannot charge)"
         );
 
-        // Zero gap at zero rate: unguarded division is 0/0 = NaN.
+        // Zero gap at zero rate: the gap dominates — nothing is needed,
+        // regardless of capability (the pre-guard division was 0/0 = NaN;
+        // the guarded order returns a deterministic 0, not the sentinel).
         let mut ctx = make_ctx(&env, 0.9);
         ctx.max_charge_kw = 0.0;
         assert_eq!(
             pref.needed_charge_hours(&ctx),
-            f64::INFINITY,
-            "zero gap at zero rate must yield the sentinel, not NaN"
+            0.0,
+            "zero gap needs zero hours even with no charge capability — the \
+             gap check runs before the capability checks"
         );
     }
 

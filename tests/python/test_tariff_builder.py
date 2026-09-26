@@ -165,6 +165,30 @@ class TestFromDictRoundtrip:
         restored = ElectricTariff.from_dict(d)
         assert original == restored
 
+    def test_non_finite_value_fails_loudly(self) -> None:
+        """A NaN/±inf float in a tariff dict must fail loudly — never
+        silently become the field's default. The boundary converter
+        (`py_to_json_value`, py_tariff.rs) routes non-finite floats through
+        `serde_json::json!(f)`, which writes them as `null` (JSON cannot
+        represent them); for an `Option<f64>` field like `minimum_charge`
+        the null deserializes as `None`, so a NaN minimum charge silently
+        becomes *no minimum charge* — the silent-substitution class the
+        equipment typed-config boundary rejects through the `from_typed`
+        finite walk. The required-field face already raises (a null for a
+        non-Option `rate_per_kwh` fails deserialization); the optional-field
+        face must meet the same loud fate."""
+        tariff = _make_simple_tou_builder().build()
+        base = tariff.to_dict()
+
+        # Control: a finite minimum charge round-trips.
+        d = dict(base, minimum_charge=8.0)
+        assert ElectricTariff.from_dict(d).to_dict()["minimum_charge"] == 8.0
+
+        # The defect: non-finite values must raise, not silently default.
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(Exception):
+                ElectricTariff.from_dict(dict(base, minimum_charge=bad))
+
     def test_to_dict_has_expected_keys(self) -> None:
         tariff = _make_simple_tou_builder().build()
         d = tariff.to_dict()

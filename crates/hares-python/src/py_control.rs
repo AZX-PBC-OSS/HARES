@@ -13,6 +13,10 @@ use crate::py_actor::{PyDRLevel, PyMode};
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
+use crate::utils::{
+    dict_optional, dict_required, finite_f64_optional, finite_f64_required, validate_finite,
+    validate_non_negative, validate_range,
+};
 
 #[pyclass(name = "ControlSignal")]
 #[derive(Debug)]
@@ -37,6 +41,16 @@ impl PyControlSignal {
         if let Some(q) = reactive_kvar {
             validate_finite(q, "reactive_power_kvar")?;
         }
+        // The SOC floor/ceiling are finiteness-only at this boundary —
+        // semantic range checks are the receiving equipment's (the
+        // SOCTarget arm validates its own same-named fields to [0, 1]
+        // because there the SOC *is* the command, not a guard).
+        if let Some(v) = min_soc {
+            validate_finite(v, "min_soc")?;
+        }
+        if let Some(v) = max_soc {
+            validate_finite(v, "max_soc")?;
+        }
         Ok(Self {
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: kw,
@@ -53,14 +67,27 @@ impl PyControlSignal {
         heat_c: Option<f64>,
         cool_c: Option<f64>,
         deadband_c: Option<f64>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        // Loud on non-finite setpoints at the boundary (the shared
+        // validators' section rationale, `utils.rs`): a NaN setpoint's
+        // comparisons are always false, so the receiving thermostat's
+        // conditionals silently stop firing in release builds.
+        if let Some(v) = heat_c {
+            validate_finite(v, "heating_setpoint_c")?;
+        }
+        if let Some(v) = cool_c {
+            validate_finite(v, "cooling_setpoint_c")?;
+        }
+        if let Some(v) = deadband_c {
+            validate_finite(v, "deadband_c")?;
+        }
+        Ok(Self {
             signal: ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: heat_c,
                 cooling_setpoint_c: cool_c,
                 deadband_c,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -68,13 +95,20 @@ impl PyControlSignal {
     pub fn thermal_setpoint_delta(
         heating_delta_c: Option<f64>,
         cooling_delta_c: Option<f64>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        // Same boundary rationale as `thermal_setpoint` above.
+        if let Some(v) = heating_delta_c {
+            validate_finite(v, "heating_delta_c")?;
+        }
+        if let Some(v) = cooling_delta_c {
+            validate_finite(v, "cooling_delta_c")?;
+        }
+        Ok(Self {
             signal: ControlSignal::ThermalSetpointDelta {
                 heating_delta_c,
                 cooling_delta_c,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -116,18 +150,26 @@ impl PyControlSignal {
 
     #[staticmethod]
     #[pyo3(signature = (level, duration_s=None))]
-    pub fn demand_response(level: PyDRLevel, duration_s: Option<f64>) -> Self {
-        Self {
+    pub fn demand_response(level: PyDRLevel, duration_s: Option<f64>) -> PyResult<Self> {
+        // Same boundary rationale as `thermal_setpoint` above.
+        if let Some(v) = duration_s {
+            validate_finite(v, "duration_s")?;
+        }
+        Ok(Self {
             signal: ControlSignal::DemandResponse {
                 level: level.into_dr_level(),
                 duration_s,
             },
-        }
+        })
     }
 
     #[staticmethod]
     #[pyo3(signature = (level, duration_s=None))]
     pub fn demand_response_str(level: &str, duration_s: Option<f64>) -> PyResult<Self> {
+        // Same boundary rationale as `thermal_setpoint` above.
+        if let Some(v) = duration_s {
+            validate_finite(v, "duration_s")?;
+        }
         Ok(Self {
             signal: ControlSignal::DemandResponse {
                 level: parse_dr_level(level)?,
@@ -157,20 +199,38 @@ impl PyControlSignal {
 
     #[staticmethod]
     #[pyo3(signature = (target_rh, min_rh=None, max_rh=None))]
-    pub fn humidity_setpoint(target_rh: f64, min_rh: Option<f64>, max_rh: Option<f64>) -> Self {
-        Self {
+    pub fn humidity_setpoint(
+        target_rh: f64,
+        min_rh: Option<f64>,
+        max_rh: Option<f64>,
+    ) -> PyResult<Self> {
+        // Same boundary rationale as `thermal_setpoint` above: a NaN
+        // relative-humidity setpoint silently stops the humidistat's
+        // conditionals in release builds.
+        validate_finite(target_rh, "target_rh")?;
+        if let Some(v) = min_rh {
+            validate_finite(v, "min_rh")?;
+        }
+        if let Some(v) = max_rh {
+            validate_finite(v, "max_rh")?;
+        }
+        Ok(Self {
             signal: ControlSignal::HumiditySetpoint {
                 target_rh,
                 min_rh,
                 max_rh,
             },
-        }
+        })
     }
 
     #[staticmethod]
     #[pyo3(signature = (max_power_kw, ramp_rate_kw_per_s=None))]
     pub fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> PyResult<Self> {
         validate_non_negative(max_power_kw, "max_power_kw")?;
+        // Same boundary rationale as `thermal_setpoint` above.
+        if let Some(v) = ramp_rate_kw_per_s {
+            validate_finite(v, "ramp_rate_kw_per_s")?;
+        }
         Ok(Self {
             signal: ControlSignal::PowerLimit {
                 max_power_kw,
@@ -187,6 +247,10 @@ impl PyControlSignal {
         component: Option<PyDutyCycleComponent>,
     ) -> PyResult<Self> {
         validate_range(on_fraction, 0.0, 1.0, "on_fraction")?;
+        // Same boundary rationale as `thermal_setpoint` above.
+        if let Some(v) = period_s {
+            validate_finite(v, "period_s")?;
+        }
         Ok(Self {
             signal: ControlSignal::DutyCycle {
                 on_fraction,
@@ -222,17 +286,23 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn reactive_setpoint(kvar: f64) -> Self {
-        Self {
+    pub fn reactive_setpoint(kvar: f64) -> PyResult<Self> {
+        // Signed per the core contract (negative = absorbing); finiteness
+        // only — same boundary rationale as `thermal_setpoint` above.
+        validate_finite(kvar, "kvar")?;
+        Ok(Self {
             signal: ControlSignal::ReactiveSetpoint { kvar },
-        }
+        })
     }
 
     #[staticmethod]
-    pub fn power_factor_setpoint(power_factor: f64) -> Self {
-        Self {
+    pub fn power_factor_setpoint(power_factor: f64) -> PyResult<Self> {
+        // Semantic range ([0, 1]) is the receiving inverter's; finiteness
+        // is the boundary's — same rationale as `thermal_setpoint`.
+        validate_finite(power_factor, "power_factor")?;
+        Ok(Self {
             signal: ControlSignal::PowerFactorSetpoint { power_factor },
-        }
+        })
     }
 
     #[staticmethod]
@@ -305,6 +375,10 @@ impl PyControlSignal {
 
     #[staticmethod]
     pub fn ev_set_ready_by(departure_hour: f64, target_soc: f64) -> PyResult<Self> {
+        // `departure_hour` is finiteness-only at this boundary — the
+        // hour-of-day wrap is the receiving scheduler's. Same boundary
+        // rationale as `thermal_setpoint` above.
+        validate_finite(departure_hour, "departure_hour")?;
         validate_range(target_soc, 0.0, 1.0, "target_soc")?;
         Ok(Self {
             signal: ControlSignal::EvSetReadyBy {
@@ -324,10 +398,13 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn event_delay(delay_s: f64) -> Self {
-        Self {
+    pub fn event_delay(delay_s: f64) -> PyResult<Self> {
+        // Same boundary rationale as `thermal_setpoint` above: a NaN
+        // delay silently stops the scheduler's elapsed-time comparison.
+        validate_finite(delay_s, "delay_s")?;
+        Ok(Self {
             signal: ControlSignal::EventDelay { delay_s },
-        }
+        })
     }
 
     #[classmethod]
@@ -335,33 +412,33 @@ impl PyControlSignal {
         let kind: String = dict_required(d, "type")?;
         let signal = match kind.as_str() {
             "ThermalSetpoint" => ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: dict_optional(d, "heating_setpoint_c")?,
-                cooling_setpoint_c: dict_optional(d, "cooling_setpoint_c")?,
-                deadband_c: dict_optional(d, "deadband_c")?,
+                heating_setpoint_c: finite_f64_optional(d, "heating_setpoint_c")?,
+                cooling_setpoint_c: finite_f64_optional(d, "cooling_setpoint_c")?,
+                deadband_c: finite_f64_optional(d, "deadband_c")?,
             },
             "ModeOverride" => ControlSignal::ModeOverride {
                 mode: parse_mode_or_enum(d, "mode")?,
             },
             "PowerSetpoint" => {
-                let active_power_kw: f64 = dict_required(d, "active_power_kw")?;
                 // Signed per the core contract (negative = discharge);
                 // finiteness only, same as the typed constructor.
-                validate_finite(active_power_kw, "active_power_kw")?;
-                let reactive_power_kvar: Option<f64> = dict_optional(d, "reactive_power_kvar")?;
-                if let Some(q) = reactive_power_kvar {
-                    validate_finite(q, "reactive_power_kvar")?;
-                }
+                let active_power_kw = finite_f64_required(d, "active_power_kw")?;
+                let reactive_power_kvar = finite_f64_optional(d, "reactive_power_kvar")?;
+                // Same-named fields here are finiteness-only, matching
+                // the typed constructor (the SOCTarget arm below
+                // validates its own to [0, 1] because there the SOC *is*
+                // the command).
                 ControlSignal::PowerSetpoint {
                     active_power_kw,
                     reactive_power_kvar,
-                    min_soc: dict_optional(d, "min_soc")?,
-                    max_soc: dict_optional(d, "max_soc")?,
+                    min_soc: finite_f64_optional(d, "min_soc")?,
+                    max_soc: finite_f64_optional(d, "max_soc")?,
                 }
             }
             "HumiditySetpoint" => ControlSignal::HumiditySetpoint {
-                target_rh: dict_required(d, "target_rh")?,
-                min_rh: dict_optional(d, "min_rh")?,
-                max_rh: dict_optional(d, "max_rh")?,
+                target_rh: finite_f64_required(d, "target_rh")?,
+                min_rh: finite_f64_optional(d, "min_rh")?,
+                max_rh: finite_f64_optional(d, "max_rh")?,
             },
             "SelfConsumption" => ControlSignal::SelfConsumption {
                 enabled: dict_required(d, "enabled")?,
@@ -372,7 +449,7 @@ impl PyControlSignal {
                 validate_non_negative(max_power_kw, "max_power_kw")?;
                 ControlSignal::PowerLimit {
                     max_power_kw,
-                    ramp_rate_kw_per_s: dict_optional(d, "ramp_rate_kw_per_s")?,
+                    ramp_rate_kw_per_s: finite_f64_optional(d, "ramp_rate_kw_per_s")?,
                 }
             }
             "SOCTarget" => {
@@ -397,7 +474,7 @@ impl PyControlSignal {
                 validate_range(on_fraction, 0.0, 1.0, "on_fraction")?;
                 ControlSignal::DutyCycle {
                     on_fraction,
-                    period_s: dict_optional(d, "period_s")?,
+                    period_s: finite_f64_optional(d, "period_s")?,
                     component: parse_duty_cycle_component_or_enum(d, "component")?,
                 }
             }
@@ -411,7 +488,7 @@ impl PyControlSignal {
             },
             "DemandResponse" => ControlSignal::DemandResponse {
                 level: parse_dr_level_or_enum(d, "level")?,
-                duration_s: dict_optional(d, "duration_s")?,
+                duration_s: finite_f64_optional(d, "duration_s")?,
             },
             "ProtocolNative" => ControlSignal::ProtocolNative {
                 protocol: ProtocolId(dict_required(d, "protocol")?),
@@ -423,10 +500,10 @@ impl PyControlSignal {
                 ControlSignal::CurtailmentPercent { percent }
             }
             "ReactiveSetpoint" => ControlSignal::ReactiveSetpoint {
-                kvar: dict_required(d, "kvar")?,
+                kvar: finite_f64_required(d, "kvar")?,
             },
             "PowerFactorSetpoint" => ControlSignal::PowerFactorSetpoint {
-                power_factor: dict_required(d, "power_factor")?,
+                power_factor: finite_f64_required(d, "power_factor")?,
             },
             "InverterPriorityMode" => ControlSignal::InverterPriorityMode {
                 priority: parse_inverter_priority_or_enum(d, "priority")?,
@@ -440,8 +517,8 @@ impl PyControlSignal {
                 }
             }
             "ThermalSetpointDelta" => ControlSignal::ThermalSetpointDelta {
-                heating_delta_c: dict_optional(d, "heating_delta_c")?,
-                cooling_delta_c: dict_optional(d, "cooling_delta_c")?,
+                heating_delta_c: finite_f64_optional(d, "heating_delta_c")?,
+                cooling_delta_c: finite_f64_optional(d, "cooling_delta_c")?,
             },
             "IdealCapacityModeOverride" => {
                 let mode_str: String = dict_required(d, "mode")?;
@@ -478,12 +555,12 @@ impl PyControlSignal {
                 let target_soc: f64 = dict_required(d, "target_soc")?;
                 validate_range(target_soc, 0.0, 1.0, "target_soc")?;
                 ControlSignal::EvSetReadyBy {
-                    departure_hour: dict_required(d, "departure_hour")?,
+                    departure_hour: finite_f64_required(d, "departure_hour")?,
                     target_soc,
                 }
             }
             "EventDelay" => ControlSignal::EventDelay {
-                delay_s: dict_required(d, "delay_s")?,
+                delay_s: finite_f64_required(d, "delay_s")?,
             },
             "MaxCapacityFraction" => {
                 let fraction: f64 = dict_required(d, "fraction")?;
@@ -734,73 +811,6 @@ impl PyControlSignal {
     }
 }
 
-fn dict_required<T>(d: &Bound<'_, PyDict>, key: &str) -> PyResult<T>
-where
-    T: for<'a, 'py> FromPyObject<'a, 'py>,
-{
-    let Some(value) = d.get_item(key)? else {
-        return Err(PyValueError::new_err(format!(
-            "missing required key `{key}`"
-        )));
-    };
-    value
-        .extract::<T>()
-        .map_err(|_| PyValueError::new_err(format!("invalid value for `{key}`")))
-}
-
-fn dict_optional<T>(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<T>>
-where
-    T: for<'a, 'py> FromPyObject<'a, 'py>,
-{
-    let Some(value) = d.get_item(key)? else {
-        return Ok(None);
-    };
-    if value.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some(value.extract::<T>().map_err(|_| {
-            PyValueError::new_err(format!("invalid value for `{key}`"))
-        })?))
-    }
-}
-
-fn validate_finite(value: f64, name: &str) -> PyResult<()> {
-    if !value.is_finite() {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be finite, got {value}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_non_negative(value: f64, name: &str) -> PyResult<()> {
-    if !value.is_finite() {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be finite, got {value}"
-        )));
-    }
-    if value < 0.0 {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be >= 0, got {value}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_range(value: f64, min: f64, max: f64, name: &str) -> PyResult<()> {
-    if !value.is_finite() {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be finite, got {value}"
-        )));
-    }
-    if value < min || value > max {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be in [{min}, {max}], got {value}"
-        )));
-    }
-    Ok(())
-}
-
 fn parse_mode(mode: &str) -> PyResult<OperatingMode> {
     match mode {
         "Off" => Ok(OperatingMode::Off),
@@ -914,7 +924,7 @@ mod tests {
 
     #[test]
     fn event_delay_constructs_correct_signal() {
-        let sig = PyControlSignal::event_delay(30.0);
+        let sig = PyControlSignal::event_delay(30.0).unwrap();
         assert!(matches!(
             sig.signal,
             ControlSignal::EventDelay { delay_s: 30.0 }

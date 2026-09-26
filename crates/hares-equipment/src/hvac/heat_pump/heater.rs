@@ -2624,7 +2624,46 @@ impl HeatPumpHeaterCore {
         self.prev_zone_temp_c = decoded.prev_zone_temp_c;
         self.er_soft_lockout = decoded.er_soft_lockout;
         self.soft_lockout_elapsed_s = decoded.soft_lockout_elapsed_s;
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal where the checkpoint
+        // carries the face: electric from `electric_kw`, thermal from
+        // `thermal_output_w`, mode from the checkpointed `operating_mode`
+        // (the pair the step published was guard-valid), speed from the
+        // restored `last_speed_index`, setpoint from the restored
+        // thermostat state (mode-keyed with the restored DR offset, as
+        // the step keys it). COP and main power are not checkpointed:
+        // COP publishes as 0.0 (the guard-allowed not-yet-recomputed
+        // value, recomputed on the next step). `CoreOutput::default()`
+        // (all fields `None`) violates the presence rules for every
+        // declared capability
+        // (ELECTRIC/HAS_MODE/THERMAL/HAS_SPEED/HAS_SETPOINT/HAS_COP/
+        // REACTIVE) — the restore contract is that a checkpoint restores
+        // a state `validate_core_contract` accepts.
+        let sp = self.hvac.effective_setpoints();
+        let active_setpoint_c = match decoded.operating_mode {
+            OperatingMode::Cooling => sp.cooling_c,
+            _ => sp.heating_c + self.dr_setpoint_offset_c,
+        };
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
+                reactive_power_kvar: Some(0.0),
+                fuel_w: None,
+                thermal_output_w: Some(decoded.thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(decoded.operating_mode),
+                soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: Some(0.0),
+                main_power_kw: None,
+            },
+        };
 
         Ok(())
     }
@@ -3773,6 +3812,33 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(ports.electrical.net_active_w() > 0.0);
+    }
+
+    /// Checkpoint restore contract: a restored core output must satisfy the
+    /// workspace's own `validate_core_contract` (presence rules and the
+    /// mode/flow guard). Pre-fix, the restore published
+    /// `CoreOutput::default()` — all fields `None` against the declared
+    /// capabilities (ELECTRIC/HAS_MODE/THERMAL/HAS_SPEED/HAS_SETPOINT/
+    /// HAS_COP/REACTIVE).
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let env = env(18.0, -3.0, 0.005);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ASHPHeater::new(cfg);
+        restored.init(&heater_config(), &env).unwrap();
+        restored.load_state(&state).unwrap();
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("an ASHP heater checkpoint must restore a contract-valid output");
     }
 
     #[test]

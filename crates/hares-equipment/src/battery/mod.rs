@@ -59,6 +59,8 @@ pub(crate) const KEY_STANDBY_POWER_W: &str = "standby_power_w";
 #[cfg(test)]
 const KEY_INITIAL_SOC: &str = "initial_soc";
 #[cfg(test)]
+const KEY_INITIAL_CELL_TEMP_C: &str = "initial_cell_temp_c";
+#[cfg(test)]
 pub(crate) const KEY_MIN_SOC: &str = "min_soc";
 #[cfg(test)]
 pub(crate) const KEY_MAX_SOC: &str = "max_soc";
@@ -203,7 +205,7 @@ impl CapacityDerateModel {
     ///
     /// Returns a value in (0, ~1.0] where 1.0 means no derating. The factor
     /// applies to available energy capacity (SOC bounds), not instantaneous power limits.
-    fn evaluate(&self, cell_temp_c: f64) -> f64 {
+    pub fn evaluate(&self, cell_temp_c: f64) -> f64 {
         match self {
             Self::Arrhenius {
                 d0_ref,
@@ -546,11 +548,12 @@ impl Battery {
             return (0.0, 0.0, 0.0, 0.0);
         }
         let cell_ocv = self.ocv_table.voltage_at_soc(self.soc);
-        let pack_ocv = cell_ocv * self.n_series as f64;
-        let pack_resistance =
-            self.cell_resistance_ohm * self.n_series as f64 / self.n_parallel as f64;
-
-        if pack_ocv < f64::EPSILON {
+        let pack = crate::pack_electrical::PackElectrical {
+            n_series: self.n_series,
+            n_parallel: self.n_parallel,
+            cell_resistance_ohm: self.cell_resistance_ohm,
+        };
+        if pack.pack_ocv_v(cell_ocv) < f64::EPSILON {
             return (0.0, 0.0, 0.0, 0.0);
         }
 
@@ -564,40 +567,23 @@ impl Battery {
         };
         let dc_power_w = power_kw_to_w(dc_power_kw);
 
-        // Quadratic terminal voltage (OCHRE method, Battery.py:295).
-        //   V = Voc/2 + sqrt((Voc/2)^2 + P_dc * R)
-        // Sign convention: P_dc > 0 = charging (consuming from grid), P_dc < 0 = discharging.
-        // Charging (P_dc > 0): discriminant > (Voc/2)^2, so V > Voc (terminal voltage rises).
-        // Discharging (P_dc < 0): discriminant < (Voc/2)^2, so V < Voc (terminal voltage sags).
-        let half_voc = pack_ocv / 2.0;
-        let discriminant = half_voc * half_voc + dc_power_w * pack_resistance;
-
-        // Clamp to maximum extractable power P_max = Voc²/(4R) when discriminant < 0.
-        // At this limit terminal voltage = Voc/2 (matched-impedance condition).
-        let (terminal_v, actual_dc_power_w) = if discriminant >= 0.0 {
-            (half_voc + discriminant.sqrt(), dc_power_w)
-        } else {
-            let p_max_w = pack_ocv * pack_ocv / (4.0 * pack_resistance);
-            let clamped = dc_power_w.abs().min(p_max_w) * dc_power_w.signum();
-            (half_voc, clamped)
-        };
-
-        let current_a = if terminal_v.abs() > f64::EPSILON {
-            actual_dc_power_w / terminal_v
-        } else {
-            0.0
-        };
-        let ohmic_loss_w = current_a * current_a * pack_resistance;
+        // Quadratic terminal-voltage solve, matched-impedance clamp, and I²R
+        // live in the one shared home (pack_electrical.rs) — the EV computes
+        // its ohmic heating through the same solve (OCHRE Battery.py:295).
+        let solved = pack.solve(cell_ocv, dc_power_w);
+        let terminal_v = solved.terminal_v;
+        let current_a = solved.current_a;
+        let ohmic_loss_w = solved.ohmic_loss_w;
 
         // Convert actual DC power back to AC grid power for the clamped case.
-        let actual_ac_power_kw = if discriminant >= 0.0 {
+        let actual_ac_power_kw = if !solved.clamped_to_p_max {
             target_ac_power_kw
-        } else if actual_dc_power_w > 0.0 {
+        } else if solved.actual_dc_power_w > 0.0 {
             // Charging: DC → AC = DC / charge_eta
-            power_w_to_kw(actual_dc_power_w / self.charge_efficiency)
+            power_w_to_kw(solved.actual_dc_power_w / self.charge_efficiency)
         } else {
             // Discharging: DC → AC = DC * discharge_eta
-            power_w_to_kw(actual_dc_power_w * self.discharge_efficiency)
+            power_w_to_kw(solved.actual_dc_power_w * self.discharge_efficiency)
         };
 
         (actual_ac_power_kw, ohmic_loss_w, terminal_v, current_a)
@@ -669,15 +655,29 @@ impl Battery {
             .clamp(0.0, 1.0);
         let dr_fraction = self.dr_power_fraction();
         if power_kw > 0.0 {
-            let mut hw_max = self.max_charge_kw * temp_derate * dr_fraction;
+            // One temperature-dependent effect on charge capability, applied
+            // once: a configured charging-curve LUT's temperature axis IS the
+            // temperature-dependent capability (a measured curve already
+            // contains the temperature dependence it was measured under), so
+            // the capacity derate is not multiplied on top of it — the same
+            // composition rule as the EV's `compute_charging_power_kw`. The
+            // plating-cutoff safety floor lives in `charge_allowed`, applied
+            // unconditionally in `step`, so a LUT fitted only above the
+            // cutoff cannot grant permission to charge below it.
+            let mut hw_max = if self.charging_curve_lut.is_some() {
+                self.max_charge_kw * dr_fraction
+            } else {
+                self.max_charge_kw * temp_derate * dr_fraction
+            };
             if let Some(ref mut lut) = self.charging_curve_lut {
                 let soh = 1.0 - self.degradation.capacity_fade_fraction();
-                let pack_kwh = self.capacity_kwh_nominal;
-                let c_rate = if pack_kwh > 0.0 {
-                    power_kw / pack_kwh
-                } else {
-                    0.0
-                };
+                // The shared c-rate rule (pack_electrical), same as the EV's
+                // LUT branch: power over the degradation-adjusted rating —
+                // one home, so the siblings cannot diverge again.
+                let c_rate = crate::pack_electrical::charging_lut_c_rate(
+                    power_kw,
+                    self.capacity_kwh_nominal,
+                );
                 hw_max *= lut.interpolate(&[self.soc, self.cell_temp_c, c_rate, soh])? as f64;
             }
             let limit = self
@@ -1453,14 +1453,13 @@ impl Equipment for Battery {
         // accumulating.
         let current_day = Self::day_ordinal(env);
         if current_day != self.last_daily_update_day {
-            let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
-
             // Capture pre-update state for observer diagnostics.
             #[cfg(feature = "observe")]
             let (q_li1_before, cell_temp_for_tafel) =
                 { (self.degradation.q_li1, self.degradation.daily_mean_temp_k()) };
 
-            self.degradation.update_daily(&self.u_neg_table, sum_sq_dod);
+            self.degradation
+                .update_daily(&self.u_neg_table, &self.rainflow);
 
             #[cfg(feature = "observe")]
             {
@@ -1556,7 +1555,7 @@ impl Equipment for Battery {
             let cell_temp_k = self.cell_temp_c + 273.15;
             let v_oc_before = self.ocv_table.voltage_at_soc(soc_before);
             self.degradation
-                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before);
+                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before)?;
         }
 
         // -- Update telemetry --
@@ -1655,7 +1654,10 @@ impl Equipment for Battery {
         // v2: BatteryCheckpoint gained the reactive-control fields
         // `q_setpoint_kvar` (Option<f64>, None = no var override) and
         // `power_factor`.
-        2
+        // v3: DegradationState gained the negative-electrode site-loss
+        // branch (c0/c2 accumulators, dq_neg) and the corrected break-in
+        // convention — its serialized schema changed with them.
+        3
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1723,6 +1725,27 @@ impl Equipment for Battery {
         // Recompute capacity_kwh_nominal from rated capacity and restored SOH.
         let soh = 1.0 - self.degradation.capacity_fade_fraction();
         self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+
+        // The checkpoint does not carry the step's power — the Battery's
+        // power is control-state-dependent (self-consumption follows the
+        // live net load, which the restore has not yet seen) — so the
+        // restore-instant output publishes zero electric flow. A restored
+        // active power mode (`Charging`/`Discharging`) paired with zero
+        // flows is a mode/flow guard violation (Rule 1: active mode with
+        // no flow), so the truthful restore-instant mode for a battery
+        // with nothing flowing is its own idle state, `Standby`; the next
+        // step re-derives the mode from actual power. (The EV's restore
+        // instead recomputes the latched flow itself — its port power IS
+        // latched state; the Battery's is not. A var-only Battery
+        // checkpoint can never carry an active mode — its classifier keys
+        // on the power sign alone and reports `Standby` at zero real
+        // power — so no var face exists to restore here.)
+        if matches!(
+            self.mode,
+            OperatingMode::Charging | OperatingMode::Discharging
+        ) {
+            self.mode = OperatingMode::Standby;
+        }
 
         // Recompute all derived telemetry from restored state so no fields are stale.
         self.telemetry.set(tk::SOC, self.soc);
@@ -2319,6 +2342,7 @@ mod tests {
                 KEY_IMPORT_LIMIT_W => cfg.import_limit_w = Some(*v),
                 KEY_EXPORT_LIMIT_W => cfg.export_limit_w = Some(*v),
                 KEY_HEATER_POWER_W => cfg.heater_power_w = Some(*v),
+                KEY_INITIAL_CELL_TEMP_C => cfg.initial_cell_temp_c = Some(*v),
                 KEY_HEATER_THRESHOLD_C => cfg.heater_threshold_c = Some(*v),
                 KEY_MIN_DISCHARGE_TEMP_C => cfg.min_discharge_temp_c = Some(*v),
                 KEY_FULL_POWER_TEMP_C => cfg.full_power_temp_c = Some(*v),
@@ -2448,7 +2472,6 @@ mod tests {
         let config = typed_battery_config(None, None);
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
-
         let err = bat
             .apply_control_unchecked(&ControlSignal::PowerSetpoint {
                 active_power_kw: f64::NAN,
@@ -4081,6 +4104,50 @@ mod tests {
         );
     }
 
+    /// A checkpoint taken mid-charge, restored, must publish a mode/flow
+    /// pair the workspace's own guard accepts. The Battery's checkpoint
+    /// does not carry the step's power (self-consumption depends on the
+    /// live net load the restore has not yet seen), so the restore-time
+    /// output publishes zero electric flow — and a restored active mode
+    /// (`Charging`) paired with zero flows is exactly the Rule 1
+    /// violation the EV's restore fix (v5) closed on its sibling face.
+    /// The truthful restore-instant mode for a battery with no flow to
+    /// publish is its own idle-active state, `Standby`.
+    #[test]
+    fn charging_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.6)]);
+        let env = base_env();
+
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 2.5,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.core_output().state.operating_mode,
+            Some(OperatingMode::Charging),
+            "precondition: the saved state is the charging mode"
+        );
+
+        let state = bat.save_state().unwrap();
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+            "a restored core output must satisfy the mode/flow guard: the \
+                 restore pairs the checkpointed active mode with zeroed flows, \
+                 which Rule 1 rejects",
+        );
+    }
+
     /// After a save/load round-trip, all telemetry fields must be consistent
     /// with the restored state (no stale values from before the checkpoint).
     #[test]
@@ -4338,7 +4405,7 @@ mod tests {
                     soc = 0.2;
                     soc_direction = 1.0;
                 }
-                state.accumulate(dt_s, cell_temp_k, v_oc, soc);
+                state.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
             // One half-cycle of DOD=0.6 per day: push 3 points to complete the reversal.
             // The 3-point algorithm requires [low, high, low] to extract a half-cycle.
@@ -4346,14 +4413,16 @@ mod tests {
             rf.push(0.2);
             rf.push(0.8);
             rf.push(0.2); // completes the reversal → half-cycle range 0.6
-            let sum_sq = rf.sum_squared_dod_daily(); // 0.5 × 0.6² = 0.18
-            state.update_daily(&u_neg, sum_sq);
+            state.update_daily(&u_neg, &rf);
             state.reset_day_tracking(soc);
             let _ = day; // suppress lint
         }
 
-        // The BOL transient (q_li3 ≈ B3_REF ≈ -2.8%) dominates capacity_fade for years.
-        // Verify the individual mechanisms are accumulating -- q_li1 and q_li2 must be positive.
+        // The break-in loss (q_li3, a positive loss relaxing toward ≈ +2.8 %)
+        // and the calendar/cycle losses must all be accumulating after a
+        // year; the usable-capacity fade is 1 − min(QLi, Qneg), which starts
+        // negative (capacity above nameplate at BOL, the reference model's
+        // b0 = 1.07 intercept capped by the negative-electrode branch).
         assert!(
             state.q_li1 > 0.0,
             "q_li1 (calendar) must be positive after 1 year: got {}",
@@ -4365,9 +4434,16 @@ mod tests {
             state.q_li2
         );
         assert!(
-            state.q_li3 < 0.0,
-            "q_li3 (BOL boost) must be negative: got {}",
+            state.q_li3 > 0.0,
+            "q_li3 (break-in loss) must be a positive loss after 1 year: got {}",
             state.q_li3
+        );
+        // The negative-electrode branch is active and site loss accumulates
+        // in Ah (tiny per day: c2,ref = 5.226e-5 Ah/cycle).
+        assert!(
+            state.dq_neg_ah > 0.0,
+            "dq_neg (site loss) must accumulate with daily cycling: got {}",
+            state.dq_neg_ah
         );
     }
 
@@ -4386,15 +4462,17 @@ mod tests {
         // Simulate 365 days at rest with no cycling.
         for _ in 0..365 {
             for _ in 0..24 {
-                state.accumulate(dt_s, cell_temp_k, v_oc, 0.5); // constant SOC = 0.5
+                state.accumulate(dt_s, cell_temp_k, v_oc, 0.5).unwrap(); // constant SOC = 0.5
             }
-            let sum_sq = 0.0; // no cycles
-            state.update_daily(&u_neg, sum_sq);
+            // No cycles: a fresh, empty counter.
+            state.update_daily(&u_neg, &RainflowCounter::default());
             state.reset_day_tracking(0.5);
         }
 
-        // q_li1 must be positive (calendar mechanism active).
-        // capacity_fade includes q_li3 (BOL boost, negative), which can dominate for years.
+        // q_li1 must be positive (calendar mechanism active). capacity_fade
+        // includes the break-in loss (positive) and the min(QLi, Qneg)
+        // branch structure, so the mechanism-level quantity is the direct
+        // observable here.
         assert!(
             state.q_li1 > 0.0,
             "q_li1 (calendar) must be positive after 365 days at rest: got {}",
@@ -4418,13 +4496,12 @@ mod tests {
             let mut rf = RainflowCounter::default();
             rf.push(0.2);
             rf.push(0.8);
-            let sum_sq = rf.sum_squared_dod_daily();
 
             for _ in 0..180 {
                 for _ in 0..steps_per_day {
-                    state.accumulate(dt_s, temp_k, v_oc, 0.5);
+                    state.accumulate(dt_s, temp_k, v_oc, 0.5).unwrap();
                 }
-                state.update_daily(&u_neg, sum_sq);
+                state.update_daily(&u_neg, &rf);
                 state.reset_day_tracking(0.5);
             }
             state
@@ -4575,9 +4652,14 @@ mod tests {
     /// accumulates negative values. The `.max(0.0)` clamp in `update_daily` keeps
     /// dq_li3 = 0 when b3_accum < q_li3, so q_li3 never rises above 0 during
     /// calendar-only aging. This confirms the mechanism produces no fade contribution
-    /// (≤ 0) in the early-life period and that total capacity fade grows with time.
+    /// The break-in mechanism follows the reference model (Smith 2017 Eq. 4
+    /// and 7, NREL SSC): a positive Li LOSS relaxing toward the b3 integral
+    /// over ~τ = 5 days, and the BOL usable capacity sits slightly ABOVE
+    /// the nameplate rating (the b0 = 1.07 Li intercept capped by the
+    /// negative-electrode branch at ≈ +0.9 %) — negative fade at BOL,
+    /// decaying as the losses accumulate.
     #[test]
-    fn degradation_bol_transient_initially_provides_capacity_gain() {
+    fn degradation_break_in_loss_and_bol_capacity_follow_reference_model() {
         let u_neg = UNegTable::default_li_nmc();
         let cell_temp_k = 298.15; // 25 °C
         let soc = 0.5;
@@ -4591,19 +4673,34 @@ mod tests {
 
         for _ in 0..5 {
             for _ in 0..steps_per_day {
-                state_5.accumulate(dt_s, cell_temp_k, v_oc, soc);
+                state_5.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_5.update_daily(&u_neg, 0.0);
+            state_5.update_daily(&u_neg, &RainflowCounter::default());
             state_5.reset_day_tracking(soc);
         }
 
-        // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative -- the BOL transient
-        // provides a transient capacity gain (negative lithium loss). Not zero as with the
-        // former broken `.max(0.0)` clamp.
+        // The break-in loss is positive, relaxing toward ≈ B3_REF = 2.805 %
+        // with the ~5-day time constant: after 5 days it is well underway
+        // but strictly below the integral's asymptote.
         assert!(
-            state_5.q_li3 < 0.0,
-            "q_li3 must be negative after 5 days (BOL boost active): got {}",
+            state_5.q_li3 > 0.0,
+            "q_li3 must be a positive break-in loss after 5 days: got {}",
             state_5.q_li3
+        );
+        assert!(
+            state_5.q_li3 < 0.02805,
+            "q_li3 must still be relaxing toward the b3 integral after 5 \
+             days (~tau): got {}",
+            state_5.q_li3
+        );
+        // BOL usable capacity above nameplate: negative fade from the
+        // min(QLi, Qneg) structure (Li branch ≈ +7 %, capped by the
+        // negative-electrode branch at ≈ +0.9 %).
+        assert!(
+            state_5.capacity_fade < 0.0,
+            "capacity fade at BOL must be negative (capacity above \
+             nameplate per the reference model): got {}",
+            state_5.capacity_fade
         );
 
         // --- Simulate 60 days of calendar aging (no cycling) ---
@@ -4612,21 +4709,33 @@ mod tests {
 
         for _ in 0..60 {
             for _ in 0..steps_per_day {
-                state_60.accumulate(dt_s, cell_temp_k, v_oc, soc);
+                state_60.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_60.update_daily(&u_neg, 0.0);
+            state_60.update_daily(&u_neg, &RainflowCounter::default());
             state_60.reset_day_tracking(soc);
         }
 
+        // The loss continues to relax toward its asymptote (never reverses),
+        // bounded by the daily b3 integral (B3_REF × the b3 Tafel factor at
+        // this probe's v_oc = 3.8).
         assert!(
-            state_60.q_li3 < 0.0,
-            "q_li3 must be negative after 60 days (BOL boost active): got {}",
+            state_60.q_li3 > state_5.q_li3,
+            "the break-in loss must keep growing ({} after 60 days vs {} \
+             after 5)",
+            state_60.q_li3,
+            state_5.q_li3
+        );
+        let b3_day =
+            0.02805_f64 * (0.0066_f64 * 96_485.0 / 8.314 * (3.8 / 298.15 - 3.7 / 298.15)).exp();
+        assert!(
+            state_60.q_li3 <= b3_day + 1e-9,
+            "the break-in loss is bounded by the b3 integral ({b3_day:.6}), got {}",
             state_60.q_li3
         );
 
         // Calendar aging (mechanism 1) grows monotonically with time: 60-day q_li1
         // must exceed 5-day q_li1. Test q_li1 directly -- capacity_fade includes the
-        // q_li3 BOL term which is also growing more negative over 60 days.
+        // break-in and negative-electrode branch structure.
         assert!(
             state_60.q_li1 > state_5.q_li1,
             "q_li1 after 60 days ({:.6}) must exceed after 5 days ({:.6})",
@@ -4961,6 +5070,85 @@ mod tests {
         let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
         bat.set_charging_curve_lut(Some(lut)).unwrap();
         assert!(bat.charging_curve_lut.is_some());
+    }
+
+    /// One temperature-dependent effect on charge capability, applied once:
+    /// a configured LUT's temperature axis IS the temperature-dependent
+    /// capability — the capacity derate is not multiplied on top of it (the
+    /// same composition rule as the EV's `compute_charging_power_kw`). The
+    /// probe runs a cold pack through `clamp_power` with a LUT whose
+    /// temperature axis carries the dependence: the limit must be the LUT's
+    /// value on the rated power, not the product with the derate.
+    #[test]
+    fn lut_temperature_axis_is_the_capability_not_multiplied_by_derate() {
+        // LUT: fraction 0.6 at 0 °C rising to 1.0 at 25 °C, flat in SOC.
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0], vec![0.0, 25.0], vec![1.0], vec![1.0]],
+            vec![0.6f32, 1.0, 0.6, 1.0],
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+        // Cold pack (5 °C — the capacity derate is ~0.90 there); the LUT
+        // axis at 5 °C interpolates to 0.6 + 0.4·(5/25) = 0.68.
+        let config = battery_config(&[(KEY_INITIAL_CELL_TEMP_C, 5.0)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        let clamped = bat.clamp_power(5.0).unwrap();
+        let expected = 5.0_f64 * 0.68;
+        assert!(
+            (clamped - expected).abs() < 1e-6,
+            "LUT temperature axis must be the capability: expected {expected} kW \
+             (rated x LUT fraction), got {clamped} — the capacity derate is \
+             being multiplied on top (one physical effect applied twice)"
+        );
+    }
+
+    /// The charging-LUT c-rate divisor is the SOH-adjusted, temperature-
+    /// independent nominal capacity (`capacity_kwh_nominal` = rated × SOH)
+    /// — the shared `pack_electrical::charging_lut_c_rate` rule the EV's
+    /// charging model follows through the same one home. The LUT's own
+    /// [soc, temp, c_rate, soh] axes already carry the temperature and
+    /// degradation effects, so the divisor must not pre-apply either:
+    /// dividing by the live usable capacity (`capacity_kwh` = nominal ×
+    /// the reversible temperature derate) would fold the derate into the
+    /// c-rate dimension the LUT's temperature axis already encodes,
+    /// inflating the c-rate as the pack cools and bin-shifting every
+    /// configured lookup — the sibling-divergence instance of the
+    /// one-effect-applied-once class (the EV divided by its usable
+    /// capacity pre-alignment).
+    #[test]
+    fn lut_c_rate_divisor_is_the_soh_adjusted_temperature_independent_nominal() {
+        // Bands chosen mid-band for both derivations so neither lands on a
+        // grid boundary: 5 kW over the 9 kWh nominal (10 kWh pack, 10 % fade)
+        // is c_rate ≈ 0.556 (below the 0.58 axis start → full power); over
+        // the temperature-derated usable capacity (9 × derate(5 °C) ≈
+        // 7.47 kWh) it is ≈ 0.669 (above the 0.65 axis end → zero power).
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0], vec![5.0], vec![0.58, 0.65], vec![1.0]],
+            vec![1.0f32, 0.0, 1.0, 0.0],
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.soc = 0.5;
+        bat.cell_temp_c = 5.0;
+        // Post-daily-update state of a 10 kWh pack with 10 % fade: nominal
+        // is SOH-adjusted, usable is nominal × the reversible derate at 5 °C.
+        bat.capacity_kwh_nominal = 9.0;
+        bat.capacity_kwh = 9.0 * CapacityDerateModel::default().evaluate(5.0);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+
+        let clamped = bat.clamp_power(5.0).unwrap();
+        assert!(
+            (clamped - 5.0).abs() < 1e-6,
+            "the c-rate axis must see the SOH-adjusted, temperature-independent \
+             nominal (5.0/9.0 ≈ 0.556, full-power band): expected 5.0 kW, got \
+             {clamped} — the divisor was the temperature-derated usable capacity \
+             (≈0.669, zero-power band), applying the reversible derate a \
+             second time"
+        );
     }
 
     #[test]
@@ -7120,9 +7308,9 @@ mod tests {
         let temp_k_day = 308.15; // 35 °C
         for _ in 0..2 {
             for _ in 0..steps_per_day {
-                ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5);
+                ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5).unwrap();
             }
-            ds_ref.update_daily(&u_neg, 0.0);
+            ds_ref.update_daily(&u_neg, &RainflowCounter::default());
             ds_ref.reset_day_tracking(0.5);
         }
 

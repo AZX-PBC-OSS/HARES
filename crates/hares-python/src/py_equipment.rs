@@ -668,6 +668,39 @@ pub struct PyEv {
     pub power_factor: Option<f64>,
     #[pyo3(get)]
     pub charger_capacity_kva: Option<f64>,
+    /// Explicit initial pack temperature [°C]; `None` → ambient-aware
+    /// cascade at init (outdoor weather).
+    #[pyo3(get)]
+    pub battery_temp_c: Option<f64>,
+    /// Pack plating-cutoff charge temperature [°C]; `None` → 0 °C.
+    #[pyo3(get)]
+    pub min_charge_temp_c: Option<f64>,
+    /// Full charge power above this temperature [°C]; `None` → 10 °C.
+    #[pyo3(get)]
+    pub full_power_temp_c: Option<f64>,
+    /// Pack preheating heater power [W]; `None` → the 5 kW pack-duty
+    /// default. `Some(0.0)` models a heaterless vehicle.
+    #[pyo3(get)]
+    pub heater_power_w: Option<f64>,
+    /// Heater activation threshold [°C]; `None` → 5 °C.
+    #[pyo3(get)]
+    pub heater_threshold_c: Option<f64>,
+    /// Pack thermal mass [J/K]; `None` → capacity-derived (pack mass ×
+    /// cell specific heat).
+    #[pyo3(get)]
+    pub thermal_mass_j_per_k: Option<f64>,
+    /// Pack-to-ambient UA [W/K]; `None` → area-scaled default.
+    #[pyo3(get)]
+    pub ua_w_per_k: Option<f64>,
+    /// Series cell count; `None` → 96 (≈350–360 V nominal).
+    #[pyo3(get)]
+    pub n_series: Option<u32>,
+    /// Parallel string count; `None` → derived from capacity.
+    #[pyo3(get)]
+    pub n_parallel: Option<u32>,
+    /// Cell internal resistance [Ω]; `None` → the 5 mΩ cell default.
+    #[pyo3(get)]
+    pub cell_resistance_ohm: Option<f64>,
     /// Optional 4D charging curve LUT (soc × temp × c_rate × soh → power_fraction).
     pub charging_curve_lut: Option<RegularGridInterpolator>,
 }
@@ -676,7 +709,7 @@ pub struct PyEv {
 impl PyEv {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, charging_curve_lut=None))]
+    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None))]
     fn new(
         py: Python<'_>,
         name: String,
@@ -686,6 +719,16 @@ impl PyEv {
         initial_connection_state: Option<PyEvConnectionState>,
         power_factor: Option<f64>,
         charger_capacity_kva: Option<f64>,
+        battery_temp_c: Option<f64>,
+        min_charge_temp_c: Option<f64>,
+        full_power_temp_c: Option<f64>,
+        heater_power_w: Option<f64>,
+        heater_threshold_c: Option<f64>,
+        thermal_mass_j_per_k: Option<f64>,
+        ua_w_per_k: Option<f64>,
+        n_series: Option<u32>,
+        n_parallel: Option<u32>,
+        cell_resistance_ohm: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let lut = match charging_curve_lut {
@@ -700,6 +743,16 @@ impl PyEv {
             initial_connection_state,
             power_factor,
             charger_capacity_kva,
+            battery_temp_c,
+            min_charge_temp_c,
+            full_power_temp_c,
+            heater_power_w,
+            heater_threshold_c,
+            thermal_mass_j_per_k,
+            ua_w_per_k,
+            n_series,
+            n_parallel,
+            cell_resistance_ohm,
             charging_curve_lut: lut,
         })
     }
@@ -733,6 +786,16 @@ impl PyEv {
             initial_connection_state: None,
             power_factor: None,
             charger_capacity_kva: None,
+            battery_temp_c: None,
+            min_charge_temp_c: None,
+            full_power_temp_c: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            thermal_mass_j_per_k: None,
+            ua_w_per_k: None,
+            n_series: None,
+            n_parallel: None,
+            cell_resistance_ohm: None,
             charging_curve_lut: None,
         }
     }
@@ -829,6 +892,16 @@ impl PyEv {
             initial_connection_state: None,
             power_factor: None,
             charger_capacity_kva: None,
+            battery_temp_c: None,
+            min_charge_temp_c: None,
+            full_power_temp_c: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            thermal_mass_j_per_k: None,
+            ua_w_per_k: None,
+            n_series: None,
+            n_parallel: None,
+            cell_resistance_ohm: None,
             charging_curve_lut: None,
         }
     }

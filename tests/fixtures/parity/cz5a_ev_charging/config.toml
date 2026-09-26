@@ -1,0 +1,33 @@
+[simulation]
+start_time = "2023-01-01T00:00:00-07:00"
+duration = 3600
+time_res = 60
+output_verbosity = 3
+output_chunk_size = 1000
+master_seed = 0
+
+bldg_id = 1
+
+[property_parity]
+equipment_count = 15
+zone_count = 2
+conditioned_zone_count = 1
+
+# Charging-EV fixture (I-07): the EV starts the window discharged and both
+# simulators charge it deterministically, cross-checking the EV *charging*
+# power OCHRE models (its event-driven max-power charge with the
+# land-on-target taper) against HARES's. The OCHRE side is pinned by
+# `ochre_event_file` — a single-day event list (one day_id, so OCHRE's
+# day-sampling is deterministic) whose event spans the whole day with
+# start_soc 50. The HARES side is pinned by the override keys below:
+# the same initial SOC, a warm pack (the reference has no thermal model to
+# mirror — a pack initialized at this fixture's -18 C first-hour ambient
+# would sit below the plating cutoff and charge nothing), and an Immediate
+# charge-to-full strategy, which charges at the EVSE's full rating exactly
+# like OCHRE's in-event behavior.
+[ev]
+initial_soc = 0.5
+battery_temp_c = 20.0
+charging_strategy = "{\"Immediate\":{\"target_soc\":1.0}}"
+heater_power_w = 0.0
+ochre_event_file = "ev_events.csv"

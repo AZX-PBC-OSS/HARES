@@ -345,6 +345,16 @@ impl HeatPumpHeaterConfig {
                 )));
             }
         }
+        // The water-source entering water temperature must be finite: a
+        // NaN becomes `SourceTemperature::Constant(NaN)` (heater.rs init)
+        // and silently poisons the WSHP COP and all its energy figures.
+        if let Some(t) = self.common.enter_water_temp_c
+            && !t.is_finite()
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: enter_water_temp_c must be finite, got {t}"
+            )));
+        }
         for (name, value) in [
             (
                 "heating_setpoint_c",
@@ -598,6 +608,17 @@ impl HeatPumpCoolerConfig {
         {
             return Err(HaresError::Equipment(format!(
                 "HeatPumpCoolerConfig: backup_capacity_w must be finite and non-negative, got {value}"
+            )));
+        }
+        // The water-source entering water temperature must be finite: a
+        // NaN becomes `SourceTemperature::Constant(NaN)` (cooler.rs init)
+        // and silently poisons the WSHP COP and all its energy figures —
+        // the same guard the heater config's validate carries.
+        if let Some(t) = self.common.enter_water_temp_c
+            && !t.is_finite()
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpCoolerConfig: enter_water_temp_c must be finite, got {t}"
             )));
         }
 
@@ -1207,5 +1228,39 @@ mod tests {
             cfg.cooling_speed_control_mode(),
             SpeedControlMode::VariableSpeedIdeal,
         );
+    }
+
+    /// The water-source entering water temperature must be finite: a NaN
+    /// becomes `SourceTemperature::Constant(NaN)` at init and silently
+    /// poisons the WSHP COP and every energy figure it feeds. The same
+    /// validation class as the EV/Battery/ventilation temperature guards.
+    #[test]
+    fn heat_pump_configs_reject_non_finite_enter_water_temp() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut heater = HeatPumpHeaterConfig::default();
+            heater.common.enter_water_temp_c = Some(bad);
+            assert!(
+                heater.validate().is_err(),
+                "HeatPumpHeaterConfig: non-finite enter_water_temp_c ({bad}) \
+                 must be rejected"
+            );
+
+            let mut cooler = HeatPumpCoolerConfig::default();
+            cooler.common.enter_water_temp_c = Some(bad);
+            assert!(
+                cooler.validate().is_err(),
+                "HeatPumpCoolerConfig: non-finite enter_water_temp_c ({bad}) \
+                 must be rejected"
+            );
+        }
+
+        // Boundary-legal: a physically plausible finite temperature passes
+        // in both configs.
+        let mut heater = HeatPumpHeaterConfig::default();
+        heater.common.enter_water_temp_c = Some(20.0);
+        assert!(heater.validate().is_ok());
+        let mut cooler = HeatPumpCoolerConfig::default();
+        cooler.common.enter_water_temp_c = Some(20.0);
+        assert!(cooler.validate().is_ok());
     }
 }

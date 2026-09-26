@@ -642,7 +642,39 @@ impl Equipment for IndirectTank {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
-        self.core_output = CoreOutput::default();
+        // Rebuild the restore-instant output from the persisted step
+        // values — mirroring the step's own literal: the thermal flow from
+        // the checkpointed `hx_power_w`, the mode re-derived by the step's
+        // own rule (heating dispatch → `resolve_idle` on the restored
+        // nonzero flow, with the thermal sign the resolver reads).
+        // `CoreOutput::default()` (all fields `None`) violates the
+        // capability-presence rules for the declared capabilities
+        // (HAS_MODE|THERMAL) — the restore contract is that a checkpoint
+        // restores a state `validate_core_contract` accepts.
+        let has_nonzero_flow = decoded.hx_power_w > 0.0;
+        let restored_mode = (if decoded.heating_on {
+            OperatingMode::Heating
+        } else {
+            OperatingMode::Off
+        })
+        .resolve_idle(has_nonzero_flow, Some(decoded.hx_power_w.max(0.0)));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: None,
+                reactive_power_kvar: None,
+                fuel_w: None,
+                thermal_output_w: Some(decoded.hx_power_w.max(0.0)),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(restored_mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
@@ -768,7 +800,10 @@ mod control_domain_tests {
     use super::IndirectTankConfig;
     use crate::Equipment;
     use chrono::{FixedOffset, TimeZone};
-    use hares_types::{ControlSignal, EnvironmentState, GridState, WeatherState, ZoneState};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneState,
+    };
+    use std::time::Duration;
 
     fn env() -> EnvironmentState {
         EnvironmentState {
@@ -876,6 +911,60 @@ mod control_domain_tests {
                 format!("{err:?}").to_lowercase().contains("fraction"),
                 "error must name the signal for {bad}, got {err:?}"
             );
+        }
+    }
+
+    /// Checkpoint round-trip: the restore must publish a contract-valid
+    /// `CoreOutput` — the F1 restore contract every equipment's checkpoint
+    /// now carries. The indirect tank was in the round-3 triage's
+    /// Shape-B enumeration (restore published `CoreOutput::default()` —
+    /// every presence-required field `None` against declared
+    /// HAS_MODE|THERMAL) and its restore was fixed with the class, but it
+    /// was the one enumerated equipment whose sibling gate did not land
+    /// with the fix — this is that gate, mirroring the twelve sibling
+    /// `restored_checkpoint_output_satisfies_the_core_contract` gates.
+    #[test]
+    fn restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = config();
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(), Duration::from_secs(60), &mut p).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = IndirectTank::new(cfg);
+        restored.init(&config(), &env()).unwrap();
+        restored.load_state(&state).unwrap();
+
+        // Non-vacuous precondition: the restore publishes a populated
+        // output (the Shape-B defect was the all-`None` default), so a
+        // regression fails here legibly even before the guard's presence
+        // rules fire.
+        assert!(
+            restored.core_output().state.operating_mode.is_some(),
+            "the restored output must publish an operating mode"
+        );
+        assert!(
+            restored.core_output().flows.thermal_output_w.is_some(),
+            "the restored output must publish its thermal flow"
+        );
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("an indirect-tank checkpoint must restore a contract-valid output");
+    }
+
+    /// Port accumulators for the config's declared ports: the indirect
+    /// tank declares a thermal port on its zone (2) and a fluid port on
+    /// its boiler loop (3) — a bare `PortSlots::default()` fails the step
+    /// with "undeclared thermal zone".
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(hares_types::ZoneId(2))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(3),
+                hares_types::FluidType::Water,
+            )],
+            ..Default::default()
         }
     }
 }
