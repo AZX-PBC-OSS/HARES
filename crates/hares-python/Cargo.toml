@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 observe = ["hares-core/observe"]
 check_invariants = ["hares-core/check_invariants"]
+profiling = ["hares-core/profiling"]
 
 [lib]
 name = "_hares"
