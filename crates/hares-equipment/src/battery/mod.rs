@@ -1454,9 +1454,13 @@ impl Equipment for Battery {
         let current_day = Self::day_ordinal(env);
         if current_day != self.last_daily_update_day {
             // Capture pre-update state for observer diagnostics.
+            // sum_sq_dod is read before reset_daily() below, so it is the day being
+            // closed, the value update_daily() just consumed.
             #[cfg(feature = "observe")]
-            let (q_li1_before, cell_temp_for_tafel) =
-                { (self.degradation.q_li1, self.degradation.daily_mean_temp_k()) };
+            let (q_li1_before, cell_temp_for_tafel, sum_sq_dod) = {
+                (self.degradation.q_li1, self.degradation.daily_mean_temp_k(),
+                 self.rainflow.sum_squared_dod_daily())
+            };
 
             self.degradation
                 .update_daily(&self.u_neg_table, &self.rainflow);

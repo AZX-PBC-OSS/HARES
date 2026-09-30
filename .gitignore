@@ -68,3 +68,5 @@ docs/hpxml/
 .verify*
 
 docs/reviews/_logs/
+
+.workstrees/
