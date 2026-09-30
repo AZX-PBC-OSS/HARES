@@ -1458,8 +1458,11 @@ impl Equipment for Battery {
             // closed, the value update_daily() just consumed.
             #[cfg(feature = "observe")]
             let (q_li1_before, cell_temp_for_tafel, sum_sq_dod) = {
-                (self.degradation.q_li1, self.degradation.daily_mean_temp_k(),
-                 self.rainflow.sum_squared_dod_daily())
+                (
+                    self.degradation.q_li1,
+                    self.degradation.daily_mean_temp_k(),
+                    self.rainflow.sum_squared_dod_daily(),
+                )
             };
 
             self.degradation
