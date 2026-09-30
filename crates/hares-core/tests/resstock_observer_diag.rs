@@ -13,7 +13,7 @@
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
@@ -27,7 +27,7 @@ mod tests {
         project_root().join("tests/fixtures/resstock")
     }
 
-    fn weather_for(bldg_dir: &PathBuf, version: &str) -> PathBuf {
+    fn weather_for(bldg_dir: &Path, version: &str) -> PathBuf {
         let hpxml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips(&hpxml);
         let wdir = fixtures_dir().join(version).join("weather");

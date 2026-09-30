@@ -532,11 +532,11 @@ fn pv_generation_visible_to_thermal_in_same_step() {
             s.phases
                 .post_nonthermal_equipment
                 .as_ref()
-                .map_or(false, |p| !p.equipment.is_empty())
+                .is_some_and(|p| !p.equipment.is_empty())
                 || s.phases
                     .post_thermal_equipment
                     .as_ref()
-                    .map_or(false, |p| !p.equipment.is_empty())
+                    .is_some_and(|p| !p.equipment.is_empty())
         })
         .count();
     assert!(

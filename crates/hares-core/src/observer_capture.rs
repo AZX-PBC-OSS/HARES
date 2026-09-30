@@ -330,22 +330,20 @@ mod tests {
     #[test]
     fn diff_ports_electrical() {
         let before = PortSlots {
-            electrical: {
-                let mut e = ElectricalAccumulator::default();
-                e.load_power_w = 1.0;
-                e.generation_power_w = -2.0;
-                e.reactive_power_kvar = 0.5;
-                e
+            electrical: ElectricalAccumulator {
+                load_power_w: 1.0,
+                generation_power_w: -2.0,
+                reactive_power_kvar: 0.5,
+                ..Default::default()
             },
             ..Default::default()
         };
         let after = PortSlots {
-            electrical: {
-                let mut e = ElectricalAccumulator::default();
-                e.load_power_w = 4.0;
-                e.generation_power_w = -2.0;
-                e.reactive_power_kvar = 1.0;
-                e
+            electrical: ElectricalAccumulator {
+                load_power_w: 4.0,
+                generation_power_w: -2.0,
+                reactive_power_kvar: 1.0,
+                ..Default::default()
             },
             ..Default::default()
         };

@@ -11,13 +11,19 @@
 //! and its cost lands in the `other` residual — use the phase shares RELATIVE to each
 //! other, and re-baseline absolute times against a non-profiling build.
 
-use std::path::PathBuf;
-use std::time::Instant;
+// Everything the harness needs is used only by the profiling main and its config
+// helper; under any other feature set the example is the fallback main below, and
+// ungated imports would be dead.
+#[cfg(feature = "profiling")]
+use {
+    hares_core::dwelling::{Dwelling, DwellingConfig},
+    hares_io::SimulationConfig,
+    std::path::{Path, PathBuf},
+    std::time::Instant,
+};
 
-use hares_core::dwelling::{Dwelling, DwellingConfig};
-use hares_io::SimulationConfig;
-
-fn config(days: i64, fixture: &PathBuf, weather: &PathBuf) -> DwellingConfig {
+#[cfg(feature = "profiling")]
+fn config(days: i64, fixture: &Path, weather: &Path) -> DwellingConfig {
     // SimulationConfig carries serde defaults for every field we do not name here.
     let sim: SimulationConfig = serde_json::from_str(&format!(
         r#"{{
@@ -35,7 +41,7 @@ fn config(days: i64, fixture: &PathBuf, weather: &PathBuf) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: fixture.join("home.xml"),
         schedule_path: fixture.join("in.schedules.csv"),
-        weather_path: weather.clone(),
+        weather_path: weather.to_path_buf(),
         sim_config: sim,
         bldg_id: 7,
         defaults_path: None,
