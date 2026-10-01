@@ -2063,7 +2063,9 @@ fn clear_equipment_never_reissues_prior_ids() {
         .max()
         .expect("fixture has equipment");
 
-    dwelling.clear_equipment();
+    dwelling
+        .clear_equipment()
+        .expect("clear must refresh caches");
     assert!(
         dwelling.equipment().is_empty(),
         "clear must empty the equipment vector"
@@ -2346,6 +2348,7 @@ fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
 fn bms_observed_soc(dwelling: &Dwelling) -> f64 {
     dwelling
         .telemetry()
+        .unwrap()
         .actor_telemetry
         .get("BatteryManagementActor:Battery")
         .and_then(|channels| channels.get("soc"))
@@ -2495,23 +2498,17 @@ fn ev_capacity_check_fails_loudly_when_ev_telemetry_keys_are_absent() {
 }
 
 /// The same monitor-blindness class, one gate up in the same invariant
-/// loop: `check_soc` silently skipped when an EV-end-use equipment's
-/// core-output SOC was absent — reachable only through a wiring defect
-/// (every real EV and Battery publishes SOC at every step, and
-/// `Soc::try_from(..).ok()` additionally nulls it on a non-finite
-/// internal SOC), so the SOC-bounds monitor was blind exactly on the
-/// observation failure it existed to catch — the anti-pattern the
-/// adjacent `ev_capacity_degraded` gate was made loud against. The four
-/// static capacity keys are present and consistent so that adjacent gate
-/// passes, isolating the `soc_bounds` behavior under test.
+/// loop: an EV-end-use equipment whose internal SOC is outside `[0, 1]`
+/// reaches the dwelling as an absent core-output SOC (the `Soc`
+/// conversion nulls the out-of-range value instead of surfacing it), and
+/// the always-on `soc_bounds` check fails the step on the absent SOC
+/// instead of skipping it silently. The four static capacity keys are
+/// present and consistent so that the adjacent `ev_capacity_degraded`
+/// gate passes, isolating the `soc_bounds` behavior under test.
 ///
-/// The gate is now loud (the fix landed: the `let-else` at the top of the
-/// loop fails the step naming the check and the equipment); this gate
-/// was the round-9 routed finding's must_fail form and flipped green
-/// with the fix, per the constitution's self-destructing-annotation
-/// discipline. It asserts the full loud-error contract — the failure
-/// names the check (`soc_bounds`) and the offending equipment, mirroring
-/// the sibling `ev_capacity_degraded` gate's message assertion — so a
+/// The gate asserts the full loud-error contract: the failure names the
+/// check (`soc_bounds`) and the offending equipment, mirroring the
+/// sibling `ev_capacity_degraded` gate's message assertion, so a
 /// regression to a generic error message goes red here too.
 #[test]
 fn ev_soc_check_fails_loudly_when_core_output_soc_is_absent() {

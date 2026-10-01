@@ -57,7 +57,6 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     // Observe-gated diagnostics: Telemetry::set panics on unknown keys under
     // debug_assertions/check_invariants, so every observe-only set site must
     // have its key pre-populated here.
-    telemetry.insert(tk::BIQUADRATIC_INDEX_CLAMPED, 0.0);
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
     telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);

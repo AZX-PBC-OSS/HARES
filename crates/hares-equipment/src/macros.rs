@@ -70,6 +70,10 @@ macro_rules! delegate_equipment {
                 self.$inner.apply_signal(signal)
             }
 
+            fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+                self.$inner.take_health_counts()
+            }
+
             fn rename(&mut self, name: String) {
                 self.$inner.rename(name)
             }

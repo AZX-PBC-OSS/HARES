@@ -1070,7 +1070,7 @@ impl HvacEquipment {
     /// Returns the number of times `evaluate_biquadratic` clamped an out-of-bounds
     /// curve index during the current timestep, then resets to zero. Callers should
     /// invoke this once per timestep (after all curve evaluations) to feed the
-    /// `biquadratic_index_clamped` observe counter.
+    /// `curve_index_clamps` health counter.
     pub fn take_biquadratic_clamp_count(&self) -> u64 {
         self.config
             .biquadratic_clamp

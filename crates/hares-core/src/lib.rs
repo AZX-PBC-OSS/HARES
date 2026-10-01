@@ -10,6 +10,7 @@ pub mod diagnostics;
 pub mod dwelling;
 pub mod engine;
 pub mod environment;
+pub mod health;
 pub mod invariants;
 #[cfg(feature = "observe")]
 pub mod observer;
@@ -31,6 +32,7 @@ pub use dwelling::{
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
+pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

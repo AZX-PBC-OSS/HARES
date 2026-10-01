@@ -34,8 +34,8 @@ struct StepResult {
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
     let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
     let guard = dwelling.acquire_string()?;
-    guard
-        .telemetry()
+    let telemetry = guard.telemetry().map_err(|e| e.to_string())?;
+    telemetry
         .to_observation_vec(&refs)
         .map_err(|err| err.to_string())
 }

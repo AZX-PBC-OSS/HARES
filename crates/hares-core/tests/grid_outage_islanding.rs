@@ -271,7 +271,7 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
 
     // Nominal operation: grid-connected, no island accounting.
     dwelling.step().expect("nominal step");
-    let telem = dwelling.telemetry();
+    let telem = dwelling.telemetry().unwrap();
     assert_eq!(
         telem.island_unserved_kw, 0.0,
         "island_unserved_kw must be 0.0 during nominal (grid-connected) operation"
@@ -291,7 +291,7 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     );
 
     dwelling.step().expect("second islanded step");
-    let telem = dwelling.telemetry();
+    let telem = dwelling.telemetry().unwrap();
     assert!(
         telem.island_unserved_kw > 0.5,
         "load beyond max_discharge_kw must be reported as unserved, got {} kW",

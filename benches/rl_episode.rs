@@ -171,7 +171,7 @@ fn bench_observation_vec(c: &mut Criterion) {
 
     let mut dwelling = make_dwelling(86_400, 60);
     dwelling.step().expect("step");
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
 
     group.bench_function("narrow_5_fields", |b| {
         b.iter(|| black_box(telemetry.to_observation_vec(NARROW_FIELDS).expect("obs")));
@@ -224,7 +224,7 @@ fn bench_episode_single(c: &mut Criterion) {
                     let mut dwelling = make_dwelling(duration_s, time_res_s);
                     for _ in 0..num_steps {
                         dwelling.step().expect("step");
-                        let t = dwelling.telemetry();
+                        let t = dwelling.telemetry().unwrap();
                         black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                     }
                 }
@@ -293,7 +293,7 @@ fn bench_episode_vec(c: &mut Criterion) {
                             });
                         }
                         for dwelling in &dwellings {
-                            let t = dwelling.telemetry();
+                            let t = dwelling.telemetry().unwrap();
                             black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                         }
                     }
@@ -342,7 +342,7 @@ fn bench_batch_step(c: &mut Criterion) {
                     |mut dwellings| {
                         dwellings.par_iter_mut().for_each(|dwelling| {
                             black_box(dwelling.step().expect("step"));
-                            let t = dwelling.telemetry();
+                            let t = dwelling.telemetry().unwrap();
                             black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                         });
                     },

@@ -57,7 +57,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
 #[test]
 fn energy_balance_residual_has_entry_per_zone_and_becomes_nonzero() {
     let mut dwelling = load_fixture("cz2a_gas_furnace_ac_res_wh");
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
     assert_eq!(
         telemetry.energy_balance_residuals.len(),
         telemetry.zone_names.len(),
@@ -67,7 +67,7 @@ fn energy_balance_residual_has_entry_per_zone_and_becomes_nonzero() {
     let mut saw_nonzero = false;
     for _ in 0..12 {
         dwelling.step().expect("fixture step must succeed");
-        let tel = dwelling.telemetry();
+        let tel = dwelling.telemetry().unwrap();
         assert_eq!(
             tel.energy_balance_residuals.len(),
             tel.zone_names.len(),
@@ -120,7 +120,7 @@ fn sum_fuel_consumption_w(dwelling: &Dwelling) -> f64 {
 }
 
 fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
     let equipment = dwelling.equipment();
 
     assert_eq!(

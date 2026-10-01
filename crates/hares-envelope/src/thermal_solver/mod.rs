@@ -235,25 +235,20 @@ pub struct ThermalSolver {
     /// Positive = heat leaving the system.  Populated by `integrate_inner`.
     thermal_balance_q_loss: f64,
     /// Pre-allocated working buffers for the affine-coupled balance
-    /// decomposition (populated only when check_invariants is active).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    /// decomposition (populated by `integrate_inner` in every build profile:
+    /// the dwelling's thermal-balance invariant runs unconditionally).
     balance_buf_a: DVector<f64>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_buf_b: DVector<f64>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_buf_c: DVector<f64>,
     /// Pre-allocated per-state diagonal-damping aggregation buffer for the
     /// identity-M coupled balance decomposition. Holds `Σ d_j` for all
     /// coupling entries sharing a state index, so the semi-implicit solve
     /// applies `rhs[i] / (1 + Σ d_j)` rather than the buggy sequential
     /// `rhs[i] / Π(1 + d_j)`. Kept zeroed and refilled each invocation.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_d_agg: Vec<f64>,
     /// Zero vector for the input dimension (avoids per-step allocation).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_u_zero: DVector<f64>,
     /// Zero vector for the state dimension (avoids per-step allocation).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_x_zero: DVector<f64>,
     /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
     /// Incremented on each solve failure, reset to 0 on success. Used to throttle
@@ -1035,17 +1030,11 @@ impl ThermalSolver {
             full_system_stored_energy_w: 0.0,
             thermal_balance_q_gains: Vec::with_capacity(n_zones_for_latent.max(1)),
             thermal_balance_q_loss: 0.0,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_a: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_b: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_c: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_d_agg: vec![0.0f64; n_states],
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_u_zero: DVector::<f64>::zeros(n_inputs),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_x_zero: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),

@@ -312,6 +312,10 @@ impl Equipment for HpCooler {
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
     }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +745,10 @@ impl Equipment for GshpCooler {
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
     }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1089,10 @@ impl Equipment for WshpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
     }
 }
 
@@ -2282,6 +2294,51 @@ mod tests {
         assert!(
             any_reactive,
             "the pf 0.96 twin must produce reactive power while cooling"
+        );
+    }
+
+    #[test]
+    fn hp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = HpCooler::ashp_cooler(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
+        );
+    }
+
+    #[test]
+    fn gshp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = GshpCooler::new(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
+        );
+    }
+
+    #[test]
+    fn wshp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = WshpCooler::new(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
         );
     }
 }

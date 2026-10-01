@@ -1014,10 +1014,8 @@ impl ThermalSolver {
         // solver.  With coupling, including h in the gain terms makes the
         // balance exact.
         //
-        // Reference: EnergyPlus ERM 26.1 — Basis for the Zone and
-        // Air System Integration — heat balance method must conserve energy.
-        // ASHRAE HoF 2021 Ch.18 — first-law requirement for zone heat balance.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Computed in every build profile: the dwelling's
+        // check_invariants runs unconditionally.
         {
             self.thermal_balance_q_gains.clear();
             self.thermal_balance_q_loss = 0.0;
@@ -1206,12 +1204,6 @@ impl ThermalSolver {
                 self.thermal_balance_q_gains.push(affine_w);
                 self.thermal_balance_q_loss = -internal_w;
             }
-        }
-
-        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-        {
-            // Release builds: clear gains so check_invariants skips the check.
-            self.thermal_balance_q_gains.clear();
         }
 
         self.last_u.clone_from(&u);

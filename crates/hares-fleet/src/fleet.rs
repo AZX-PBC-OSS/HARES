@@ -636,9 +636,26 @@ impl SteppableFleet {
     }
 
     /// Returns telemetry for one dwelling, or `None` if the index is out of bounds.
+    ///
+    /// A telemetry snapshot that cannot be constructed (non-finite or
+    /// out-of-range state) is reported as `None`, the same signal as an
+    /// out-of-bounds index, with the underlying error logged. Some
+    /// snapshot-construction conditions are not step failures, so this is
+    /// the only place the error would surface.
     #[must_use]
     pub fn telemetry(&self, dwelling_index: usize) -> Option<DwellingTelemetry> {
-        self.dwellings.get(dwelling_index).map(|d| d.telemetry())
+        self.dwellings.get(dwelling_index).and_then(|d| {
+            d.telemetry()
+                .map_err(|err| {
+                    tracing::warn!(
+                        dwelling_index,
+                        error = %err,
+                        "dwelling telemetry snapshot failed; reporting None"
+                    );
+                    err
+                })
+                .ok()
+        })
     }
 
     /// Returns building id for one dwelling index.

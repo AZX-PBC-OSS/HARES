@@ -98,6 +98,7 @@ write_output = false
                 .map(|dwelling| {
                     dwelling
                         .telemetry()
+                        .unwrap()
                         .to_observation_vec(NARROW_FIELDS)
                         .expect("observation")
                 })
@@ -126,7 +127,7 @@ write_output = false
 
         dwellings.par_iter_mut().for_each(|dwelling| {
             let _ = dwelling.step().expect("step");
-            let t = dwelling.telemetry();
+            let t = dwelling.telemetry().unwrap();
             let obs = t.to_observation_vec(NARROW_FIELDS).expect("obs");
             assert_eq!(
                 obs.len(),
@@ -137,7 +138,7 @@ write_output = false
 
         // After stepping, all dwellings should have advanced by one timestep.
         for dwelling in &dwellings {
-            let t = dwelling.telemetry();
+            let t = dwelling.telemetry().unwrap();
             assert_eq!(
                 t.timestep_index, 1,
                 "dwelling should have advanced to timestep 1 after a single step"

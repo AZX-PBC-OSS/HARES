@@ -10,6 +10,7 @@ pub mod environment;
 pub mod equipment;
 pub mod error;
 pub mod fluid;
+pub mod health;
 pub(crate) mod mode_flow_guard;
 pub mod panic_hook;
 pub mod ports;
@@ -26,6 +27,7 @@ pub use environment::*;
 pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
+pub use health::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are
 // internal plumbing for `validate_core_contract`. Only the observability

@@ -6,9 +6,9 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -457,6 +457,12 @@ impl Equipment for HeatPumpHeaterCore {
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         self.apply_control_unchecked(signal)
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: self.hvac.take_biquadratic_clamp_count(),
+        }
     }
 }
 
@@ -1590,10 +1596,6 @@ impl HeatPumpHeaterCore {
 
         #[cfg(feature = "observe")]
         {
-            self.telemetry.set(
-                hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
-                self.hvac.take_biquadratic_clamp_count() as f64,
-            );
             self.telemetry.set(
                 tk::STARTUP_TIMER_RESET_COUNT,
                 self.hvac.runtime.startup.reset_count as f64,
@@ -8554,6 +8556,41 @@ mod ideal_capacity_tests {
         assert!(
             cop > 0.1 && cop < 50.0,
             "COP must be physically reasonable; got {cop} for 4-speed HP at max stage with speed_frac=0.5"
+        );
+    }
+
+    #[test]
+    fn take_health_counts_reports_and_resets_curve_index_clamps() {
+        let mut core = ASHPHeater::new(heater_config()).core;
+        core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        let counts = Equipment::take_health_counts(&mut core);
+        assert_eq!(
+            counts.curve_index_clamps, 1,
+            "one out-of-bounds evaluation → one clamp"
+        );
+        assert_eq!(
+            Equipment::take_health_counts(&mut core).curve_index_clamps,
+            0,
+            "take resets the counters"
+        );
+    }
+
+    #[test]
+    fn delegate_equipment_forwards_take_health_counts_to_core() {
+        let mut eq = ASHPHeater::new(heater_config());
+        eq.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the wrapper must forward take_health_counts to the heater core"
         );
     }
 }

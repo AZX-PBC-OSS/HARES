@@ -827,7 +827,9 @@ fn hvac_heating_energy_reaches_thermal_solver() {
     let _ = fs::remove_file(&path_unheated);
 
     // Remove all equipment from unheated dwelling to isolate the envelope
-    dwelling_unheated.clear_equipment();
+    dwelling_unheated
+        .clear_equipment()
+        .expect("clear must refresh caches");
 
     const STEPS: usize = 60;
     let mut heated_final_temp = f64::NAN;
@@ -998,7 +1000,7 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     if steps_survived == 10 {
         // Release path: all 10 steps completed. Verify the thermostat
         // telemetry records the rejection.
-        let tel = dwelling.telemetry();
+        let tel = dwelling.telemetry().unwrap();
         let actor_name = format!("IdealThermostat({hvac_name})");
         let actor_tel = tel.actor_telemetry.get(&actor_name).unwrap_or_else(|| {
             panic!(

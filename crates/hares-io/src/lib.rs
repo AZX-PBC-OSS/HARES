@@ -40,14 +40,11 @@ pub use epw::{
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
 pub use hares_physics::constants::STEFAN_BOLTZMANN;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use hpxml::building::check_foundation_zone_invariant;
 pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml,
     parse_iecc_climate_zone, resolve_equipment,
 };
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub use output::check_mode_ordinals_invariant;
 pub use output::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
@@ -75,7 +72,6 @@ pub use resstock::{
 pub use resstock_csv::parse_resstock_csv;
 pub use sample_weight::{SampleWeightClass, classify_sample_weight};
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use schedule_resolve::check_hvac_setpoint_invariants;
 pub use schedule_resolve::inject_schedule_into_specs;
 pub use site_location::{FieldSource, SiteLocation, SiteLocationOverride, resolve_site_location};

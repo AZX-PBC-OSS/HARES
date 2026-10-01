@@ -234,7 +234,7 @@ pub const TIME_SINCE_START_MIN: &str = "time_since_start_min";
 /// consecutive diagnostic-CSV rows yields the resets-per-hour rate — the
 /// former per-off-step reset behaviour produced a dramatically higher rate.
 /// Diagnostic counter only: not persisted across checkpoint restore
-/// (restarts from 0, matching `BIQUADRATIC_INDEX_CLAMPED`).
+/// (restarts from 0).
 ///
 /// scope: internal
 pub const STARTUP_TIMER_RESET_COUNT: &str = "startup_timer_reset_count";
@@ -363,13 +363,6 @@ pub const EIR_RATIO: &str = "eir_ratio";
 
 /// scope: internal
 pub const BIQUADRATIC_CURVE_SOURCE: &str = "biquadratic_curve_source";
-
-/// Counter incremented each timestep `evaluate_biquadratic` clamps an
-/// out-of-bounds curve index. Zero when no clamping occurred during the
-/// current timestep; non-zero when the fallback path fired.
-///
-/// scope: internal
-pub const BIQUADRATIC_INDEX_CLAMPED: &str = "biquadratic_index_clamped";
 
 /// `speed_frac` value recorded when the MultiSpeedInterpolated high-side
 /// curve index is clamped to the last valid stage (i.e. `speed_index + 1`
@@ -1174,7 +1167,6 @@ mod tests {
             CAP_RATIO_RAW,
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
-            BIQUADRATIC_INDEX_CLAMPED,
             HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
             LATENT_DEGRADATION_ACTIVE,
             SHR_BEFORE_DEGRADATION,
@@ -1435,7 +1427,6 @@ mod tests {
             CAP_RATIO_RAW,
             EIR_RATIO,
             BIQUADRATIC_CURVE_SOURCE,
-            BIQUADRATIC_INDEX_CLAMPED,
             HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
             LATENT_DEGRADATION_ACTIVE,
             SHR_BEFORE_DEGRADATION,

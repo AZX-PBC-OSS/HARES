@@ -1452,8 +1452,7 @@ pub(crate) fn find_unmapped_csv_columns(csv_col_map: &HashMap<String, usize>) ->
 /// If heating/cooling equipment is present and no setpoint schedule is
 /// configured (schedule CSV column, HPXML-derived, or default profile),
 /// the diagnostic names the missing schedule and the affected equipment.
-/// This guard only runs in debug or when `feature = "check_invariants"`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Runs in every build profile as a warning diagnostic.
 pub fn check_hvac_setpoint_invariants(specs: &[EquipmentSpec]) {
     for spec in specs {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {

@@ -979,7 +979,7 @@ impl PyDwelling {
                 e
             ))
         })?;
-        Ok(PyTelemetry::new(dwelling.telemetry()))
+        Ok(PyTelemetry::new(dwelling.telemetry().map_err(to_py_err)?))
     }
 
     #[getter]
@@ -1225,7 +1225,7 @@ impl PyDwelling {
         // no-actor mode). add_ev_with_driver must NOT do this: it attaches
         // its own driver under the canonical EvDriver:<name> the
         // re-registration dedups against.
-        dwelling.auto_register_actors();
+        dwelling.auto_register_actors().map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1922,7 +1922,7 @@ impl PyDwelling {
     /// Removes all equipment from the dwelling.
     pub fn clear_equipment(&self) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
-        dwelling.clear_equipment();
+        dwelling.clear_equipment().map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1936,7 +1936,9 @@ impl PyDwelling {
         let rust_end_uses: Vec<hares_types::EndUse> =
             end_uses.into_iter().map(From::from).collect();
         let mut dwelling = self.acquire()?;
-        Ok(dwelling.remove_equipment_by_end_use(&rust_end_uses))
+        dwelling
+            .remove_equipment_by_end_use(&rust_end_uses)
+            .map_err(to_py_err)
     }
 
     /// Returns a snapshot of the current environment state.
@@ -2085,7 +2087,7 @@ impl PyDwelling {
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
         let dwelling = self.acquire_string()?;
-        let telemetry = dwelling.telemetry();
+        let telemetry = dwelling.telemetry().map_err(|e| e.to_string())?;
         telemetry
             .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
             .map_err(|err| err.to_string())

@@ -196,7 +196,9 @@ mod tests {
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
 
         // Remove all equipment -- free-floating envelope only.
-        dwelling.clear_equipment();
+        dwelling
+            .clear_equipment()
+            .expect("clear must refresh caches");
 
         // Disable natural ventilation to match the OCHRE freefloat fixture scope.
         // HARES correctly enables natural ventilation from HPXML window operable
@@ -1333,7 +1335,9 @@ mod tests {
         };
         let mut dwelling_base =
             Dwelling::from_config(baseline_config).expect("Dwelling::from_config (baseline)");
-        dwelling_base.clear_equipment();
+        dwelling_base
+            .clear_equipment()
+            .expect("clear must refresh caches");
         dwelling_base
             .thermal_solver
             .config_mut()
@@ -1355,7 +1359,9 @@ mod tests {
         let override_config = beopt_freefloat_config(scenario, override_output.clone());
         let mut dwelling_ov =
             Dwelling::from_config(override_config).expect("Dwelling::from_config (override)");
-        dwelling_ov.clear_equipment();
+        dwelling_ov
+            .clear_equipment()
+            .expect("clear must refresh caches");
         dwelling_ov.thermal_solver.config_mut().natural_ventilation = None;
 
         let n_surfaces = dwelling_ov.environment.surface_count();

@@ -3680,8 +3680,7 @@ fn normalize_name(name: &str) -> String {
 /// foundation type is set means foundation thermal mass is absent from the RC
 /// network.
 ///
-/// This guard only runs in debug or when `feature = "check_invariants"`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Runs in every build profile as a warning diagnostic.
 pub fn check_foundation_zone_invariant(building: &Building) {
     let has_foundation_zone = building
         .zones

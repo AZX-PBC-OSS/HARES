@@ -290,7 +290,9 @@ mod tests {
             // to compute exact capacity needed to track setpoint.
             let (heating_c, cooling_c) = beopt_setpoints_c();
 
-            dwelling.clear_equipment();
+            dwelling
+                .clear_equipment()
+                .expect("clear must refresh caches");
 
             let ideal_config = create_ideal_hvac_config(ZoneId(1), &heating_c, &cooling_c);
             let registry = EquipmentRegistry::new();
@@ -327,19 +329,21 @@ mod tests {
             // HARES physically correctly models all equipment from HPXML, including
             // internal gains (328 W mean for BEopt). OCHRE's fixture strips these,
             // so we strip them here for a fair comparison.
-            let stripped = dwelling.remove_equipment_by_end_use(&[
-                EndUse::WATER_HEATING,
-                EndUse::LIGHTING,
-                EndUse::PLUG_LOADS,
-                EndUse::REFRIGERATION,
-                EndUse::VENTILATION,
-                EndUse::EV,
-                EndUse::BATTERY,
-                EndUse::PV,
-                EndUse::GENERATOR,
-                EndUse::DEHUMIDIFIER,
-                EndUse::OTHER,
-            ]);
+            let stripped = dwelling
+                .remove_equipment_by_end_use(&[
+                    EndUse::WATER_HEATING,
+                    EndUse::LIGHTING,
+                    EndUse::PLUG_LOADS,
+                    EndUse::REFRIGERATION,
+                    EndUse::VENTILATION,
+                    EndUse::EV,
+                    EndUse::BATTERY,
+                    EndUse::PV,
+                    EndUse::GENERATOR,
+                    EndUse::DEHUMIDIFIER,
+                    EndUse::OTHER,
+                ])
+                .expect("remove_equipment_by_end_use must refresh caches");
             let remaining: Vec<String> = dwelling
                 .equipment()
                 .iter()

@@ -22,35 +22,11 @@ pub mod water_heater;
 
 use std::time::Duration;
 
-#[cfg(feature = "observe")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, GridExportRule, HaresError, OperatingMode, PlugInPolicy,
-    PortDeclaration, PortSlots, ensure_signal_supported,
+    EquipmentDescriptor, EquipmentHealthCounts, EquipmentId, GridExportRule, HaresError,
+    OperatingMode, PlugInPolicy, PortDeclaration, PortSlots, ensure_signal_supported,
 };
-
-#[cfg(feature = "observe")]
-static REJECTED_SIGNAL_COUNT: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "observe")]
-static WARNED_REJECTED_SIGNAL: AtomicBool = AtomicBool::new(false);
-
-/// Returns the total count of control signals rejected for numeric bounds
-/// violations across all equipment types since program start.
-///
-/// Only available when the `observe` feature is enabled; returns `0` otherwise.
-pub fn control_signal_rejected_count() -> u64 {
-    #[cfg(feature = "observe")]
-    {
-        REJECTED_SIGNAL_COUNT.load(Ordering::Relaxed)
-    }
-    #[cfg(not(feature = "observe"))]
-    {
-        0
-    }
-}
 
 /// Configuration seed for auto-registering an actor for this equipment.
 /// Equipment that wants a built-in actor overrides `actor_seed()`.
@@ -254,24 +230,7 @@ pub trait Equipment: Send + Sync {
     /// numeric bounds are rejected with a typed error — no silent clamping.
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
-        if let Err(ref e) = signal.validate_numeric_bounds() {
-            #[cfg(feature = "observe")]
-            {
-                REJECTED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
-                if WARNED_REJECTED_SIGNAL
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    tracing::warn!(
-                        signal = ?signal,
-                        reason = %e,
-                        equipment = %self.descriptor().name,
-                        "control_signal_rejected: numeric bounds validation failed (further rejections will be counted but not logged)"
-                    );
-                }
-            }
-            return Err(e.clone());
-        }
+        signal.validate_numeric_bounds()?;
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             // Belt-and-suspenders: re-verify that numeric bounds pass before
@@ -310,6 +269,18 @@ pub trait Equipment: Send + Sync {
     /// equipment that produces derived signals.
     fn drain_command_signals(&mut self) -> Vec<(String, ControlSignal)> {
         Vec::new()
+    }
+
+    /// Read once per step, after stepping: returns and resets this
+    /// equipment's health counters.
+    ///
+    /// Health events are recorded unconditionally in every build profile and
+    /// returned with the run's result: this take is the pipe that carries a
+    /// step's worth of events (e.g. curve-index clamps) to the caller that
+    /// accumulates them into run totals. The default implementation reports
+    /// no counters; equipment with health counters overrides it.
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts::default()
     }
 
     /// Returns whether the equipment's `zone_id` was explicitly set in its config
@@ -990,6 +961,16 @@ mod tests {
         let table = crate::battery::ocv::OcvTable::default_li_nmc();
         let err = eq.set_ocv_table(table).unwrap_err();
         assert!(err.to_string().contains("already initialized"));
+    }
+
+    #[test]
+    fn default_take_health_counts_reports_no_counters() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert_eq!(
+            eq.take_health_counts(),
+            hares_types::EquipmentHealthCounts::default(),
+            "equipment without health counters takes the trait default"
+        );
     }
 
     #[test]

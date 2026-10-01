@@ -7,11 +7,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use hares_types::OperatingMode;
 use hares_types::{EndUse, FuelType, ZoneId};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use strum::IntoEnumIterator;
 
 /// Extracts the unit string from a column name's parenthesized suffix.
 ///
@@ -1029,25 +1025,29 @@ const MODE_ORDINALS: &[(&str, u8)] = &[
     ("On", 12),
 ];
 
-/// Gated invariant: every `OperatingMode` variant must have a corresponding
-/// entry in `MODE_ORDINALS` so that Parquet output files remain self-describing.
+/// Every `OperatingMode` variant must have a corresponding entry in
+/// `MODE_ORDINALS` so that Parquet output files remain self-describing.
 ///
 /// Uses `strum::EnumIter` to enumerate variants directly from the enum
 /// definition, eliminating the manually-maintained parallel list that was the
 /// root cause of the original drift.
 ///
-/// This guard runs at startup in debug builds or when
-/// `feature = "check_invariants"` is enabled. It is not part of the hot path.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub fn check_mode_ordinals_invariant() {
-    for mode in OperatingMode::iter() {
-        let ordinal = mode as u8;
-        let found = MODE_ORDINALS.iter().any(|(_, o)| *o == ordinal);
-        if !found {
-            tracing::error!(
-                ordinal,
-                variant = ?mode,
-                "MODE_ORDINALS is missing entry for OperatingMode variant; \
+/// Verified by the `mode_ordinals_cover_all_variants` unit test below
+/// (the construction-path call was removed); it is not part of the hot path.
+#[cfg(test)]
+mod mode_ordinals_tests {
+    use hares_types::OperatingMode;
+    use strum::IntoEnumIterator;
+
+    use super::MODE_ORDINALS;
+
+    #[test]
+    fn mode_ordinals_cover_all_variants() {
+        for mode in OperatingMode::iter() {
+            let ordinal = mode as u8;
+            assert!(
+                MODE_ORDINALS.iter().any(|(_, o)| *o == ordinal),
+                "MODE_ORDINALS is missing entry for OperatingMode variant {mode:?}; \
                  Parquet metadata will not be self-describing for files \
                  containing this mode"
             );
