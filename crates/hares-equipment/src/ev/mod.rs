@@ -1401,6 +1401,7 @@ impl Ev {
             // (battery/mod.rs). Without this the EV would move SOC using the
             // undegraded divisor, understating range loss and charge duration.
             self.refresh_usable_capacity();
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
