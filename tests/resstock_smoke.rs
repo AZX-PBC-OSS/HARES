@@ -252,7 +252,7 @@ mod tests {
             }
             hasher.update(&buf[..n]);
         }
-        format!("{:x}", hasher.finalize())
+        hares_core::checksum::hex_encode(&hasher.finalize())
     }
 
     #[test]

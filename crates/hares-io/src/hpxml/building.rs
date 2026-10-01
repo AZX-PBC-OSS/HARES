@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
 use hares_types::{normalize_ascii, parse_trimmed_f64};
@@ -360,12 +361,12 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(tag)) => {
-                let name = normalize_name(&String::from_utf8_lossy(tag.name().as_ref()));
+                let name = normalize_name(tag.name().as_ref());
                 let mut attrs = HashMap::new();
                 for attr in tag.attributes().flatten() {
-                    let key = normalize_name(&String::from_utf8_lossy(attr.key.as_ref()));
+                    let key = normalize_name(attr.key.as_ref());
                     let value = attr
-                        .decode_and_unescape_value(reader.decoder())
+                        .normalized_value(XmlVersion::Implicit1_0)
                         .map(|v| v.into_owned())
                         .unwrap_or_default();
                     attrs.insert(key, value);
@@ -378,12 +379,12 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
                 });
             }
             Ok(Event::Empty(tag)) => {
-                let name = normalize_name(&String::from_utf8_lossy(tag.name().as_ref()));
+                let name = normalize_name(tag.name().as_ref());
                 let mut attrs = HashMap::new();
                 for attr in tag.attributes().flatten() {
-                    let key = normalize_name(&String::from_utf8_lossy(attr.key.as_ref()));
+                    let key = normalize_name(attr.key.as_ref());
                     let value = attr
-                        .decode_and_unescape_value(reader.decoder())
+                        .normalized_value(XmlVersion::Implicit1_0)
                         .map(|v| v.into_owned())
                         .unwrap_or_default();
                     attrs.insert(key, value);
@@ -401,8 +402,8 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
                 }
             }
             Ok(Event::Text(text)) => {
+                let value = text.xml_content(XmlVersion::Implicit1_0);
                 if let Some(node) = stack.last_mut()
-                    && let Ok(value) = text.decode()
                     && !value.trim().is_empty()
                 {
                     if !node.text.is_empty() {

@@ -14,9 +14,10 @@
 //! formula).
 
 use std::collections::HashMap;
+use std::hint::black_box;
 
 use chrono::{FixedOffset, TimeZone};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use hares_envelope::thermal_solver::{
     BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };

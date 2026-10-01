@@ -35,6 +35,14 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  advisories:
+    name: "cargo deny advisories"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --all-features check advisories
+
   check-si-guard:
     name: "SI guard (imperial unit markers)"
     runs-on: ubuntu-latest

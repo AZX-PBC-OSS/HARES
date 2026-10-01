@@ -193,7 +193,7 @@ fn bench_aggregation(c: &mut Criterion) {
                                     .expect("benchmark aggregation should succeed"),
                             );
                         }
-                        criterion::black_box(ret);
+                        std::hint::black_box(ret);
 
                         let elapsed = start.elapsed();
 

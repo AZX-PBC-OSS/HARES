@@ -34,7 +34,7 @@ fn bench_fleet(c: &mut Criterion) {
                 |fleet| {
                     // Use a fixed thread count for reproducible, resource-bounded benchmarks.
                     let results = fleet.simulate(4);
-                    criterion::black_box(results);
+                    std::hint::black_box(results);
                 },
                 criterion::BatchSize::LargeInput,
             );

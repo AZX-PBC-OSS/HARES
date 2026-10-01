@@ -12,7 +12,7 @@
 fn main() {
     // pyo3-build-config exposes the resolved interpreter's lib dir. When it
     // is absent (e.g. cross-compiles with a static libpython), emit nothing.
-    if let Some(lib_dir) = pyo3_build_config::get().lib_dir.as_deref() {
+    if let Some(lib_dir) = pyo3_build_config::get().lib_dir() {
         // Re-run if the configured interpreter changes.
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
         println!("cargo:rustc-link-search=native={lib_dir}");

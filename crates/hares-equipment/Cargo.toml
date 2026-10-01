@@ -28,4 +28,4 @@ check_invariants = []
 proptest = { workspace = true }
 uom = { workspace = true }
 regex = { workspace = true }
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
