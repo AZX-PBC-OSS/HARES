@@ -1554,7 +1554,7 @@ pub struct Dwelling {
     fluid_update_buf: hares_types::DomainUpdate,
     /// Pre-allocated DomainUpdate buffers for custom domain solvers, one per solver.
     custom_update_bufs: Vec<hares_types::DomainUpdate>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     stage_snapshot: Option<StageSnapshot>,
     #[cfg(debug_assertions)]
     test_panic_on_step: bool,

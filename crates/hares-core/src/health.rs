@@ -7,7 +7,7 @@ use hares_types::ZoneId;
 /// Run-total health counters for one dwelling, recorded unconditionally in
 /// every build profile and never reset per step: a finished run always
 /// reports the degradation it hit without requiring a special build or log
-/// capture. Per-step observe counters do not exist — the run totals replace
+/// capture. Per-step observe counters do not exist; the run totals replace
 /// them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunHealth {
@@ -67,7 +67,7 @@ pub enum WarmupOutcome {
 /// aggregate daily-peak heating/cooling relative changes are attributed to
 /// the worst-temperature-residual zone's row. The zone scope is ALL zones
 /// (unconditioned included) even though the convergence criterion is
-/// conditioned zones only — a converged run can still carry an
+/// conditioned zones only: a converged run can still carry an
 /// unconditioned-zone residual.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WarmupResiduals {

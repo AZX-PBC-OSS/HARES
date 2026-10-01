@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// Health events equipment records while running.
 ///
-/// Health events are recorded unconditionally in every build profile —
-/// unlike the feature-gated observe counters they replace — and are
+/// Health events are recorded unconditionally in every build profile,
+/// unlike the feature-gated observe counters they replace, and are
 /// returned with the run's result, so a finished run always reports the
 /// degradation it hit without requiring a special build or log capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum HealthEvent {
 /// per-step deltas and the caller accumulates them, so the counters returned
 /// with the run's result answer "how often did this happen over the run"
 /// without holding per-step history. Health events are recorded
-/// unconditionally in every build profile — the totals exist even without
+/// unconditionally in every build profile; the totals exist even without
 /// the `observe` feature.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquipmentHealthCounts {
