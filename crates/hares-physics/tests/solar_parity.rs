@@ -184,7 +184,7 @@ fn perez_diffuse_returns_zero_when_dhi_below_threshold() {
 //   Total POA ≈ 800–1200 W/m² for this geometry.
 //
 // Tolerance: physical plausibility check only (model comparison would need
-//            pvlib reference run; full reference values are #[ignore]).
+//            a pvlib reference run).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -261,7 +261,6 @@ fn poa_total_zero_at_night() {
 //   solar = loc.get_solarposition(times)
 //   total = pvlib.irradiance.get_total_irradiance(30, 180, solar.apparent_zenith,
 //           solar.azimuth, 800, 900, 100)
-// Marked #[ignore] until pvlib output is captured and hardcoded.
 // ---------------------------------------------------------------------------
 
 #[test]
