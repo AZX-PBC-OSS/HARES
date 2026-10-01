@@ -14,10 +14,20 @@ use frame_golden::manifest::{GoldenManifest, repo_root};
 /// A one-day, hourly manifest against the cz4a parity fixture: 24 rows,
 /// master seed 0, no initialization (the warm-up loop still runs, at the
 /// hourly resolution, and converges in a few day-replays).
+///
+/// The feature set names the running binary's own: these tests exercise
+/// capture stability and the round trip, not the feature gate, so the
+/// manifest must be accepted whatever the build flags.
 fn one_day_manifest() -> String {
-    r#"
+    let features = frame_golden::manifest::running_features()
+        .into_iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
 kind = "dwelling"
-features = []
+features = [{features}]
 defaults = "defaults"
 
 [simulation]
@@ -33,9 +43,9 @@ hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
 initialization_duration_s = 0
-overrides = {}
+overrides = {{}}
 "#
-    .to_string()
+    )
 }
 
 fn write_manifest(dir: &tempfile::TempDir) -> PathBuf {
@@ -71,8 +81,12 @@ fn golden_json_is_byte_stable() {
         "two captures of one run must write identical bytes"
     );
     // Sorted keys, visible provenance: the document parses and pins the
-    // feature set and defaults directory it was captured under.
-    assert_eq!(first.doc.features, Vec::<String>::new());
+    // feature set and defaults directory it was captured under. The feature
+    // set is the running binary's, matching the manifest.
+    assert_eq!(
+        first.doc.features,
+        frame_golden::manifest::running_features()
+    );
     assert_eq!(first.doc.defaults_dir, "defaults");
 }
 
