@@ -1,0 +1,18 @@
+kind = "dwelling"
+features = []
+defaults = "defaults"
+
+[simulation]
+start_time = "2023-01-01T00:00:00-07:00"
+duration = 31536000
+time_res = 3600
+output_verbosity = 2
+master_seed = 0
+
+[[home]]
+bldg_id = 1
+hpxml = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml"
+schedule = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/schedule.csv"
+weather = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/weather.epw"
+initialization_duration_s = 0
+overrides = {}
