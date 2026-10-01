@@ -451,25 +451,25 @@ impl RegularGridInterpolator {
 
         // Check fallback mask: warn once if any contributing corner cell was
         // produced by fallback extrapolation rather than direct solve.
-        if let Some(ref mask) = self.fallback_mask {
-            if !self.fallback_warned.load(Ordering::Relaxed) {
-                let any_fallback = (0..n_corners).any(|corner| {
-                    let mut flat_idx = 0usize;
-                    for (dim, lo) in lo_indices.iter().enumerate().take(ndim) {
-                        let bit = (corner >> dim) & 1;
-                        let idx = lo + bit as usize;
-                        let idx = idx.min(self.axes[dim].len() - 1);
-                        flat_idx += idx * self.strides[dim];
-                    }
-                    mask[flat_idx] != 0
-                });
-                if any_fallback {
-                    self.fallback_warned.store(true, Ordering::Relaxed);
-                    tracing::warn!(
-                        "Interpolating from charging-curve LUT cells that were filled by fallback \
-                         extrapolation; charge-rate limits may be conservative"
-                    );
+        if let Some(ref mask) = self.fallback_mask
+            && !self.fallback_warned.load(Ordering::Relaxed)
+        {
+            let any_fallback = (0..n_corners).any(|corner| {
+                let mut flat_idx = 0usize;
+                for (dim, lo) in lo_indices.iter().enumerate().take(ndim) {
+                    let bit = (corner >> dim) & 1;
+                    let idx = lo + bit as usize;
+                    let idx = idx.min(self.axes[dim].len() - 1);
+                    flat_idx += idx * self.strides[dim];
                 }
+                mask[flat_idx] != 0
+            });
+            if any_fallback {
+                self.fallback_warned.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    "Interpolating from charging-curve LUT cells that were filled by fallback \
+                         extrapolation; charge-rate limits may be conservative"
+                );
             }
         }
 

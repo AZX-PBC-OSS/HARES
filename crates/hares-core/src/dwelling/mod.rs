@@ -333,17 +333,16 @@ fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[Box<dyn Equip
             if let Some((_name, units)) = instance_units.iter().find(|(name, _)| {
                 col_name.as_bytes().starts_with(name.as_bytes())
                     && (col_name.len() == name.len() || col_name.as_bytes()[name.len()] == b' ')
-            }) {
-                if let Some(col_unit) = extract_unit_from_name(col_name) {
-                    if units.contains(col_unit) {
-                        metadata.insert("unit_source".to_string(), "telemetry_field".to_string());
-                    } else {
-                        tracing::warn!(
-                            column = col_name,
-                            unit = col_unit,
-                            "column unit not found in equipment telemetry fields"
-                        );
-                    }
+            }) && let Some(col_unit) = extract_unit_from_name(col_name)
+            {
+                if units.contains(col_unit) {
+                    metadata.insert("unit_source".to_string(), "telemetry_field".to_string());
+                } else {
+                    tracing::warn!(
+                        column = col_name,
+                        unit = col_unit,
+                        "column unit not found in equipment telemetry fields"
+                    );
                 }
             }
 
@@ -1450,13 +1449,13 @@ fn validate_equipment_zones(
     env_zone_ids: &HashSet<ZoneId>,
 ) -> Result<()> {
     for decl in decls {
-        if let Some(zone) = decl.zone {
-            if !env_zone_ids.contains(&zone) {
-                return Err(HaresError::Dwelling(format!(
-                    "equipment declares port for zone {zone:?} \
+        if let Some(zone) = decl.zone
+            && !env_zone_ids.contains(&zone)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "equipment declares port for zone {zone:?} \
                      which does not exist in the environment model"
-                )));
-            }
+            )));
         }
     }
     Ok(())
@@ -1474,13 +1473,13 @@ fn validate_equipment_loops(
     allocated_loop_ids: &HashSet<u16>,
 ) -> Result<()> {
     for decl in decls {
-        if let Some(loop_id) = decl.loop_id {
-            if !allocated_loop_ids.contains(&loop_id.0) {
-                return Err(HaresError::Dwelling(format!(
-                    "equipment declares fluid port for loop {loop_id:?} \
+        if let Some(loop_id) = decl.loop_id
+            && !allocated_loop_ids.contains(&loop_id.0)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "equipment declares fluid port for loop {loop_id:?} \
                      which has not been allocated to any equipment spec"
-                )));
-            }
+            )));
         }
     }
     Ok(())
@@ -2378,10 +2377,10 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         );
         merged_cfg.zone_map = Some(zone_map.clone());
         merged_cfg.rng_seed = Some(sub_rng.get_seed());
-        if let Some(zone_id) = merged_cfg.zone_id() {
-            if let Some(&cap) = zone_cap_kwh_per_k.get(&zone_id) {
-                merged_cfg.zone_capacitance_kwh_per_k = cap;
-            }
+        if let Some(zone_id) = merged_cfg.zone_id()
+            && let Some(&cap) = zone_cap_kwh_per_k.get(&zone_id)
+        {
+            merged_cfg.zone_capacitance_kwh_per_k = cap;
         }
         match eq.init(&merged_cfg, &initial_env) {
             Ok(()) => equipment.push(eq),
@@ -4070,14 +4069,13 @@ impl Dwelling {
                     // Mirrors construction: streaming runs collect run
                     // metrics incrementally; an init failure degrades to
                     // zeroed metrics with a warning, not a failed refresh.
-                    if !self.retain_batches {
-                        if let Err(err) = recorder
+                    if !self.retain_batches
+                        && let Err(err) = recorder
                             .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
-                        {
-                            self.push_warning(format!(
-                                "MetricsCalculator init failed: {err} -- metrics are zeroed"
-                            ));
-                        }
+                    {
+                        self.push_warning(format!(
+                            "MetricsCalculator init failed: {err} -- metrics are zeroed"
+                        ));
                     }
                     self.recorder = Some(recorder);
                 }
@@ -4262,19 +4260,18 @@ impl Dwelling {
 
             if let Some(zone_id) = eq.descriptor().zone
                 && let Some(zone_idx) = zone_ids.iter().position(|z| *z == zone_id)
+                && let Some(sp) = co.state.setpoint_c
             {
-                if let Some(sp) = co.state.setpoint_c {
-                    match co.state.operating_mode {
-                        // Standard heating mode and all heat-pump-specific heating modes.
-                        Some(
-                            hares_types::OperatingMode::Heating
-                            | hares_types::OperatingMode::HeatingHP
-                            | hares_types::OperatingMode::HeatingER
-                            | hares_types::OperatingMode::HeatingHPAndER,
-                        ) => setpoint_heat_c[zone_idx] = sp,
-                        Some(hares_types::OperatingMode::Cooling) => setpoint_cool_c[zone_idx] = sp,
-                        _ => {}
-                    }
+                match co.state.operating_mode {
+                    // Standard heating mode and all heat-pump-specific heating modes.
+                    Some(
+                        hares_types::OperatingMode::Heating
+                        | hares_types::OperatingMode::HeatingHP
+                        | hares_types::OperatingMode::HeatingER
+                        | hares_types::OperatingMode::HeatingHPAndER,
+                    ) => setpoint_heat_c[zone_idx] = sp,
+                    Some(hares_types::OperatingMode::Cooling) => setpoint_cool_c[zone_idx] = sp,
+                    _ => {}
                 }
             }
         }
@@ -4470,12 +4467,12 @@ impl Dwelling {
             let mut map: HashMap<ZoneId, f64> = HashMap::new();
             for eq in &self.equipment {
                 let desc = eq.descriptor();
-                if let Some(zone) = desc.zone {
-                    if desc.end_use == EndUse::HVAC_HEATING || desc.end_use == EndUse::HVAC_COOLING
-                    {
-                        let thermal_w = eq.core_output().flows.thermal_output_w.unwrap_or(0.0);
-                        *map.entry(zone).or_insert(0.0) += thermal_w;
-                    }
+                if let Some(zone) = desc.zone
+                    && (desc.end_use == EndUse::HVAC_HEATING
+                        || desc.end_use == EndUse::HVAC_COOLING)
+                {
+                    let thermal_w = eq.core_output().flows.thermal_output_w.unwrap_or(0.0);
+                    *map.entry(zone).or_insert(0.0) += thermal_w;
                 }
             }
             map

@@ -1489,19 +1489,17 @@ fn try_build_heat_pump_heater_config(
         capacity_ratio_at_17f: params.get("capacity_ratio_at_17f").and_then(Value::as_f64),
         defrost: {
             let mut d = DefrostConfig::default();
-            if let Some(s) = params.get("defrost_control").and_then(Value::as_str) {
-                if let Ok(c) =
+            if let Some(s) = params.get("defrost_control").and_then(Value::as_str)
+                && let Ok(c) =
                     serde_json::from_value::<DefrostControl>(Value::String(s.to_string()))
-                {
-                    d.control = c;
-                }
+            {
+                d.control = c;
             }
-            if let Some(s) = params.get("defrost_strategy").and_then(Value::as_str) {
-                if let Ok(st) =
+            if let Some(s) = params.get("defrost_strategy").and_then(Value::as_str)
+                && let Ok(st) =
                     serde_json::from_value::<DefrostStrategy>(Value::String(s.to_string()))
-                {
-                    d.strategy = st;
-                }
+            {
+                d.strategy = st;
             }
             if let Some(v) = params.get("defrost_time_fraction").and_then(Value::as_f64) {
                 d.defrost_time_fraction = v;
@@ -2069,10 +2067,10 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
-        if name == "Ideal HVAC" {
-            if let Some(deadband) = building.hvac_deadband_c {
-                params.insert("deadband_c".to_string(), json!(deadband));
-            }
+        if name == "Ideal HVAC"
+            && let Some(deadband) = building.hvac_deadband_c
+        {
+            params.insert("deadband_c".to_string(), json!(deadband));
         }
         duct_params.insert_into_map(&mut params);
         for (k, v) in &basement_params {
@@ -2293,25 +2291,23 @@ pub(super) fn resolve_hvac(
         );
         // HPXML MinimumCapacity → min_compressor_fraction when HeatingCapacity is available.
         // MinimumCapacity is the lowest compressor output; min_compressor_fraction = MinimumCapacity / HeatingCapacity.
-        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity") {
-            if let Some(Value::Number(cap_n)) = params.get("heating_capacity_w") {
-                if let Some(heat_w) = cap_n.as_f64() {
-                    if heat_w > 0.0 {
-                        let min_w = conv::power_btu_h_to_w(min_btu_h);
-                        let raw_frac = min_w / heat_w;
-                        let frac = raw_frac.clamp(0.1, 0.5);
-                        if (frac - raw_frac).abs() > f64::EPSILON {
-                            tracing::warn!(
-                                raw = raw_frac,
-                                clamped = frac,
-                                "HPXML MinimumCapacity / HeatingCapacity = {raw_frac:.3} \
+        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity")
+            && let Some(Value::Number(cap_n)) = params.get("heating_capacity_w")
+            && let Some(heat_w) = cap_n.as_f64()
+            && heat_w > 0.0
+        {
+            let min_w = conv::power_btu_h_to_w(min_btu_h);
+            let raw_frac = min_w / heat_w;
+            let frac = raw_frac.clamp(0.1, 0.5);
+            if (frac - raw_frac).abs() > f64::EPSILON {
+                tracing::warn!(
+                    raw = raw_frac,
+                    clamped = frac,
+                    "HPXML MinimumCapacity / HeatingCapacity = {raw_frac:.3} \
                                  is outside [0.1, 0.5]; clamped to {frac:.3}"
-                            );
-                        }
-                        params.insert("min_compressor_fraction".to_string(), json!(frac));
-                    }
-                }
+                );
             }
+            params.insert("min_compressor_fraction".to_string(), json!(frac));
         }
         let is_mini_split = heat_pump_type == "mini-split";
         insert_annual_efficiency(&mut params, heat_pump, true, is_mini_split);
@@ -2324,16 +2320,15 @@ pub(super) fn resolve_hvac(
         // HeatingCapacity17F: AHRI 210/240 H3 low-ambient rating point at 17°F (-8.33°C).
         // Stores capacity_ratio_at_17f = HeatingCapacity17F / HeatingCapacity (both in W)
         // so the biquadratic curve can be validated against the manufacturer spec.
-        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F") {
-            if let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64) {
-                if cap_w > 0.0 {
-                    let cap_17f_w = conv::power_btu_h_to_w(cap_17f_btu);
-                    params.insert(
-                        "capacity_ratio_at_17f".to_string(),
-                        json!(cap_17f_w / cap_w),
-                    );
-                }
-            }
+        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F")
+            && let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64)
+            && cap_w > 0.0
+        {
+            let cap_17f_w = conv::power_btu_h_to_w(cap_17f_btu);
+            params.insert(
+                "capacity_ratio_at_17f".to_string(),
+                json!(cap_17f_w / cap_w),
+            );
         }
 
         // Backup heating parameters.
@@ -2359,47 +2354,50 @@ pub(super) fn resolve_hvac(
         // backup). For ASHP, init_from_typed will return Err if a required
         // backup capacity is missing, guarding against a genuinely incomplete
         // HPXML rather than silently inferring an absent backup system.
-        if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency") {
-            if let Some(val) = child_f64(eff_node, "Value") {
-                let units_raw = child_text(eff_node, "Units").unwrap_or_default();
-                let units = units_raw.to_ascii_uppercase();
-                let eir =
-                    match units.as_str() {
-                        "PERCENT" if val > 1.0 => {
-                            // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
-                            // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
-                            // OpenStudio-HPXML (NREL reference implementation) treats Percent
-                            // values as fractions 0–1, but HARES guards against the
-                            // percent-out-of-100 form to be robust to all valid HPXML inputs.
-                            100.0 / val.max(0.01)
-                        }
-                        "PERCENT" => {
-                            // Value is already a fraction (0–1) — the conventional HPXML form.
-                            1.0 / val.max(0.01)
-                        }
-                        // AFUE is always a fraction (0–1). Absent units default to fraction
-                        // form per HPXML convention.
-                        "AFUE" | "" => 1.0 / val.max(0.01),
-                        // COP is already a COP; EIR = 1/COP.
-                        "COP" => 1.0 / val.max(0.01),
-                        // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
-                        // HeatingEfficiencyUnits_simple type, but they do not apply to a
-                        // backup resistance or gas strip. Reject loudly.
-                        "HSPF" | "HSPF2" => {
-                            return Err(HpxmlError::Parse(format!(
+        if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency")
+            && let Some(val) = child_f64(eff_node, "Value")
+        {
+            let units_raw = child_text(eff_node, "Units").unwrap_or_default();
+            let units = units_raw.to_ascii_uppercase();
+            let eir =
+                match units.as_str() {
+                    "PERCENT" if val > 1.0 => {
+                        // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
+                        // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
+                        // OpenStudio-HPXML (NREL reference implementation) treats Percent
+                        // values as fractions 0–1, but HARES guards against the
+                        // percent-out-of-100 form to be robust to all valid HPXML inputs.
+                        100.0 / val.max(0.01)
+                    }
+                    "PERCENT" => {
+                        // Value is already a fraction (0-1): the conventional HPXML form.
+                        1.0 / val.max(0.01)
+                    }
+                    // AFUE is always a fraction (0–1). Absent units default to fraction
+                    // form per HPXML convention.
+                    "AFUE" | "" => 1.0 / val.max(0.01),
+                    // COP is already a COP; EIR = 1/COP.
+                    "COP" => 1.0 / val.max(0.01),
+                    // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
+                    // HeatingEfficiencyUnits_simple type, but they do not apply to a
+                    // backup resistance or gas strip. Reject loudly.
+                    "HSPF" | "HSPF2" => {
+                        return Err(HpxmlError::Parse(format!(
                             "BackupAnnualHeatingEfficiency: '{units_raw}' is a seasonal metric, \
                              not supported for backup heating"
                         ).into()));
-                        }
-                        _ => {
-                            return Err(HpxmlError::Parse(format!(
-                            "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
+                    }
+                    _ => {
+                        return Err(HpxmlError::Parse(
+                            format!(
+                                "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
                              '{units_raw}'"
-                        ).into()));
-                        }
-                    };
-                params.insert("backup_eir".to_string(), json!(eir));
-            }
+                            )
+                            .into(),
+                        ));
+                    }
+                };
+            params.insert("backup_eir".to_string(), json!(eir));
         }
         if let Some(fuel) = child_text(heat_pump, "BackupSystemFuel") {
             params.insert("backup_fuel".to_string(), Value::String(fuel));
@@ -2809,10 +2807,10 @@ fn insert_autosizing_params(
             params.insert(key.to_string(), json!(factor));
             return;
         }
-        if let Some(ext) = node.child("extension") {
-            if let Some(factor) = child_f64(ext, tag) {
-                params.insert(key.to_string(), json!(factor));
-            }
+        if let Some(ext) = node.child("extension")
+            && let Some(factor) = child_f64(ext, tag)
+        {
+            params.insert(key.to_string(), json!(factor));
         }
     };
 
@@ -3549,21 +3547,22 @@ fn apply_multispeed_parameters(
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
         let eff_kind_upper = eff_kind_used.to_ascii_uppercase();
-        if !is_heating && (eff_kind_upper == "SEER" || eff_kind_upper == "EER") {
-            if let Some(&last_cop) = cops.last() {
-                let expected_cop = efficiency_value / BTU_PER_HR_PER_W;
-                if last_cop < expected_cop * 0.5 {
-                    tracing::warn!(
-                        equipment = %equipment_name,
-                        %eff_kind_used,
-                        efficiency_value,
-                        last_cop,
-                        expected_cop,
-                        "speed-{max_speed} COP {last_cop} is far below SEER-derived \
+        if !is_heating
+            && (eff_kind_upper == "SEER" || eff_kind_upper == "EER")
+            && let Some(&last_cop) = cops.last()
+        {
+            let expected_cop = efficiency_value / BTU_PER_HR_PER_W;
+            if last_cop < expected_cop * 0.5 {
+                tracing::warn!(
+                    equipment = %equipment_name,
+                    %eff_kind_used,
+                    efficiency_value,
+                    last_cop,
+                    expected_cop,
+                    "speed-{max_speed} COP {last_cop} is far below SEER-derived \
                          expectation {expected_cop:.3} for {equipment_name}",
-                        max_speed = cops.len(),
-                    );
-                }
+                    max_speed = cops.len(),
+                );
             }
         }
     }
@@ -3874,21 +3873,17 @@ fn apply_building_setpoint_profiles(
         }
     }
 
-    if include_heating {
-        if let Some((weekday, weekend)) = heating {
-            params.insert(
-                "heating_setpoint_source".to_string(),
-                daily_profile_source(weekday, weekend),
-            );
-        }
+    if include_heating && let Some((weekday, weekend)) = heating {
+        params.insert(
+            "heating_setpoint_source".to_string(),
+            daily_profile_source(weekday, weekend),
+        );
     }
-    if include_cooling {
-        if let Some((weekday, weekend)) = cooling {
-            params.insert(
-                "cooling_setpoint_source".to_string(),
-                daily_profile_source(weekday, weekend),
-            );
-        }
+    if include_cooling && let Some((weekday, weekend)) = cooling {
+        params.insert(
+            "cooling_setpoint_source".to_string(),
+            daily_profile_source(weekday, weekend),
+        );
     }
 }
 

@@ -149,13 +149,13 @@ pub(crate) fn initialize_steady_state(
     // (not a panic) so callers can handle the condition at the construction
     // boundary without crashing the entire process in debug builds.
     for zone_id in pinned_zones {
-        if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id) {
-            if c_zone < ZONE_PINNING_MIN_CAPACITANCE_J_K {
-                return Err(ThermalSolverError::SingularInitialization {
-                    zone_id: *zone_id,
-                    capacitance_j_k: c_zone,
-                });
-            }
+        if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id)
+            && c_zone < ZONE_PINNING_MIN_CAPACITANCE_J_K
+        {
+            return Err(ThermalSolverError::SingularInitialization {
+                zone_id: *zone_id,
+                capacitance_j_k: c_zone,
+            });
         }
     }
 

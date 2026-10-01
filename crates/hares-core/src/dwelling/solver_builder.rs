@@ -201,21 +201,19 @@ fn build_solver_boundaries(
         };
 
         // Invariant: exterior boundaries with layer_info must resolve through node_index.
-        if is_exterior {
-            if let Some(info) = rc.layer_info.get(&surface_idx) {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                debug_assert!(
-                    outer_wiring.is_some(),
-                    "surface {surface_idx}: outer_node {:?} missing from node_index",
-                    info.outer_node
+        if is_exterior && let Some(info) = rc.layer_info.get(&surface_idx) {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            debug_assert!(
+                outer_wiring.is_some(),
+                "surface {surface_idx}: outer_node {:?} missing from node_index",
+                info.outer_node
+            );
+            if outer_wiring.is_none() {
+                tracing::warn!(
+                    surface_idx = surface_idx,
+                    outer_node = ?info.outer_node,
+                    "surface has layer_info entry but outer_node missing from node_index; exterior injection lost"
                 );
-                if outer_wiring.is_none() {
-                    tracing::warn!(
-                        surface_idx = surface_idx,
-                        outer_node = ?info.outer_node,
-                        "surface has layer_info entry but outer_node missing from node_index; exterior injection lost"
-                    );
-                }
             }
         }
 
@@ -233,21 +231,19 @@ fn build_solver_boundaries(
         };
 
         // Invariant: interior boundaries with layer_info must resolve through node_index.
-        if is_conditioned_interior {
-            if let Some(info) = rc.layer_info.get(&surface_idx) {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                debug_assert!(
-                    inner_wiring.is_some(),
-                    "surface {surface_idx}: inner_node {:?} missing from node_index",
-                    info.inner_node
+        if is_conditioned_interior && let Some(info) = rc.layer_info.get(&surface_idx) {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            debug_assert!(
+                inner_wiring.is_some(),
+                "surface {surface_idx}: inner_node {:?} missing from node_index",
+                info.inner_node
+            );
+            if inner_wiring.is_none() {
+                tracing::warn!(
+                    surface_idx = surface_idx,
+                    inner_node = ?info.inner_node,
+                    "surface has layer_info entry but inner_node missing from node_index; interior wiring lost"
                 );
-                if inner_wiring.is_none() {
-                    tracing::warn!(
-                        surface_idx = surface_idx,
-                        inner_node = ?info.inner_node,
-                        "surface has layer_info entry but inner_node missing from node_index; interior wiring lost"
-                    );
-                }
             }
         }
 
@@ -775,17 +771,17 @@ fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, Fluid
         // Boilers: typed config carries both loop_id and fluid_type.
         match spec.name.as_str() {
             "Gas Boiler" => {
-                if let Ok(typed) = cfg.typed::<hares_equipment::GasBoilerConfig>() {
-                    if let Some(lid) = typed.loop_id {
-                        loops.push((LoopId(lid), typed.fluid_type));
-                    }
+                if let Ok(typed) = cfg.typed::<hares_equipment::GasBoilerConfig>()
+                    && let Some(lid) = typed.loop_id
+                {
+                    loops.push((LoopId(lid), typed.fluid_type));
                 }
             }
             "Electric Boiler" => {
-                if let Ok(typed) = cfg.typed::<hares_equipment::ElectricBoilerConfig>() {
-                    if let Some(lid) = typed.loop_id {
-                        loops.push((LoopId(lid), typed.fluid_type));
-                    }
+                if let Ok(typed) = cfg.typed::<hares_equipment::ElectricBoilerConfig>()
+                    && let Some(lid) = typed.loop_id
+                {
+                    loops.push((LoopId(lid), typed.fluid_type));
                 }
             }
             // Water heaters: always fluid_type=Water, with optional loop_id
@@ -804,10 +800,9 @@ fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, Fluid
                         loops.push((LoopId(lid), FluidType::Water));
                     }
                 } else if let Ok(typed) = cfg.typed::<hares_equipment::HeatPumpWaterHeaterConfig>()
+                    && let Some(lid) = typed.loop_id
                 {
-                    if let Some(lid) = typed.loop_id {
-                        loops.push((LoopId(lid), FluidType::Water));
-                    }
+                    loops.push((LoopId(lid), FluidType::Water));
                 }
             }
             _ => {}
@@ -1696,32 +1691,32 @@ fn foundation_infiltration_method(
         return InfiltrationMethod::Ach { ach };
     }
 
-    if let Some(sla) = zone.ventilation_sla {
-        if let (Some(floor_area_m2), Some(height_m)) = (
+    if let Some(sla) = zone.ventilation_sla
+        && let (Some(floor_area_m2), Some(height_m)) = (
             zone.floor_area_m2.or(conditioned_floor_area_m2),
             foundation_height_m,
-        ) {
-            let ela_m2 = sla * floor_area_m2;
-            let (stack_coeff, wind_coeff) =
-                calculate_ela_coefficients(0.0, height_m, 0.0, terrain, shielding.raw() / 3.0);
+        )
+    {
+        let ela_m2 = sla * floor_area_m2;
+        let (stack_coeff, wind_coeff) =
+            calculate_ela_coefficients(0.0, height_m, 0.0, terrain, shielding.raw() / 3.0);
 
-            #[cfg(feature = "observe")]
-            tracing::info!(
-                target: "observe",
-                zone_type = "foundation",
-                ?shielding,
-                ?terrain,
-                stack_coeff,
-                wind_coeff,
-                "foundation infiltration coefficients"
-            );
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            zone_type = "foundation",
+            ?shielding,
+            ?terrain,
+            stack_coeff,
+            wind_coeff,
+            "foundation infiltration coefficients"
+        );
 
-            return InfiltrationMethod::Ela {
-                ela_m2,
-                stack_coeff,
-                wind_coeff,
-            };
-        }
+        return InfiltrationMethod::Ela {
+            ela_m2,
+            stack_coeff,
+            wind_coeff,
+        };
     }
 
     if zone.vented {

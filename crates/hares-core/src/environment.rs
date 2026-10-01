@@ -707,10 +707,10 @@ impl EnvironmentManager {
                 if let Some(v) = du.custom_payload {
                     self.schedule_payload_swap = v;
                 }
-            } else if du.domain_id == MAINS_WATER_DOMAIN_ID {
-                if let Some(v) = du.custom_payload {
-                    self.mains_payload_swap = v;
-                }
+            } else if du.domain_id == MAINS_WATER_DOMAIN_ID
+                && let Some(v) = du.custom_payload
+            {
+                self.mains_payload_swap = v;
             }
         }
 

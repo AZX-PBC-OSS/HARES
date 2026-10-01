@@ -776,15 +776,15 @@ impl HvacEquipment {
             extract_numeric(config, "min_off_time_s").unwrap_or(0.0);
 
         // Flow-fraction quadratic coefficients: OCHRE HVAC.py `cap_ff` / `eir_ff`.
-        if let Some(raw) = extract_text(config, "cap_ff_coeffs") {
-            if let Ok(arr) = parse_f64_array_3(raw) {
-                self.config.cap_ff_coeffs = arr;
-            }
+        if let Some(raw) = extract_text(config, "cap_ff_coeffs")
+            && let Ok(arr) = parse_f64_array_3(raw)
+        {
+            self.config.cap_ff_coeffs = arr;
         }
-        if let Some(raw) = extract_text(config, "eir_ff_coeffs") {
-            if let Ok(arr) = parse_f64_array_3(raw) {
-                self.config.eir_ff_coeffs = arr;
-            }
+        if let Some(raw) = extract_text(config, "eir_ff_coeffs")
+            && let Ok(arr) = parse_f64_array_3(raw)
+        {
+            self.config.eir_ff_coeffs = arr;
         }
 
         // Flow-fraction clamping bounds: applied before ff quadratic evaluation.

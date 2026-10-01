@@ -431,16 +431,16 @@ fn full_pipeline_synthetic_weather() {
         assert_finite(w.solar_altitude_deg, "solar_altitude_deg", step);
 
         // F-5: Enthalpy increases with temperature
-        if let (Some(pt), Some(pe)) = (prev_temp, prev_enthalpy) {
-            if w.outdoor_temp_c > pt + 0.5 {
-                assert!(
-                    w.outdoor_enthalpy_j_kg > pe,
-                    "step {step}: temp increased by {:.2}°C but enthalpy did not increase \
+        if let (Some(pt), Some(pe)) = (prev_temp, prev_enthalpy)
+            && w.outdoor_temp_c > pt + 0.5
+        {
+            assert!(
+                w.outdoor_enthalpy_j_kg > pe,
+                "step {step}: temp increased by {:.2}°C but enthalpy did not increase \
                      (prev_enthalpy={pe}, cur_enthalpy={})",
-                    w.outdoor_temp_c - pt,
-                    w.outdoor_enthalpy_j_kg
-                );
-            }
+                w.outdoor_temp_c - pt,
+                w.outdoor_enthalpy_j_kg
+            );
         }
         prev_temp = Some(w.outdoor_temp_c);
         prev_enthalpy = Some(w.outdoor_enthalpy_j_kg);

@@ -58,10 +58,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(&columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(&columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -287,10 +287,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < sums.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        sums[i] += v;
-                    }
+                if i < sums.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    sums[i] += v;
                 }
             }
             count += 1;

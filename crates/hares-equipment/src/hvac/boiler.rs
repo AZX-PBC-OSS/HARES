@@ -808,16 +808,16 @@ impl Equipment for GasBoiler {
         // For condensing boilers (EIR < 1), jacket loss is zero -- the extra output
         // comes from latent heat recovery, not from the room.
         let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
-        if let Some(zone) = self.descriptor.zone {
-            if jacket_loss_w > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: jacket_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && jacket_loss_w > 0.0
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: jacket_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);

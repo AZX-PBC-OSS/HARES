@@ -165,28 +165,28 @@ impl ThermalSolver {
             .interior_lwr_zones
             .iter()
             .find(|z| z.zone_id == zone_id);
-        if let Some(zone_cfg) = lwr_zone {
-            if !zone_cfg.surfaces.is_empty() {
-                let reflected_w = compute_solar_distribution_into(
-                    &zone_cfg.surfaces,
-                    beam_w,
-                    diffuse_w,
-                    solar_altitude_deg,
-                    solar_azimuth_deg,
-                    &mut self.solar_absorbed_buf,
-                );
-                let (nodes_w, air_spillover) =
-                    deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
-                let mut injected_w = nodes_w;
-                if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-                    let air_total = reflected_w + air_spillover;
-                    if air_idx < u.len() && air_total > 0.0 {
-                        u[air_idx] += air_total;
-                        injected_w += air_total;
-                    }
+        if let Some(zone_cfg) = lwr_zone
+            && !zone_cfg.surfaces.is_empty()
+        {
+            let reflected_w = compute_solar_distribution_into(
+                &zone_cfg.surfaces,
+                beam_w,
+                diffuse_w,
+                solar_altitude_deg,
+                solar_azimuth_deg,
+                &mut self.solar_absorbed_buf,
+            );
+            let (nodes_w, air_spillover) =
+                deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
+            let mut injected_w = nodes_w;
+            if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
+                let air_total = reflected_w + air_spillover;
+                if air_idx < u.len() && air_total > 0.0 {
+                    u[air_idx] += air_total;
+                    injected_w += air_total;
                 }
-                return Some(injected_w);
             }
+            return Some(injected_w);
         }
 
         // StarMesh mode: use interior_solar_zones for distribution.
@@ -504,12 +504,12 @@ fn deposit_solar_to_solar_surfaces(
     let mut air_total = 0.0;
     for (s, &q) in surfaces.iter().zip(absorbed.iter()) {
         if q > 0.0 {
-            if let Some(idx) = s.input_index {
-                if idx < u.len() {
-                    let q_node = q * s.radiation_frac;
-                    u[idx] += q_node;
-                    nodes_w += q_node;
-                }
+            if let Some(idx) = s.input_index
+                && idx < u.len()
+            {
+                let q_node = q * s.radiation_frac;
+                u[idx] += q_node;
+                nodes_w += q_node;
             }
             air_total += q * (1.0 - s.radiation_frac);
         }

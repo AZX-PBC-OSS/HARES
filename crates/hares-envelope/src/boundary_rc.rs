@@ -1393,32 +1393,31 @@ pub fn assemble_building_rc(
             if diag.path == RCPath::Precomputed
                 && diag.n_rc_nodes > 0
                 && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+                && let Some(info) = layer_info.get(&diag.boundary_idx)
             {
-                if let Some(info) = layer_info.get(&diag.boundary_idx) {
-                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                    // Innermost node must connect to zone air.
-                    assert!(
-                        rc.resistances.contains_key(&(info.inner_node, zone_node))
-                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                        "same-zone precomputed boundary {}: inner node {:?} \
+                let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+                // Innermost node must connect to zone air.
+                assert!(
+                    rc.resistances.contains_key(&(info.inner_node, zone_node))
+                        || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                    "same-zone precomputed boundary {}: inner node {:?} \
                          not connected to zone {:?}",
+                    diag.boundary_idx,
+                    info.inner_node,
+                    zone_node
+                );
+                // Outermost (cut-surface) node must NOT connect directly to
+                // zone air; the fin dead-ends there.
+                if info.outer_node != info.inner_node {
+                    assert!(
+                        !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                            && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                        "same-zone precomputed boundary {}: outer (cut-surface) node \
+                             {:?} incorrectly connected directly to zone {:?}",
                         diag.boundary_idx,
-                        info.inner_node,
+                        info.outer_node,
                         zone_node
                     );
-                    // Outermost (cut-surface) node must NOT connect directly to
-                    // zone air — the fin dead-ends there.
-                    if info.outer_node != info.inner_node {
-                        assert!(
-                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                            "same-zone precomputed boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?}",
-                            diag.boundary_idx,
-                            info.outer_node,
-                            zone_node
-                        );
-                    }
                 }
             }
         }
@@ -1431,34 +1430,33 @@ pub fn assemble_building_rc(
             if diag.path == RCPath::MaterialLayer
                 && diag.n_rc_nodes > 0
                 && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+                && let Some(info) = layer_info.get(&diag.boundary_idx)
             {
-                if let Some(info) = layer_info.get(&diag.boundary_idx) {
-                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                    // Innermost (interior-facing) node must connect to zone air via
-                    // the interior film resistance.
-                    assert!(
-                        rc.resistances.contains_key(&(info.inner_node, zone_node))
-                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                        "same-zone material-layer boundary {}: inner node {:?} \
+                let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+                // Innermost (interior-facing) node must connect to zone air via
+                // the interior film resistance.
+                assert!(
+                    rc.resistances.contains_key(&(info.inner_node, zone_node))
+                        || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                    "same-zone material-layer boundary {}: inner node {:?} \
                          not connected to zone {:?} — interior wiring must fire for same-zone",
+                    diag.boundary_idx,
+                    info.inner_node,
+                    zone_node
+                );
+                // Outermost (cut-surface) node must NOT connect directly to
+                // zone air; the exterior-side wiring must be skipped for same-zone.
+                if info.outer_node != info.inner_node {
+                    assert!(
+                        !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                            && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                        "same-zone material-layer boundary {}: outer (cut-surface) node \
+                             {:?} incorrectly connected directly to zone {:?}: \
+                             exterior wiring must be skipped for same-zone",
                         diag.boundary_idx,
-                        info.inner_node,
+                        info.outer_node,
                         zone_node
                     );
-                    // Outermost (cut-surface) node must NOT connect directly to
-                    // zone air — the exterior-side wiring must be skipped for same-zone.
-                    if info.outer_node != info.inner_node {
-                        assert!(
-                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                            "same-zone material-layer boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?} — \
-                             exterior wiring must be skipped for same-zone",
-                            diag.boundary_idx,
-                            info.outer_node,
-                            zone_node
-                        );
-                    }
                 }
             }
         }

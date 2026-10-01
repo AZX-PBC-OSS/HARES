@@ -1269,12 +1269,11 @@ pub fn extract_u_neg_table(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<U
 }
 
 fn is_polars_dataframe(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if let Ok(cls) = obj.getattr("__class__") {
-        if let Ok(name) = cls.getattr("__name__") {
-            if let Ok(s) = name.extract::<String>() {
-                return Ok(s == "DataFrame");
-            }
-        }
+    if let Ok(cls) = obj.getattr("__class__")
+        && let Ok(name) = cls.getattr("__name__")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return Ok(s == "DataFrame");
     }
     Ok(false)
 }

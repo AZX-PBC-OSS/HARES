@@ -83,19 +83,19 @@ impl PyGasFurnace {
                 "GasFurnace: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "GasFurnace: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "GasFurnace: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = afue {
-            if v <= 0.0 || v > 1.0 {
-                return Err(PyValueError::new_err(
-                    "GasFurnace: afue must be between 0 and 1",
-                ));
-            }
+        if let Some(v) = afue
+            && (v <= 0.0 || v > 1.0)
+        {
+            return Err(PyValueError::new_err(
+                "GasFurnace: afue must be between 0 and 1",
+            ));
         }
         Ok(Self {
             name,
@@ -132,10 +132,10 @@ pub fn gas_furnace_spec_from_py(gf: &PyGasFurnace) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "number_of_speeds", gf.number_of_speeds);
     insert_opt(&mut params, "heating_setpoint_c", gf.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", gf.cooling_setpoint_c);
-    if gf.autosize {
-        if let Some(v) = gf.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if gf.autosize
+        && let Some(v) = gf.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if gf.autosize {
@@ -217,19 +217,19 @@ impl PyAirConditioner {
                 "AirConditioner: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "AirConditioner: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "AirConditioner: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = seer {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "AirConditioner: seer must be positive",
-                ));
-            }
+        if let Some(v) = seer
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "AirConditioner: seer must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -278,10 +278,10 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "fan_power_w", ac.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", ac.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", ac.cooling_setpoint_c);
-    if ac.autosize {
-        if let Some(v) = ac.oversizing_factor {
-            params.insert("autosize_cooling_factor".into(), json!(v));
-        }
+    if ac.autosize
+        && let Some(v) = ac.oversizing_factor
+    {
+        params.insert("autosize_cooling_factor".into(), json!(v));
     }
 
     let typed_config = if ac.autosize {
@@ -395,17 +395,17 @@ impl PyASHPHeater {
                 "ASHPHeater: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ASHPHeater: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "ASHPHeater: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = hspf {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err("ASHPHeater: hspf must be positive"));
-            }
+        if let Some(v) = hspf
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err("ASHPHeater: hspf must be positive"));
         }
         let backup_fuel_parsed = parse_fuel_type(backup_fuel.as_deref())?;
         Ok(Self {
@@ -473,10 +473,10 @@ pub fn ashp_heater_spec_from_py(hp: &PyASHPHeater) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "fan_power_w", hp.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", hp.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", hp.cooling_setpoint_c);
-    if hp.autosize {
-        if let Some(v) = hp.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if hp.autosize
+        && let Some(v) = hp.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if hp.autosize {
@@ -567,17 +567,17 @@ impl PyASHPCooler {
                 "ASHPCooler: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ASHPCooler: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "ASHPCooler: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = seer {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err("ASHPCooler: seer must be positive"));
-            }
+        if let Some(v) = seer
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err("ASHPCooler: seer must be positive"));
         }
         Ok(Self {
             name,
@@ -621,10 +621,10 @@ pub fn ashp_cooler_spec_from_py(hp: &PyASHPCooler) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "fan_power_w", hp.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", hp.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", hp.cooling_setpoint_c);
-    if hp.autosize {
-        if let Some(v) = hp.oversizing_factor {
-            params.insert("autosize_cooling_factor".into(), json!(v));
-        }
+    if hp.autosize
+        && let Some(v) = hp.oversizing_factor
+    {
+        params.insert("autosize_cooling_factor".into(), json!(v));
     }
 
     let typed_config = if hp.autosize {
@@ -706,19 +706,19 @@ impl PyElectricBaseboard {
                 "ElectricBaseboard: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ElectricBaseboard: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "ElectricBaseboard: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = eir {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "ElectricBaseboard: eir must be positive",
-                ));
-            }
+        if let Some(v) = eir
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "ElectricBaseboard: eir must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -753,10 +753,10 @@ pub fn baseboard_spec_from_py(bb: &PyElectricBaseboard) -> PyResult<EquipmentSpe
     insert_opt(&mut params, "zone_id", bb.zone_id);
     insert_opt(&mut params, "heating_setpoint_c", bb.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", bb.cooling_setpoint_c);
-    if bb.autosize {
-        if let Some(v) = bb.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if bb.autosize
+        && let Some(v) = bb.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if bb.autosize {
@@ -865,11 +865,11 @@ pub fn ideal_hvac_spec_from_py(ih: &PyIdealHVAC) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "heating_setpoint_c", ih.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", ih.cooling_setpoint_c);
     insert_opt(&mut params, "deadband_c", ih.deadband_c);
-    if ih.autosize {
-        if let Some(v) = ih.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-            params.insert("autosize_cooling_factor".into(), json!(v));
-        }
+    if ih.autosize
+        && let Some(v) = ih.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
+        params.insert("autosize_cooling_factor".into(), json!(v));
     }
 
     let typed_config = if ih.autosize {
@@ -945,19 +945,19 @@ impl PyGasBoiler {
                 "GasBoiler: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "GasBoiler: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "GasBoiler: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = afue {
-            if v <= 0.0 || v > 1.0 {
-                return Err(PyValueError::new_err(
-                    "GasBoiler: afue must be between 0 and 1",
-                ));
-            }
+        if let Some(v) = afue
+            && (v <= 0.0 || v > 1.0)
+        {
+            return Err(PyValueError::new_err(
+                "GasBoiler: afue must be between 0 and 1",
+            ));
         }
         Ok(Self {
             name,
@@ -990,10 +990,10 @@ pub fn gas_boiler_spec_from_py(gb: &PyGasBoiler) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "zone_id", gb.zone_id);
     insert_opt(&mut params, "heating_setpoint_c", gb.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", gb.cooling_setpoint_c);
-    if gb.autosize {
-        if let Some(v) = gb.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if gb.autosize
+        && let Some(v) = gb.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if gb.autosize {
@@ -1062,19 +1062,19 @@ impl PyElectricBoiler {
                 "ElectricBoiler: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ElectricBoiler: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "ElectricBoiler: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = eir {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "ElectricBoiler: eir must be positive",
-                ));
-            }
+        if let Some(v) = eir
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "ElectricBoiler: eir must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -1109,10 +1109,10 @@ pub fn electric_boiler_spec_from_py(eb: &PyElectricBoiler) -> PyResult<Equipment
     insert_opt(&mut params, "zone_id", eb.zone_id);
     insert_opt(&mut params, "heating_setpoint_c", eb.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", eb.cooling_setpoint_c);
-    if eb.autosize {
-        if let Some(v) = eb.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if eb.autosize
+        && let Some(v) = eb.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if eb.autosize {
@@ -1189,19 +1189,19 @@ impl PyElectricFurnace {
                 "ElectricFurnace: capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = capacity_w {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err(
-                    "ElectricFurnace: capacity_w must be positive and finite",
-                ));
-            }
+        if let Some(v) = capacity_w
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err(
+                "ElectricFurnace: capacity_w must be positive and finite",
+            ));
         }
-        if let Some(v) = eir {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "ElectricFurnace: eir must be positive",
-                ));
-            }
+        if let Some(v) = eir
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "ElectricFurnace: eir must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -1238,10 +1238,10 @@ pub fn electric_furnace_spec_from_py(ef: &PyElectricFurnace) -> PyResult<Equipme
     insert_opt(&mut params, "fan_power_w", ef.fan_power_w);
     insert_opt(&mut params, "heating_setpoint_c", ef.heating_setpoint_c);
     insert_opt(&mut params, "cooling_setpoint_c", ef.cooling_setpoint_c);
-    if ef.autosize {
-        if let Some(v) = ef.oversizing_factor {
-            params.insert("autosize_heating_factor".into(), json!(v));
-        }
+    if ef.autosize
+        && let Some(v) = ef.oversizing_factor
+    {
+        params.insert("autosize_heating_factor".into(), json!(v));
     }
 
     let typed_config = if ef.autosize {

@@ -209,13 +209,12 @@ impl BillingState {
             if let Some(slot) = self.period_peak_demand_kw.get_mut(period_idx as usize) {
                 *slot = slot.max(avg);
             }
-            if demand_period_idx != period_idx {
-                if let Some(slot) = self
+            if demand_period_idx != period_idx
+                && let Some(slot) = self
                     .period_peak_demand_kw
                     .get_mut(demand_period_idx as usize)
-                {
-                    *slot = slot.max(avg);
-                }
+            {
+                *slot = slot.max(avg);
             }
         } else {
             tracing::debug!(

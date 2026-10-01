@@ -121,18 +121,20 @@ pub(crate) fn aggregate_premise_zip(
         .all(|v| v.is_finite());
         let roster_weight = if zip_is_finite { mean_power_kw } else { None };
         governing.push((name, roster_weight));
-        if let Some(w) = mean_power_kw {
-            if w > 0.0 && w.is_finite() && zip_is_finite {
-                total_weight += w;
-                zp += w * zip.zp;
-                ip += w * zip.ip;
-                pp += w * zip.pp;
-                zq += w * zip.zq;
-                iq += w * zip.iq;
-                pq += w * zip.pq;
-                tan_phi_sum += w * zip.tan_phi();
-                v0 += w * zip.v0;
-            }
+        if let Some(w) = mean_power_kw
+            && w > 0.0
+            && w.is_finite()
+            && zip_is_finite
+        {
+            total_weight += w;
+            zp += w * zip.zp;
+            ip += w * zip.ip;
+            pp += w * zip.pp;
+            zq += w * zip.zq;
+            iq += w * zip.iq;
+            pq += w * zip.pq;
+            tan_phi_sum += w * zip.tan_phi();
+            v0 += w * zip.v0;
         }
     }
 

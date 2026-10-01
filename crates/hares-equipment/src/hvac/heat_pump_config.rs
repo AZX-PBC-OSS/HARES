@@ -338,12 +338,12 @@ impl HeatPumpHeaterConfig {
         if let Some(v) = self.common.cooling_eir {
             check(v, "cooling_eir")?;
         }
-        if let Some(v) = self.common.backup_capacity_w {
-            if v.is_nan() || (v < 0.0 && v.is_finite()) {
-                return Err(HaresError::Equipment(format!(
-                    "HeatPumpHeaterConfig: backup_capacity_w must be finite and non-negative, got {v}"
-                )));
-            }
+        if let Some(v) = self.common.backup_capacity_w
+            && (v.is_nan() || (v < 0.0 && v.is_finite()))
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: backup_capacity_w must be finite and non-negative, got {v}"
+            )));
         }
         // The water-source entering water temperature must be finite: a
         // NaN becomes `SourceTemperature::Constant(NaN)` (heater.rs init)
@@ -412,23 +412,23 @@ impl HeatPumpHeaterConfig {
         if !self.common.is_mini_split {
             let n_speeds = self.effective_number_of_speeds() as usize;
             if n_speeds >= 2 {
-                if let Some(stages) = &self.common.stage_heating_capacities_w {
-                    if stages.len() != n_speeds {
-                        return Err(HaresError::Equipment(format!(
-                            "HeatPumpHeaterConfig: stage_heating_capacities_w has {} elements but number_of_speeds is {}; lengths must match",
-                            stages.len(),
-                            n_speeds,
-                        )));
-                    }
+                if let Some(stages) = &self.common.stage_heating_capacities_w
+                    && stages.len() != n_speeds
+                {
+                    return Err(HaresError::Equipment(format!(
+                        "HeatPumpHeaterConfig: stage_heating_capacities_w has {} elements but number_of_speeds is {}; lengths must match",
+                        stages.len(),
+                        n_speeds,
+                    )));
                 }
-                if let Some(stages) = &self.common.stage_heating_eirs {
-                    if stages.len() != n_speeds {
-                        return Err(HaresError::Equipment(format!(
-                            "HeatPumpHeaterConfig: stage_heating_eirs has {} elements but number_of_speeds is {}; lengths must match",
-                            stages.len(),
-                            n_speeds,
-                        )));
-                    }
+                if let Some(stages) = &self.common.stage_heating_eirs
+                    && stages.len() != n_speeds
+                {
+                    return Err(HaresError::Equipment(format!(
+                        "HeatPumpHeaterConfig: stage_heating_eirs has {} elements but number_of_speeds is {}; lengths must match",
+                        stages.len(),
+                        n_speeds,
+                    )));
                 }
             }
         }

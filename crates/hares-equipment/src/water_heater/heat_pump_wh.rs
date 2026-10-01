@@ -1110,16 +1110,16 @@ impl Equipment for HeatPumpWH {
         }
 
         let skin_loss_w = self.tank.skin_loss_w();
-        if let Some(zone) = self.descriptor.zone {
-            if skin_loss_w.abs() > 1e-3 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: skin_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && skin_loss_w.abs() > 1e-3
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: skin_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         if total_draw_kg_s > 0.0 {

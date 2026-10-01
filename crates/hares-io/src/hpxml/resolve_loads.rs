@@ -586,25 +586,24 @@ pub(super) fn resolve_scheduled_loads(
                         .child("extension")
                         .and_then(|e| child_f64(e, "UsageMultiplier"))
                         .unwrap_or(1.0);
-                    if (multiplier - 1.0).abs() > f64::EPSILON {
-                        if let Some(kwh) =
+                    if (multiplier - 1.0).abs() > f64::EPSILON
+                        && let Some(kwh) =
                             params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                    {
+                        let unscaled_default = match tag {
+                            "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
+                            "Freezer" => Some(319.8),
+                            _ => None,
+                        };
+                        if let Some(default) = unscaled_default
+                            && (kwh - default).abs() < 1e-6
                         {
-                            let unscaled_default = match tag {
-                                "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
-                                "Freezer" => Some(319.8),
-                                _ => None,
-                            };
-                            if let Some(default) = unscaled_default {
-                                if (kwh - default).abs() < 1e-6 {
-                                    tracing::warn!(
-                                        appliance = tag,
-                                        multiplier = %multiplier,
-                                        unscaled_default_kwh = default,
-                                        "appliance default energy was not scaled by UsageMultiplier"
-                                    );
-                                }
-                            }
+                            tracing::warn!(
+                                appliance = tag,
+                                multiplier = %multiplier,
+                                unscaled_default_kwh = default,
+                                "appliance default energy was not scaled by UsageMultiplier"
+                            );
                         }
                     }
                 }

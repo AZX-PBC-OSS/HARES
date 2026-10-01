@@ -1375,23 +1375,23 @@ fn load_hvac_multispeed_csv(
         // and AFUE is a percentage, so this check is restricted to SEER and EER
         // entries where COP ≈ efficiency_value / BTU_PER_HR_PER_W.
         // EnergyPlus StandardRatings.hh:71 defines ConvFromSIToIP = 3.412141633.
-        if efficiency_kind == "SEER" || efficiency_kind == "EER" {
-            if let Some(&last_cop) = cops.last() {
-                let expected = efficiency_value / BTU_PER_HR_PER_W;
-                let deviation = (last_cop - expected).abs() / expected;
-                if deviation > 0.30 {
-                    tracing::warn!(
-                        hvac_name = %hvac_name,
-                        %efficiency_kind,
-                        efficiency_value,
-                        last_cop,
-                        expected_cop = expected,
-                        deviation_pct = deviation * 100.0,
-                        "CSV row rated-speed COP deviates from SEER/EER-derived \
+        if (efficiency_kind == "SEER" || efficiency_kind == "EER")
+            && let Some(&last_cop) = cops.last()
+        {
+            let expected = efficiency_value / BTU_PER_HR_PER_W;
+            let deviation = (last_cop - expected).abs() / expected;
+            if deviation > 0.30 {
+                tracing::warn!(
+                    hvac_name = %hvac_name,
+                    %efficiency_kind,
+                    efficiency_value,
+                    last_cop,
+                    expected_cop = expected,
+                    deviation_pct = deviation * 100.0,
+                    "CSV row rated-speed COP deviates from SEER/EER-derived \
                          expectation by {:.1}% (>30%); values may be erroneous",
-                        deviation * 100.0,
-                    );
-                }
+                    deviation * 100.0,
+                );
             }
         }
 
@@ -1987,16 +1987,16 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
                     "UA for {gal}-gal tank ({ua:.2} W/K) outside plausible range [0.5, 5.0] W/K"
                 );
             }
-            if let Some(prev) = prev_ua {
-                if ua <= prev {
-                    tracing::error!(
-                        gal,
-                        prev_ua = prev,
-                        ua_w_per_k = ua,
-                        "UA for {gal}-gal tank ({ua:.2} W/K) not greater than \
+            if let Some(prev) = prev_ua
+                && ua <= prev
+            {
+                tracing::error!(
+                    gal,
+                    prev_ua = prev,
+                    ua_w_per_k = ua,
+                    "UA for {gal}-gal tank ({ua:.2} W/K) not greater than \
                          previous size ({prev:.2} W/K); UA must increase monotonically with tank volume"
-                    );
-                }
+                );
             }
             prev_ua = Some(ua);
         }
@@ -2021,15 +2021,15 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
         ("UEF_HPWH_65gal", 1.0, 5.0),
         ("UEF_HPWH_80gal", 1.0, 5.0),
     ] {
-        if let Some(uef) = wh.uef(uef_name) {
-            if !(min..=max).contains(&uef) {
-                tracing::error!(
-                    name = %uef_name,
-                    uef_value = uef,
-                    valid_range = format!("[{min}, {max}]"),
-                    "UEF value {uef} for {uef_name} outside valid range [{min}, {max}]"
-                );
-            }
+        if let Some(uef) = wh.uef(uef_name)
+            && !(min..=max).contains(&uef)
+        {
+            tracing::error!(
+                name = %uef_name,
+                uef_value = uef,
+                valid_range = format!("[{min}, {max}]"),
+                "UEF value {uef} for {uef_name} outside valid range [{min}, {max}]"
+            );
         }
     }
 

@@ -933,24 +933,24 @@ impl Ev {
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw) {
-                if sp_kw > 0.0 {
-                    // When both Ready-By and PowerSetpoint are active, the
-                    // setpoint originates from the scheduler's urgency power
-                    // (ctx.max_charge_kw). It must not exceed the equipment's
-                    // rated power by more than a small tolerance — divergence
-                    // beyond 110% indicates the schedule and equipment
-                    // configuration disagree about the EV's capabilities.
-                    let max_allowed = self.rated_power_kw * 1.1;
-                    if sp_kw > max_allowed {
-                        tracing::warn!(
-                            ready_by_hour = self.ready_by_hour,
-                            power_setpoint_kw = sp_kw,
-                            rated_power_kw = self.rated_power_kw,
-                            "EV: PowerSetpoint exceeds rated power while Ready-By active — \
+            if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw)
+                && sp_kw > 0.0
+            {
+                // When both Ready-By and PowerSetpoint are active, the
+                // setpoint originates from the scheduler's urgency power
+                // (ctx.max_charge_kw). It must not exceed the equipment's
+                // rated power by more than a small tolerance; divergence
+                // beyond 110% indicates the schedule and equipment
+                // configuration disagree about the EV's capabilities.
+                let max_allowed = self.rated_power_kw * 1.1;
+                if sp_kw > max_allowed {
+                    tracing::warn!(
+                        ready_by_hour = self.ready_by_hour,
+                        power_setpoint_kw = sp_kw,
+                        rated_power_kw = self.rated_power_kw,
+                        "EV: PowerSetpoint exceeds rated power while Ready-By active: \
                              scheduler urgency power inconsistent with equipment capabilities"
-                        );
-                    }
+                    );
                 }
             }
         }
@@ -2266,12 +2266,12 @@ impl Equipment for Ev {
                 // Validate the ENTIRE signal before mutating any state so a
                 // rejected setpoint leaves no partial effect (e.g. an armed
                 // q_setpoint from a signal whose active power was refused).
-                if let Some(q) = reactive_power_kvar {
-                    if !q.is_finite() {
-                        return Err(HaresError::Control(
-                            "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
-                        ));
-                    }
+                if let Some(q) = reactive_power_kvar
+                    && !q.is_finite()
+                {
+                    return Err(HaresError::Control(
+                        "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                    ));
                 }
                 // Self-contained guard (see EvDrive): a non-finite active
                 // setpoint would silently disarm charging (`f64::max`

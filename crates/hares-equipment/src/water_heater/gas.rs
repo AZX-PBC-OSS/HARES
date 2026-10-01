@@ -689,16 +689,16 @@ impl Equipment for GasWH {
 
         // Skin losses (jacket losses that enter the conditioned space) go to the
         // zone thermal port. Flue losses exit the building and are not reported here.
-        if let Some(zone) = self.descriptor.zone {
-            if skin_loss_to_zone_w > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: skin_loss_to_zone_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && skin_loss_to_zone_w > 0.0
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: skin_loss_to_zone_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         let avg_temp_c =

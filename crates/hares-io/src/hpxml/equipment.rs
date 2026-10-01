@@ -115,14 +115,13 @@ pub(crate) fn build_spec(
     // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
     if !parameters.contains_key("frac_sensible")
         && !parameters.contains_key("sensible_gain_fraction")
+        && let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type)
     {
-        if let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type) {
-            parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
-            if !parameters.contains_key("frac_latent")
-                && !parameters.contains_key("latent_gain_fraction")
-            {
-                parameters.insert("latent_gain_fraction".to_string(), json!(latent));
-            }
+        parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
+        if !parameters.contains_key("frac_latent")
+            && !parameters.contains_key("latent_gain_fraction")
+        {
+            parameters.insert("latent_gain_fraction".to_string(), json!(latent));
         }
     }
 

@@ -338,17 +338,17 @@ impl EnvelopeLookup {
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn check_csv_vs_hardcoded_consistency(&self) {
         for ((bt, int, ext), csv_name) in &self.boundary_names {
-            if let Some(hardcoded_name) = resolve_boundary_name(bt, Some(int), Some(ext)) {
-                if csv_name != hardcoded_name {
-                    tracing::warn!(
-                        boundary_type = ?bt,
-                        interior_zone = ?int,
-                        exterior_zone = ?ext,
-                        csv_name = %csv_name,
-                        hardcoded_name = %hardcoded_name,
-                        "Boundary name mismatch between CSV and hardcoded mapping"
-                    );
-                }
+            if let Some(hardcoded_name) = resolve_boundary_name(bt, Some(int), Some(ext))
+                && csv_name != hardcoded_name
+            {
+                tracing::warn!(
+                    boundary_type = ?bt,
+                    interior_zone = ?int,
+                    exterior_zone = ?ext,
+                    csv_name = %csv_name,
+                    hardcoded_name = %hardcoded_name,
+                    "Boundary name mismatch between CSV and hardcoded mapping"
+                );
             }
         }
     }
@@ -521,42 +521,42 @@ impl EnvelopeLookup {
         // Progressive filtering
         let mut filtered: Vec<&BoundaryTypeRow> = candidates.iter().collect();
 
-        if let Some(ct) = construction_type {
-            if !ct.is_empty() {
-                let narrowed: Vec<_> = filtered
-                    .iter()
-                    .filter(|r| r.construction_type == ct)
-                    .copied()
-                    .collect();
-                if !narrowed.is_empty() {
-                    filtered = narrowed;
-                }
+        if let Some(ct) = construction_type
+            && !ct.is_empty()
+        {
+            let narrowed: Vec<_> = filtered
+                .iter()
+                .filter(|r| r.construction_type == ct)
+                .copied()
+                .collect();
+            if !narrowed.is_empty() {
+                filtered = narrowed;
             }
         }
 
-        if let Some(ft) = finish_type {
-            if !ft.is_empty() {
-                let narrowed: Vec<_> = filtered
-                    .iter()
-                    .filter(|r| r.finish_type == ft)
-                    .copied()
-                    .collect();
-                if !narrowed.is_empty() {
-                    filtered = narrowed;
-                }
+        if let Some(ft) = finish_type
+            && !ft.is_empty()
+        {
+            let narrowed: Vec<_> = filtered
+                .iter()
+                .filter(|r| r.finish_type == ft)
+                .copied()
+                .collect();
+            if !narrowed.is_empty() {
+                filtered = narrowed;
             }
         }
 
-        if let Some(ins) = insulation_details {
-            if !ins.is_empty() {
-                let narrowed: Vec<_> = filtered
-                    .iter()
-                    .filter(|r| r.insulation_details == ins)
-                    .copied()
-                    .collect();
-                if !narrowed.is_empty() {
-                    filtered = narrowed;
-                }
+        if let Some(ins) = insulation_details
+            && !ins.is_empty()
+        {
+            let narrowed: Vec<_> = filtered
+                .iter()
+                .filter(|r| r.insulation_details == ins)
+                .copied()
+                .collect();
+            if !narrowed.is_empty() {
+                filtered = narrowed;
             }
         }
 

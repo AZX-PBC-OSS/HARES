@@ -476,14 +476,14 @@ impl FluidAccumulator {
         // contributions must match (same node = same equipment = same role).
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            if let Some(existing) = self.direction {
-                if existing != direction {
-                    return Err(HaresError::Equipment(format!(
-                        "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
+            if let Some(existing) = self.direction
+                && existing != direction
+            {
+                return Err(HaresError::Equipment(format!(
+                    "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
                          got {direction:?}, expected {existing:?}",
-                        self.loop_id, self.fluid_type, self.node_id
-                    )));
-                }
+                    self.loop_id, self.fluid_type, self.node_id
+                )));
             }
         }
         if self.direction.is_none() {
@@ -596,10 +596,10 @@ impl PortSlots {
         for decl in decls {
             match decl.port_type {
                 PortType::Thermal => {
-                    if let Some(zone) = decl.zone {
-                        if !thermal.iter().any(|t: &ThermalAccumulator| t.zone == zone) {
-                            thermal.push(ThermalAccumulator::new(zone));
-                        }
+                    if let Some(zone) = decl.zone
+                        && !thermal.iter().any(|t: &ThermalAccumulator| t.zone == zone)
+                    {
+                        thermal.push(ThermalAccumulator::new(zone));
                     }
                 }
                 PortType::Fluid => {
@@ -615,23 +615,21 @@ impl PortSlots {
                     }
                 }
                 PortType::Custom => {
-                    if let Some(domain_id) = decl.domain_id {
-                        if !custom
+                    if let Some(domain_id) = decl.domain_id
+                        && !custom
                             .iter()
                             .any(|c: &CustomAccumulator| c.domain_id == domain_id)
-                        {
-                            custom.push(CustomAccumulator::new(domain_id));
-                        }
+                    {
+                        custom.push(CustomAccumulator::new(domain_id));
                     }
                 }
                 PortType::Humidity => {
-                    if let Some(zone) = decl.zone {
-                        if !humidity
+                    if let Some(zone) = decl.zone
+                        && !humidity
                             .iter()
                             .any(|h: &HumidityAccumulator| h.zone == zone)
-                        {
-                            humidity.push(HumidityAccumulator::new(zone));
-                        }
+                    {
+                        humidity.push(HumidityAccumulator::new(zone));
                     }
                 }
                 // Electrical and Fuel are singletons; pre-initialized via Default.
@@ -924,13 +922,13 @@ pub fn validate_fluid_type_consistency(decls: &[PortDeclaration]) -> Result<(), 
         let Some(fluid_type) = decl.fluid_type else {
             continue;
         };
-        if let Some(existing) = loop_fluid.insert(loop_id, fluid_type) {
-            if existing != fluid_type {
-                return Err(HaresError::Equipment(format!(
-                    "loop {loop_id:?} declared with conflicting fluid types: \
+        if let Some(existing) = loop_fluid.insert(loop_id, fluid_type)
+            && existing != fluid_type
+        {
+            return Err(HaresError::Equipment(format!(
+                "loop {loop_id:?} declared with conflicting fluid types: \
                      {existing:?} and {fluid_type:?}"
-                )));
-            }
+            )));
         }
     }
     Ok(())

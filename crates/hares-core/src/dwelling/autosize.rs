@@ -918,10 +918,11 @@ fn resolve_design_temperatures(
     site_lon: Option<f64>,
 ) -> (f64, f64) {
     // Try EPW design conditions first.
-    if let Some(dc) = design_conditions {
-        if dc.heating_design_db_c.is_finite() && dc.cooling_design_db_c.is_finite() {
-            return (dc.heating_design_db_c, dc.cooling_design_db_c);
-        }
+    if let Some(dc) = design_conditions
+        && dc.heating_design_db_c.is_finite()
+        && dc.cooling_design_db_c.is_finite()
+    {
+        return (dc.heating_design_db_c, dc.cooling_design_db_c);
     }
 
     // Fall back to ASHRAE 152 climate station lookup.
@@ -956,10 +957,10 @@ fn resolve_heating_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
     }
 
     // Try the building's heating setpoint profile (use midnight value).
-    if let Some(ref profile) = building.heating_weekday_setpoints_c {
-        if !profile.is_empty() {
-            return profile[0];
-        }
+    if let Some(ref profile) = building.heating_weekday_setpoints_c
+        && !profile.is_empty()
+    {
+        return profile[0];
     }
 
     // ASHRAE 90.1 default.
@@ -979,10 +980,10 @@ fn resolve_cooling_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
     }
 
     // Try the building's cooling setpoint profile (use midnight value).
-    if let Some(ref profile) = building.cooling_weekday_setpoints_c {
-        if !profile.is_empty() {
-            return profile[0];
-        }
+    if let Some(ref profile) = building.cooling_weekday_setpoints_c
+        && !profile.is_empty()
+    {
+        return profile[0];
     }
 
     // ASHRAE 90.1 default.

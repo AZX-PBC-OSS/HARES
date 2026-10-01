@@ -191,15 +191,14 @@ impl FleetAggregation {
 #[cfg(test)]
 fn temp_field_with_unit(name: &str) -> arrow::datatypes::Field {
     let field = arrow::datatypes::Field::new(name, DataType::Float64, true);
-    if let Some(start) = name.rfind('(') {
-        if let Some(end) = name[start..].find(')') {
-            if end > 1 {
-                let unit = &name[start + 1..start + end];
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("unit".to_string(), unit.to_string());
-                return field.with_metadata(metadata);
-            }
-        }
+    if let Some(start) = name.rfind('(')
+        && let Some(end) = name[start..].find(')')
+        && end > 1
+    {
+        let unit = &name[start + 1..start + end];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), unit.to_string());
+        return field.with_metadata(metadata);
     }
     field
 }

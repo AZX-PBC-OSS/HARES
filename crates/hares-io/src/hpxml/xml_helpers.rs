@@ -219,28 +219,28 @@ pub(crate) fn parse_setpoint_from_control(
     let day_prefix = if weekday { "Weekday" } else { "Weekend" };
     let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
 
-    if let Some(ext) = control.child("extension") {
-        if let Some(node) = ext.child(&ext_key) {
-            let vals: Vec<f64> = node
-                .text
-                .trim()
-                .split(',')
-                .filter_map(parse_trimmed_f64)
-                .map(conv::temperature_f_to_c)
-                .collect();
-            if vals.len() == 24 {
-                return Some(vals);
-            }
+    if let Some(ext) = control.child("extension")
+        && let Some(node) = ext.child(&ext_key)
+    {
+        let vals: Vec<f64> = node
+            .text
+            .trim()
+            .split(',')
+            .filter_map(parse_trimmed_f64)
+            .map(conv::temperature_f_to_c)
+            .collect();
+        if vals.len() == 24 {
+            return Some(vals);
         }
     }
 
     // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
     let const_key = format!("SetpointTemp{hvac_type}Season");
-    if let Some(node) = control.child(&const_key) {
-        if let Some(f_val) = parse_trimmed_f64(&node.text) {
-            let c_val = conv::temperature_f_to_c(f_val);
-            return Some(vec![c_val; 24]);
-        }
+    if let Some(node) = control.child(&const_key)
+        && let Some(f_val) = parse_trimmed_f64(&node.text)
+    {
+        let c_val = conv::temperature_f_to_c(f_val);
+        return Some(vec![c_val; 24]);
     }
 
     None

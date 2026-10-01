@@ -169,81 +169,78 @@ impl GeneratorConfig {
             ("eta_lube_oil", self.eta_lube_oil),
             ("eta_exhaust", self.eta_exhaust),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-                    return Err(HaresError::Equipment(format!(
-                        "generator {name} must be finite and within [0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+            {
+                return Err(HaresError::Equipment(format!(
+                    "generator {name} must be finite and within [0, 1]"
+                )));
             }
         }
         // Validate legacy combined eta_thermal + eta_electric sum constraint.
-        if let (Some(eta_e), Some(eta_t)) = (self.eta_electric, self.eta_thermal) {
-            if eta_e + eta_t > 1.0 + f64::EPSILON {
-                return Err(HaresError::Equipment(
-                    "generator eta_electric + eta_thermal must not exceed 1.0".to_string(),
-                ));
-            }
+        if let (Some(eta_e), Some(eta_t)) = (self.eta_electric, self.eta_thermal)
+            && eta_e + eta_t > 1.0 + f64::EPSILON
+        {
+            return Err(HaresError::Equipment(
+                "generator eta_electric + eta_thermal must not exceed 1.0".to_string(),
+            ));
         }
         // Validate per-stream eta sum against eta_electric when per-stream fields are used.
         let per_stream_sum = self.eta_jacket_water.unwrap_or(0.0)
             + self.eta_lube_oil.unwrap_or(0.0)
             + self.eta_exhaust.unwrap_or(0.0);
-        if per_stream_sum > 0.0 {
-            if let Some(eta_e) = self.eta_electric {
-                if eta_e + per_stream_sum > 1.0 + f64::EPSILON {
-                    return Err(HaresError::Equipment(
-                        "generator eta_electric + per-stream heat recovery sum must not exceed 1.0"
-                            .to_string(),
-                    ));
-                }
-            }
+        if per_stream_sum > 0.0
+            && let Some(eta_e) = self.eta_electric
+            && eta_e + per_stream_sum > 1.0 + f64::EPSILON
+        {
+            return Err(HaresError::Equipment(
+                "generator eta_electric + per-stream heat recovery sum must not exceed 1.0"
+                    .to_string(),
+            ));
         }
         // Cross-check CHP thermal output against fluid port capacity.
         // When eta_thermal > 0 and a fluid loop is configured, the port must
         // be able to transport the peak thermal output at rated electric load.
         let eta_t = self.eta_thermal.unwrap_or(0.0);
-        if eta_t > 0.0 {
-            if let Some(loop_id) = self.loop_id {
-                if loop_id > 0 {
-                    let flow = self.flow_rate_kg_s.unwrap_or(DEFAULT_FLOW_RATE_KG_S);
-                    if !flow.is_finite() || flow <= 0.0 {
-                        return Err(HaresError::Equipment(
-                            "CHP flow_rate_kg_s must be finite and > 0 when CHP is enabled"
-                                .to_string(),
-                        ));
-                    }
-                    let supply = self.supply_temp_c.unwrap_or(DEFAULT_SUPPLY_TEMP_C);
-                    let return_t = self.return_temp_c.unwrap_or(DEFAULT_RETURN_TEMP_C);
-                    let delta_t = supply - return_t;
-                    if delta_t <= 0.0 {
-                        return Err(HaresError::Equipment(
-                            "CHP supply_temp_c must be greater than return_temp_c".to_string(),
-                        ));
-                    }
-                    let fluid_capacity_w = flow * CP_LIQUID_WATER_J_KG_K * delta_t;
-                    let rated_eta_e = self.eta_electric.unwrap_or(0.0);
-                    if rated_eta_e > 0.0 {
-                        let fuel_power_w = power_kw_to_w(self.rated_power_kw) / rated_eta_e;
-                        let peak_thermal_w = fuel_power_w * eta_t;
-                        if fluid_capacity_w < peak_thermal_w * CHP_FLUID_CAPACITY_MARGIN {
-                            return Err(HaresError::Equipment(format!(
-                                "CHP fluid port cannot transport peak thermal output: \
+        if eta_t > 0.0
+            && let Some(loop_id) = self.loop_id
+            && loop_id > 0
+        {
+            let flow = self.flow_rate_kg_s.unwrap_or(DEFAULT_FLOW_RATE_KG_S);
+            if !flow.is_finite() || flow <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "CHP flow_rate_kg_s must be finite and > 0 when CHP is enabled".to_string(),
+                ));
+            }
+            let supply = self.supply_temp_c.unwrap_or(DEFAULT_SUPPLY_TEMP_C);
+            let return_t = self.return_temp_c.unwrap_or(DEFAULT_RETURN_TEMP_C);
+            let delta_t = supply - return_t;
+            if delta_t <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "CHP supply_temp_c must be greater than return_temp_c".to_string(),
+                ));
+            }
+            let fluid_capacity_w = flow * CP_LIQUID_WATER_J_KG_K * delta_t;
+            let rated_eta_e = self.eta_electric.unwrap_or(0.0);
+            if rated_eta_e > 0.0 {
+                let fuel_power_w = power_kw_to_w(self.rated_power_kw) / rated_eta_e;
+                let peak_thermal_w = fuel_power_w * eta_t;
+                if fluid_capacity_w < peak_thermal_w * CHP_FLUID_CAPACITY_MARGIN {
+                    return Err(HaresError::Equipment(format!(
+                        "CHP fluid port cannot transport peak thermal output: \
                                  fluid capacity {:.0} W < peak thermal {:.0} W; \
                                  increase flow rate, widen ΔT, or both",
-                                fluid_capacity_w, peak_thermal_w
-                            )));
-                        }
-                    }
+                        fluid_capacity_w, peak_thermal_w
+                    )));
                 }
             }
         }
-        if let Some(ramp) = self.delta_kw_per_s {
-            if !ramp.is_finite() || ramp <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "generator delta_kw_per_s must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(ramp) = self.delta_kw_per_s
+            && (!ramp.is_finite() || ramp <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "generator delta_kw_per_s must be finite and > 0".to_string(),
+            ));
         }
         if let Some(efficiency_type) = self.efficiency_type.as_deref() {
             match efficiency_type {
@@ -259,13 +256,12 @@ impl GeneratorConfig {
         if let Some(points) = self.efficiency_curve_points.as_deref() {
             EfficiencyModel::validate_curve_points(points)?;
         }
-        if let Some(min_kw) = self.capacity_min_kw {
-            if !min_kw.is_finite() || min_kw < 0.0 || min_kw > self.rated_power_kw {
-                return Err(HaresError::Equipment(
-                    "generator capacity_min_kw must be finite, >= 0, and <= rated_power_kw"
-                        .to_string(),
-                ));
-            }
+        if let Some(min_kw) = self.capacity_min_kw
+            && (!min_kw.is_finite() || min_kw < 0.0 || min_kw > self.rated_power_kw)
+        {
+            return Err(HaresError::Equipment(
+                "generator capacity_min_kw must be finite, >= 0, and <= rated_power_kw".to_string(),
+            ));
         }
         if let Some(zone) = self.zone_id
             && zone == 0
@@ -274,19 +270,19 @@ impl GeneratorConfig {
                 "generator zone_id must be non-zero when provided".to_string(),
             ));
         }
-        if let Some(inv_eff) = self.inverter_efficiency {
-            if !inv_eff.is_finite() || inv_eff <= 0.0 || inv_eff > 1.0 {
-                return Err(HaresError::Equipment(
-                    "generator inverter_efficiency must be finite and in (0, 1]".to_string(),
-                ));
-            }
+        if let Some(inv_eff) = self.inverter_efficiency
+            && (!inv_eff.is_finite() || inv_eff <= 0.0 || inv_eff > 1.0)
+        {
+            return Err(HaresError::Equipment(
+                "generator inverter_efficiency must be finite and in (0, 1]".to_string(),
+            ));
         }
-        if let Some(st) = self.stack_temp_c {
-            if !st.is_finite() || st < 0.0 {
-                return Err(HaresError::Equipment(
-                    "generator stack_temp_c must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(st) = self.stack_temp_c
+            && (!st.is_finite() || st < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "generator stack_temp_c must be finite and >= 0".to_string(),
+            ));
         }
         for (name, val) in [
             ("stack_cooler_r0", self.stack_cooler_r0),
@@ -294,41 +290,41 @@ impl GeneratorConfig {
             ("stack_cooler_r2", self.stack_cooler_r2),
             ("stack_cooler_r3", self.stack_cooler_r3),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() {
-                    return Err(HaresError::Equipment(format!(
-                        "generator {name} must be finite"
-                    )));
-                }
+            if let Some(v) = val
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "generator {name} must be finite"
+                )));
             }
         }
-        if let Some(snt) = self.stack_nominal_temp_c {
-            if !snt.is_finite() || snt < 0.0 {
-                return Err(HaresError::Equipment(
-                    "generator stack_nominal_temp_c must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(snt) = self.stack_nominal_temp_c
+            && (!snt.is_finite() || snt < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "generator stack_nominal_temp_c must be finite and >= 0".to_string(),
+            ));
         }
-        if let Some(hrmt) = self.heat_rec_max_temp_c {
-            if !hrmt.is_finite() || hrmt <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "generator heat_rec_max_temp_c must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(hrmt) = self.heat_rec_max_temp_c
+            && (!hrmt.is_finite() || hrmt <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "generator heat_rec_max_temp_c must be finite and > 0".to_string(),
+            ));
         }
-        if let Some(fraction) = self.no_load_fuel_fraction {
-            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
-                return Err(HaresError::Equipment(
-                    "generator no_load_fuel_fraction must be finite and within [0, 1]".to_string(),
-                ));
-            }
+        if let Some(fraction) = self.no_load_fuel_fraction
+            && (!fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+        {
+            return Err(HaresError::Equipment(
+                "generator no_load_fuel_fraction must be finite and within [0, 1]".to_string(),
+            ));
         }
-        if let Some(fraction) = self.parasitic_fraction {
-            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
-                return Err(HaresError::Equipment(
-                    "generator parasitic_fraction must be finite and within [0, 1]".to_string(),
-                ));
-            }
+        if let Some(fraction) = self.parasitic_fraction
+            && (!fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+        {
+            return Err(HaresError::Equipment(
+                "generator parasitic_fraction must be finite and within [0, 1]".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1132,10 +1128,11 @@ impl Generator {
         // which in OCHRE's negative-generation convention means the generator must
         // produce at least capacity_min when it is on. Values between 0 and capacity_min
         // are clamped UP to capacity_min; a request of exactly 0 keeps the generator off.
-        if let Some(min_kw) = self.capacity_min_kw {
-            if raw > 0.0 && raw < min_kw {
-                return min_kw;
-            }
+        if let Some(min_kw) = self.capacity_min_kw
+            && raw > 0.0
+            && raw < min_kw
+        {
+            return min_kw;
         }
         raw
     }
@@ -1193,15 +1190,15 @@ impl Generator {
         self.efficiency.validate()?;
         self.curve_from_file = c.efficiency_curve_points.is_some();
 
-        if self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0 {
-            if let Some(lid) = c.loop_id {
-                if lid == 0 {
-                    return Err(HaresError::Equipment(
-                        "generator CHP fluid loop_id must be non-zero".to_string(),
-                    ));
-                }
-                self.chp_loop_id = Some(LoopId(lid));
+        if (self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0)
+            && let Some(lid) = c.loop_id
+        {
+            if lid == 0 {
+                return Err(HaresError::Equipment(
+                    "generator CHP fluid loop_id must be non-zero".to_string(),
+                ));
             }
+            self.chp_loop_id = Some(LoopId(lid));
         }
         let mut ports = vec![PortDeclaration::electrical(), PortDeclaration::fuel()];
         if let Some(zone) = self.descriptor.zone {
@@ -1639,102 +1636,102 @@ impl Equipment for Generator {
         }
 
         // Write zone thermal ports, differentiated by category.
-        if zone_jacket_loss_w > IDLE_KW_THRESHOLD {
-            if let Some(zone) = self.descriptor.zone {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: zone_jacket_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if zone_jacket_loss_w > IDLE_KW_THRESHOLD
+            && let Some(zone) = self.descriptor.zone
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: zone_jacket_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
-        if zone_internal_gain_w > IDLE_KW_THRESHOLD {
-            if let Some(zone) = self.descriptor.zone {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: zone_internal_gain_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
+        if zone_internal_gain_w > IDLE_KW_THRESHOLD
+            && let Some(zone) = self.descriptor.zone
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: zone_internal_gain_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })?;
         }
 
         // Parasitic auxiliary power becomes sensible heat in the building zone.
         // Pump and fan motors reject heat locally; this is separate from
         // combustion-derived waste heat (flue, jacket, etc.).
-        if parasitic_kw > IDLE_KW_THRESHOLD {
-            if let Some(zone) = self.descriptor.zone {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: parasitic_kw * 1000.0,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
+        if parasitic_kw > IDLE_KW_THRESHOLD
+            && let Some(zone) = self.descriptor.zone
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: parasitic_kw * 1000.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })?;
         }
 
         // Write CHP fluid port when producing heat.
         // Compute flow dynamically from thermal output and configured ΔT so the
         // fluid port carries the correct energy: m_dot = Q / (cp × ΔT).
         // ASHRAE HoF 2021 Ch.1 Eq.2.
-        if q_thermal_effective_w > IDLE_KW_THRESHOLD {
-            if let Some(loop_id) = self.chp_loop_id {
-                let delta_t_c = self.supply_temp_c - self.return_temp_c;
-                let computed_flow = if delta_t_c > 0.0 {
-                    q_thermal_effective_w / (CP_LIQUID_WATER_J_KG_K * delta_t_c)
+        if q_thermal_effective_w > IDLE_KW_THRESHOLD
+            && let Some(loop_id) = self.chp_loop_id
+        {
+            let delta_t_c = self.supply_temp_c - self.return_temp_c;
+            let computed_flow = if delta_t_c > 0.0 {
+                q_thermal_effective_w / (CP_LIQUID_WATER_J_KG_K * delta_t_c)
+            } else {
+                0.0
+            };
+            ports.accumulate(&PortContribution::Fluid {
+                loop_id,
+                flow_rate_kg_s: computed_flow,
+                supply_temp_c: self.supply_temp_c,
+                return_temp_c: self.return_temp_c,
+                fluid_type: FluidType::Water,
+                thermal_power_w: if computed_flow > 0.0 {
+                    Some(q_thermal_effective_w)
                 } else {
-                    0.0
-                };
-                ports.accumulate(&PortContribution::Fluid {
-                    loop_id,
-                    flow_rate_kg_s: computed_flow,
-                    supply_temp_c: self.supply_temp_c,
-                    return_temp_c: self.return_temp_c,
-                    fluid_type: FluidType::Water,
-                    thermal_power_w: if computed_flow > 0.0 {
-                        Some(q_thermal_effective_w)
-                    } else {
-                        None
-                    },
-                    node_id: FluidNodeId(0),
-                    direction: HeatTransferDirection::Source,
-                })?;
+                    None
+                },
+                node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
+            })?;
 
-                // Invariant: when flow is positive, the fluid port's flow-implied
-                // energy must equal the generator's computed effective thermal output.
-                // Any gap means energy was computed but never delivered to the fluid loop.
-                // Skipped when computed_flow == 0 (e.g. supply_temp_c <= return_temp_c),
-                // which is a physically impossible configuration. In this case
-                // thermal_power_w is None, so the port is self-consistent.
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                if computed_flow > 0.0 {
-                    let delta_t = self.supply_temp_c - self.return_temp_c;
-                    let fluid_energy = computed_flow * CP_LIQUID_WATER_J_KG_K * delta_t;
-                    if (fluid_energy - q_thermal_effective_w).abs() >= 1.0 {
-                        return Err(HaresError::InvariantViolation {
-                            check_name: "generator_chp_fluid_port_energy_divergence".to_string(),
-                            value: (fluid_energy - q_thermal_effective_w).abs(),
-                            tolerance: 1.0,
-                        });
-                    }
+            // Invariant: when flow is positive, the fluid port's flow-implied
+            // energy must equal the generator's computed effective thermal output.
+            // Any gap means energy was computed but never delivered to the fluid loop.
+            // Skipped when computed_flow == 0 (e.g. supply_temp_c <= return_temp_c),
+            // which is a physically impossible configuration. In this case
+            // thermal_power_w is None, so the port is self-consistent.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if computed_flow > 0.0 {
+                let delta_t = self.supply_temp_c - self.return_temp_c;
+                let fluid_energy = computed_flow * CP_LIQUID_WATER_J_KG_K * delta_t;
+                if (fluid_energy - q_thermal_effective_w).abs() >= 1.0 {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "generator_chp_fluid_port_energy_divergence".to_string(),
+                        value: (fluid_energy - q_thermal_effective_w).abs(),
+                        tolerance: 1.0,
+                    });
                 }
+            }
 
-                // Observer capture: record computed flow for diagnostics.
-                #[cfg(feature = "observe")]
-                {
-                    tracing::debug!(
-                        computed_flow_kg_s = computed_flow,
-                        q_thermal_effective_w,
-                        supply_temp_c = self.supply_temp_c,
-                        return_temp_c = self.return_temp_c,
-                        delta_t_c = self.supply_temp_c - self.return_temp_c,
-                        "Generator CHP computed flow rate",
-                    );
-                }
+            // Observer capture: record computed flow for diagnostics.
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    computed_flow_kg_s = computed_flow,
+                    q_thermal_effective_w,
+                    supply_temp_c = self.supply_temp_c,
+                    return_temp_c = self.return_temp_c,
+                    delta_t_c = self.supply_temp_c - self.return_temp_c,
+                    "Generator CHP computed flow rate",
+                );
             }
         }
 

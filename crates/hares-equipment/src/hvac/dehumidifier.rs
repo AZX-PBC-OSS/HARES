@@ -701,16 +701,16 @@ impl Equipment for Dehumidifier {
                     "rtf > plr: cycling losses applied"
                 );
             }
-            if let Some(parasitic) = self.off_cycle_parasitic_load_w {
-                if !self.is_on {
-                    let parasitic_energy_j = parasitic * dt.as_secs_f64();
-                    tracing::debug!(
-                        dehumidifier = %self.descriptor.name,
-                        off_cycle_parasitic_w = parasitic,
-                        parasitic_energy_j,
-                        "dehumidifier off-cycle parasitic load active: {parasitic} W, accumulated {parasitic_energy_j} J this step"
-                    );
-                }
+            if let Some(parasitic) = self.off_cycle_parasitic_load_w
+                && !self.is_on
+            {
+                let parasitic_energy_j = parasitic * dt.as_secs_f64();
+                tracing::debug!(
+                    dehumidifier = %self.descriptor.name,
+                    off_cycle_parasitic_w = parasitic,
+                    parasitic_energy_j,
+                    "dehumidifier off-cycle parasitic load active: {parasitic} W, accumulated {parasitic_energy_j} J this step"
+                );
             }
         }
         // Rule R1: Q from the already-computed real power (whole-unit pf

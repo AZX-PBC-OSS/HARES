@@ -117,10 +117,11 @@ fn parse_solar_override_from_dataframe(
 
     let mut surface_ids: Vec<u32> = Vec::new();
     for col in &columns {
-        if col.starts_with("s") && col.ends_with("_direct") {
-            if let Ok(sid) = col[1..col.len() - 7].parse::<u32>() {
-                surface_ids.push(sid);
-            }
+        if col.starts_with("s")
+            && col.ends_with("_direct")
+            && let Ok(sid) = col[1..col.len() - 7].parse::<u32>()
+        {
+            surface_ids.push(sid);
         }
     }
     surface_ids.sort();
@@ -383,16 +384,13 @@ fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
     if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
         return Ok(list.len());
     }
-    if arr.hasattr("shape")? {
-        if let Ok(shape) = arr.getattr("shape") {
-            if let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>() {
-                if tuple.len() > 0 {
-                    if let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>()) {
-                        return Ok(dim);
-                    }
-                }
-            }
-        }
+    if arr.hasattr("shape")?
+        && let Ok(shape) = arr.getattr("shape")
+        && let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>()
+        && tuple.len() > 0
+        && let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>())
+    {
+        return Ok(dim);
     }
     Err(PyValueError::new_err("Expected a list or numpy array"))
 }
@@ -2225,39 +2223,39 @@ fn extract_site_location_override(
     };
 
     let latitude_deg = get("latitude")?;
-    if let Some(lat) = latitude_deg {
-        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-            return Err(PyValueError::new_err(format!(
-                "latitude must be finite and within [-90, 90] degrees, got {lat}"
-            )));
-        }
+    if let Some(lat) = latitude_deg
+        && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+    {
+        return Err(PyValueError::new_err(format!(
+            "latitude must be finite and within [-90, 90] degrees, got {lat}"
+        )));
     }
 
     let longitude_deg = get("longitude")?;
-    if let Some(lon) = longitude_deg {
-        if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-            return Err(PyValueError::new_err(format!(
-                "longitude must be finite and within [-180, 180] degrees, got {lon}"
-            )));
-        }
+    if let Some(lon) = longitude_deg
+        && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+    {
+        return Err(PyValueError::new_err(format!(
+            "longitude must be finite and within [-180, 180] degrees, got {lon}"
+        )));
     }
 
     let elevation_m = get("elevation_m")?;
-    if let Some(elev) = elevation_m {
-        if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-            return Err(PyValueError::new_err(format!(
-                "elevation_m must be finite and within [-500, 9000] m, got {elev}"
-            )));
-        }
+    if let Some(elev) = elevation_m
+        && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+    {
+        return Err(PyValueError::new_err(format!(
+            "elevation_m must be finite and within [-500, 9000] m, got {elev}"
+        )));
     }
 
     let utc_offset_h = get("utc_offset_h")?;
-    if let Some(off) = utc_offset_h {
-        if !off.is_finite() || !(-14.0..=14.0).contains(&off) {
-            return Err(PyValueError::new_err(format!(
-                "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
-            )));
-        }
+    if let Some(off) = utc_offset_h
+        && (!off.is_finite() || !(-14.0..=14.0).contains(&off))
+    {
+        return Err(PyValueError::new_err(format!(
+            "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
+        )));
     }
 
     Ok(SiteLocationOverride {
@@ -2399,12 +2397,12 @@ pub(crate) fn build_config(
             .map(|obj| obj.extract::<f64>())
             .transpose()?;
 
-        if let Some(db) = setpoint_deadband_c {
-            if !db.is_finite() || db < 0.0 {
-                return Err(PyValueError::new_err(format!(
-                    "setpoint_deadband_c must be finite and non-negative, got {db}"
-                )));
-            }
+        if let Some(db) = setpoint_deadband_c
+            && (!db.is_finite() || db < 0.0)
+        {
+            return Err(PyValueError::new_err(format!(
+                "setpoint_deadband_c must be finite and non-negative, got {db}"
+            )));
         }
 
         let site_location = extract_site_location_override(kwargs.as_ref())?;

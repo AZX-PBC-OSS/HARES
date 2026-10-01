@@ -463,33 +463,33 @@ impl ThermalSolver {
                 }
 
                 let threshold = self.config.ideal_capacity_degraded_threshold;
-                if *count >= threshold {
-                    if let Some(&last_good) = self.last_good_capacity_w.get(&zone) {
-                        self.ideal_capacity_degraded_zones.insert(zone);
-                        if self.ideal_capacity_degraded_warned_zones.insert(zone) {
-                            tracing::error!(
-                                zone_id = zone.0,
-                                target_c,
-                                t_zone_c = t_zone,
-                                oat_c = t_out,
-                                consecutive_failures = count,
-                                last_good_capacity_w = last_good,
-                                error = %e,
-                                "solve_ideal_capacity_for_target: threshold {threshold} exceeded, \
+                if *count >= threshold
+                    && let Some(&last_good) = self.last_good_capacity_w.get(&zone)
+                {
+                    self.ideal_capacity_degraded_zones.insert(zone);
+                    if self.ideal_capacity_degraded_warned_zones.insert(zone) {
+                        tracing::error!(
+                            zone_id = zone.0,
+                            target_c,
+                            t_zone_c = t_zone,
+                            oat_c = t_out,
+                            consecutive_failures = count,
+                            last_good_capacity_w = last_good,
+                            error = %e,
+                            "solve_ideal_capacity_for_target: threshold {threshold} exceeded, \
                                  falling back to last-good capacity {last_good:.0} W"
-                            );
-                        } else {
-                            tracing::debug!(
-                                zone_id = zone.0,
-                                target_c,
-                                consecutive_failures = count,
-                                last_good_capacity_w = last_good,
-                                "solve_ideal_capacity_for_target: degraded fallback \
+                        );
+                    } else {
+                        tracing::debug!(
+                            zone_id = zone.0,
+                            target_c,
+                            consecutive_failures = count,
+                            last_good_capacity_w = last_good,
+                            "solve_ideal_capacity_for_target: degraded fallback \
                                  (suppressed), using last-good {last_good:.0} W"
-                            );
-                        }
-                        return last_good;
+                        );
                     }
+                    return last_good;
                 }
 
                 if self.ideal_capacity_warned_zones.insert(zone) {
@@ -875,35 +875,33 @@ impl ThermalSolver {
             self.wiring
                 .zone_sensible_input_indices
                 .get(&self.config.indoor_zone_id),
-        ) {
-            if !self.zone_exchange_row_w.is_empty()
-                && zone_state_idx < self.x.len()
-                && zone_state_idx < self.rhs_buf.len()
-                && zone_input_idx < u.len()
-            {
-                // After the swap, self.x is T_next and self.rhs_buf is T_prev.
-                let stored_w =
-                    c_zone * (self.x[zone_state_idx] - self.rhs_buf[zone_state_idx]) / self.dt_s;
-                // Exact RC exchange into zone air (all matrix paths).
-                let mut exchange_w: f64 = self
-                    .zone_exchange_row_w
-                    .iter()
-                    .zip(self.rhs_buf.iter())
-                    .map(|(c, t)| c * t)
-                    .sum();
-                for &(col, coeff) in &self.zone_env_col_coeffs {
-                    if col < u.len() {
-                        exchange_w += coeff * u[col];
-                    }
+        ) && !self.zone_exchange_row_w.is_empty()
+            && zone_state_idx < self.x.len()
+            && zone_state_idx < self.rhs_buf.len()
+            && zone_input_idx < u.len()
+        {
+            // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+            let stored_w =
+                c_zone * (self.x[zone_state_idx] - self.rhs_buf[zone_state_idx]) / self.dt_s;
+            // Exact RC exchange into zone air (all matrix paths).
+            let mut exchange_w: f64 = self
+                .zone_exchange_row_w
+                .iter()
+                .zip(self.rhs_buf.iter())
+                .map(|(c, t)| c * t)
+                .sum();
+            for &(col, coeff) in &self.zone_env_col_coeffs {
+                if col < u.len() {
+                    exchange_w += coeff * u[col];
                 }
-                let g = &self.component_gains;
-                let terms_w = u[zone_input_idx]
-                    + exchange_w
-                    + g.infiltration_w
-                    + g.ventilation_w
-                    + g.natural_ventilation_w;
-                self.component_gains.zone_air_balance_residual_w = stored_w - terms_w;
             }
+            let g = &self.component_gains;
+            let terms_w = u[zone_input_idx]
+                + exchange_w
+                + g.infiltration_w
+                + g.ventilation_w
+                + g.natural_ventilation_w;
+            self.component_gains.zone_air_balance_residual_w = stored_w - terms_w;
         }
 
         // ── Zone energy balance closure check ────────────────────────────────────
@@ -987,11 +985,12 @@ impl ThermalSolver {
         if !self.wiring.node_capacitances.is_empty() {
             let mut stored_energy_w: f64 = 0.0;
             for (node_id, c_j_k) in &self.wiring.node_capacitances {
-                if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                    if idx < self.x.len() && idx < self.rhs_buf.len() {
-                        // After the swap, self.x is T_next and self.rhs_buf is T_prev.
-                        stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
-                    }
+                if let Some(&idx) = self.wiring.node_index.get(node_id)
+                    && idx < self.x.len()
+                    && idx < self.rhs_buf.len()
+                {
+                    // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+                    stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
                 }
             }
             self.full_system_stored_energy_w = stored_energy_w;
@@ -1031,10 +1030,10 @@ impl ThermalSolver {
 
                 let mut external_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * b_d_u[idx] / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        external_w += c_j_k * b_d_u[idx] / dt_s;
                     }
                 }
                 self.thermal_balance_q_gains.push(external_w);
@@ -1044,10 +1043,10 @@ impl ThermalSolver {
                 self.model.step_into(&self.rhs_buf, u_zero, a_d_x);
                 let mut internal_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
                     }
                 }
                 self.thermal_balance_q_loss = -internal_w;
@@ -1128,12 +1127,12 @@ impl ThermalSolver {
                 let mut internal_w = 0.0_f64;
                 let mut affine_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * g_u[idx] / dt_s;
-                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                            affine_w += c_j_k * h[idx] / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        external_w += c_j_k * g_u[idx] / dt_s;
+                        internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                        affine_w += c_j_k * h[idx] / dt_s;
                     }
                 }
                 self.thermal_balance_q_gains.push(external_w);
@@ -1192,12 +1191,12 @@ impl ThermalSolver {
                 let mut internal_w = 0.0_f64;
                 let mut affine_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * g_u[idx] / dt_s;
-                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                            affine_w += c_j_k * h[idx] / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        external_w += c_j_k * g_u[idx] / dt_s;
+                        internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                        affine_w += c_j_k * h[idx] / dt_s;
                     }
                 }
                 self.thermal_balance_q_gains.push(external_w);

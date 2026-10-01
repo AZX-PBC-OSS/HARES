@@ -348,14 +348,14 @@ pub(crate) fn load_default_profiles(
     // was imported verbatim from the ANSI 301 source without weekend derivation.
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
-        if let Some(occ) = profiles.get("Occupancy") {
-            if occ.weekday_fractions == occ.weekend_fractions {
-                tracing::error!(
-                    "Occupancy weekday and weekend schedule fractions are identical; \
+        if let Some(occ) = profiles.get("Occupancy")
+            && occ.weekday_fractions == occ.weekend_fractions
+        {
+            tracing::error!(
+                "Occupancy weekday and weekend schedule fractions are identical; \
                      the default CSV has not been updated with distinct weekend patterns. \
                      ASHRAE 90.2/HERS Reference Home requires distinct weekday/weekend occupancy."
-                );
-            }
+            );
         }
     }
 
@@ -431,27 +431,26 @@ pub fn inject_schedule_into_specs(
     // ensure_specs_for_csv_columns), so no extra foundation check is needed.
     if specs.iter().any(|s| s.name == "Basement Lighting")
         && !csv_col_map.contains_key("lighting_basement")
+        && let Some(&interior_idx) = csv_col_map.get("lighting_interior")
     {
-        if let Some(&interior_idx) = csv_col_map.get("lighting_interior") {
-            let values = schedule.columns[interior_idx].clone();
-            let aggregation = schedule
-                .column_aggregations
-                .get(interior_idx)
-                .copied()
-                .unwrap_or(ColumnAggregation::Mean);
-            match schedule.add_column("lighting_basement", values, aggregation) {
-                Ok(()) => {
-                    if let Some(&idx) = schedule.column_index.get("lighting_basement") {
-                        csv_col_map.insert("lighting_basement".to_string(), idx);
-                    }
+        let values = schedule.columns[interior_idx].clone();
+        let aggregation = schedule
+            .column_aggregations
+            .get(interior_idx)
+            .copied()
+            .unwrap_or(ColumnAggregation::Mean);
+        match schedule.add_column("lighting_basement", values, aggregation) {
+            Ok(()) => {
+                if let Some(&idx) = schedule.column_index.get("lighting_basement") {
+                    csv_col_map.insert("lighting_basement".to_string(), idx);
                 }
-                Err(error) => {
-                    warn!(
-                        %error,
-                        "failed to copy lighting_interior column to lighting_basement; \
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    "failed to copy lighting_interior column to lighting_basement; \
                          Basement Lighting will fall back to other schedule sources"
-                    );
-                }
+                );
             }
         }
     }
@@ -602,10 +601,10 @@ fn spec_has_setpoint_source(spec: &EquipmentSpec, prefix: &str) -> bool {
 /// Walk a JSON object tree looking for a setpoint key at any nesting level.
 fn find_setpoint_source<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
     let obj = data.as_object()?;
-    if let Some(sp) = obj.get("setpoint") {
-        if let Some(v) = sp.get(key) {
-            return Some(v);
-        }
+    if let Some(sp) = obj.get("setpoint")
+        && let Some(v) = sp.get(key)
+    {
+        return Some(v);
     }
     None
 }
@@ -645,10 +644,10 @@ fn inject_default_setpoint_profile(
 }
 
 fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) {
-    if let Some(sp) = obj.get_mut("setpoint") {
-        if let Some(sp_obj) = sp.as_object_mut() {
-            sp_obj.insert(key.to_string(), value);
-        }
+    if let Some(sp) = obj.get_mut("setpoint")
+        && let Some(sp_obj) = sp.as_object_mut()
+    {
+        sp_obj.insert(key.to_string(), value);
     }
 }
 
@@ -782,10 +781,10 @@ fn inject_water_heater_schedule_columns(
                 set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
             }
         }
-        if let Some(col_idx) = mains_col {
-            if has_typed_sources {
-                set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
-            }
+        if let Some(col_idx) = mains_col
+            && has_typed_sources
+        {
+            set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
         }
     }
     Ok(())
@@ -1133,43 +1132,43 @@ fn resolve_hpxml_profile(spec: &EquipmentSpec) -> Option<DefaultScheduleProfile>
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-    if let Some(ref wd) = hpxml_weekday {
-        if !wd.is_empty() {
-            let we = spec
-                .parameters
-                .get("weekend_schedule_fractions")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
+    if let Some(ref wd) = hpxml_weekday
+        && !wd.is_empty()
+    {
+        let we = spec
+            .parameters
+            .get("weekend_schedule_fractions")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-            let month = spec
-                .parameters
-                .get("month_multipliers")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
+        let month = spec
+            .parameters
+            .get("month_multipliers")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-            let mut profile = DefaultScheduleProfile {
-                weekday_fractions: [0.0; 24],
-                weekend_fractions: [0.0; 24],
-                month_multipliers: [1.0; 12],
-            };
+        let mut profile = DefaultScheduleProfile {
+            weekday_fractions: [0.0; 24],
+            weekend_fractions: [0.0; 24],
+            month_multipliers: [1.0; 12],
+        };
 
-            let n = wd.len().min(24);
-            profile.weekday_fractions[..n].copy_from_slice(&wd[..n]);
+        let n = wd.len().min(24);
+        profile.weekday_fractions[..n].copy_from_slice(&wd[..n]);
 
-            if let Some(ref we_vals) = we {
-                let n = we_vals.len().min(24);
-                profile.weekend_fractions[..n].copy_from_slice(&we_vals[..n]);
-            } else {
-                profile.weekend_fractions = profile.weekday_fractions;
-            }
-
-            if let Some(ref m_vals) = month {
-                let n = m_vals.len().min(12);
-                profile.month_multipliers[..n].copy_from_slice(&m_vals[..n]);
-            }
-
-            return Some(profile);
+        if let Some(ref we_vals) = we {
+            let n = we_vals.len().min(24);
+            profile.weekend_fractions[..n].copy_from_slice(&we_vals[..n]);
+        } else {
+            profile.weekend_fractions = profile.weekday_fractions;
         }
+
+        if let Some(ref m_vals) = month {
+            let n = m_vals.len().min(12);
+            profile.month_multipliers[..n].copy_from_slice(&m_vals[..n]);
+        }
+
+        return Some(profile);
     }
 
     None
@@ -1504,17 +1503,16 @@ mod tests {
         data: &'a serde_json::Map<String, Value>,
         key: &str,
     ) -> Option<&'a Value> {
-        if let Some(common) = data.get("common") {
-            if let Some(sp) = common.get("setpoint") {
-                if let Some(v) = sp.get(key) {
-                    return Some(v);
-                }
-            }
+        if let Some(common) = data.get("common")
+            && let Some(sp) = common.get("setpoint")
+            && let Some(v) = sp.get(key)
+        {
+            return Some(v);
         }
-        if let Some(sp) = data.get("setpoint") {
-            if let Some(v) = sp.get(key) {
-                return Some(v);
-            }
+        if let Some(sp) = data.get("setpoint")
+            && let Some(v) = sp.get(key)
+        {
+            return Some(v);
         }
         data.get(key)
     }

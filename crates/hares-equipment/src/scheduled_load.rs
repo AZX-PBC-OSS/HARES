@@ -643,16 +643,16 @@ impl Equipment for ScheduledLoad {
         let radiant_gain_w = total_gain_source_w * self.radiant_gain_fraction;
         let sensible_gain_w = total_sensible_w - radiant_gain_w;
         let latent_gain_w = total_gain_source_w * self.latent_gain_fraction;
-        if let Some(zone) = self.descriptor.zone {
-            if sensible_gain_w != 0.0 || radiant_gain_w != 0.0 || latent_gain_w != 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w,
-                    radiant_gain_w,
-                    latent_gain_w,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && (sensible_gain_w != 0.0 || radiant_gain_w != 0.0 || latent_gain_w != 0.0)
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w,
+                radiant_gain_w,
+                latent_gain_w,
+                category: ThermalCategory::InternalGain,
+            })?;
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
@@ -1278,10 +1278,10 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
                     *max *= scale;
                 }
                 // Ensure min ≤ max after scaling (negative scale inverts).
-                if let (Some(lo), Some(hi)) = (&mut w.min_value, &mut w.max_value) {
-                    if *lo > *hi {
-                        std::mem::swap(lo, hi);
-                    }
+                if let (Some(lo), Some(hi)) = (&mut w.min_value, &mut w.max_value)
+                    && *lo > *hi
+                {
+                    std::mem::swap(lo, hi);
                 }
             }
         }

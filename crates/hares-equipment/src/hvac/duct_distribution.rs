@@ -44,24 +44,22 @@ impl HvacEquipment {
         let conditioned_frac = effective_dse * (1.0 - basement_frac);
         self.config.zone_heat_fractions = vec![(self.config.zone_id, conditioned_frac)];
 
-        if basement_frac > 0.0 {
-            if let Some(basement_zone) = self.config.basement_zone_id {
-                if basement_zone != self.config.zone_id {
-                    self.config
-                        .zone_heat_fractions
-                        .push((basement_zone, effective_dse * basement_frac));
-                }
-            }
+        if basement_frac > 0.0
+            && let Some(basement_zone) = self.config.basement_zone_id
+            && basement_zone != self.config.zone_id
+        {
+            self.config
+                .zone_heat_fractions
+                .push((basement_zone, effective_dse * basement_frac));
         }
 
-        if effective_dse < 1.0 {
-            if let Some(duct_zone) = self.config.duct_zone_id {
-                if duct_zone != self.config.zone_id {
-                    self.config
-                        .zone_heat_fractions
-                        .push((duct_zone, 1.0 - effective_dse));
-                }
-            }
+        if effective_dse < 1.0
+            && let Some(duct_zone) = self.config.duct_zone_id
+            && duct_zone != self.config.zone_id
+        {
+            self.config
+                .zone_heat_fractions
+                .push((duct_zone, 1.0 - effective_dse));
         }
 
         // Deduplicate zone entries when basement_zone == duct_zone: merge by

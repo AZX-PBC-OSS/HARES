@@ -598,21 +598,21 @@ impl Battery {
         }
 
         // Priority 2: SOC target (simple proportional controller)
-        if let Some(target) = self.soc_target {
-            if dt_hours > 0.0 {
-                let error = target - self.soc;
-                // DC power needed to hit target in one step.
-                let dc_power = error * self.capacity_kwh / dt_hours;
-                // Convert DC→AC: compute_electrical expects AC (grid-side) power.
-                // Charging (dc_power > 0): AC = DC / charge_eta
-                // Discharging (dc_power < 0): AC = DC * discharge_eta
-                let ac_power = if dc_power > 0.0 {
-                    dc_power / self.charge_efficiency
-                } else {
-                    dc_power * self.discharge_efficiency
-                };
-                return self.clamp_power(ac_power);
-            }
+        if let Some(target) = self.soc_target
+            && dt_hours > 0.0
+        {
+            let error = target - self.soc;
+            // DC power needed to hit target in one step.
+            let dc_power = error * self.capacity_kwh / dt_hours;
+            // Convert DC→AC: compute_electrical expects AC (grid-side) power.
+            // Charging (dc_power > 0): AC = DC / charge_eta
+            // Discharging (dc_power < 0): AC = DC * discharge_eta
+            let ac_power = if dc_power > 0.0 {
+                dc_power / self.charge_efficiency
+            } else {
+                dc_power * self.discharge_efficiency
+            };
+            return self.clamp_power(ac_power);
         }
 
         // Priority 3: self-consumption
@@ -844,48 +844,45 @@ impl Battery {
         if has_cell_params
             && (self.derivation_source == DerivationSource::CellParameters
                 || self.derivation_source == DerivationSource::Mixed)
+            && let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell)
+            && ah > 0.0
+            && vc > 0.0
         {
-            if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
-                if ah > 0.0 && vc > 0.0 {
-                    let implied_kwh =
-                        self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
-                    let relative_error =
-                        (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
-                    // With ceil(), implied_kwh >= declared_kwh; the check guards
-                    // against pathological cell-parameter combinations where a
-                    // single cell's Ah capacity dwarfs the pack requirement,
-                    // producing a physically invalid topology.
-                    if relative_error > 0.10 {
-                        tracing::error!(
-                            self.n_series,
-                            self.n_parallel,
-                            ah_cell = ah,
-                            v_cell = vc,
-                            capacity_kwh = self.capacity_kwh,
-                            implied_capacity_kwh = implied_kwh,
-                            relative_error,
-                            "Battery topology derived from cell parameters is inconsistent \
+            let implied_kwh = self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+            let relative_error = (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+            // With ceil(), implied_kwh >= declared_kwh; the check guards
+            // against pathological cell-parameter combinations where a
+            // single cell's Ah capacity dwarfs the pack requirement,
+            // producing a physically invalid topology.
+            if relative_error > 0.10 {
+                tracing::error!(
+                    self.n_series,
+                    self.n_parallel,
+                    ah_cell = ah,
+                    v_cell = vc,
+                    capacity_kwh = self.capacity_kwh,
+                    implied_capacity_kwh = implied_kwh,
+                    relative_error,
+                    "Battery topology derived from cell parameters is inconsistent \
                              with declared capacity: implied {:.2} kWh vs declared {:.2} kWh \
                              (relative error {:.1}% > 10%)",
-                            implied_kwh,
-                            self.capacity_kwh,
-                            relative_error * 100.0,
-                        );
-                        return Err(HaresError::Equipment(format!(
-                            "derived battery topology (n_series={}, n_parallel={}) implies capacity \
+                    implied_kwh,
+                    self.capacity_kwh,
+                    relative_error * 100.0,
+                );
+                return Err(HaresError::Equipment(format!(
+                    "derived battery topology (n_series={}, n_parallel={}) implies capacity \
                              {:.2} kWh, which differs from declared {:.2} kWh by {:.1}% (>10% threshold). \
                              Cell parameters (ah_cell={} Ah, v_cell={} V) are incompatible with the \
                              declared pack capacity",
-                            self.n_series,
-                            self.n_parallel,
-                            implied_kwh,
-                            self.capacity_kwh,
-                            relative_error * 100.0,
-                            ah,
-                            vc,
-                        )));
-                    }
-                }
+                    self.n_series,
+                    self.n_parallel,
+                    implied_kwh,
+                    self.capacity_kwh,
+                    relative_error * 100.0,
+                    ah,
+                    vc,
+                )));
             }
         }
 
@@ -894,65 +891,63 @@ impl Battery {
         // cell-parameter derivation would have produced.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            if has_any_explicit && has_cell_params {
-                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
-                    if ah > 0.0 && vc > 0.0 {
-                        let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
-                        let derived_series = {
-                            let s = (target_pack_v / vc).round() as u32;
-                            if s == 0 { 1 } else { s }
-                        };
-                        let pack_v = derived_series as f64 * vc;
-                        let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
-                        let derived_parallel = {
-                            let p = (pack_ah / ah).ceil() as u32;
-                            if p == 0 { 1 } else { p }
-                        };
-                        let series_diff =
-                            (self.n_series as i64 - derived_series as i64).unsigned_abs();
-                        let parallel_diff =
-                            (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
-                        if series_diff > 1 || parallel_diff > 1 {
-                            tracing::warn!(
-                                self.n_series,
-                                self.n_parallel,
-                                derived_n_series = derived_series,
-                                derived_n_parallel = derived_parallel,
-                                series_diff,
-                                parallel_diff,
-                                "Battery topology invariant: explicit topology differs \
+            if has_any_explicit
+                && has_cell_params
+                && let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell)
+                && ah > 0.0
+                && vc > 0.0
+            {
+                let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                let derived_series = {
+                    let s = (target_pack_v / vc).round() as u32;
+                    if s == 0 { 1 } else { s }
+                };
+                let pack_v = derived_series as f64 * vc;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                let derived_parallel = {
+                    let p = (pack_ah / ah).ceil() as u32;
+                    if p == 0 { 1 } else { p }
+                };
+                let series_diff = (self.n_series as i64 - derived_series as i64).unsigned_abs();
+                let parallel_diff =
+                    (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
+                if series_diff > 1 || parallel_diff > 1 {
+                    tracing::warn!(
+                        self.n_series,
+                        self.n_parallel,
+                        derived_n_series = derived_series,
+                        derived_n_parallel = derived_parallel,
+                        series_diff,
+                        parallel_diff,
+                        "Battery topology invariant: explicit topology differs \
                                  from cell-parameter derivation by >1 cell"
-                            );
-                        }
+                    );
+                }
 
-                        // Capacity consistency invariant: warn when the declared
-                        // capacity_kwh and the topology (whether explicit or derived)
-                        // produce an implied capacity mismatch >10%.
-                        // This catches pathological configs that slip through
-                        // the main derivation check (e.g. explicit topology that
-                        // the user believes matches the cell parameters but doesn't).
-                        let implied_kwh =
-                            self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
-                        let relative_error =
-                            (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
-                        if relative_error > 0.10 {
-                            tracing::warn!(
-                                self.n_series,
-                                self.n_parallel,
-                                ah_cell = ah,
-                                v_cell = vc,
-                                capacity_kwh = self.capacity_kwh,
-                                implied_capacity_kwh = implied_kwh,
-                                relative_error,
-                                "Battery topology invariant: declared capacity_kwh \
+                // Capacity consistency invariant: warn when the declared
+                // capacity_kwh and the topology (whether explicit or derived)
+                // produce an implied capacity mismatch >10%.
+                // This catches pathological configs that slip through
+                // the main derivation check (e.g. explicit topology that
+                // the user believes matches the cell parameters but doesn't).
+                let implied_kwh = self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                let relative_error = (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                if relative_error > 0.10 {
+                    tracing::warn!(
+                        self.n_series,
+                        self.n_parallel,
+                        ah_cell = ah,
+                        v_cell = vc,
+                        capacity_kwh = self.capacity_kwh,
+                        implied_capacity_kwh = implied_kwh,
+                        relative_error,
+                        "Battery topology invariant: declared capacity_kwh \
                                  ({:.2} kWh) inconsistent with topology-implied \
                                  capacity ({:.2} kWh, {:.1}% error)",
-                                self.capacity_kwh,
-                                implied_kwh,
-                                relative_error * 100.0,
-                            );
-                        }
-                    }
+                        self.capacity_kwh,
+                        implied_kwh,
+                        relative_error * 100.0,
+                    );
                 }
             }
         }
@@ -1422,16 +1417,16 @@ impl Equipment for Battery {
         // The heater energy enters the cell thermal mass and reaches the zone through the
         // lumped UA conductance above. Adding heater_w here directly would double-count it.
         // Only ohmic losses dissipate directly into the zone without passing through the cell model.
-        if let Some(zone) = self.descriptor.zone {
-            if ohmic_loss_w > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: ohmic_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && ohmic_loss_w > 0.0
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: ohmic_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })?;
         }
 
         // -- Update mode based on cell electrochemical power --

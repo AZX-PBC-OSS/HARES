@@ -187,24 +187,23 @@ impl DwellingTelemetry {
 
             // Actor telemetry fallback: dot-separated <actor>.<channel>.
             let mut found_in_actors = false;
-            if let Some((actor_name, channel_name)) = field.split_once('.') {
-                if let Some(channels) = self.actor_telemetry.get(actor_name) {
-                    // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
-                    if let Some(&value) = channels.get(channel_name) {
-                        if WARNED_ACTOR_TELEMETRY_DOT
-                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                        {
-                            tracing::warn!(
-                                field = field,
-                                actor_telemetry_key = channel_name,
-                                "resolving observation field via actor_telemetry (throttled to once per process)"
-                            );
-                        }
-                        out.push(value);
-                        found_in_actors = true;
-                    }
+            if let Some((actor_name, channel_name)) = field.split_once('.')
+                // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
+                && let Some(channels) = self.actor_telemetry.get(actor_name)
+                && let Some(&value) = channels.get(channel_name)
+            {
+                if WARNED_ACTOR_TELEMETRY_DOT
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    tracing::warn!(
+                        field = field,
+                        actor_telemetry_key = channel_name,
+                        "resolving observation field via actor_telemetry (throttled to once per process)"
+                    );
                 }
+                out.push(value);
+                found_in_actors = true;
             }
             // Bare field name: search all actors in sorted-name order
             // (BTreeMap), so duplicate channel names always resolve to the

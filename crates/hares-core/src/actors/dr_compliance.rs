@@ -472,10 +472,11 @@ impl DrCompliance {
             // CoreOutput gains a tank temperature field — CoreState has
             // none, and water-heater freeze protection must not wait for
             // one.
-            if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C) {
-                if tank_temp.is_finite() && tank_temp < WH_FREEZE_THRESHOLD_C {
-                    return true;
-                }
+            if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C)
+                && tank_temp.is_finite()
+                && tank_temp < WH_FREEZE_THRESHOLD_C
+            {
+                return true;
             }
         }
         false

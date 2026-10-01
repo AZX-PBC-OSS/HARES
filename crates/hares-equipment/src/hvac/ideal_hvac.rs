@@ -978,10 +978,11 @@ impl Equipment for IdealHvac {
                 };
                 self.thermostat_fsm.runtime_setpoints =
                     Some(self.validate_runtime_override(candidate)?);
-                if let Some(db) = deadband_c {
-                    if db.is_finite() && *db >= 0.0 {
-                        self.thermostat_fsm.thermostat.hysteresis_c = *db;
-                    }
+                if let Some(db) = deadband_c
+                    && db.is_finite()
+                    && *db >= 0.0
+                {
+                    self.thermostat_fsm.thermostat.hysteresis_c = *db;
                 }
             }
             ControlSignal::ModeOverride { mode } if *mode == OperatingMode::Off => {

@@ -6749,19 +6749,20 @@ mod tests {
 
                 // At the arrival minute, reconciliation has just fired.
                 // Verify estimated_soc matches this day's actual equipment SOC.
-                if matches!(actor.phase, DriverPhase::HomePluggedIn) && minute == 1080 {
-                    if let Some(actual) = actor.actual_soc(&env) {
-                        arrival_reconciliation_count += 1;
-                        observed_actuals.push(actual);
-                        let drift = (actor.estimated_soc - actual).abs();
-                        // Ticket tolerance is <1% drift; reconciliation is exact,
-                        // so 1e-6 is the meaningful bound.
-                        assert!(
-                            drift < 1e-6,
-                            "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
-                            actor.estimated_soc
-                        );
-                    }
+                if matches!(actor.phase, DriverPhase::HomePluggedIn)
+                    && minute == 1080
+                    && let Some(actual) = actor.actual_soc(&env)
+                {
+                    arrival_reconciliation_count += 1;
+                    observed_actuals.push(actual);
+                    let drift = (actor.estimated_soc - actual).abs();
+                    // Ticket tolerance is <1% drift; reconciliation is exact,
+                    // so 1e-6 is the meaningful bound.
+                    assert!(
+                        drift < 1e-6,
+                        "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
+                        actor.estimated_soc
+                    );
                 }
             }
         }

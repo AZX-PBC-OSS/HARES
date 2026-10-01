@@ -401,15 +401,14 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
                 }
             }
             Ok(Event::Text(text)) => {
-                if let Some(node) = stack.last_mut() {
-                    if let Ok(value) = text.decode() {
-                        if !value.trim().is_empty() {
-                            if !node.text.is_empty() {
-                                node.text.push(' ');
-                            }
-                            node.text.push_str(value.trim());
-                        }
+                if let Some(node) = stack.last_mut()
+                    && let Ok(value) = text.decode()
+                    && !value.trim().is_empty()
+                {
+                    if !node.text.is_empty() {
+                        node.text.push(' ');
                     }
+                    node.text.push_str(value.trim());
                 }
             }
             Ok(Event::End(_)) => {
@@ -685,18 +684,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             }
         }
         // Doors also have AttachedToWall in HPXML.
-        if let Some(enclosure) = details.child("Enclosure") {
-            if let Some(doors) = enclosure.child("Doors") {
-                for door in doors.children_named("Door") {
-                    if let Some(wall_id) = door
-                        .child("AttachedToWall")
-                        .and_then(|n| n.attrs.get("idref"))
-                    {
-                        let area = parse_value_with_units(door.child("Area"), ValueKind::Area)?
-                            .unwrap_or(0.0);
-                        if area > 0.0 {
-                            *boundary_reductions.entry(wall_id.clone()).or_default() += area;
-                        }
+        if let Some(enclosure) = details.child("Enclosure")
+            && let Some(doors) = enclosure.child("Doors")
+        {
+            for door in doors.children_named("Door") {
+                if let Some(wall_id) = door
+                    .child("AttachedToWall")
+                    .and_then(|n| n.attrs.get("idref"))
+                {
+                    let area =
+                        parse_value_with_units(door.child("Area"), ValueKind::Area)?.unwrap_or(0.0);
+                    if area > 0.0 {
+                        *boundary_reductions.entry(wall_id.clone()).or_default() += area;
                     }
                 }
             }
@@ -833,35 +832,33 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     if let Some(cond_zone) = zones
         .values()
         .find(|z| z.zone_type == ZoneType::Conditioned)
+        && let Some(area) = cond_zone.floor_area_m2
+        && area > 0.0
     {
-        if let Some(area) = cond_zone.floor_area_m2 {
-            if area > 0.0 {
-                boundaries.push(Boundary {
-                    id: "interior_wall".to_string(),
-                    boundary_type: BoundaryType::Wall,
-                    area_m2: area,
-                    azimuth_deg: None,
-                    assembly_r_value_m2_k_w: None,
-                    r_value_layers_m2_k_w: Vec::new(),
-                    interior_zone: Some(ZoneType::Conditioned),
-                    exterior_zone: Some(ZoneType::Conditioned),
-                    material_layers: Vec::new(),
-                    framing_factor: None,
-                    construction_type: None,
-                    finish_type: None,
-                    insulation_details: Some("Standard".to_string()),
-                    has_radiant_barrier: false,
-                    solar_absorptance: None,
-                    emittance: None,
-                    tilt_deg: Some(90.0),
-                    lut_boundary_name: Some("Interior Wall".to_string()),
-                    floor_or_ceiling: None,
-                    perimeter_m: None,
-                    perimeter_insulation_r_m2_k_w: None,
-                    foundation_depth_m: None,
-                });
-            }
-        }
+        boundaries.push(Boundary {
+            id: "interior_wall".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: area,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Conditioned),
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: Some("Standard".to_string()),
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            lut_boundary_name: Some("Interior Wall".to_string()),
+            floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        });
     }
 
     // Auto-generate furniture boundaries per zone (same-zone thermal mass).
@@ -876,51 +873,51 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         // Attic: 0 (no furniture)
     ];
     for (zone_type, default_fraction) in FURNITURE_FRACTIONS {
-        if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type) {
-            if let Some(area) = zone.floor_area_m2 {
-                let fraction = if *zone_type == ZoneType::Conditioned {
-                    furniture_area_fraction_override.unwrap_or(*default_fraction)
-                } else {
-                    *default_fraction
+        if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type)
+            && let Some(area) = zone.floor_area_m2
+        {
+            let fraction = if *zone_type == ZoneType::Conditioned {
+                furniture_area_fraction_override.unwrap_or(*default_fraction)
+            } else {
+                *default_fraction
+            };
+            let furniture_area = area * fraction;
+            if furniture_area > 0.0 {
+                let lut_name = match zone_type {
+                    ZoneType::Conditioned => "Indoor Furniture",
+                    ZoneType::Foundation => "Foundation Furniture",
+                    ZoneType::Garage => "Garage Furniture",
+                    // Unreachable: the FURNITURE_FRACTIONS loop above iterates
+                    // exactly Conditioned, Foundation, and Garage; no other
+                    // ZoneType variants can appear here.
+                    _ => unreachable!(
+                        "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
+                    ),
                 };
-                let furniture_area = area * fraction;
-                if furniture_area > 0.0 {
-                    let lut_name = match zone_type {
-                        ZoneType::Conditioned => "Indoor Furniture",
-                        ZoneType::Foundation => "Foundation Furniture",
-                        ZoneType::Garage => "Garage Furniture",
-                        // Unreachable: the FURNITURE_FRACTIONS loop above iterates
-                        // exactly Conditioned, Foundation, and Garage — no other
-                        // ZoneType variants can appear here.
-                        _ => unreachable!(
-                            "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
-                        ),
-                    };
-                    boundaries.push(Boundary {
-                        id: format!("{}_furniture", zone_key(zone_type)),
-                        boundary_type: BoundaryType::Wall,
-                        area_m2: furniture_area,
-                        azimuth_deg: None,
-                        assembly_r_value_m2_k_w: None,
-                        r_value_layers_m2_k_w: Vec::new(),
-                        interior_zone: Some(zone_type.clone()),
-                        exterior_zone: Some(zone_type.clone()),
-                        material_layers: Vec::new(),
-                        framing_factor: None,
-                        construction_type: None,
-                        finish_type: None,
-                        insulation_details: Some("Standard".to_string()),
-                        has_radiant_barrier: false,
-                        solar_absorptance: None,
-                        emittance: None,
-                        tilt_deg: Some(90.0),
-                        lut_boundary_name: Some(lut_name.to_string()),
-                        floor_or_ceiling: None,
-                        perimeter_m: None,
-                        perimeter_insulation_r_m2_k_w: None,
-                        foundation_depth_m: None,
-                    });
-                }
+                boundaries.push(Boundary {
+                    id: format!("{}_furniture", zone_key(zone_type)),
+                    boundary_type: BoundaryType::Wall,
+                    area_m2: furniture_area,
+                    azimuth_deg: None,
+                    assembly_r_value_m2_k_w: None,
+                    r_value_layers_m2_k_w: Vec::new(),
+                    interior_zone: Some(zone_type.clone()),
+                    exterior_zone: Some(zone_type.clone()),
+                    material_layers: Vec::new(),
+                    framing_factor: None,
+                    construction_type: None,
+                    finish_type: None,
+                    insulation_details: Some("Standard".to_string()),
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    tilt_deg: Some(90.0),
+                    lut_boundary_name: Some(lut_name.to_string()),
+                    floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
+                });
             }
         }
     }
@@ -1803,10 +1800,11 @@ fn parse_framing_factor(
     // Explicit FramingFactor from HPXML
     // Range (0, 1) excludes boundaries: 0.0 = no framing (equivalent to None),
     // 1.0 = all framing (physically impossible for an insulated wall).
-    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)? {
-        if ff > 0.0 && ff < 1.0 {
-            return Ok(Some(ff));
-        }
+    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)?
+        && ff > 0.0
+        && ff < 1.0
+    {
+        return Ok(Some(ff));
     }
 
     // Derive assembly framing fraction from stud geometry and wall height.
@@ -1814,50 +1812,52 @@ fn parse_framing_factor(
     // includes studs, plates, headers, corners, and miscellaneous members.
     let stud_spacing = find_descendant_f64(node, "StudSpacing", ValueKind::Raw)?;
     let stud_width = find_descendant_f64(node, "StudWidth", ValueKind::Raw)?;
-    if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width) {
-        if spacing_in > 0.0 && width_in > 0.0 && width_in < spacing_in {
-            // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
-            // HPXML WallHeight is typically in feet; convert to inches.
-            let wall_height_in = node
-                .child("WallHeight")
-                .and_then(|n| {
-                    let raw = n.text_as_f64()?;
-                    let units_norm = n
-                        .attrs
-                        .get("units")
-                        .or_else(|| n.attrs.get("unit"))
-                        .map(|u| normalize_ascii(u));
-                    let inches = match units_norm.as_deref() {
-                        Some("ft") | Some("feet") => raw * 12.0,
-                        Some("in") | Some("inch") | Some("inches") => raw,
-                        None => raw * 12.0, // HPXML default: feet
-                        _ => {
-                            tracing::warn!(
-                                units = ?units_norm,
-                                value = raw,
-                                "unrecognized unit for WallHeight; assuming feet"
-                            );
-                            raw * 12.0
-                        }
-                    };
-                    if inches <= 0.0 {
+    if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width)
+        && spacing_in > 0.0
+        && width_in > 0.0
+        && width_in < spacing_in
+    {
+        // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
+        // HPXML WallHeight is typically in feet; convert to inches.
+        let wall_height_in = node
+            .child("WallHeight")
+            .and_then(|n| {
+                let raw = n.text_as_f64()?;
+                let units_norm = n
+                    .attrs
+                    .get("units")
+                    .or_else(|| n.attrs.get("unit"))
+                    .map(|u| normalize_ascii(u));
+                let inches = match units_norm.as_deref() {
+                    Some("ft") | Some("feet") => raw * 12.0,
+                    Some("in") | Some("inch") | Some("inches") => raw,
+                    None => raw * 12.0, // HPXML default: feet
+                    _ => {
                         tracing::warn!(
-                            wall_height_in = inches,
-                            "WallHeight must be positive; defaulting to 96 in (8 ft)"
+                            units = ?units_norm,
+                            value = raw,
+                            "unrecognized unit for WallHeight; assuming feet"
                         );
-                        None
-                    } else {
-                        Some(inches)
+                        raw * 12.0
                     }
-                })
-                .unwrap_or(96.0);
+                };
+                if inches <= 0.0 {
+                    tracing::warn!(
+                        wall_height_in = inches,
+                        "WallHeight must be positive; defaulting to 96 in (8 ft)"
+                    );
+                    None
+                } else {
+                    Some(inches)
+                }
+            })
+            .unwrap_or(96.0);
 
-            return Ok(Some(assembly_framing_factor(
-                width_in,
-                spacing_in,
-                wall_height_in,
-            )));
-        }
+        return Ok(Some(assembly_framing_factor(
+            width_in,
+            spacing_in,
+            wall_height_in,
+        )));
     }
 
     // Default by construction type per ASHRAE Handbook of Fundamentals.
@@ -2253,10 +2253,10 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLay
         });
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(cp) = specific_heat_j_kg_k {
-            if cp > 0.0 {
-                check_specific_heat_plausible(cp, "HPXML material layer");
-            }
+        if let Some(cp) = specific_heat_j_kg_k
+            && cp > 0.0
+        {
+            check_specific_heat_plausible(cp, "HPXML material layer");
         }
     }
 
@@ -2340,10 +2340,10 @@ fn build_zone_map(
             for node in group.children_named("Attic") {
                 // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
                 let attic_type_child = node.child("AtticType").and_then(|at| at.children.first());
-                if let Some(child) = attic_type_child {
-                    if child.name == "FlatRoof" {
-                        continue;
-                    }
+                if let Some(child) = attic_type_child
+                    && child.name == "FlatRoof"
+                {
+                    continue;
                 }
 
                 let floor_area_m2 =
@@ -3241,11 +3241,11 @@ fn compute_garage_geometry(
             && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None);
         let is_adjacent_garage = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
             && b.exterior_zone.as_ref() == Some(&ZoneType::Garage);
-        if is_garage_exterior || is_adjacent_garage {
-            if let Some(az) = b.azimuth_deg {
-                wall_areas.push(b.area_m2);
-                wall_azimuths.push(az % 180.0);
-            }
+        if (is_garage_exterior || is_adjacent_garage)
+            && let Some(az) = b.azimuth_deg
+        {
+            wall_areas.push(b.area_m2);
+            wall_azimuths.push(az % 180.0);
         }
     }
 
@@ -3607,18 +3607,18 @@ fn compute_attic_volume(
 
         let attic_height = (attic_gable_area * roof_tilt_rad.tan()).sqrt();
 
-        if third_gable_area > 0.0 {
-            if let Some(gg) = garage_geometry {
-                let garage_height = (third_gable_area * garage_tilt_rad.tan()).sqrt();
-                let garage_width = 2.0 * third_gable_area / garage_height;
-                let garage_depth_in_house = garage_height * roof_tilt_rad.tan();
-                let square_area = floor_area - gg.protruded_area_m2;
+        if third_gable_area > 0.0
+            && let Some(gg) = garage_geometry
+        {
+            let garage_height = (third_gable_area * garage_tilt_rad.tan()).sqrt();
+            let garage_width = 2.0 * third_gable_area / garage_height;
+            let garage_depth_in_house = garage_height * roof_tilt_rad.tan();
+            let square_area = floor_area - gg.protruded_area_m2;
 
-                let volume = 0.5 * square_area * attic_height
-                    + 0.5 * gg.protruded_area_m2 * garage_height
-                    + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
-                return Some(volume);
-            }
+            let volume = 0.5 * square_area * attic_height
+                + 0.5 * gg.protruded_area_m2 * garage_height
+                + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
+            return Some(volume);
         }
 
         return Some(0.5 * floor_area * attic_height);
@@ -3687,14 +3687,12 @@ pub fn check_foundation_zone_invariant(building: &Building) {
         .iter()
         .any(|z| z.zone_type == ZoneType::Foundation);
 
-    if !has_foundation_zone {
-        if let Some(ref fnd_name) = building.foundation_name {
-            tracing::warn!(
-                foundation_name = %fnd_name,
-                "Foundation zone missing despite foundation type being set. \
+    if !has_foundation_zone && let Some(ref fnd_name) = building.foundation_name {
+        tracing::warn!(
+            foundation_name = %fnd_name,
+            "Foundation zone missing despite foundation type being set. \
                  Foundation thermal mass is absent from the RC network."
-            );
-        }
+        );
     }
 }
 

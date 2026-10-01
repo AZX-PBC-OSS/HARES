@@ -2239,11 +2239,11 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     let mut post_replace_soc_last = 0.0_f64;
     for line in contents.lines().skip(1 + 96) {
         // day 2 only
-        if let Some(v) = line.split(',').nth(soc_col) {
-            if let Ok(soc) = v.trim().parse::<f64>() {
-                post_replace_soc_max = post_replace_soc_max.max(soc);
-                post_replace_soc_last = soc;
-            }
+        if let Some(v) = line.split(',').nth(soc_col)
+            && let Ok(soc) = v.trim().parse::<f64>()
+        {
+            post_replace_soc_max = post_replace_soc_max.max(soc);
+            post_replace_soc_last = soc;
         }
     }
     assert!(

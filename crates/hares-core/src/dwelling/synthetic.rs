@@ -1297,22 +1297,22 @@ pub(crate) fn build_synthetic_building(
     let mut wall_original_area: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
     for win in &windows {
-        if let Some(ref wall_id) = win.attached_to_wall_id {
-            if let Some(wall) = boundaries.iter_mut().find(|b| b.id == *wall_id) {
-                wall_original_area
-                    .entry(wall_id.clone())
-                    .or_insert(wall.area_m2);
-                wall.area_m2 -= win.area_m2;
-                if wall.area_m2 < 0.0 {
-                    tracing::warn!(
-                        window_id = %win.id,
-                        host_wall_id = %wall_id,
-                        window_area_m2 = win.area_m2,
-                        host_wall_original_area_m2 = *wall_original_area.get(wall_id).unwrap_or(&0.0),
-                        "Window area exceeds host wall area; clamping wall opaque area to 0.0"
-                    );
-                    wall.area_m2 = 0.0;
-                }
+        if let Some(ref wall_id) = win.attached_to_wall_id
+            && let Some(wall) = boundaries.iter_mut().find(|b| b.id == *wall_id)
+        {
+            wall_original_area
+                .entry(wall_id.clone())
+                .or_insert(wall.area_m2);
+            wall.area_m2 -= win.area_m2;
+            if wall.area_m2 < 0.0 {
+                tracing::warn!(
+                    window_id = %win.id,
+                    host_wall_id = %wall_id,
+                    window_area_m2 = win.area_m2,
+                    host_wall_original_area_m2 = *wall_original_area.get(wall_id).unwrap_or(&0.0),
+                    "Window area exceeds host wall area; clamping wall opaque area to 0.0"
+                );
+                wall.area_m2 = 0.0;
             }
         }
     }

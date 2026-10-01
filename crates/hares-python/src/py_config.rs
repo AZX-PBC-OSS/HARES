@@ -146,44 +146,44 @@ impl PySimulationConfig {
             return Err(PyValueError::new_err("output_verbosity must be 0-8"));
         }
 
-        if let Some(deadband) = setpoint_deadband_c {
-            if !deadband.is_finite() || deadband < 0.0 {
-                return Err(PyValueError::new_err(
-                    "setpoint_deadband_c must be finite and >= 0",
-                ));
-            }
+        if let Some(deadband) = setpoint_deadband_c
+            && (!deadband.is_finite() || deadband < 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "setpoint_deadband_c must be finite and >= 0",
+            ));
         }
 
-        if let Some(lat) = latitude {
-            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-                return Err(PyValueError::new_err(
-                    "latitude must be finite and within [-90, 90]",
-                ));
-            }
+        if let Some(lat) = latitude
+            && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+        {
+            return Err(PyValueError::new_err(
+                "latitude must be finite and within [-90, 90]",
+            ));
         }
 
-        if let Some(lon) = longitude {
-            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-                return Err(PyValueError::new_err(
-                    "longitude must be finite and within [-180, 180]",
-                ));
-            }
+        if let Some(lon) = longitude
+            && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+        {
+            return Err(PyValueError::new_err(
+                "longitude must be finite and within [-180, 180]",
+            ));
         }
 
-        if let Some(elev) = elevation_m {
-            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-                return Err(PyValueError::new_err(
-                    "elevation_m must be finite and within [-500, 9000]",
-                ));
-            }
+        if let Some(elev) = elevation_m
+            && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+        {
+            return Err(PyValueError::new_err(
+                "elevation_m must be finite and within [-500, 9000]",
+            ));
         }
 
-        if let Some(offset) = utc_offset_h {
-            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
-                return Err(PyValueError::new_err(
-                    "utc_offset_h must be finite and within [-14, 14]",
-                ));
-            }
+        if let Some(offset) = utc_offset_h
+            && (!offset.is_finite() || !(-14.0..=14.0).contains(&offset))
+        {
+            return Err(PyValueError::new_err(
+                "utc_offset_h must be finite and within [-14, 14]",
+            ));
         }
 
         let output_chunk_size = output_chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
@@ -323,12 +323,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_setpoint_deadband_c(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(deadband) = value {
-            if !deadband.is_finite() || deadband < 0.0 {
-                return Err(PyValueError::new_err(
-                    "setpoint_deadband_c must be finite and >= 0",
-                ));
-            }
+        if let Some(deadband) = value
+            && (!deadband.is_finite() || deadband < 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "setpoint_deadband_c must be finite and >= 0",
+            ));
         }
         self.setpoint_deadband_c = value;
         Ok(())
@@ -361,12 +361,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_latitude(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(lat) = value {
-            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-                return Err(PyValueError::new_err(
-                    "latitude must be finite and within [-90, 90]",
-                ));
-            }
+        if let Some(lat) = value
+            && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+        {
+            return Err(PyValueError::new_err(
+                "latitude must be finite and within [-90, 90]",
+            ));
         }
         self.latitude = value;
         Ok(())
@@ -379,12 +379,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_longitude(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(lon) = value {
-            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-                return Err(PyValueError::new_err(
-                    "longitude must be finite and within [-180, 180]",
-                ));
-            }
+        if let Some(lon) = value
+            && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+        {
+            return Err(PyValueError::new_err(
+                "longitude must be finite and within [-180, 180]",
+            ));
         }
         self.longitude = value;
         Ok(())
@@ -397,12 +397,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_elevation_m(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(elev) = value {
-            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-                return Err(PyValueError::new_err(
-                    "elevation_m must be finite and within [-500, 9000]",
-                ));
-            }
+        if let Some(elev) = value
+            && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+        {
+            return Err(PyValueError::new_err(
+                "elevation_m must be finite and within [-500, 9000]",
+            ));
         }
         self.elevation_m = value;
         Ok(())
@@ -415,12 +415,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_utc_offset_h(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(offset) = value {
-            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
-                return Err(PyValueError::new_err(
-                    "utc_offset_h must be finite and within [-14, 14]",
-                ));
-            }
+        if let Some(offset) = value
+            && (!offset.is_finite() || !(-14.0..=14.0).contains(&offset))
+        {
+            return Err(PyValueError::new_err(
+                "utc_offset_h must be finite and within [-14, 14]",
+            ));
         }
         self.utc_offset_h = value;
         Ok(())
@@ -637,12 +637,12 @@ impl PyDwellingConfig {
             None
         };
 
-        if let Some(init_dur) = initialization_duration {
-            if init_dur < 0 {
-                return Err(PyValueError::new_err(
-                    "initialization_duration must be non-negative",
-                ));
-            }
+        if let Some(init_dur) = initialization_duration
+            && init_dur < 0
+        {
+            return Err(PyValueError::new_err(
+                "initialization_duration must be non-negative",
+            ));
         }
 
         let initialization_duration = initialization_duration.filter(|&d| d != 0);

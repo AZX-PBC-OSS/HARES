@@ -179,18 +179,18 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     // Only the served (conditioned) zone is checked; duct zones in attics
     // or garages are not subject to this limit because they can legitimately
     // reach high temperatures without heating equipment running.
-    if let Ok(zone) = lookup_zone(env, hvac.config.zone_id) {
-        if zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C {
-            tracing::warn!(
-                zone_temp_c = zone.temperature_c,
-                equipment_type = ?hvac.config.equipment_type,
-                zone_id = hvac.config.zone_id.0,
-                max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
-                "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
-            );
-            hvac.runtime.duty_cycle = 0.0;
-            return OperatingMode::Off;
-        }
+    if let Ok(zone) = lookup_zone(env, hvac.config.zone_id)
+        && zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C
+    {
+        tracing::warn!(
+            zone_temp_c = zone.temperature_c,
+            equipment_type = ?hvac.config.equipment_type,
+            zone_id = hvac.config.zone_id.0,
+            max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
+            "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
+        );
+        hvac.runtime.duty_cycle = 0.0;
+        return OperatingMode::Off;
     }
 
     // Apply DR setpoint offset (set by apply_simple_mode_override_in_control)

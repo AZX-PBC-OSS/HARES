@@ -353,22 +353,22 @@ impl ElectricTariff {
         }
         self.fixed_charges.validate()?;
         self.export_rate.validate()?;
-        if let Some(mc) = self.minimum_charge {
-            if !mc.is_finite() || mc < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "minimum_charge must be finite and >= 0, got {mc}"
-                )));
-            }
+        if let Some(mc) = self.minimum_charge
+            && (!mc.is_finite() || mc < 0.0)
+        {
+            return Err(HaresError::Tariff(format!(
+                "minimum_charge must be finite and >= 0, got {mc}"
+            )));
         }
         for er in &self.energy_rates {
             er.validate()?;
         }
-        if let BillingCycle::Custom(days) = self.billing_cycle {
-            if days == 0 {
-                return Err(HaresError::Tariff(
-                    "BillingCycle::Custom days must be > 0".into(),
-                ));
-            }
+        if let BillingCycle::Custom(days) = self.billing_cycle
+            && days == 0
+        {
+            return Err(HaresError::Tariff(
+                "BillingCycle::Custom days must be > 0".into(),
+            ));
         }
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;
@@ -396,12 +396,12 @@ impl ElectricTariff {
         };
         let demand_tou_names: Vec<&str> = demand_schedule.iter().map(|p| p.name.as_str()).collect();
         for dr in &self.demand_rates {
-            if let Some(name) = &dr.period_name {
-                if !demand_tou_names.contains(&name.as_str()) {
-                    return Err(HaresError::Tariff(format!(
-                        "demand rate references unknown TOU period '{name}'"
-                    )));
-                }
+            if let Some(name) = &dr.period_name
+                && !demand_tou_names.contains(&name.as_str())
+            {
+                return Err(HaresError::Tariff(format!(
+                    "demand rate references unknown TOU period '{name}'"
+                )));
             }
         }
         if let Some(ref rtp) = self.rtp_schedule {
@@ -422,12 +422,13 @@ impl ElectricTariff {
         if let Some(ref cpp) = self.cpp_config {
             cpp.validate()?;
         }
-        if let Some(ref ev_name) = self.ev_tou_period_name {
-            if !ev_name.is_empty() && !tou_names.contains(&ev_name.as_str()) {
-                return Err(HaresError::Tariff(format!(
-                    "ev_tou_period_name '{ev_name}' references unknown TOU period"
-                )));
-            }
+        if let Some(ref ev_name) = self.ev_tou_period_name
+            && !ev_name.is_empty()
+            && !tou_names.contains(&ev_name.as_str())
+        {
+            return Err(HaresError::Tariff(format!(
+                "ev_tou_period_name '{ev_name}' references unknown TOU period"
+            )));
         }
         Ok(())
     }
@@ -470,12 +471,12 @@ impl GasTariff {
             tb.validate()?;
         }
         self.fixed_charges.validate()?;
-        if let BillingCycle::Custom(days) = self.billing_cycle {
-            if days == 0 {
-                return Err(HaresError::Tariff(
-                    "BillingCycle::Custom days must be > 0".into(),
-                ));
-            }
+        if let BillingCycle::Custom(days) = self.billing_cycle
+            && days == 0
+        {
+            return Err(HaresError::Tariff(
+                "BillingCycle::Custom days must be > 0".into(),
+            ));
         }
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;

@@ -1183,11 +1183,11 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         }
 
         let mut split = split_result?;
-        if let (Some(ref mut s), Some(sh)) = (split.as_mut(), &shoulder_months) {
-            if let Some((start, end)) = shoulder_split_from_months(sh)? {
-                s.shoulder_start = Some(start);
-                s.shoulder_end = Some(end);
-            }
+        if let (Some(ref mut s), Some(sh)) = (split.as_mut(), &shoulder_months)
+            && let Some((start, end)) = shoulder_split_from_months(sh)?
+        {
+            s.shoulder_start = Some(start);
+            s.shoulder_end = Some(end);
         }
         split
     } else {

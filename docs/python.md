@@ -7,7 +7,7 @@ and [Maturin](https://www.maturin.rs/). The resulting package is called `ochre_n
 
 | Tool  | Minimum version | Install |
 |-------|----------------|---------|
-| Rust  | 1.87+          | [rustup.rs](https://rustup.rs/) |
+| Rust  | 1.89+          | [rustup.rs](https://rustup.rs/) |
 | uv    | 0.11+          | `brew install uv` or [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
 | Python| 3.12–3.13     | Managed by uv (see below) |
 

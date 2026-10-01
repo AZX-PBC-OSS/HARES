@@ -914,10 +914,10 @@ fn record_step_impl(
         // Detect mode changes: only transitions between consecutive known
         // states count.  Entering an active mode on the first step is the
         // initial state, not a cycling event.
-        if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode) {
-            if prev != curr {
-                ec.mode_changes += 1;
-            }
+        if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode)
+            && prev != curr
+        {
+            ec.mode_changes += 1;
         }
 
         prev_equipment_modes[i] = mode;

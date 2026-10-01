@@ -110,10 +110,10 @@ impl hares_core::Actor for PyActorWrapper {
             let obj = self.obj.bind(py);
 
             // Refresh cached name in case Python code updated it
-            if let Ok(n) = obj.getattr("name").and_then(|v| v.extract::<String>()) {
-                if n.as_str() != &*self.name {
-                    self.name = Arc::from(n);
-                }
+            if let Ok(n) = obj.getattr("name").and_then(|v| v.extract::<String>())
+                && n.as_str() != &*self.name
+            {
+                self.name = Arc::from(n);
             }
 
             let env_dict = environment_to_py_dict(py, env);

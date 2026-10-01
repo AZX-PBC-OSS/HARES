@@ -1060,10 +1060,10 @@ impl HeatPumpHeaterCore {
                 .unwrap_or(self.pump_system_head_loss_m);
         }
 
-        if matches!(self.variant, HeaterVariant::Wshp) {
-            if let Some(ewt) = cfg.common.enter_water_temp_c {
-                self.source_temp = SourceTemperature::Constant(ewt);
-            }
+        if matches!(self.variant, HeaterVariant::Wshp)
+            && let Some(ewt) = cfg.common.enter_water_temp_c
+        {
+            self.source_temp = SourceTemperature::Constant(ewt);
         }
 
         if !matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
@@ -1323,13 +1323,13 @@ impl HeatPumpHeaterCore {
             })?;
         }
         let scaled_fuel_w = step.fuel_w * self.hvac.config.space_fraction;
-        if scaled_fuel_w > 0.0 {
-            if let Some(fuel_type) = self.backup_fuel_type {
-                ports.accumulate(&PortContribution::Fuel {
-                    fuel_type,
-                    consumption_w: scaled_fuel_w,
-                })?;
-            }
+        if scaled_fuel_w > 0.0
+            && let Some(fuel_type) = self.backup_fuel_type
+        {
+            ports.accumulate(&PortContribution::Fuel {
+                fuel_type,
+                consumption_w: scaled_fuel_w,
+            })?;
         }
 
         // Record borehole heat exchange for transient ground model.

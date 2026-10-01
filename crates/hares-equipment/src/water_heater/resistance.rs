@@ -603,12 +603,12 @@ impl Equipment for ResistanceWH {
         // its full required power, and the lower element is bounded by whatever
         // capacity remains under the ceiling. NEC Table 210.24(1): 30 A / 240 V
         // branch circuit → 7,200 W continuous with 80% derate.
-        if self.element_priority == ElementPriorityMode::Simultaneous {
-            if let Some(max_w) = self.max_combined_power_w {
-                let combined = upper_power_w + lower_power_w;
-                if combined > max_w {
-                    lower_power_w = (max_w - upper_power_w).max(0.0);
-                }
+        if self.element_priority == ElementPriorityMode::Simultaneous
+            && let Some(max_w) = self.max_combined_power_w
+        {
+            let combined = upper_power_w + lower_power_w;
+            if combined > max_w {
+                lower_power_w = (max_w - upper_power_w).max(0.0);
             }
         }
 
@@ -695,16 +695,16 @@ impl Equipment for ResistanceWH {
 
         // Jacket loss: tank skin heat flows into the conditioned zone.
         let skin_loss_w = self.tank.skin_loss_w();
-        if let Some(zone) = self.descriptor.zone {
-            if skin_loss_w.abs() > 1e-3 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: skin_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && skin_loss_w.abs() > 1e-3
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: skin_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         let avg_temp_c =

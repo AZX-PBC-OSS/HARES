@@ -312,10 +312,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(columns[i]).unwrap().push(v);
                 }
             }
         }

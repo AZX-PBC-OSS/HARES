@@ -63,12 +63,12 @@ impl PyGasWaterHeater {
                 "GasWaterHeater: both tank_volume_m3 and heating_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "GasWaterHeater: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "GasWaterHeater: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -112,10 +112,10 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
@@ -222,12 +222,12 @@ impl PyElectricResistanceWH {
                 "ElectricResistanceWH: both tank_volume_m3 and heating_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "ElectricResistanceWH: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "ElectricResistanceWH: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -270,10 +270,10 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<Equipme
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
@@ -383,17 +383,17 @@ impl PyHeatPumpWH {
                 "HeatPumpWH: both tank_volume_m3 and backup_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "HeatPumpWH: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "HeatPumpWH: tank_volume_m3 must be positive",
+            ));
         }
-        if let Some(v) = cop {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err("HeatPumpWH: cop must be positive"));
-            }
+        if let Some(v) = cop
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err("HeatPumpWH: cop must be positive"));
         }
         Ok(Self {
             name,
@@ -434,10 +434,10 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
@@ -550,12 +550,12 @@ impl PyTanklessWaterHeater {
                 "TanklessWaterHeater: heating_capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = uniform_energy_factor {
-            if v <= 0.0 || v > 1.5 {
-                return Err(PyValueError::new_err(
-                    "TanklessWaterHeater: uniform_energy_factor must be between 0 and 1.5",
-                ));
-            }
+        if let Some(v) = uniform_energy_factor
+            && (v <= 0.0 || v > 1.5)
+        {
+            return Err(PyValueError::new_err(
+                "TanklessWaterHeater: uniform_energy_factor must be between 0 and 1.5",
+            ));
         }
         Ok(Self {
             name,
@@ -597,10 +597,10 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
@@ -691,12 +691,12 @@ impl PyIndirectTank {
                 "IndirectTank: tank_volume_m3 is required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "IndirectTank: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "IndirectTank: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -735,10 +735,10 @@ pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> PyResult<EquipmentSpec
         "avg_water_draw_l_per_day",
         it.avg_water_draw_l_per_day,
     );
-    if it.autosize {
-        if let Some(v) = it.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if it.autosize
+        && let Some(v) = it.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if it.autosize {

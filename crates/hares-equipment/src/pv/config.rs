@@ -124,12 +124,12 @@ impl PvConfig {
                     ));
                 }
             }
-            if let Some(az) = self.azimuth_deg {
-                if !az.is_finite() || !(0.0..360.0).contains(&az) {
-                    return Err(HaresError::Equipment(
-                        "PV azimuth_deg must be finite and within [0, 360)".to_string(),
-                    ));
-                }
+            if let Some(az) = self.azimuth_deg
+                && (!az.is_finite() || !(0.0..360.0).contains(&az))
+            {
+                return Err(HaresError::Equipment(
+                    "PV azimuth_deg must be finite and within [0, 360)".to_string(),
+                ));
             }
             self.capacity_kw
         };
@@ -138,27 +138,27 @@ impl PvConfig {
             ("inverter_efficiency", self.inverter_efficiency),
             ("power_factor", self.power_factor),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v <= 0.0 || v > 1.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "PV {name} must be finite and within (0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v <= 0.0 || v > 1.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "PV {name} must be finite and within (0, 1]"
+                )));
             }
         }
-        if let Some(losses) = self.system_losses_fraction {
-            if !losses.is_finite() || !(0.0..1.0).contains(&losses) {
-                return Err(HaresError::Equipment(
-                    "PV system_losses_fraction must be finite and within [0, 1)".to_string(),
-                ));
-            }
+        if let Some(losses) = self.system_losses_fraction
+            && (!losses.is_finite() || !(0.0..1.0).contains(&losses))
+        {
+            return Err(HaresError::Equipment(
+                "PV system_losses_fraction must be finite and within [0, 1)".to_string(),
+            ));
         }
-        if let Some(cap) = self.inverter_capacity_kw {
-            if !cap.is_finite() || cap <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "PV inverter_capacity_kw must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(cap) = self.inverter_capacity_kw
+            && (!cap.is_finite() || cap <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "PV inverter_capacity_kw must be finite and > 0".to_string(),
+            ));
         }
         if let Some(inv_cap) = self.inverter_capacity_kw {
             // Typical residential DC-to-AC ratios: 1.0–1.5 (NREL SAM documentation;

@@ -175,67 +175,67 @@ impl HvacEquipment {
         }
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if zone_capacitance_kwh_per_k > 0.0 {
-            if let Some(max_e) = max_energy_kwh {
-                if max_e <= 0.0 {
-                    panic!(
-                        "EBM invariant violation: zone_capacitance_kwh_per_k={} > 0 \
+        if zone_capacitance_kwh_per_k > 0.0
+            && let Some(max_e) = max_energy_kwh
+        {
+            if max_e <= 0.0 {
+                panic!(
+                    "EBM invariant violation: zone_capacitance_kwh_per_k={} > 0 \
                          but max_energy_kwh={} <= 0. Capacitance is positive but \
                          the computed energy capacity is non-positive — check \
                          deadband and reference temperature computation.",
-                        zone_capacitance_kwh_per_k, max_e
-                    );
-                }
-                // max_energy_kwh must exceed min_energy_kwh when deadband > 0
-                let deadband_range = (max_e - min_energy_kwh).max(0.0);
-                if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
-                    panic!(
-                        "EBM invariant violation: max_energy_kwh={} equals min_energy_kwh={}, \
+                    zone_capacitance_kwh_per_k, max_e
+                );
+            }
+            // max_energy_kwh must exceed min_energy_kwh when deadband > 0
+            let deadband_range = (max_e - min_energy_kwh).max(0.0);
+            if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
+                panic!(
+                    "EBM invariant violation: max_energy_kwh={} equals min_energy_kwh={}, \
                          implying zero deadband range while capacitance is positive ({zone_capacitance_kwh_per_k}). \
                          Check thermostat thresholds.",
-                        max_e, min_energy_kwh
-                    );
-                }
+                    max_e, min_energy_kwh
+                );
             }
         }
 
         #[cfg(feature = "observe")]
-        if let Some(max_e) = max_energy_kwh {
-            if let Some(e) = energy_kwh {
-                let fill_ratio = if max_e > f64::EPSILON {
-                    (e - min_energy_kwh) / (max_e - min_energy_kwh).max(f64::EPSILON)
-                } else {
-                    0.0
-                };
-                let deadband_range_c = if zone_capacitance_kwh_per_k > f64::EPSILON {
-                    (max_e - min_energy_kwh) / zone_capacitance_kwh_per_k
-                } else {
-                    0.0
-                };
-                tracing::debug!(
-                    energy_kwh = e,
-                    zone_temp_c,
-                    ref_temp_c = _ref_temp_c,
-                    fill_ratio,
-                    min_energy_kwh,
-                    max_energy_kwh = max_e,
-                    zone_capacitance_kwh_per_k,
-                    deadband_range_c,
-                    efficiency,
-                    baseline_power_kw,
-                    rated_eir,
-                    capacity_ideal_w,
-                    t_min_heat_c = t_heat_on,
-                    t_max_heat_c = t_heat_off,
-                    t_min_cool_c = t_cool_off,
-                    t_max_cool_c = t_cool_on,
-                    deadband_offset = offset,
-                    hysteresis_c = hysteresis,
-                    heating_setpoint_c = setpoints.heating_c,
-                    cooling_setpoint_c = setpoints.cooling_c,
-                    "EquivalentBatteryModel parameters computed"
-                );
-            }
+        if let Some(max_e) = max_energy_kwh
+            && let Some(e) = energy_kwh
+        {
+            let fill_ratio = if max_e > f64::EPSILON {
+                (e - min_energy_kwh) / (max_e - min_energy_kwh).max(f64::EPSILON)
+            } else {
+                0.0
+            };
+            let deadband_range_c = if zone_capacitance_kwh_per_k > f64::EPSILON {
+                (max_e - min_energy_kwh) / zone_capacitance_kwh_per_k
+            } else {
+                0.0
+            };
+            tracing::debug!(
+                energy_kwh = e,
+                zone_temp_c,
+                ref_temp_c = _ref_temp_c,
+                fill_ratio,
+                min_energy_kwh,
+                max_energy_kwh = max_e,
+                zone_capacitance_kwh_per_k,
+                deadband_range_c,
+                efficiency,
+                baseline_power_kw,
+                rated_eir,
+                capacity_ideal_w,
+                t_min_heat_c = t_heat_on,
+                t_max_heat_c = t_heat_off,
+                t_min_cool_c = t_cool_off,
+                t_max_cool_c = t_cool_on,
+                deadband_offset = offset,
+                hysteresis_c = hysteresis,
+                heating_setpoint_c = setpoints.heating_c,
+                cooling_setpoint_c = setpoints.cooling_c,
+                "EquivalentBatteryModel parameters computed"
+            );
         }
 
         EquivalentBatteryModel {

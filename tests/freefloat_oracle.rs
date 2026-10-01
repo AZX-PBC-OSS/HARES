@@ -108,10 +108,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -483,34 +483,34 @@ mod tests {
         }
 
         // Solar irradiance diagnostic from step-0 environment.
-        if let Some(snap) = snapshots.first() {
-            if let Some(e) = snap.phases.post_environment.as_ref() {
-                eprintln!("\n--- STEP-0 SOLAR & WEATHER: {scenario} ---");
+        if let Some(snap) = snapshots.first()
+            && let Some(e) = snap.phases.post_environment.as_ref()
+        {
+            eprintln!("\n--- STEP-0 SOLAR & WEATHER: {scenario} ---");
+            eprintln!(
+                "  T_out={:.1}°C  T_ground={:.1}°C  T_sky={:.1}°C  wind={:.1}m/s",
+                e.outdoor_temp_c, e.ground_temp_c, e.sky_temp_c, e.wind_speed_m_s
+            );
+            eprintln!(
+                "  GHI={:.1}  DNI={:.1}  DHI={:.1} W/m²",
+                e.ghi_w_m2, e.dni_w_m2, e.dhi_w_m2
+            );
+            eprintln!(
+                "  Solar alt={:.2}°  az={:.2}°",
+                e.solar_altitude_deg, e.solar_azimuth_deg
+            );
+            eprintln!("  Per-surface POA irradiance:");
+            for irr in &e.solar_irradiance {
+                let total = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
                 eprintln!(
-                    "  T_out={:.1}°C  T_ground={:.1}°C  T_sky={:.1}°C  wind={:.1}m/s",
-                    e.outdoor_temp_c, e.ground_temp_c, e.sky_temp_c, e.wind_speed_m_s
+                    "    srf {:2}: direct={:>7.1} diffuse={:>6.1} refl={:>5.1} total={:>7.1} aoi={:.2}°",
+                    irr.surface_id,
+                    irr.direct_w_m2,
+                    irr.diffuse_w_m2,
+                    irr.reflected_w_m2,
+                    total,
+                    irr.angle_of_incidence_rad.to_degrees()
                 );
-                eprintln!(
-                    "  GHI={:.1}  DNI={:.1}  DHI={:.1} W/m²",
-                    e.ghi_w_m2, e.dni_w_m2, e.dhi_w_m2
-                );
-                eprintln!(
-                    "  Solar alt={:.2}°  az={:.2}°",
-                    e.solar_altitude_deg, e.solar_azimuth_deg
-                );
-                eprintln!("  Per-surface POA irradiance:");
-                for irr in &e.solar_irradiance {
-                    let total = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
-                    eprintln!(
-                        "    srf {:2}: direct={:>7.1} diffuse={:>6.1} refl={:>5.1} total={:>7.1} aoi={:.2}°",
-                        irr.surface_id,
-                        irr.direct_w_m2,
-                        irr.diffuse_w_m2,
-                        irr.reflected_w_m2,
-                        total,
-                        irr.angle_of_incidence_rad.to_degrees()
-                    );
-                }
             }
         }
 
@@ -1129,17 +1129,17 @@ mod tests {
             finite_mean(&hares_nat_flow).unwrap_or(0.0) * 3600.0 / 129.6,
         );
         // Step-0 flow rates
-        if let Some(snap) = snapshots.first() {
-            if let Some(solver) = snap.phases.post_solvers.as_ref() {
-                let g = &solver.envelope_gains;
-                eprintln!(
-                    "    Step-0: total={:.6} raw_inf={:.6} forced={:.6} nat={:.6} m³/s",
-                    g.total_airflow_m3_s,
-                    g.raw_infiltration_m3_s,
-                    g.forced_vent_m3_s,
-                    g.natural_vent_m3_s
-                );
-            }
+        if let Some(snap) = snapshots.first()
+            && let Some(solver) = snap.phases.post_solvers.as_ref()
+        {
+            let g = &solver.envelope_gains;
+            eprintln!(
+                "    Step-0: total={:.6} raw_inf={:.6} forced={:.6} nat={:.6} m³/s",
+                g.total_airflow_m3_s,
+                g.raw_infiltration_m3_s,
+                g.forced_vent_m3_s,
+                g.natural_vent_m3_s
+            );
         }
 
         eprintln!("\n{:-^70}", " checks ");

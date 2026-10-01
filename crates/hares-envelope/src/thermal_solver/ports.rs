@@ -127,10 +127,10 @@ impl ThermalSolver {
             }
 
             // No surface info for this zone: dump all radiant gain to zone air.
-            if let Some(idx) = zone_air_idx {
-                if idx < u.len() {
-                    u[idx] += radiant_w;
-                }
+            if let Some(idx) = zone_air_idx
+                && idx < u.len()
+            {
+                u[idx] += radiant_w;
             }
         }
     }
@@ -173,10 +173,10 @@ fn distribute_radiant_lwr_surfaces(
         air_from_radiant = total_radiant_w;
     }
 
-    if let Some(idx) = zone_air_idx {
-        if idx < u.len() {
-            u[idx] += air_from_radiant;
-        }
+    if let Some(idx) = zone_air_idx
+        && idx < u.len()
+    {
+        u[idx] += air_from_radiant;
     }
 }
 
@@ -219,10 +219,10 @@ fn distribute_radiant_solar_surfaces(
         for (s, &w) in surfaces.iter().zip(buf.iter()) {
             if w > 0.0 && s.input_index.is_some() {
                 let q = total_radiant_w * w / total_weight;
-                if let Some(idx) = s.input_index {
-                    if idx < u.len() {
-                        u[idx] += q * s.radiation_frac;
-                    }
+                if let Some(idx) = s.input_index
+                    && idx < u.len()
+                {
+                    u[idx] += q * s.radiation_frac;
                 }
                 air_from_radiant += q * (1.0 - s.radiation_frac);
             }
@@ -231,9 +231,9 @@ fn distribute_radiant_solar_surfaces(
         air_from_radiant = total_radiant_w;
     }
 
-    if let Some(idx) = zone_air_idx {
-        if idx < u.len() {
-            u[idx] += air_from_radiant;
-        }
+    if let Some(idx) = zone_air_idx
+        && idx < u.len()
+    {
+        u[idx] += air_from_radiant;
     }
 }

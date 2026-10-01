@@ -142,10 +142,10 @@ mod tests {
             for line in lines.filter(|l| !l.trim().is_empty()) {
                 let fields: Vec<&str> = line.split(',').collect();
                 for (i, vals) in zone_temps.iter_mut() {
-                    if let Some(f) = fields.get(*i) {
-                        if let Ok(v) = f.trim().parse::<f64>() {
-                            vals.push(v);
-                        }
+                    if let Some(f) = fields.get(*i)
+                        && let Ok(v) = f.trim().parse::<f64>()
+                    {
+                        vals.push(v);
                     }
                 }
             }

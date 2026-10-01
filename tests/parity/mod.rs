@@ -349,13 +349,13 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
             ));
         }
 
-        if let Some(expected_conditioned) = expectations.conditioned_zone_count {
-            if conditioned != expected_conditioned {
-                failures.push(format!(
-                    "fixture={} conditioned zone count mismatch: expected={} actual={}",
-                    fixture_id, expected_conditioned, conditioned
-                ));
-            }
+        if let Some(expected_conditioned) = expectations.conditioned_zone_count
+            && conditioned != expected_conditioned
+        {
+            failures.push(format!(
+                "fixture={} conditioned zone count mismatch: expected={} actual={}",
+                fixture_id, expected_conditioned, conditioned
+            ));
         }
     }
 

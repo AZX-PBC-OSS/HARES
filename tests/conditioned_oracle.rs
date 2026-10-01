@@ -120,10 +120,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -407,16 +407,14 @@ mod tests {
         for _ in 0..n_steps {
             dwelling.step().expect("dwelling.step");
             // Read IdealHvac telemetry after each step
-            if use_ideal {
-                if let Some(eq) = dwelling.equipment().first() {
-                    let t = eq.telemetry();
-                    step_telemetry.push(StepTelemetry {
-                        mode: t.get("operating_mode").unwrap_or(f64::NAN),
-                        target_c: t.get("current_target_c").unwrap_or(f64::NAN),
-                        ideal_cap_w: t.get("ideal_capacity_w").unwrap_or(f64::NAN),
-                        output_w: t.get("thermal_output_w").unwrap_or(f64::NAN),
-                    });
-                }
+            if use_ideal && let Some(eq) = dwelling.equipment().first() {
+                let t = eq.telemetry();
+                step_telemetry.push(StepTelemetry {
+                    mode: t.get("operating_mode").unwrap_or(f64::NAN),
+                    target_c: t.get("current_target_c").unwrap_or(f64::NAN),
+                    ideal_cap_w: t.get("ideal_capacity_w").unwrap_or(f64::NAN),
+                    output_w: t.get("thermal_output_w").unwrap_or(f64::NAN),
+                });
             }
         }
         let _ = fs::remove_file(&output_path);
@@ -430,30 +428,30 @@ mod tests {
         );
 
         // One-shot interior LWR surface diagnostic from last timestep.
-        if let Some(last) = snapshots.last() {
-            if let Some(solver) = last.phases.post_solvers.as_ref() {
-                let diags = &solver.envelope_gains.int_surface_diag;
-                if !diags.is_empty() {
+        if let Some(last) = snapshots.last()
+            && let Some(solver) = last.phases.post_solvers.as_ref()
+        {
+            let diags = &solver.envelope_gains.int_surface_diag;
+            if !diags.is_empty() {
+                eprintln!(
+                    "\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):",
+                    diags.len()
+                );
+                eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
+                let mut total_lwr = 0.0_f64;
+                for (i, d) in diags.iter().enumerate() {
                     eprintln!(
-                        "\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):",
-                        diags.len()
+                        "    {:>4} {:>10.2} {:>10.1}",
+                        i, d.surface_temp_c, d.lwr_flux_w
                     );
-                    eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
-                    let mut total_lwr = 0.0_f64;
-                    for (i, d) in diags.iter().enumerate() {
-                        eprintln!(
-                            "    {:>4} {:>10.2} {:>10.1}",
-                            i, d.surface_temp_c, d.lwr_flux_w
-                        );
-                        total_lwr += d.lwr_flux_w;
-                    }
-                    eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
+                    total_lwr += d.lwr_flux_w;
                 }
+                eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
+            }
 
-                // Also dump interior LWR by zone.
-                for (zid, lwr) in &solver.envelope_gains.interior_lwr_by_zone {
-                    eprintln!("    Zone {:?} interior LWR total: {:.1} W", zid, lwr);
-                }
+            // Also dump interior LWR by zone.
+            for (zid, lwr) in &solver.envelope_gains.interior_lwr_by_zone {
+                eprintln!("    Zone {:?} interior LWR total: {:.1} W", zid, lwr);
             }
         }
 

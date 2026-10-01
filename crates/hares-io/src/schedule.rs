@@ -151,12 +151,11 @@ impl ScheduleTimeSeries {
         }
 
         let normalized = normalize_column_name(name);
-        if let Some(&existing_idx) = self.column_index.get(&normalized) {
-            if self.columns.get(existing_idx) == Some(&data)
-                && self.column_aggregations.get(existing_idx) == Some(&aggregation)
-            {
-                return Ok(existing_idx);
-            }
+        if let Some(&existing_idx) = self.column_index.get(&normalized)
+            && self.columns.get(existing_idx) == Some(&data)
+            && self.column_aggregations.get(existing_idx) == Some(&aggregation)
+        {
+            return Ok(existing_idx);
         }
 
         let mut candidate = normalized.clone();

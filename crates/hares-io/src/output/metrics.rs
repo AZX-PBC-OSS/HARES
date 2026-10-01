@@ -787,93 +787,91 @@ impl MetricsCalculator {
             }
 
             // Envelope component loads [W → Wh via timestep_h].
-            if let Some(idx) = self.window_solar_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_window_solar_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.window_solar_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_window_solar_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.infiltration_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_infiltration_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.infiltration_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_infiltration_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.interior_lwr_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_interior_lwr_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.interior_lwr_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_interior_lwr_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.internal_gains_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_internal_gains_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.internal_gains_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_internal_gains_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.opaque_conduction_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_opaque_conduction_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.opaque_conduction_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_opaque_conduction_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.window_conduction_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_window_conduction_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.window_conduction_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_window_conduction_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.internal_mass_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_internal_mass_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.internal_mass_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_internal_mass_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.forced_ventilation_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_ventilation_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.forced_ventilation_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_ventilation_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.natural_ventilation_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_ventilation_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.natural_ventilation_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_ventilation_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.duct_loss_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_duct_loss_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.duct_loss_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_duct_loss_wh += v * self.timestep_h;
             }
 
             // HVAC thermal delivered accumulation for COP and envelope loads.
-            if let Some(idx) = self.hvac_heating_delivered_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_hvac_heating_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.hvac_heating_delivered_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_hvac_heating_wh += v * self.timestep_h;
             }
-            if let Some(idx) = self.hvac_cooling_delivered_w_idx {
-                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
-                    self.envelope_hvac_cooling_wh += v * self.timestep_h;
-                }
+            if let Some(idx) = self.hvac_cooling_delivered_w_idx
+                && let Some(v) = value_at(as_f64_array(batch, idx), row)
+            {
+                self.envelope_hvac_cooling_wh += v * self.timestep_h;
             }
 
             // HVAC electric power accumulation for COP.
-            if let Some(idx) = self.hvac_heating_kw_idx {
-                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
-                    if kw > 0.0 {
-                        self.hvac_heating_electric_wh += kw * 1000.0 * self.timestep_h;
-                    }
-                }
+            if let Some(idx) = self.hvac_heating_kw_idx
+                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
+                && kw > 0.0
+            {
+                self.hvac_heating_electric_wh += kw * 1000.0 * self.timestep_h;
             }
-            if let Some(idx) = self.hvac_cooling_kw_idx {
-                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
-                    if kw > 0.0 {
-                        self.hvac_cooling_electric_wh += kw * 1000.0 * self.timestep_h;
-                    }
-                }
+            if let Some(idx) = self.hvac_cooling_kw_idx
+                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
+                && kw > 0.0
+            {
+                self.hvac_cooling_electric_wh += kw * 1000.0 * self.timestep_h;
             }
 
             // Battery energy tracking for round-trip efficiency.
-            if let Some(idx) = self.battery_kw_idx {
-                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
-                    if kw > 0.0 {
-                        self.battery_energy_in_kwh += kw * self.timestep_h;
-                    } else if kw < 0.0 {
-                        self.battery_energy_out_kwh += kw.abs() * self.timestep_h;
-                    }
+            if let Some(idx) = self.battery_kw_idx
+                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
+            {
+                if kw > 0.0 {
+                    self.battery_energy_in_kwh += kw * self.timestep_h;
+                } else if kw < 0.0 {
+                    self.battery_energy_out_kwh += kw.abs() * self.timestep_h;
                 }
             }
 

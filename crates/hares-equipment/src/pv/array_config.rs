@@ -221,12 +221,12 @@ impl PvArraySpec {
                 ));
             }
         }
-        if let Some(az) = self.azimuth_deg {
-            if !az.is_finite() || !(0.0..=360.0).contains(&az) {
-                return Err(HaresError::Equipment(
-                    "PvArraySpec azimuth_deg must be finite and within [0, 360]".to_string(),
-                ));
-            }
+        if let Some(az) = self.azimuth_deg
+            && (!az.is_finite() || !(0.0..=360.0).contains(&az))
+        {
+            return Err(HaresError::Equipment(
+                "PvArraySpec azimuth_deg must be finite and within [0, 360]".to_string(),
+            ));
         }
         Ok(())
     }

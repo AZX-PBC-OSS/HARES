@@ -1104,10 +1104,10 @@ fn no_insulated_stud_cavity_conductivity_exceeds_plausible_maximum() {
         }
         let boundary_type = record.get(bt_idx).unwrap_or("");
         // Skip uninsulated cavities — they naturally have high k.
-        if let Some((_, rank)) = split_r_variant(boundary_type) {
-            if rank == 0 {
-                continue;
-            }
+        if let Some((_, rank)) = split_r_variant(boundary_type)
+            && rank == 0
+        {
+            continue;
         }
         let k_str = record.get(k_idx).unwrap_or("");
         if k_str.is_empty() {

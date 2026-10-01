@@ -235,10 +235,10 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
         dwelling.step().expect("step must succeed");
         for eq in dwelling.equipment() {
             let telem = eq.telemetry();
-            if let Some(fuel_w) = telem.get("fuel_input_w") {
-                if fuel_w > 0.0 {
-                    ever_nonzero_gas = true;
-                }
+            if let Some(fuel_w) = telem.get("fuel_input_w")
+                && fuel_w > 0.0
+            {
+                ever_nonzero_gas = true;
             }
         }
     }

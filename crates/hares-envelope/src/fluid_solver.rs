@@ -966,38 +966,38 @@ impl DomainSolver for FluidSolver {
 
             // ── Post-resolution invariant (T-0255) ────────────────────────
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if let Some(ref resolved) = resolved_node_flows {
-                if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
-                    let parent_count: HashMap<FluidNodeId, usize> = {
-                        let mut map = HashMap::new();
-                        for (_, to) in &topo.edges {
-                            *map.entry(*to).or_default() += 1;
-                        }
-                        map
-                    };
-                    if let Some(pump) = topo.nodes.iter().find(|n| {
-                        n.role == FluidNodeRole::Source
-                            && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
-                    }) {
-                        let pump_flow = resolved.get(&pump.node_id).copied().unwrap_or(0.0);
-                        let branch_sum: f64 = topo
-                            .splitters
-                            .iter()
-                            .flat_map(|s| &s.branches)
-                            .map(|b| resolved.get(&b.node_id).copied().unwrap_or(0.0))
-                            .sum();
-                        let diff = (pump_flow - branch_sum).abs();
-                        assert!(
-                            diff < MASS_FLOW_TOLERANCE,
-                            "fluid loop {loop_id:?}: flow resolution invariant violated — \
+            if let Some(ref resolved) = resolved_node_flows
+                && let Some(topo) = self.config.loop_topologies.get(&loop_id)
+            {
+                let parent_count: HashMap<FluidNodeId, usize> = {
+                    let mut map = HashMap::new();
+                    for (_, to) in &topo.edges {
+                        *map.entry(*to).or_default() += 1;
+                    }
+                    map
+                };
+                if let Some(pump) = topo.nodes.iter().find(|n| {
+                    n.role == FluidNodeRole::Source
+                        && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+                }) {
+                    let pump_flow = resolved.get(&pump.node_id).copied().unwrap_or(0.0);
+                    let branch_sum: f64 = topo
+                        .splitters
+                        .iter()
+                        .flat_map(|s| &s.branches)
+                        .map(|b| resolved.get(&b.node_id).copied().unwrap_or(0.0))
+                        .sum();
+                    let diff = (pump_flow - branch_sum).abs();
+                    assert!(
+                        diff < MASS_FLOW_TOLERANCE,
+                        "fluid loop {loop_id:?}: flow resolution invariant violated: \
                              pump flow = {:.6e} kg/s, sum of branch allocated flows = {:.6e} kg/s, \
                              diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
-                            pump_flow,
-                            branch_sum,
-                            diff,
-                            MASS_FLOW_TOLERANCE
-                        );
-                    }
+                        pump_flow,
+                        branch_sum,
+                        diff,
+                        MASS_FLOW_TOLERANCE
+                    );
                 }
             }
 

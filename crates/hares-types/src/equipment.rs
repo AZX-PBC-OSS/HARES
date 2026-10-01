@@ -1041,12 +1041,12 @@ fn validate_finite_non_negative(name: &str, v: f64) -> Result<(), crate::HaresEr
 }
 
 fn validate_positive_if_present(name: &str, v: Option<usize>) -> Result<(), crate::HaresError> {
-    if let Some(n) = v {
-        if n == 0 {
-            return Err(crate::HaresError::Equipment(format!(
-                "{name} must be > 0 when set, got 0; use None to disable"
-            )));
-        }
+    if let Some(n) = v
+        && n == 0
+    {
+        return Err(crate::HaresError::Equipment(format!(
+            "{name} must be > 0 when set, got 0; use None to disable"
+        )));
     }
     Ok(())
 }
@@ -1447,13 +1447,13 @@ pub fn validate_core_contract(
         // non-finite values (NaN, ±∞) that would silently corrupt
         // downstream telemetry, ports, and checkpoint serialization.
         for (name, value) in &checks {
-            if let Some(v) = value {
-                if !v.is_finite() {
-                    return Err(HaresError::Equipment(format!(
-                        "core_output contract violation for '{}' ({:?}): non-finite value in {}={}",
-                        desc.name, caps, name, v,
-                    )));
-                }
+            if let Some(v) = value
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): non-finite value in {}={}",
+                    desc.name, caps, name, v,
+                )));
             }
         }
 
@@ -1510,44 +1510,44 @@ pub fn validate_core_contract(
         }
 
         // Main power consumed cannot be negative.
-        if let Some(p) = co.performance.main_power_kw {
-            if p < 0.0 {
-                record_range_rejection("performance.main_power_kw", p, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(p) = co.performance.main_power_kw
+            && p < 0.0
+        {
+            record_range_rejection("performance.main_power_kw", p, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      performance.main_power_kw={p} must be >= 0.0; \
                      negative main power is physically impossible",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // Sensible cooling by documented convention is ≤ 0 (heat removed from zone).
-        if let Some(sc) = co.flows.sensible_cooling_w {
-            if sc > 0.0 {
-                record_range_rejection("flows.sensible_cooling_w", sc, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(sc) = co.flows.sensible_cooling_w
+            && sc > 0.0
+        {
+            record_range_rejection("flows.sensible_cooling_w", sc, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      flows.sensible_cooling_w={sc} must be <= 0.0; \
                      positive sensible cooling violates the sign convention \
                      (negative = heat removed from zone)",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // Latent cooling by documented convention is ≤ 0 (moisture condensed from zone air).
-        if let Some(lc) = co.flows.latent_cooling_w {
-            if lc > 0.0 {
-                record_range_rejection("flows.latent_cooling_w", lc, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(lc) = co.flows.latent_cooling_w
+            && lc > 0.0
+        {
+            record_range_rejection("flows.latent_cooling_w", lc, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      flows.latent_cooling_w={lc} must be <= 0.0; \
                      positive latent cooling violates the sign convention \
                      (negative = moisture condensed from zone)",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // setpoint_c: [-50, 80] °C is the plausible residential HVAC range.
@@ -1555,25 +1555,25 @@ pub fn validate_core_contract(
         // industrial process heat) but rare — warn rather than reject.
         // ASHRAE HoF 2021 Ch. 17: residential heating setpoints rarely below 15°C;
         // ASHRAE 55-2020 §5.3: typical occupied range 20-30°C.
-        if let Some(sp) = co.state.setpoint_c {
-            if !(-50.0..=80.0).contains(&sp) {
-                record_range_warning("state.setpoint_c", sp, desc.id.0);
-                if sp > 100.0 {
-                    tracing::warn!(
-                        equipment = %desc.name,
-                        equipment_id = desc.id.0,
-                        setpoint_c = sp,
-                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
+        if let Some(sp) = co.state.setpoint_c
+            && !(-50.0..=80.0).contains(&sp)
+        {
+            record_range_warning("state.setpoint_c", sp, desc.id.0);
+            if sp > 100.0 {
+                tracing::warn!(
+                    equipment = %desc.name,
+                    equipment_id = desc.id.0,
+                    setpoint_c = sp,
+                    "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
                          and may indicate a Fahrenheit-to-Celsius conversion bug"
-                    );
-                } else {
-                    tracing::warn!(
-                        equipment = %desc.name,
-                        equipment_id = desc.id.0,
-                        setpoint_c = sp,
-                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
-                    );
-                }
+                );
+            } else {
+                tracing::warn!(
+                    equipment = %desc.name,
+                    equipment_id = desc.id.0,
+                    setpoint_c = sp,
+                    "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
+                );
             }
         }
 
@@ -1587,18 +1587,18 @@ pub fn validate_core_contract(
         // residential load profile simulation"), so no per-equipment-class
         // allowlist is needed; any value past the bound is a diagnostic
         // signal, never a block.
-        if let Some(t) = co.flows.thermal_output_w {
-            if !(-100_000.0..=100_000.0).contains(&t) {
-                record_range_warning("flows.thermal_output_w", t, desc.id.0);
-                tracing::warn!(
-                    equipment = %desc.name,
-                    equipment_id = desc.id.0,
-                    thermal_output_w = t,
-                    "thermal_output_w={t} W outside residential plausibility range \
+        if let Some(t) = co.flows.thermal_output_w
+            && !(-100_000.0..=100_000.0).contains(&t)
+        {
+            record_range_warning("flows.thermal_output_w", t, desc.id.0);
+            tracing::warn!(
+                equipment = %desc.name,
+                equipment_id = desc.id.0,
+                thermal_output_w = t,
+                "thermal_output_w={t} W outside residential plausibility range \
                      [-100, 100] kW; may indicate a W-vs-kW unit bug or a \
                      performance-curve blow-up"
-                );
-            }
+            );
         }
 
         // --- mode-vs-flows consistency checks ---
@@ -1659,41 +1659,41 @@ pub fn validate_core_contract(
 /// Present only in debug or `check_invariants` builds.
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 fn invariant_recheck_range_consistency(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    if let Some(c) = co.performance.cop {
-        if c < 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                cop = c,
-                "invariant violation: negative COP ({c}) passed production check"
-            );
-        }
+    if let Some(c) = co.performance.cop
+        && c < 0.0
+    {
+        tracing::warn!(
+            equipment = %desc.name,
+            cop = c,
+            "invariant violation: negative COP ({c}) passed production check"
+        );
     }
-    if let Some(p) = co.performance.main_power_kw {
-        if p < 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                main_power_kw = p,
-                "invariant violation: negative main_power_kw ({p}) passed production check"
-            );
-        }
+    if let Some(p) = co.performance.main_power_kw
+        && p < 0.0
+    {
+        tracing::warn!(
+            equipment = %desc.name,
+            main_power_kw = p,
+            "invariant violation: negative main_power_kw ({p}) passed production check"
+        );
     }
-    if let Some(sc) = co.flows.sensible_cooling_w {
-        if sc > 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                sensible_cooling_w = sc,
-                "invariant violation: positive sensible_cooling_w ({sc}) passed production check"
-            );
-        }
+    if let Some(sc) = co.flows.sensible_cooling_w
+        && sc > 0.0
+    {
+        tracing::warn!(
+            equipment = %desc.name,
+            sensible_cooling_w = sc,
+            "invariant violation: positive sensible_cooling_w ({sc}) passed production check"
+        );
     }
-    if let Some(lc) = co.flows.latent_cooling_w {
-        if lc > 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                latent_cooling_w = lc,
-                "invariant violation: positive latent_cooling_w ({lc}) passed production check"
-            );
-        }
+    if let Some(lc) = co.flows.latent_cooling_w
+        && lc > 0.0
+    {
+        tracing::warn!(
+            equipment = %desc.name,
+            latent_cooling_w = lc,
+            "invariant violation: positive latent_cooling_w ({lc}) passed production check"
+        );
     }
 }
 

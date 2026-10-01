@@ -137,10 +137,10 @@ impl ThermalSolver {
                     .copied()
                     .unwrap_or(self.config.indoor_zone_id);
 
-                if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
-                    if idx < u.len() {
-                        u[idx] += delta_q_w;
-                    }
+                if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone)
+                    && idx < u.len()
+                {
+                    u[idx] += delta_q_w;
                 }
 
                 self.window_exterior_lwr_w += delta_q_w;
@@ -622,15 +622,15 @@ impl ThermalSolver {
                     &mut self.lwr_net_flux_buf,
                 );
             };
-            if let Some(saved) = self.interior_surface_temps.get_mut(zone_idx) {
-                if saved.len() == buf.len() {
-                    saved.copy_from_slice(buf);
-                }
+            if let Some(saved) = self.interior_surface_temps.get_mut(zone_idx)
+                && saved.len() == buf.len()
+            {
+                saved.copy_from_slice(buf);
             }
-            if let Some(saved_prev) = self.interior_surface_prev_temps.get_mut(zone_idx) {
-                if saved_prev.len() == prev_buf.len() {
-                    saved_prev.copy_from_slice(prev_buf);
-                }
+            if let Some(saved_prev) = self.interior_surface_prev_temps.get_mut(zone_idx)
+                && saved_prev.len() == prev_buf.len()
+            {
+                saved_prev.copy_from_slice(prev_buf);
             }
 
             let air_idx = self
@@ -662,10 +662,10 @@ impl ThermalSolver {
                     //   surface.lwr_gain * surface.radiation_frac → surface h_idx
                     //   surface.lwr_gain * (1 - radiation_frac) → zone radiation_heat
                     u[info.input_index] += q * info.radiation_frac;
-                    if let Some(ai) = air_idx {
-                        if ai < u.len() {
-                            u[ai] += q * (1.0 - info.radiation_frac);
-                        }
+                    if let Some(ai) = air_idx
+                        && ai < u.len()
+                    {
+                        u[ai] += q * (1.0 - info.radiation_frac);
                     }
                 } else if info.driving_temp.is_some() {
                     // Window surfaces (no RC node, t_idx=None): OCHRE skips
@@ -677,10 +677,10 @@ impl ThermalSolver {
                     // lines 1187-1195: `if surface.t_idx is not None` guards
                     // the h_idx injection; windows always skip it.
                     let q_inject = q * (1.0 - info.radiation_frac);
-                    if let Some(ai) = air_idx {
-                        if ai < u.len() {
-                            u[ai] += q_inject;
-                        }
+                    if let Some(ai) = air_idx
+                        && ai < u.len()
+                    {
+                        u[ai] += q_inject;
                     }
                 }
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]

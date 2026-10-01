@@ -125,10 +125,10 @@ impl TariffEvaluator {
             }
         }
         for dr in &tariff.demand_rates {
-            if let Some(name) = &dr.period_name {
-                if !period_name_table.contains(name) {
-                    period_name_table.push(name.clone());
-                }
+            if let Some(name) = &dr.period_name
+                && !period_name_table.contains(name)
+            {
+                period_name_table.push(name.clone());
             }
         }
 

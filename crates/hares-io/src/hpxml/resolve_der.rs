@@ -41,13 +41,13 @@ pub(super) fn resolve_pv(
     for pv in photovoltaics.children_named("PVSystem") {
         let pv_id_opt = element_id(pv);
         let pv_id = pv_id_opt.clone().unwrap_or_else(|| "unknown".to_string());
-        if let Some(tracking) = child_text(pv, "Tracking") {
-            if !tracking.trim().eq_ignore_ascii_case("fixed") {
-                return Err(HpxmlError::Parse(format!(
+        if let Some(tracking) = child_text(pv, "Tracking")
+            && !tracking.trim().eq_ignore_ascii_case("fixed")
+        {
+            return Err(HpxmlError::Parse(format!(
                     "PV system `{pv_id}` uses unsupported tracking mode `{}`; only `fixed` is supported",
                     tracking.trim()
                 ).into()));
-            }
         }
 
         let inverter_id = pv

@@ -112,23 +112,23 @@ impl VentilationConfig {
                 "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
             ));
         }
-        if let Some(power) = self.fan_power_w {
-            if !power.is_finite() || power < 0.0 {
-                return Err(HaresError::Equipment(
-                    "ventilation fan_power_w must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(power) = self.fan_power_w
+            && (!power.is_finite() || power < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "ventilation fan_power_w must be finite and >= 0".to_string(),
+            ));
         }
         for (name, val) in [
             ("supply_fan_power_w", self.supply_fan_power_w),
             ("exhaust_fan_power_w", self.exhaust_fan_power_w),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v < 0.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "ventilation {name} must be finite and >= 0"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v < 0.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation {name} must be finite and >= 0"
+                )));
             }
         }
         // The defrost threshold must be finite: a NaN makes
@@ -150,21 +150,20 @@ impl VentilationConfig {
                 self.defrost_initial_time_fraction,
             ),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-                    return Err(HaresError::Equipment(format!(
-                        "ventilation {name} must be finite and within [0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+            {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation {name} must be finite and within [0, 1]"
+                )));
             }
         }
-        if let Some(rate) = self.defrost_time_increase_rate_per_k {
-            if !rate.is_finite() || rate < 0.0 {
-                return Err(HaresError::Equipment(
-                    "ventilation defrost_time_increase_rate_per_k must be finite and >= 0"
-                        .to_string(),
-                ));
-            }
+        if let Some(rate) = self.defrost_time_increase_rate_per_k
+            && (!rate.is_finite() || rate < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "ventilation defrost_time_increase_rate_per_k must be finite and >= 0".to_string(),
+            ));
         }
         if let Some(hours) = self.hours_in_operation
             && (!hours.is_finite() || !(0.0..=24.0).contains(&hours))
@@ -557,15 +556,15 @@ impl Ventilation {
         // routes thermal contributions to the indoor conditioned zone. The
         // ZoneMap provides the correct ZoneId from the building envelope
         // configuration, replacing the hardcoded ZoneId(1) default set in new().
-        if let Some(zone_map) = &config.zone_map {
-            if let Some(resolved_id) = zone_map.get(ZoneRole::Indoor) {
-                self.zone_id = resolved_id;
-                self.descriptor.zone = Some(resolved_id);
-                self.ports = vec![
-                    PortDeclaration::electrical(),
-                    PortDeclaration::thermal(resolved_id),
-                ];
-            }
+        if let Some(zone_map) = &config.zone_map
+            && let Some(resolved_id) = zone_map.get(ZoneRole::Indoor)
+        {
+            self.zone_id = resolved_id;
+            self.descriptor.zone = Some(resolved_id);
+            self.ports = vec![
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(resolved_id),
+            ];
         }
 
         Ok(())

@@ -238,31 +238,30 @@ impl IdealThermostat {
     pub fn set_override(&mut self, state: OverrideState) {
         if let (Some(heating_c), Some(cooling_c)) =
             (state.heating_setpoint_c, state.cooling_setpoint_c)
+            && heating_c >= cooling_c
         {
-            if heating_c >= cooling_c {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    panic!(
-                        "setpoint inversion in set_override() for IdealThermostat '{}': \
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                panic!(
+                    "setpoint inversion in set_override() for IdealThermostat '{}': \
                          heating={heating_c}°C >= cooling={cooling_c}°C",
-                        self.name,
-                    );
-                }
-                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+                    self.name,
+                );
+            }
+            #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+            {
+                #[cfg(feature = "observe")]
                 {
-                    #[cfg(feature = "observe")]
-                    {
-                        self.setpoint_inversion_rejected_count =
-                            self.setpoint_inversion_rejected_count.saturating_add(1);
-                    }
-                    tracing::warn!(
-                        actor = %self.name,
-                        heating_c = heating_c,
-                        cooling_c = cooling_c,
-                        "set_override: rejected inverted setpoints (heating >= cooling)",
-                    );
-                    return;
+                    self.setpoint_inversion_rejected_count =
+                        self.setpoint_inversion_rejected_count.saturating_add(1);
                 }
+                tracing::warn!(
+                    actor = %self.name,
+                    heating_c = heating_c,
+                    cooling_c = cooling_c,
+                    "set_override: rejected inverted setpoints (heating >= cooling)",
+                );
+                return;
             }
         }
         self.override_state = state;
