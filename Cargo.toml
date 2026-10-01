@@ -10,6 +10,7 @@ members = [
     "crates/hares-fleet",
     "crates/hares-tariff",
     "crates/hares-python",
+    "tools/frame_golden",
 ]
 default-members = [
     "crates/hares-types",
