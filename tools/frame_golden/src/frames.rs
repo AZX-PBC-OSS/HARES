@@ -47,5 +47,15 @@ pub fn read_frame(
     let reader = builder.build()?;
     let batches: Vec<RecordBatch> =
         reader.collect::<Result<Vec<RecordBatch>, arrow::error::ArrowError>>()?;
+    // A zero-row frame product (num_rows = 0 in the committed golden) is
+    // stored as a schema-only parquet: it has no row groups, so the reader
+    // yields no batches even though the product carries a schema. Keep that
+    // schema as an empty batch: every consumer (digest_frame's "a frame
+    // product must carry a schema" rule included) needs it.
+    let batches = if batches.is_empty() {
+        vec![RecordBatch::new_empty(schema.clone())]
+    } else {
+        batches
+    };
     Ok((schema, batches))
 }
