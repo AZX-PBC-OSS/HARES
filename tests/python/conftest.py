@@ -23,6 +23,7 @@ def make_dwelling(
     seed: int = 0,
     output_verbosity: int = 0,
     start_time: str = "2019-01-01T00:00:00",
+    write_output: bool = False,
     **kw,
 ):
     from ochre_next import Dwelling
@@ -38,6 +39,7 @@ def make_dwelling(
         bldg_id=42,
         master_seed=seed,
         output_verbosity=output_verbosity,
+        write_output=write_output,
         **kw,
     )
     dw.initialize()

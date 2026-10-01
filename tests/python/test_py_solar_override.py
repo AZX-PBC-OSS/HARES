@@ -38,6 +38,7 @@ class TestSurfaceIds:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -62,6 +63,7 @@ class TestSolarOverrideNumpy:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -105,6 +107,7 @@ class TestSolarOverrideNumpy:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
             dw.initialize()
             return dw
@@ -168,6 +171,7 @@ class TestSolarOverrideDataFrame:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -196,6 +200,7 @@ class TestSolarOverrideParquet:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -232,6 +237,7 @@ class TestSolarOverrideClear:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -299,6 +305,7 @@ class TestSolarOverrideListOfDicts:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -341,6 +348,7 @@ class TestSolarOverrideValidation:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -360,6 +368,7 @@ class TestSolarOverrideValidation:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -382,6 +391,7 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -446,6 +456,7 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -473,6 +484,7 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         pv = PV(name="roof_pv", capacity_kw=10.0, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)

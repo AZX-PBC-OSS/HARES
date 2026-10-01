@@ -4,10 +4,17 @@ These tests verify BEHAVIOR, not just structure. Each test asserts something
 that would fail if the underlying physics or actor logic were broken.
 """
 
+import tempfile
+from pathlib import Path
+
 import pytest
 from conftest import make_dwelling
 
 pl = pytest.importorskip("polars")
+
+# Tests that consume simulate() DataFrame columns need the output pipeline
+# (write_output=True); the CSV lands under a per-call temp dir, never the tree.
+OUTPUT = dict(write_output=True, output_path=str(Path(tempfile.mkdtemp()) / "dwelling_42.csv"))
 
 
 def _build_flat_tariff(rate: float = 0.15):
@@ -99,7 +106,7 @@ class TestArchetypeTariffIntegration:
 
         def total_ev_kwh(archetype_id):
             dw = make_dwelling(
-                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1,
+                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -148,7 +155,7 @@ class TestArchetypeTariffIntegration:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -169,7 +176,7 @@ class TestArchetypeTariffIntegration:
 
         def max_ev_power(archetype_id):
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1,
+                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -197,7 +204,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3
+            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -235,7 +242,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -297,7 +304,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -363,6 +370,8 @@ class TestHpxmlDeclaredEv:
             bldg_id=42,
             master_seed=42,
             output_verbosity=1,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.initialize()
         df = dw.simulate()
@@ -397,7 +406,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -421,7 +430,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -476,7 +485,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -512,7 +521,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -551,7 +560,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.step()  # simulation is now in progress
@@ -596,7 +605,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -747,7 +756,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -794,7 +803,7 @@ class TestDefaultStrategyEv:
 
         def charging_kwh(readd: bool) -> float:
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(

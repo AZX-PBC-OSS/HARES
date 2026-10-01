@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,8 @@ def _run_hares_observed() -> tuple[list[dict], list[dict]]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        write_output=False,
+        output_path=str(Path(tempfile.mkdtemp()) / "hares_observer_diag.csv"),
     )
 
     # Enable observer with capacity for all steps

@@ -14,6 +14,7 @@ import argparse
 import datetime as dt
 import json
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -303,6 +304,8 @@ def run_hares(
         output_verbosity=sim_cfg["output_verbosity"],
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
+        write_output=True,
+        output_path=str(Path(tempfile.gettempdir()) / "hares_parity_diagnostics.csv"),
     )
     pdf = dwelling_sim.simulate().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
@@ -317,6 +320,8 @@ def run_hares(
         output_verbosity=sim_cfg["output_verbosity"],
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
+        write_output=True,
+        output_path=str(Path(tempfile.gettempdir()) / "hares_parity_diagnostics_obs.csv"),
     )
 
     obs_rows: list[dict[str, Any]] = []

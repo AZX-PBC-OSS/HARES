@@ -42,7 +42,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         time_res: Duration::hours(1),
         output_verbosity: 0,
         output_path: None,
-        write_output: true,
+        write_output: false,
         output_format: OutputFormat::Csv,
         output_chunk_size: 16,
         master_seed: 0,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -213,6 +214,8 @@ def hares_48h() -> "pl.DataFrame":
         output_verbosity=9,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        write_output=False,
+        output_path=str(Path(tempfile.mkdtemp()) / "hares_thermal_trace.csv"),
     )
     return dwelling.simulate()
 

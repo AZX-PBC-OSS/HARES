@@ -116,8 +116,8 @@ class TestFullSimulation:
             "January Denver heating case should have positive total electric power"
         )
 
-    def test_simulate_expected_columns(self):
-        dw = _init_dwelling(output_verbosity=3)
+    def test_simulate_expected_columns(self, tmp_path):
+        dw = _init_dwelling(output_verbosity=3, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
@@ -136,8 +136,8 @@ class TestFullSimulation:
         mode_cols = [c for c in cols if c.endswith("Mode (-)")]
         assert len(mode_cols) > 0
 
-    def test_verbosity_2_includes_outdoor_temp(self):
-        dw = _init_dwelling(output_verbosity=2)
+    def test_verbosity_2_includes_outdoor_temp(self, tmp_path):
+        dw = _init_dwelling(output_verbosity=2, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
@@ -145,9 +145,9 @@ class TestFullSimulation:
         assert col.min() > -50.0
         assert col.max() < 60.0
 
-    def test_verbosity_1_includes_outdoor_temp(self):
+    def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
-        dw = _init_dwelling(output_verbosity=1)
+        dw = _init_dwelling(output_verbosity=1, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
 
@@ -393,7 +393,7 @@ class TestEquipmentDescriptors:
 
 
 class TestMetrics:
-    def test_metrics_after_simulate(self):
+    def test_metrics_after_simulate(self, tmp_path):
         # Use a 2-hour evening simulation in January -- zone will cool below
         # the thermostat turn-on threshold (19.2°C) forcing the gas furnace
         # to run. Midnight start was too warm from prior internal gains.
@@ -402,6 +402,8 @@ class TestMetrics:
             time_res_s=60,
             output_verbosity=1,
             start_time="2019-01-01T05:00:00",
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.simulate()
         m = dw.metrics()
@@ -902,7 +904,7 @@ class TestActorSystem:
 
 class TestDerSimulationExplorer:
     @pytest.mark.slow
-    def test_pv_battery_ev_end_to_end(self):
+    def test_pv_battery_ev_end_to_end(self, tmp_path):
         """End-to-end DER simulation matching the simulation_explorer.py workflow."""
         from ochre_next import ControlSignal
         from ochre_next import EV, PV, Battery
@@ -914,6 +916,8 @@ class TestDerSimulationExplorer:
             time_res_s=900,  # 15 minutes
             seed=0,
             output_verbosity=3,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.initialize()
 

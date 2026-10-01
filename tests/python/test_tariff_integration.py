@@ -54,6 +54,7 @@ def sim_result():
         bldg_id=1,
         master_seed=42,
         output_verbosity=3,
+        write_output=False,
     )
     dw.initialize()
     dw.set_electric_tariff(ElectricTariff.from_urdb_json(str(URDB_TOU)))
@@ -225,6 +226,7 @@ class TestHvacActiveCooling:
             bldg_id=1,
             master_seed=42,
             output_verbosity=3,
+            write_output=False,
         )
         dw.initialize()
 

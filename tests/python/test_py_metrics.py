@@ -1,6 +1,7 @@
 """Tests for Python-side simulation metrics exposure."""
 
 import math
+import tempfile
 
 import pytest
 from pathlib import Path
@@ -14,6 +15,10 @@ WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 from ochre_next import Dwelling, SimulationMetrics
+
+# metrics() and the simulate() DataFrame read the output pipeline, so these
+# tests run with write_output=True; the CSV lands in a temp dir, never the tree.
+_OUTPUT = dict(write_output=True, output_path=str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"))
 
 
 class TestMetrics:
@@ -29,6 +34,7 @@ class TestMetrics:
             bldg_id=42,
             master_seed=0,
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -83,6 +89,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -94,7 +101,7 @@ class TestMetrics:
         assert isinstance(repr(metrics.grid_interaction), str)
         assert isinstance(repr(metrics.efficiency), str)
 
-    def test_metrics_before_simulate_raises(self):
+    def test_metrics_before_simulate_raises(self, tmp_path):
         dw = Dwelling.from_hpxml(
             HPXML,
             SCHEDULE,
@@ -103,6 +110,8 @@ class TestMetrics:
             duration_s=3600,
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_0.csv"),
         )
         dw.initialize()
 
@@ -119,6 +128,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=0,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -127,7 +137,7 @@ class TestMetrics:
 
         assert metrics.envelope_loads_kwh is None
 
-    def test_envelope_loads_present_at_high_verbosity(self):
+    def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
         dw = Dwelling.from_hpxml(
             HPXML,
             SCHEDULE,
@@ -137,6 +147,8 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=6,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_0.csv"),
         )
         dw.initialize()
         dw.simulate()
@@ -176,6 +188,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -198,6 +211,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -221,6 +235,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -252,6 +267,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -289,6 +305,7 @@ class TestMetrics:
             time_res_s=900,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()

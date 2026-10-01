@@ -28,7 +28,7 @@ def _build_valid_config(bldg_id: int = 1):
     if not _fixtures_available():
         pytest.skip("OCHRE fixtures not available")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
     return DwellingConfig(
         hpxml=str(EXAMPLES / "BEopt_example.xml"),
         schedule=str(EXAMPLES / "BEopt_example_schedule.csv"),

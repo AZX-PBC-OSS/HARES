@@ -38,6 +38,12 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
         .and_then(|value| value.as_integer())
         .unwrap_or(1);
 
+    // The fixture configs carry no output settings, so the parsed config
+    // defaults to writing to a working-directory-relative path; these tests
+    // read in-memory state, so the recorder is off.
+    let mut sim_config = sim_config;
+    sim_config.write_output = false;
+
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),
         schedule_path: root.join("schedule.csv"),

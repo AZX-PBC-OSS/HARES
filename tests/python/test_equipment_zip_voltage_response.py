@@ -249,6 +249,7 @@ class TestScheduleDataIntegrity:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
         message = str(excinfo.value)
         assert "non-finite" in message, (
@@ -305,6 +306,7 @@ class TestZipDataIntegrity:
                 defaults_path=str(defaults),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
         message = str(excinfo.value).lower()
         assert "non-finite" in message, (
@@ -342,6 +344,7 @@ class TestZipDataIntegrity:
                 bldg_id=42,
                 master_seed=0,
                 overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}},
+                write_output=False,
             )
         message = str(excinfo.value).lower()
         assert "v0" in message, (

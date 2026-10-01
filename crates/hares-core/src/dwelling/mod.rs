@@ -1800,13 +1800,41 @@ impl Dwelling {
         duration: Duration,
         overrides: Option<Value>,
     ) -> Result<Self> {
+        Self::from_hpxml_with_write_output(
+            hpxml_path,
+            schedule_path,
+            weather_path,
+            start_time,
+            time_res,
+            duration,
+            overrides,
+            None,
+        )
+    }
+
+    /// [`Self::from_hpxml`] with an optional output-write override, for tests
+    /// that exercise this constructor's defaults without paying for a file.
+    // Why allow: the signature mirrors from_hpxml's seven parameters plus the
+    // override; a builder would obscure the one-to-one correspondence with the
+    // constructor the tests must exercise.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_hpxml_with_write_output(
+        hpxml_path: &Path,
+        schedule_path: &Path,
+        weather_path: &Path,
+        start_time: DateTime<FixedOffset>,
+        time_res: Duration,
+        duration: Duration,
+        overrides: Option<Value>,
+        write_output_override: Option<bool>,
+    ) -> Result<Self> {
         let sim_config = SimulationConfig {
             start_time,
             duration,
             time_res,
             output_verbosity: 0,
             output_path: None,
-            write_output: true,
+            write_output: write_output_override.unwrap_or(true),
             output_format: hares_io::OutputFormat::Csv,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,

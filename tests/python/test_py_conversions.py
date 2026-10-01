@@ -38,7 +38,7 @@ def dwelling():
     else:
         pytest.skip("OCHRE fixtures not available")
 
-    dw = dwelling_class.from_hpxml(hpxml, schedule, weather)
+    dw = dwelling_class.from_hpxml(hpxml, schedule, weather, write_output=False)
     dw.initialize()
     return dw
 
@@ -100,6 +100,7 @@ def test_results_before_simulate_returns_dataframe(dwelling):
         str(EXAMPLES / "BEopt_example.xml"),
         str(EXAMPLES / "BEopt_example_schedule.csv"),
         str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        write_output=False,
     )
     df = fresh.results()
 

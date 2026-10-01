@@ -427,6 +427,7 @@ class TestZipPfOverride:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
 
         # Baseline: no override.
@@ -501,6 +502,7 @@ class TestZipPfOverride:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
 
         dw = Dwelling.from_hpxml(
@@ -617,6 +619,7 @@ class TestResolvedZipInspection:
             bldg_id=42,
             duration_s=600,
             time_res_s=60,
+            write_output=False,
         )
         bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
         bp.add_equipment(
@@ -647,6 +650,7 @@ class TestResolvedZipInspection:
             bldg_id=42,
             master_seed=0,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
+            write_output=False,
         )
         dw.initialize()
 

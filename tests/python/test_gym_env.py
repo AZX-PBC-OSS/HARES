@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import math
 from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -29,6 +30,9 @@ _DWELLING_CONFIG = {
     "start_time": "2019-01-01T00:00:00",
     "duration_s": 600,
     "time_res_s": 60,
+    # The gym env's dict path cannot disable write_output; the recorder at
+    # least lands here instead of the working tree.
+    "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"),
 }
 
 # Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
@@ -56,6 +60,7 @@ def _make_dwelling(seed: int = 0) -> PyDwelling:
         duration_s=600,
         time_res_s=60,
         master_seed=seed,
+        write_output=False,
     )
 
 
@@ -187,6 +192,7 @@ def test_vec_gym_random_policy_100_steps():
             duration_s=6000,
             time_res_s=60,
             master_seed=i,
+            write_output=False,
         )
         for i in range(n_dwel)
     ]
@@ -284,6 +290,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
             duration_s=6000,
             time_res_s=60,
             master_seed=i,
+            write_output=False,
         )
         for i in range(n_dwel)
     ]

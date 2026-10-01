@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -141,6 +142,8 @@ def _run_hares() -> tuple[dict[str, float], float, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        write_output=True,
+        output_path=str(Path(tempfile.gettempdir()) / "hares_bench_4month_der.csv"),
     )
     dwelling.initialize()
 

@@ -15,6 +15,7 @@ def _make_blueprint():
         HPXML, SCHEDULE, WEATHER,
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42, duration_s=300, time_res_s=60,
+        write_output=False,
     )
 
 

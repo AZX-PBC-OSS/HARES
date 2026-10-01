@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,8 @@ def _run_hares() -> dict[str, float]:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
+        write_output=False,
+        output_path=str(Path(tempfile.mkdtemp()) / "hares_parity.csv"),
     )
     dwelling.initialize()
 
@@ -135,6 +138,8 @@ def _run_hares_simulate() -> dict[str, float]:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
+        write_output=False,
+        output_path=str(Path(tempfile.mkdtemp()) / "hares_parity.csv"),
     )
     dwelling.initialize()
     df = dwelling.simulate()
@@ -320,6 +325,8 @@ def _run_hares_7d() -> tuple[dict[str, float], float, float]:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
+        write_output=False,
+        output_path=str(Path(tempfile.mkdtemp()) / "hares_parity.csv"),
     )
     # OCHRE initializes inside its constructor; include HARES' explicit
     # initialize() in the init timing for a fair comparison.

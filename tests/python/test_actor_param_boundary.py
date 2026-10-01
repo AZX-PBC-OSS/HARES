@@ -50,12 +50,14 @@ def test_inf_thermostat_param_fails_loudly_at_the_boundary(param: str) -> None:
         )
 
 
-def test_finite_thermostat_param_still_attaches_and_simulates() -> None:
+def test_finite_thermostat_param_still_attaches_and_simulates(tmp_path) -> None:
     # Control: the rejection must be value-triggered, not blanket — a
     # finite setpoint attaches, simulates without panic, and the
     # thermostat heats the dwelling (the observed behavior the NaN
     # variant silently loses).
-    dwelling = make_dwelling(output_verbosity=5)
+    dwelling = make_dwelling(
+        output_verbosity=5, output_path=str(tmp_path / "dwelling_42.csv"), write_output=True
+    )
     dwelling.add_actor_by_name(
         "IdealThermostat",
         "Thermostat",
@@ -97,13 +99,13 @@ def test_non_finite_list_element_param_fails_loudly_at_the_boundary(bad: float) 
         )
 
 
-def test_finite_list_element_param_still_attaches_and_simulates() -> None:
+def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> None:
     """Control: the list-element rejection must be value-triggered, not
     blanket — a finite occupancy column attaches and the dwelling
     simulates (the channel the non-finite variant must be rejected from,
     not silently stored into).
     """
-    dwelling = make_dwelling(output_verbosity=5)
+    dwelling = make_dwelling(output_verbosity=5, output_path=str(tmp_path / "dwelling_42.csv"))
     dwelling.add_actor_by_name(
         "Occupant",
         "Occupant",

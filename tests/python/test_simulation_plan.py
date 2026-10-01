@@ -17,6 +17,7 @@ def test_simulation_plan_single_segment():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -36,6 +37,7 @@ def test_simulation_plan_two_segments_same_equipment():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -59,6 +61,7 @@ def test_simulation_plan_empty_segments_raises():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
     with pytest.raises(ValueError, match="no segments"):
         plan.run()
@@ -72,6 +75,7 @@ def test_simulation_plan_swap_furnace_to_ashp():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -118,6 +122,7 @@ def test_thermal_continuity_across_segments():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
 
     plan.add_segment(
@@ -153,6 +158,7 @@ def test_post_build_callback_adds_battery():
         HPXML, SCHEDULE, WEATHER,
         defaults_path=str(HARES_DEFAULTS), bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
     battery_added = []
 

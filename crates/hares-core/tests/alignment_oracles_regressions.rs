@@ -1050,6 +1050,13 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
         parse_simulation_config(&config_contents, &config).expect("simulation config must parse");
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
 
+    // The fixture configs carry no output settings, so the parsed config
+    // defaults to writing to a working-directory-relative path; these tests
+    // compare in-memory series against the reference parquet, so the
+    // recorder is off.
+    let mut sim_config = sim_config;
+    sim_config.write_output = false;
+
     DwellingConfig {
         hpxml_path: fixture.building_xml(),
         schedule_path: fixture.schedule_csv(),

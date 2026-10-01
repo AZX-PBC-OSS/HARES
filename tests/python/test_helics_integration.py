@@ -369,13 +369,14 @@ def _new_dwelling(*, bldg_id: int = 42) -> Dwelling:
         bldg_id=bldg_id,
         master_seed=0,
         output_verbosity=0,
+        write_output=False,
     )
     dwelling.initialize()
     return dwelling
 
 
 def _new_fleet(n_dwellings: int = 3) -> SteppableFleet:
-    sim_config = SimulationConfig(duration_s=_DURATION_S, time_res_s=int(_TIME_RES_S))
+    sim_config = SimulationConfig(duration_s=_DURATION_S, time_res_s=int(_TIME_RES_S), write_output=False)
     configs = [
         DwellingConfig(
             hpxml=HPXML,
@@ -891,6 +892,7 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
             bldg_id=99,
             master_seed=0,
             output_verbosity=0,
+            write_output=False,
         )
         dwelling_raw.initialize()
         recording = _RecordingDwelling(dwelling_raw)
@@ -1126,6 +1128,7 @@ def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
             bldg_id=99,
             master_seed=0,
             output_verbosity=0,
+            write_output=False,
         )
         dwelling_raw.initialize()
         federate_ready = threading.Event()
@@ -1313,6 +1316,7 @@ def _new_year_dwelling(bldg_id: int = 42) -> Dwelling:
         bldg_id=bldg_id,
         master_seed=0,
         output_verbosity=0,
+        write_output=False,
     )
     dwelling.initialize()
     return dwelling
@@ -1551,6 +1555,7 @@ def test_drift_guard_raises_when_cumulative_drift_exceeds_tolerance() -> None:
             bldg_id=99,
             master_seed=0,
             output_verbosity=0,
+            write_output=False,
         )
         dwelling.initialize()
 

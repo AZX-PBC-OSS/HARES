@@ -68,6 +68,8 @@ def _ochre_fixtures_available() -> bool:
 def _build_simulatable_fleet(n: int = 1):
     """Build a fleet from real OCHRE fixtures that can actually simulate."""
     PyFleet, DwellingConfig = _pyfleet_class()
+    import tempfile
+
     from ochre_next import SimulationConfig
 
     if not _ochre_fixtures_available():
@@ -77,23 +79,34 @@ def _build_simulatable_fleet(n: int = 1):
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
-    configs = [
-        DwellingConfig(
-            hpxml=hpxml, schedule=schedule, weather=weather,
-            config=sim_config, bldg_id=i + 1,
-        )
-        for i in range(n)
-    ]
-    return PyFleet.from_buildings(configs)
+    return PyFleet.from_buildings(
+        [
+            DwellingConfig(
+                hpxml=hpxml, schedule=schedule, weather=weather,
+                config=SimulationConfig(
+                    duration_s=3600,
+                    time_res_s=60,
+                    write_output=True,
+                    output_path=str(Path(tempfile.mkdtemp()) / f"fleet_{i + 1}.csv"),
+                ),
+                bldg_id=i + 1,
+            )
+            for i in range(n)
+        ]
+    )
 
 
 def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
     """Verify from_buildings([DwellingConfig(...)]) constructs a fleet with correct length."""
     PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
-    config = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
+    config = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=1,
+    )
     fleet = PyFleet.from_buildings([config])
 
     assert len(fleet) == 1
@@ -102,10 +115,18 @@ def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
 def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
     """Verify from_buildings with custom sample_weights=[2.0, 1.0]."""
     PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
-    config1 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
-    config2 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=2)
+    config1 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=1,
+    )
+    config2 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=2,
+    )
 
     fleet = PyFleet.from_buildings([config1, config2], sample_weights=[2.0, 1.0])
 
@@ -115,9 +136,14 @@ def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
 def test_from_buildings_raises_on_weight_length_mismatch(tmp_path: Path) -> None:
     """Verify from_buildings raises if sample_weights length != configs length."""
     PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
-    config = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
+    config = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=1,
+    )
 
     with pytest.raises(ValueError, match="sample_weights length"):
         PyFleet.from_buildings([config], sample_weights=[1.0, 2.0])
@@ -132,10 +158,18 @@ def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float
     into the simulation results.
     """
     PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
-    config1 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
-    config2 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=2)
+    config1 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=1,
+    )
+    config2 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=2,
+    )
 
     with pytest.raises(ValueError, match="invalid sample_weight"):
         PyFleet.from_buildings([config1, config2], sample_weights=[1.0, bad_weight])
@@ -152,11 +186,22 @@ def test_from_buildings_empty_list_raises(tmp_path: Path) -> None:
 def test_len_returns_correct_count(tmp_path: Path) -> None:
     """Verify __len__ returns correct count."""
     PyFleet, DwellingConfig = _pyfleet_class()
+    from ochre_next import SimulationConfig
+
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
-    config1 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=1)
-    config2 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=2)
-    config3 = DwellingConfig(hpxml=hpxml, schedule=schedule, weather=weather, bldg_id=3)
+    config1 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=1,
+    )
+    config2 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=2,
+    )
+    config3 = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=SimulationConfig(write_output=False), bldg_id=3,
+    )
 
     fleet = PyFleet.from_buildings([config1, config2, config3])
 
@@ -349,7 +394,7 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     from ochre_next import SimulationConfig
 
     # Use invalid paths to force simulation failure
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
     config = DwellingConfig(
         hpxml="/nonexistent/building.xml",
         schedule="/nonexistent/schedule.csv",
@@ -376,7 +421,7 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
 
     # One valid config, one invalid -- partial failure
     good = DwellingConfig(
@@ -422,7 +467,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, output_verbosity=1)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, output_verbosity=1, write_output=False)
 
     config1 = DwellingConfig(
         hpxml=str(fixture_dir / "base.xml"),

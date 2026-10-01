@@ -1,5 +1,7 @@
 """Diagnostic: trace PV intermediate values to find underproduction root cause."""
 import sys
+import tempfile
+from pathlib import Path
 sys.path.insert(0, 'python')
 import polars as pl
 import pandas as pd
@@ -265,6 +267,8 @@ dw = Dwelling.from_hpxml(
     defaults_path='vendor/HARES/defaults',
     start_time='2021-07-01T12:00:00', duration_s=7200, time_res_s=900,
     output_verbosity=4,
+    write_output=True,
+    output_path=str(Path(tempfile.gettempdir()) / 'hares_diag_pv_trace.csv'),
 )
 dw.initialize()
 dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))

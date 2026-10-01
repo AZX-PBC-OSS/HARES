@@ -15,6 +15,8 @@ tests skip where that optional dependency is absent.
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -113,6 +115,9 @@ def _make_gym_env(action_config: dict[str, list[str]]):
             "start_time": "2019-01-01T00:00:00",
             "duration_s": 600,
             "time_res_s": 60,
+            # The gym env's dict path cannot disable write_output; the recorder
+            # at least lands here instead of the working tree.
+            "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"),
         },
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,

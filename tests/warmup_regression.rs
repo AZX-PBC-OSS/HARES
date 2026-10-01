@@ -197,7 +197,7 @@ mod tests {
 
         // Use 1-hour timesteps so warmup convergence (24 h/day iterations) is fast.
         // A short duration keeps the test lightweight.
-        let mut dwelling = Dwelling::from_hpxml(
+        let mut dwelling = Dwelling::from_hpxml_with_write_output(
             &hpxml,
             &schedule,
             &weather,
@@ -205,6 +205,7 @@ mod tests {
             Duration::hours(1),
             Duration::hours(2),
             None,
+            Some(false),
         )
         .expect("HPXML dwelling must build");
 
