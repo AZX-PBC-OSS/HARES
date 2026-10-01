@@ -33,7 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   check-si-guard:
     name: "SI guard (imperial unit markers)"
@@ -132,7 +132,11 @@ jobs:
         run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-nextest
+      - run: cargo nextest run --workspace --no-fail-fast --profile ci
+      - run: cargo nextest run --workspace --no-fail-fast --profile ci -F dst
+      - run: cargo nextest run --workspace --no-fail-fast --profile ci -F profiling
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F observe
+      - run: cargo nextest run --workspace --release --no-fail-fast --profile ci
       - run: cargo nextest run --workspace --release -F check_invariants --no-fail-fast --profile ci
       - run: cargo nextest run --release --no-fail-fast --profile ci -p hares-equipment
       - uses: actions/upload-artifact@v4
