@@ -679,8 +679,12 @@ fn print_run_repetition(
         let total_secs = summary.step_total.as_secs_f64();
         if total_secs > 0.0 {
             let pct = |d: std::time::Duration| d.as_secs_f64() * 100.0 / total_secs;
+            let hwm_kb = match summary.memory_high_water_kb {
+                Some(kb) => kb.to_string(),
+                None => "unavailable".to_string(),
+            };
             println!(
-                "rep {repetition} profiling: step_total {:.3} s, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {}, hot_path_alloc_violations {}",
+                "rep {repetition} profiling: step_total {:.3} s, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {hwm_kb}, hot_path_alloc_violations {}",
                 total_secs,
                 pct(summary.environment),
                 pct(summary.control),
@@ -693,7 +697,6 @@ fn print_run_repetition(
                 pct(summary.state_snapshot),
                 pct(summary.output),
                 pct(summary.accounting),
-                summary.memory_high_water_kb,
                 summary.hot_path_alloc_violations
             );
         }

@@ -691,8 +691,9 @@ impl PyDwelling {
 
     /// Per-phase wall-clock split of the work done so far, behind the `profiling`
     /// feature (`maturin develop --release --features profiling`). A flat dict of
-    /// seconds plus the memory high-water mark; zero-valued when the feature is
-    /// compiled out (with a `note` key saying so). Goes through the crate's own
+    /// seconds plus the memory high-water mark (`None` when no measurement is
+    /// available, including when the feature is compiled out, with a `note` key
+    /// saying so). Goes through the crate's own
     /// acquire discipline: a fatal-error dwelling refuses, and lock poison surfaces as
     /// the same error type every other method raises.
     pub fn profiling_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -736,7 +737,7 @@ impl PyDwelling {
             d.set_item("output_s", 0.0)?;
             d.set_item("accounting_s", 0.0)?;
             d.set_item("step_total_s", 0.0)?;
-            d.set_item("memory_high_water_kb", 0)?;
+            d.set_item("memory_high_water_kb", py.None())?;
             d.set_item("hot_path_alloc_violations", 0)?;
         }
         Ok(d.into())

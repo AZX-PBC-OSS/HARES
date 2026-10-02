@@ -2106,21 +2106,47 @@ pub(crate) fn build_synthetic_schedule(
     })
 }
 
+/// Reads the process's peak resident set size in KiB (`VmHWM` from
+/// `/proc/self/status`). `None` off Linux. On Linux, a read or parse failure
+/// is logged with `tracing::warn!` naming the error and yields `None`,
+/// never a zero, which would read as a measurement.
 #[cfg(feature = "profiling")]
-pub(crate) fn current_process_hwm_kb() -> u64 {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return 0;
-    };
-
-    status
-        .lines()
-        .find_map(|line| {
-            if !line.starts_with("VmHWM:") {
-                return None;
+pub(crate) fn current_process_hwm_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        match process_vm_hwm_kb() {
+            Ok(kb) => Some(kb),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "could not read the process memory high-water mark; profiling reports no measurement",
+                );
+                None
             }
-            line.split_whitespace().nth(1)?.parse::<u64>().ok()
-        })
-        .unwrap_or(0)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Parses `VmHWM` out of `/proc/self/status`.
+#[cfg(all(feature = "profiling", target_os = "linux"))]
+fn process_vm_hwm_kb() -> std::result::Result<u64, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("could not read /proc/self/status: {error}"))?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .ok_or("VmHWM line missing from /proc/self/status")?;
+    let value = line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("VmHWM line carries no value")?;
+    value
+        .parse::<u64>()
+        .map_err(|error| format!("could not parse the VmHWM value `{value}` as KiB: {error}"))
 }
 
 #[cfg(feature = "profiling")]

@@ -91,3 +91,41 @@ fn profiling_phases_partition_the_step() {
         "the eleven phase fields must partition step_total exactly after 96 steps"
     );
 }
+
+/// Reads `VmHWM` (KiB) straight from the test process's `/proc/self/status`.
+#[cfg(target_os = "linux")]
+fn vm_hwm_kb_now() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("VmHWM:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+}
+
+/// The high-water mark is read once per summary, not per step: after 96 steps
+/// it must be a real measurement (`Some`, `> 0`) no greater than the
+/// process's `VmHWM` read immediately afterwards (the peak can only grow).
+#[test]
+#[cfg(target_os = "linux")]
+fn profiling_summary_reports_process_high_water_mark() {
+    let mut dwelling = load_cz2a_fixture();
+    for _ in 0..96 {
+        dwelling.step().expect("cz2a fixture step must succeed");
+    }
+
+    let summary = dwelling.profiling_summary();
+    let kb = summary
+        .memory_high_water_kb
+        .expect("the summary must carry a high-water mark on Linux");
+    assert!(kb > 0, "the high-water mark must be a measurement, never 0");
+
+    let later = vm_hwm_kb_now().expect("a VmHWM read must succeed in the test process");
+    assert!(
+        kb <= later,
+        "the summary's high-water mark {kb} KiB must not exceed the later VmHWM read {later} KiB"
+    );
+}

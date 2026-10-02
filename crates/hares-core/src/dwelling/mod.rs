@@ -240,7 +240,9 @@ struct StageSnapshot {
 /// step exactly: each phase is the sum of spans closed by `Instant::now()`
 /// readings taken at the step's phase boundaries, so their sum equals
 /// `step_total` (no residual). Like every field, they accumulate over the
-/// run's steps.
+/// run's steps. `memory_high_water_kb` is the one exception: it is read
+/// from the process once, when `profiling_summary()` is called, so the
+/// per-step work pays for no `/proc` reads.
 #[cfg(feature = "profiling")]
 #[derive(Debug, Clone, Default)]
 pub struct DwellingProfilingSummary {
@@ -256,7 +258,10 @@ pub struct DwellingProfilingSummary {
     pub output: StdDuration,
     pub accounting: StdDuration,
     pub step_total: StdDuration,
-    pub memory_high_water_kb: u64,
+    /// The process's peak resident set size in KiB, read once when
+    /// `profiling_summary()` is called. `None` off Linux, or when the read
+    /// or parse fails there: never a zero that would read as a measurement.
+    pub memory_high_water_kb: Option<u64>,
     pub hot_path_alloc_violations: u64,
 }
 
@@ -4631,7 +4636,12 @@ impl Dwelling {
     #[cfg(feature = "profiling")]
     #[must_use]
     pub fn profiling_summary(&self) -> DwellingProfilingSummary {
-        self.profiling.clone()
+        let mut summary = self.profiling.clone();
+        // The one field not accumulated per step: the peak resident size is
+        // monotone, so a single read at summary time adds nothing to per-step
+        // reads and the per-step work pays for no /proc parsing.
+        summary.memory_high_water_kb = current_process_hwm_kb();
+        summary
     }
 
     /// Enables the step observer with a ring buffer of the given capacity.
@@ -5896,13 +5906,6 @@ impl Dwelling {
             &mut self.warnings,
             &mut self.health.rejected_control_signals,
         );
-        #[cfg(feature = "profiling")]
-        {
-            self.profiling.memory_high_water_kb = self
-                .profiling
-                .memory_high_water_kb
-                .max(current_process_hwm_kb());
-        }
 
         // Step 2b: collect and dispatch derived control signals from equipment
         // that translate one signal into others (e.g. ProtocolBridge converting
@@ -6266,14 +6269,6 @@ impl Dwelling {
             });
         }
 
-        #[cfg(feature = "profiling")]
-        {
-            self.profiling.memory_high_water_kb = self
-                .profiling
-                .memory_high_water_kb
-                .max(current_process_hwm_kb());
-        }
-
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
         // computes effective sensible/latent effectiveness accounting for bypass
@@ -6466,13 +6461,7 @@ impl Dwelling {
         // End of the `envelope` phase (Step 4 and its diagnostic capture);
         // the always-on invariant checks and `check_invariants` follow.
         #[cfg(feature = "profiling")]
-        {
-            phase_clock.enter(&mut self.profiling, ProfilePhase::Invariants);
-            self.profiling.memory_high_water_kb = self
-                .profiling
-                .memory_high_water_kb
-                .max(current_process_hwm_kb());
-        }
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Invariants);
 
         // Always-on invariant checks — unconditional in all build configurations.
         // These catch unrecoverable data corruption (NaN/Inf) in the two domains
@@ -6792,13 +6781,7 @@ impl Dwelling {
         }
         // End of the `output` phase (Step 5).
         #[cfg(feature = "profiling")]
-        {
-            phase_clock.enter(&mut self.profiling, ProfilePhase::Accounting);
-            self.profiling.memory_high_water_kb = self
-                .profiling
-                .memory_high_water_kb
-                .max(current_process_hwm_kb());
-        }
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Accounting);
         #[cfg(feature = "profiling")]
         {
             let alloc_after = hot_path_alloc_counter();
