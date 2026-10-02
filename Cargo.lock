@@ -817,6 +817,7 @@ dependencies = [
  "hares-fleet",
  "hares-io",
  "hares-tariff",
+ "hares-types",
  "parquet",
  "serde",
  "serde_json",

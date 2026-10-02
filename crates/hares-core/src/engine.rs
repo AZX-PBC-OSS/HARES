@@ -387,7 +387,8 @@ fn emit_dwelling_profiling_summary(summary: &DwellingProfilingSummary) {
     tracing::info!(
         step_total_s = summary.step_total.as_secs_f64(),
         memory_high_water_kb = ?summary.memory_high_water_kb,
-        hot_path_alloc_violations = summary.hot_path_alloc_violations,
+        hot_path_allocations = ?summary.hot_path_allocations,
+        hot_path_alloc_violations = ?summary.hot_path_alloc_violations,
         "profiling stats"
     );
 }

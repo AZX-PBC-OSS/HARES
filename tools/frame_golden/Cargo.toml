@@ -11,6 +11,7 @@ profiling = ["hares-core/profiling"]
 
 [dependencies]
 hares-core = { workspace = true }
+hares-types = { workspace = true }
 hares-fleet = { workspace = true }
 hares-io = { workspace = true }
 hares-tariff = { workspace = true }

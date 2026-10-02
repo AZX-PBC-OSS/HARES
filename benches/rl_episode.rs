@@ -1,40 +1,26 @@
 mod common;
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hares_core::Dwelling;
+use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 use rayon::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Allocation tracking
 // ---------------------------------------------------------------------------
-// Benchmarks instrument allocations via a global allocator wrapper.
-// Snapshot before / after each iter_custom measurement to compute
-// per-episode allocation counts reported alongside wall-clock timing.
+// The bench installs the workspace's shared per-thread counting allocator.
+// The parallel groups time uncounted; per-episode allocation counts come
+// from the sequential counting pass in `bench_episode_vec`, which runs on
+// the bench thread outside the timed loop and says so in its label.
 
 #[global_allocator]
-static GLOBAL: TrackingAllocator = TrackingAllocator;
-
-static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
-
-struct TrackingAllocator;
-
-unsafe impl GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn alloc_snapshot() -> u64 {
-    ALLOC_COUNT.load(Ordering::Relaxed)
+    thread_allocations().expect("the bench installs the counting allocator")
 }
 
 // ---------------------------------------------------------------------------
@@ -272,18 +258,42 @@ fn bench_episode_vec(c: &mut Criterion) {
         group.warm_up_time(Duration::from_secs(if is_large { 10 } else { 3 }));
         group.measurement_time(Duration::from_secs(if is_large { 30 } else { 10 }));
 
+        // Per-thread counting cannot see allocations on rayon worker
+        // threads, so the allocations-per-episode figure comes from a
+        // separate counting pass that steps the same dwellings sequentially
+        // with `iter_mut()` on the bench thread, outside the timed loop.
+        // The timed loop below stays parallel and uncounted.
+        let num_steps: usize = if duration_s == 86_400 {
+            EPISODE_96
+        } else {
+            EPISODE_8760
+        };
+        let allocs_per_episode = {
+            let before_alloc = alloc_snapshot();
+            let mut dwellings: Vec<Dwelling> = (0..num_dwellings)
+                .map(|_| make_dwelling(duration_s, time_res_s))
+                .collect();
+            for _ in 0..num_steps {
+                dwellings.iter_mut().for_each(|dwelling| {
+                    dwelling.step().expect("step");
+                });
+            }
+            for dwelling in &dwellings {
+                let t = dwelling.telemetry().unwrap();
+                black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+            }
+            alloc_snapshot().saturating_sub(before_alloc)
+        };
+        eprintln!(
+            "rl_episode/episode_vec/{label}: ~{allocs_per_episode} allocs/episode (counted on the sequential pass outside the timed loop)"
+        );
+
         group.bench_with_input(
             BenchmarkId::new("full_episode", label),
             &label,
             |b, _label| {
                 b.iter_custom(|iters| {
-                    let before_alloc = alloc_snapshot();
                     let start = std::time::Instant::now();
-                    let num_steps: usize = if duration_s == 86_400 {
-                        EPISODE_96
-                    } else {
-                        EPISODE_8760
-                    };
                     for _ in 0..iters {
                         let mut dwellings: Vec<Dwelling> = (0..num_dwellings)
                             .map(|_| make_dwelling(duration_s, time_res_s))
@@ -298,13 +308,7 @@ fn bench_episode_vec(c: &mut Criterion) {
                             black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                         }
                     }
-                    let elapsed = start.elapsed();
-                    let after_alloc = alloc_snapshot();
-                    let allocs_per_episode = (after_alloc.saturating_sub(before_alloc)) / iters;
-                    eprintln!(
-                        "rl_episode/episode_vec/{label}: ~{allocs_per_episode} allocs/episode"
-                    );
-                    elapsed
+                    start.elapsed()
                 });
             },
         );

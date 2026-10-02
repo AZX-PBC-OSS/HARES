@@ -112,13 +112,15 @@ use conversions::{
     merged_equipment_config, required_datetime, required_duration, required_path,
     validate_equipment_override_keys, validate_sim_config,
 };
+#[cfg(feature = "profiling")]
+use hares_types::alloc_count::thread_allocations;
 use solver_builder::build_default_solvers;
+#[cfg(feature = "profiling")]
+use synthetic::current_process_hwm_kb;
 use synthetic::{
     SyntheticTomlConfig, build_synthetic_building, build_synthetic_schedule,
     build_synthetic_weather,
 };
-#[cfg(feature = "profiling")]
-use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
@@ -242,7 +244,9 @@ struct StageSnapshot {
 /// `step_total` (no residual). Like every field, they accumulate over the
 /// run's steps. `memory_high_water_kb` is the one exception: it is read
 /// from the process once, when `profiling_summary()` is called, so the
-/// per-step work pays for no `/proc` reads.
+/// per-step work pays for no `/proc` reads. The hot-path allocation fields
+/// are `None` unless the binary installed the workspace's counting
+/// allocator.
 #[cfg(feature = "profiling")]
 #[derive(Debug, Clone, Default)]
 pub struct DwellingProfilingSummary {
@@ -262,7 +266,13 @@ pub struct DwellingProfilingSummary {
     /// `profiling_summary()` is called. `None` off Linux, or when the read
     /// or parse fails there: never a zero that would read as a measurement.
     pub memory_high_water_kb: Option<u64>,
-    pub hot_path_alloc_violations: u64,
+    /// Sum over the run's steps of the hot path's per-step allocation
+    /// deltas, counted on the stepping thread. `None` when the binary did
+    /// not install `hares_types::alloc_count::CountingAllocator`.
+    pub hot_path_allocations: Option<u64>,
+    /// Steps whose hot path allocated at least once. `None` when the
+    /// binary did not install `hares_types::alloc_count::CountingAllocator`.
+    pub hot_path_alloc_violations: Option<u64>,
 }
 
 /// The phases of `run_timestep`, named only by the step's phase clock.
@@ -5560,7 +5570,7 @@ impl Dwelling {
         }
 
         #[cfg(feature = "profiling")]
-        let alloc_before = hot_path_alloc_counter();
+        let alloc_before = thread_allocations();
 
         #[cfg(feature = "observe")]
         let mut obs_phases = PhaseSnapshots::default();
@@ -6784,12 +6794,18 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::Accounting);
         #[cfg(feature = "profiling")]
         {
-            let alloc_after = hot_path_alloc_counter();
-            if alloc_after > alloc_before {
-                self.profiling.hot_path_alloc_violations += 1;
-                debug_assert_eq!(
-                    alloc_after, alloc_before,
-                    "hot-path allocation detected during timestep"
+            let alloc_after = thread_allocations();
+            if let (Some(before), Some(after)) = (alloc_before, alloc_after) {
+                // The counter only ever grows, so the delta is the step's
+                // allocation count. Without the counting allocator both
+                // reads are `None` and no field is touched. A violating
+                // step is counted and reported, never asserted: steps
+                // allocate today.
+                let delta = after.saturating_sub(before);
+                self.profiling.hot_path_allocations =
+                    Some(self.profiling.hot_path_allocations.unwrap_or(0) + delta);
+                self.profiling.hot_path_alloc_violations = Some(
+                    self.profiling.hot_path_alloc_violations.unwrap_or(0) + u64::from(delta > 0),
                 );
             }
         }

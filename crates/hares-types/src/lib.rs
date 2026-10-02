@@ -4,6 +4,7 @@
 //! types that multiple sibling crates need without introducing circular deps:
 //! port contributions, environment state, control signals, equipment descriptors.
 
+pub mod alloc_count;
 pub mod control_signal;
 pub mod domain_solver;
 pub mod environment;

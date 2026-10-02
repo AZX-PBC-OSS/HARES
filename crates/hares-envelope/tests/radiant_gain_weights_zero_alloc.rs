@@ -11,9 +11,7 @@
 //! This file must be a separate test binary because `#[global_allocator]`
 //! applies to the whole binary and would interfere with other tests.
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
@@ -21,6 +19,7 @@ use hares_envelope::{
     FilmCoefficientModel, InteriorLwrZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
     OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
+use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 use hares_types::{
     DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
     THERMAL_CATEGORY_COUNT, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -28,21 +27,9 @@ use hares_types::{
 use nalgebra::DMatrix;
 
 // ---------------------------------------------------------------------------
-// Counting allocator
+// Counting allocator: the workspace-shared per-thread counter, installed for
+// this test binary.
 // ---------------------------------------------------------------------------
-
-struct CountingAllocator;
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
 
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
@@ -262,14 +249,16 @@ fn radiant_gain_weight_distribution_zero_allocations() {
     // Warm-up: let any lazy initialization in the solver fire.
     solver.resolve(&ports, &env, Duration::from_secs(60), &mut out);
 
-    // Reset counter and measure the hot loop.
-    ALLOC_COUNT.store(0, Ordering::SeqCst);
+    // The per-thread counter cannot be reset, so the hot loop is counted as
+    // a delta between two reads on this thread.
+    let before = thread_allocations().expect("the test installs the counting allocator");
 
     for _ in 0..100 {
         solver.resolve(&ports, &env, Duration::from_secs(60), &mut out);
     }
 
-    let allocs = ALLOC_COUNT.load(Ordering::SeqCst);
+    let after = thread_allocations().expect("the test installs the counting allocator");
+    let allocs = after - before;
     assert!(
         allocs <= 1100,
         "ThermalSolver::resolve allocated {allocs} times during 100 steps with radiant gains; \

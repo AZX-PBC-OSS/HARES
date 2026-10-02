@@ -683,8 +683,16 @@ fn print_run_repetition(
                 Some(kb) => kb.to_string(),
                 None => "unavailable".to_string(),
             };
+            let allocs = match summary.hot_path_allocations {
+                Some(count) => count.to_string(),
+                None => "unavailable".to_string(),
+            };
+            let violations = match summary.hot_path_alloc_violations {
+                Some(count) => count.to_string(),
+                None => "unavailable".to_string(),
+            };
             println!(
-                "rep {repetition} profiling: step_total {:.3} s, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {hwm_kb}, hot_path_alloc_violations {}",
+                "rep {repetition} profiling: step_total {:.3} s, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {hwm_kb}, hot_path_allocations {allocs}, hot_path_alloc_violations {violations}",
                 total_secs,
                 pct(summary.environment),
                 pct(summary.control),
@@ -696,8 +704,7 @@ fn print_run_repetition(
                 pct(summary.invariants),
                 pct(summary.state_snapshot),
                 pct(summary.output),
-                pct(summary.accounting),
-                summary.hot_path_alloc_violations
+                pct(summary.accounting)
             );
         }
     }

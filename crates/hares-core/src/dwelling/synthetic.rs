@@ -2149,11 +2149,6 @@ fn process_vm_hwm_kb() -> std::result::Result<u64, String> {
         .map_err(|error| format!("could not parse the VmHWM value `{value}` as KiB: {error}"))
 }
 
-#[cfg(feature = "profiling")]
-pub(crate) fn hot_path_alloc_counter() -> u64 {
-    0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
