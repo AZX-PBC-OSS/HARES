@@ -14,7 +14,7 @@ bldg_id = 2
 hpxml = "tests/fixtures/resstock/2025.1/bldg0000002/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"
-initialization_duration_s = 0
+initialization_duration_s = 604800
 overrides = {}
 
 [[home]]
@@ -22,7 +22,7 @@ bldg_id = 4
 hpxml = "tests/fixtures/resstock/2025.1/bldg0000004/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0000004/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G4803030_2018.csv"
-initialization_duration_s = 0
+initialization_duration_s = 604800
 overrides = {}
 
 [[home]]
@@ -30,5 +30,5 @@ bldg_id = 176227
 hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"
-initialization_duration_s = 0
+initialization_duration_s = 604800
 overrides = {}

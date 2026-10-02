@@ -46,6 +46,13 @@ pub struct HomeEntry {
     pub hpxml: String,
     pub schedule: String,
     pub weather: String,
+    /// Warm-up setting: `0` runs no warm-up and a positive value runs the
+    /// engine's converging warm-up: the rule the Python binding applies
+    /// (`crates/hares-python/src/py_dwelling.rs`: zero maps to
+    /// `initialization_duration: None`, a positive value to `Some`). The
+    /// engine ignores the value's magnitude: any positive setting runs the
+    /// same fixed convergence loop, so the number of warm-up days is not
+    /// chosen here.
     pub initialization_duration_s: u64,
     pub overrides: serde_json::Value,
 }

@@ -15,5 +15,5 @@ bldg_id = 1
 hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
-initialization_duration_s = 0
+initialization_duration_s = 604800
 overrides = {}

@@ -120,6 +120,19 @@ fn apply_duration_override(
     Ok(())
 }
 
+/// The manifest's warm-up setting as `DwellingConfig` wants it: `0` maps
+/// to `None` (no warm-up) and a positive value to `Some`, the same rule
+/// the Python binding applies (`crates/hares-python/src/py_dwelling.rs`).
+/// The engine runs its converging warm-up for any `Some`, ignoring the
+/// value's magnitude.
+fn initialization_duration(secs: u64) -> Option<StdDuration> {
+    if secs == 0 {
+        None
+    } else {
+        Some(StdDuration::from_secs(secs))
+    }
+}
+
 /// Runs the manifest: a single dwelling, or a fleet on a single-thread pool.
 pub fn run(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     match req.manifest.kind {
@@ -171,7 +184,7 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         sim_config: sim.clone(),
         overrides: Some(home.overrides.clone()),
         bldg_id: home.bldg_id,
-        initialization_duration: Some(StdDuration::from_secs(home.initialization_duration_s)),
+        initialization_duration: initialization_duration(home.initialization_duration_s),
         resample_overrides: None,
         patches: None,
     };
@@ -271,9 +284,7 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
                 sim_config: sim,
                 overrides: Some(home.overrides.clone()),
                 bldg_id: home.bldg_id,
-                initialization_duration: Some(StdDuration::from_secs(
-                    home.initialization_duration_s,
-                )),
+                initialization_duration: initialization_duration(home.initialization_duration_s),
                 resample_overrides: None,
                 patches: None,
             }

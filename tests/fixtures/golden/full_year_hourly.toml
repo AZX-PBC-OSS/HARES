@@ -14,5 +14,5 @@ bldg_id = 1
 hpxml = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml"
 schedule = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/schedule.csv"
 weather = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/weather.epw"
-initialization_duration_s = 0
+initialization_duration_s = 604800
 overrides = {}
