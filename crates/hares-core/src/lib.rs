@@ -32,6 +32,8 @@ pub use dwelling::{
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
+#[cfg(feature = "profiling")]
+pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
 pub use rng::derive_dwelling_rng;

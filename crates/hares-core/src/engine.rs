@@ -391,6 +391,17 @@ fn emit_dwelling_profiling_summary(summary: &DwellingProfilingSummary) {
         hot_path_alloc_violations = ?summary.hot_path_alloc_violations,
         "profiling stats"
     );
+    // Per-actor run totals (one entry per registered actor, registration
+    // order): each actor's share of the `actors` phase and its decide()
+    // call count.
+    for timing in &summary.per_actor {
+        tracing::info!(
+            actor = %timing.name,
+            total_s = timing.total.as_secs_f64(),
+            calls = timing.calls,
+            "per-actor timing"
+        );
+    }
 }
 
 fn validate_input_paths(config: &DwellingConfig) -> Result<(), HaresError> {

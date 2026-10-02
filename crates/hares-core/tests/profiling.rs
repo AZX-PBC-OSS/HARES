@@ -13,8 +13,10 @@ use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use chrono::Duration;
-use hares_core::{Dwelling, DwellingConfig};
+use hares_control::DispatchRequest;
+use hares_core::{Actor, Dwelling, DwellingConfig};
 use hares_io::SimulationConfig;
+use hares_types::EnvironmentState;
 
 /// Loads the cz2a fixture at hourly resolution for 96 steps.
 fn load_cz2a_fixture() -> Dwelling {
@@ -89,6 +91,78 @@ fn profiling_phases_partition_the_step() {
     assert_eq!(
         phase_sum, summary.step_total,
         "the eleven phase fields must partition step_total exactly after 96 steps"
+    );
+}
+
+/// A probe actor that declares no interests (the filter calls `decide()`
+/// every step) and dispatches nothing.
+struct ProbeActor {
+    name: &'static str,
+}
+
+impl Actor for ProbeActor {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
+}
+
+/// Per-actor totals accumulate over the run, not per step, and sum exactly
+/// to the `actors` phase: each entry's total is the same phase-clock
+/// `Instant` difference the phase gets (`Duration` equality, no tolerance,
+/// no timing dependence). The assertions name the two probe entries rather
+/// than count the list, because `auto_register_actors` may register
+/// built-in actors first.
+#[test]
+fn actor_timings_accumulate_over_the_run() {
+    let mut dwelling = load_cz2a_fixture();
+    dwelling
+        .add_actor(Box::new(ProbeActor { name: "probe_a" }))
+        .expect("probe_a must register");
+    dwelling
+        .add_actor(Box::new(ProbeActor { name: "probe_b" }))
+        .expect("probe_b must register");
+    for _ in 0..96 {
+        dwelling.step().expect("cz2a fixture step must succeed");
+    }
+
+    let summary = dwelling.profiling_summary();
+    let position = |name: &str| {
+        summary
+            .per_actor
+            .iter()
+            .position(|timing| timing.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("per_actor must hold a '{name}' entry"))
+    };
+    let probe_a = position("probe_a");
+    let probe_b = position("probe_b");
+    assert!(
+        probe_a < probe_b,
+        "probe_a must be listed before probe_b (registration order): {:?}",
+        summary.per_actor
+    );
+
+    let timing = |name: &str| {
+        let entry = &summary.per_actor[position(name)];
+        assert_eq!(
+            entry.calls, 96,
+            "'{name}' declares no interests, so the filter must call decide() every step"
+        );
+        entry.total
+    };
+    let probe_a_total = timing("probe_a");
+    let probe_b_total = timing("probe_b");
+    assert!(
+        probe_a_total > StdDuration::ZERO || probe_b_total > StdDuration::ZERO,
+        "the probes' decide() must take measurable time across 96 steps"
+    );
+
+    let per_actor_sum: StdDuration = summary.per_actor.iter().map(|t| t.total).sum();
+    assert_eq!(
+        per_actor_sum, summary.actors,
+        "the per-actor totals must sum to the actors phase exactly: both are \
+         differences of the same phase-clock Instant readings"
     );
 }
 

@@ -1,5 +1,10 @@
 //! Run-level health totals for a dwelling.
 
+#[cfg(feature = "profiling")]
+use std::sync::Arc;
+#[cfg(feature = "profiling")]
+use std::time::Duration as StdDuration;
+
 use serde::{Deserialize, Serialize};
 
 use hares_types::ZoneId;
@@ -37,6 +42,74 @@ impl Default for RunHealth {
             curve_index_clamps: 0,
             warmup: WarmupOutcome::Disabled,
         }
+    }
+}
+
+/// One registered actor's run-total scheduler-entry time, behind the
+/// `profiling` feature: `total` is the actor's share of the run's `actors`
+/// phase (the interest filter, `decide()` and the health check, measured by
+/// the same phase-clock readings that accumulate the phase), `calls` the
+/// number of `decide()` invocations the interest filter made.
+#[cfg(feature = "profiling")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorTiming {
+    pub name: Arc<str>,
+    pub total: StdDuration,
+    pub calls: u64,
+}
+
+/// Run-total per-actor timing store behind the `profiling` feature: one slot
+/// per registered actor, in registration order, accumulated in place across
+/// the run's steps and never reset per step (like [`RunHealth`]). Opaque by
+/// contract (`plan.md` §2.9): the slots are private, `record` mutates them,
+/// and the profiling summary reads them through [`Self::timings`].
+#[cfg(feature = "profiling")]
+#[derive(Debug, Default)]
+pub struct ActorTimings {
+    slots: Vec<ActorTiming>,
+}
+
+#[cfg(feature = "profiling")]
+impl ActorTimings {
+    /// One zeroed slot per name, in iteration order. Runs at actor
+    /// registration (off the hot path), so the allocation is fine.
+    pub fn new(names: impl IntoIterator<Item = Arc<str>>) -> Self {
+        Self {
+            slots: names
+                .into_iter()
+                .map(|name| ActorTiming {
+                    name,
+                    total: StdDuration::ZERO,
+                    calls: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// Adds `elapsed` to the slot's total in place and, when `called`,
+    /// counts one `decide()` invocation. The accumulation allocates nothing:
+    /// the scheduler calls this once per plan entry per step. An
+    /// out-of-range slot has no actor (the actor list changed without the
+    /// store being rebuilt, which the registration paths prevent) and is
+    /// ignored in release builds.
+    pub fn record(&mut self, slot: usize, elapsed: StdDuration, called: bool) {
+        debug_assert!(
+            slot < self.slots.len(),
+            "actor timing slot {slot} out of range ({} slots)",
+            self.slots.len()
+        );
+        if let Some(entry) = self.slots.get_mut(slot) {
+            entry.total += elapsed;
+            if called {
+                entry.calls += 1;
+            }
+        }
+    }
+
+    /// The run's per-actor totals, one entry per registered actor in
+    /// registration order.
+    pub fn timings(&self) -> &[ActorTiming] {
+        &self.slots
     }
 }
 

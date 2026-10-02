@@ -37,12 +37,27 @@ class SteppableBuildError(TypedDict):
     bldg_id: int
     error: str
 
+class ActorTimingSummary(TypedDict):
+    """One registered actor's run-total scheduler-entry time.
+
+    ``total_s`` is the actor's share of the summary's ``actors_s`` phase
+    (the interest filter, ``decide()`` and the health check), ``calls`` the
+    number of ``decide()`` invocations the interest filter made. Entries
+    appear in registration order.
+    """
+
+    name: str
+    total_s: float
+    calls: int
+
 class ProfilingSummary(TypedDict):
     """Per-phase wall-clock split returned by ``Dwelling.profiling_summary()``.
 
-    Seconds per phase, plus the process memory high-water mark and the
+    Seconds per phase, plus the process memory high-water mark, the
     hot-path allocation counters (each ``None`` when no measurement is
-    available: the extension does not install the counting allocator).
+    available: the extension does not install the counting allocator), and
+    ``per_actor``: the run's per-actor totals, one entry per registered
+    actor in registration order.
     """
 
     environment_s: float
@@ -60,6 +75,7 @@ class ProfilingSummary(TypedDict):
     memory_high_water_kb: int | None
     hot_path_allocations: int | None
     hot_path_alloc_violations: int | None
+    per_actor: list[ActorTimingSummary]
 
 # ---------------------------------------------------------------------------
 # Enums

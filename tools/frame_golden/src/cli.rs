@@ -706,6 +706,17 @@ fn print_run_repetition(
                 pct(summary.output),
                 pct(summary.accounting)
             );
+            // Per-actor run totals, one line per registered actor in
+            // registration order: the actor's share of the `actors` phase
+            // and its decide() call count.
+            for timing in &summary.per_actor {
+                println!(
+                    "rep {repetition} actor: {} total {:.3} s, calls {}",
+                    timing.name,
+                    timing.total.as_secs_f64(),
+                    timing.calls
+                );
+            }
         }
     }
     let _ = std::io::stdout().flush();

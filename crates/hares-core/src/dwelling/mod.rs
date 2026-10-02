@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
-#[cfg(any(feature = "profiling", feature = "actor_profiling"))]
+#[cfg(feature = "profiling")]
 use std::time::Instant;
 
 use arrow::datatypes::{Field, Schema};
@@ -86,6 +86,8 @@ use crate::checkpoint::{
 };
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
+#[cfg(feature = "profiling")]
+use crate::health::{ActorTiming, ActorTimings};
 use crate::health::{RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
@@ -246,7 +248,10 @@ struct StageSnapshot {
 /// from the process once, when `profiling_summary()` is called, so the
 /// per-step work pays for no `/proc` reads. The hot-path allocation fields
 /// are `None` unless the binary installed the workspace's counting
-/// allocator.
+/// allocator. `per_actor` is not a twelfth phase: it is the run-total
+/// breakdown *within* the `actors` phase, one entry per registered actor
+/// in registration order, whose totals sum to that phase exactly because
+/// each entry's span is the same phase-clock difference the phase gets.
 #[cfg(feature = "profiling")]
 #[derive(Debug, Clone, Default)]
 pub struct DwellingProfilingSummary {
@@ -273,12 +278,16 @@ pub struct DwellingProfilingSummary {
     /// Steps whose hot path allocated at least once. `None` when the
     /// binary did not install `hares_types::alloc_count::CountingAllocator`.
     pub hot_path_alloc_violations: Option<u64>,
+    /// Per-actor totals over the run (`health::ActorTiming`): one entry per
+    /// registered actor in registration order, filled from the dwelling's
+    /// `ActorTimings` store when `profiling_summary()` is called.
+    pub per_actor: Vec<ActorTiming>,
 }
 
 /// The phases of `run_timestep`, named only by the step's phase clock.
 /// Declaration order is the spans' code order in `run_timestep`.
 #[cfg(feature = "profiling")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfilePhase {
     Environment,
     Control,
@@ -318,13 +327,21 @@ impl DwellingProfilingSummary {
 /// One phase clock per step: `Instant::now()` is read once at entry and once
 /// at each phase boundary, and each reading closes the open span into its
 /// phase and opens the next, so the phases partition the step exactly with
-/// no residual. A step that returns early (failed invariant, unhealthy
-/// actor) records nothing for that step.
+/// no residual. A step that returns early (a failed invariant) records
+/// nothing for that step; an unhealthy actor is logged and the step
+/// continues.
 #[cfg(feature = "profiling")]
 struct PhaseClock {
     started: Instant,
     open: Instant,
     phase: ProfilePhase,
+    /// The actor slot whose `Actors` span is currently open, with whether
+    /// the interest filter called its `decide()` so far. `None` when the
+    /// open span is not an `Actors` span. The flag is what keeps the
+    /// per-actor totals summing to the `actors` phase exactly: the closed
+    /// span is one `Instant` difference routed to both the phase and the
+    /// slot.
+    open_actor: Option<(usize, bool)>,
 }
 
 #[cfg(feature = "profiling")]
@@ -335,6 +352,7 @@ impl PhaseClock {
             started: now,
             open: now,
             phase: ProfilePhase::Environment,
+            open_actor: None,
         }
     }
 
@@ -346,12 +364,55 @@ impl PhaseClock {
         self.phase = next;
     }
 
+    /// Scheduler-loop variant of [`Self::enter`]: closes the open span into
+    /// its phase, routing an `Actors` span to its actor's slot in
+    /// `timings`, then opens `next`. `actor_slot` is `Some` only for an
+    /// `ActorDecide` entry, whose span is the actor's scheduler-entry time
+    /// (interest filter, `decide()` and health check included: the whole
+    /// span the phase clock attributes to `actors`).
+    fn enter_plan_entry(
+        &mut self,
+        profiling: &mut DwellingProfilingSummary,
+        timings: &mut ActorTimings,
+        next: ProfilePhase,
+        actor_slot: Option<usize>,
+    ) {
+        let now = Instant::now();
+        let span = now - self.open;
+        profiling.add_span(self.phase, span);
+        self.route_closed_actor_span(timings, span);
+        self.open = now;
+        self.phase = next;
+        self.open_actor = actor_slot.map(|slot| (slot, false));
+    }
+
+    /// Records that the open `Actors` span's filter called `decide()`. Must
+    /// run inside the plan entry whose span is open.
+    fn mark_open_actor_called(&mut self) {
+        if let Some((_, called)) = &mut self.open_actor {
+            *called = true;
+        }
+    }
+
     /// Closes the final span at return and accumulates `step_total` (entry
-    /// to return) over the run.
+    /// to return) over the run. The open phase here is always `accounting`
+    /// (the last `enter` before return opens it and nothing intervenes), so
+    /// no actor span is routed.
     fn finish(self, profiling: &mut DwellingProfilingSummary) {
         let now = Instant::now();
         profiling.add_span(self.phase, now - self.open);
         profiling.step_total += now - self.started;
+    }
+
+    /// Routes a just-closed span to its actor's slot when it is an `Actors`
+    /// span. The same `Instant` difference already went to the phase, so
+    /// the per-actor totals sum to the `actors` phase exactly.
+    fn route_closed_actor_span(&self, timings: &mut ActorTimings, span: StdDuration) {
+        if self.phase == ProfilePhase::Actors
+            && let Some((slot, called)) = self.open_actor
+        {
+            timings.record(slot, span, called);
+        }
     }
 }
 
@@ -1835,10 +1896,11 @@ pub struct Dwelling {
     diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
-    #[cfg(feature = "actor_profiling")]
-    per_actor_timing: Vec<(usize, StdDuration)>,
-    #[cfg(feature = "actor_profiling")]
-    actor_name_cache: Vec<String>,
+    /// Run-total per-actor scheduler-entry timings (one slot per registered
+    /// actor, rebuilt by `refresh_equipment_caches` with the actor list);
+    /// read once by `profiling_summary()`, never cleared per step.
+    #[cfg(feature = "profiling")]
+    actor_timings: ActorTimings,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
     /// Accumulates per-step data for post-hoc diagnostic checks (unmet hours,
@@ -2839,10 +2901,8 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         diagnostic_writer: None,
         #[cfg(feature = "profiling")]
         profiling: DwellingProfilingSummary::default(),
-        #[cfg(feature = "actor_profiling")]
-        per_actor_timing: Vec::new(),
-        #[cfg(feature = "actor_profiling")]
-        actor_name_cache: Vec::new(),
+        #[cfg(feature = "profiling")]
+        actor_timings: ActorTimings::default(),
         #[cfg(feature = "observe")]
         observer_buf: None,
         #[cfg(feature = "observe")]
@@ -3211,8 +3271,6 @@ impl Dwelling {
                 "duplicate actor name '{actor_name}' is not allowed"
             )));
         }
-        #[cfg(feature = "actor_profiling")]
-        self.actor_name_cache.push(actor.name().to_string());
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         let actor_name = actor.name().to_string();
         self.actors.push(actor);
@@ -3347,12 +3405,6 @@ impl Dwelling {
             self.actors.extend(user_actors);
         }
 
-        #[cfg(feature = "actor_profiling")]
-        {
-            self.actor_name_cache.clear();
-            self.actor_name_cache
-                .extend(self.actors.iter().map(|a| a.name().to_string()));
-        }
         self.rebuild_schedule();
         self.refresh_equipment_caches()?;
 
@@ -3968,6 +4020,16 @@ impl Dwelling {
         for actor in &mut self.actors {
             actor.resolve_equipment_id(&id_by_name);
         }
+        // One `ActorTimings` slot per registered actor, rebuilt with the
+        // actor list: every actor-list mutation (`add_actor`,
+        // `auto_register_actors`, the equipment-removal evictions) runs this
+        // refresh right after, so the slots always match the live actor
+        // order the scheduler's plan slots index into. Totals restart with
+        // the actor list: the summary reports a run under one roster.
+        #[cfg(feature = "profiling")]
+        {
+            self.actor_timings = ActorTimings::new(self.actors.iter().map(|a| Arc::from(a.name())));
+        }
         // Seed the environment snapshot for equipment whose id is not yet
         // in `equipment_core` — equipment entering the vector mid-run (add,
         // replace) has no entry until its first step completes, leaving
@@ -4220,24 +4282,6 @@ impl Dwelling {
             self.actor_column_map = build_actor_column_map(&self.actors, &self.output_column_index);
         }
         Ok(())
-    }
-
-    /// Returns per-actor timing from the simulation (requires `actor_profiling` feature).
-    /// Each entry is `(actor_name, elapsed_duration)`.
-    #[cfg(feature = "actor_profiling")]
-    #[must_use]
-    pub fn actor_timing(&self) -> Vec<(String, StdDuration)> {
-        self.per_actor_timing
-            .iter()
-            .map(|&(idx, dur)| {
-                let name = self
-                    .actor_name_cache
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| format!("actor_{idx}"));
-                (name, dur)
-            })
-            .collect()
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -4651,6 +4695,9 @@ impl Dwelling {
         // monotone, so a single read at summary time adds nothing to per-step
         // reads and the per-step work pays for no /proc parsing.
         summary.memory_high_water_kb = current_process_hwm_kb();
+        // The run's per-actor totals, read from the run's store at summary
+        // time like the high-water mark: the hot path never clones a name.
+        summary.per_actor = self.actor_timings.timings().to_vec();
         summary
     }
 
@@ -5733,25 +5780,35 @@ impl Dwelling {
         #[cfg(debug_assertions)]
         let mut executed_actors: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
-        #[cfg(feature = "actor_profiling")]
-        {
-            self.per_actor_timing.clear();
-            self.per_actor_timing.reserve(self.actors.len());
-        }
 
         self.actor_dispatch_buf.clear();
         for entry in self.scheduler.plan() {
             // The scheduler loop interleaves `ideal_capacity` and `actors`
             // spans in plan order: each entry closes the previous span and
-            // opens its own phase.
+            // opens its own phase. An `ActorDecide` entry's span (the
+            // interest filter, `decide()` and the health check) is routed
+            // to that actor's slot in `actor_timings` when it closes, so
+            // the per-actor totals sum to the `actors` phase exactly.
             #[cfg(feature = "profiling")]
-            phase_clock.enter(
-                &mut self.profiling,
-                match entry.phase {
-                    ExecutionPhase::SolverFeedback => ProfilePhase::IdealCapacity,
-                    ExecutionPhase::ActorDecide => ProfilePhase::Actors,
-                },
-            );
+            match entry.phase {
+                ExecutionPhase::SolverFeedback => phase_clock.enter_plan_entry(
+                    &mut self.profiling,
+                    &mut self.actor_timings,
+                    ProfilePhase::IdealCapacity,
+                    None,
+                ),
+                ExecutionPhase::ActorDecide => phase_clock.enter_plan_entry(
+                    &mut self.profiling,
+                    &mut self.actor_timings,
+                    ProfilePhase::Actors,
+                    Some(
+                        entry
+                            .slot
+                            .expect("ActorDecide plan entries must carry a slot")
+                            .0,
+                    ),
+                ),
+            }
             match entry.phase {
                 ExecutionPhase::SolverFeedback => {
                     #[cfg(feature = "observe")]
@@ -5802,8 +5859,13 @@ impl Dwelling {
                             executed_actors.insert(idx);
                         }
 
-                        #[cfg(feature = "actor_profiling")]
-                        let start = Instant::now();
+                        // The open `Actors` span (this entry's whole
+                        // scheduler time, closed at the next phase
+                        // boundary) counts a `decide()` call. No extra
+                        // `Instant` read: the span's difference is the
+                        // phase clock's own.
+                        #[cfg(feature = "profiling")]
+                        phase_clock.mark_open_actor_called();
 
                         self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
 
@@ -5817,18 +5879,21 @@ impl Dwelling {
                                 "actor is unhealthy after decide() — dispatch output may be compromised"
                             );
                         }
-
-                        #[cfg(feature = "actor_profiling")]
-                        self.per_actor_timing.push((idx, start.elapsed()));
                     }
                 }
             }
         }
         // The `dispatch` phase opens here: the ActorDecide buffer drain, the
         // post-loop actor health checks and Steps 2 and 2b all queue or apply
-        // control signals.
+        // control signals. The plan variant routes the final plan entry's
+        // span (an `Actors` span when the plan ends with one) to its slot.
         #[cfg(feature = "profiling")]
-        phase_clock.enter(&mut self.profiling, ProfilePhase::Dispatch);
+        phase_clock.enter_plan_entry(
+            &mut self.profiling,
+            &mut self.actor_timings,
+            ProfilePhase::Dispatch,
+            None,
+        );
 
         // Drain dispatch from all ActorDecide entries.
         for req in self.actor_dispatch_buf.drain(..) {

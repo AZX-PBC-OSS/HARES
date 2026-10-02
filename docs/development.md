@@ -230,18 +230,13 @@ cargo build --release -F "observe,observe_detailed"
 
 ### `profiling`
 
-Timing instrumentation for the simulation loop.
+The one timing feature: it partitions each step's wall clock into phases,
+times output finalisation, and accumulates per-actor scheduler-entry
+totals over the run, all reported by `Dwelling::profiling_summary()`
+(and `PyDwelling.profiling_summary()` in Python builds).
 
 ```bash
 cargo build --release -F profiling
-```
-
-### `actor_profiling`
-
-Per-equipment step timing. More granular than `profiling`.
-
-```bash
-cargo build --release -F actor_profiling
 ```
 
 ### `dst`
@@ -255,9 +250,17 @@ cargo build --release -F dst
 ### Python-side feature flags
 
 Maturin passes `-F` flags through to Cargo, but only features defined on
-the `hares-python` crate are available. Currently that is `observe` only.
-Rust-only features like `profiling` and `actor_profiling` do not apply to
-the Python extension.
+the `hares-python` crate are available. Currently those are `observe`
+(state snapshots for Gymnasium RL environments), `profiling` (the
+phase and per-actor timings of `Dwelling.profiling_summary()`) and
+`check_invariants` (turns on the boundary rejections and assertion
+gates that debug builds run anyway, so a release extension can enforce
+them too):
+
+```bash
+uv run maturin develop --release -F observe
+uv run maturin develop --release -F profiling
+```
 
 ---
 

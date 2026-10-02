@@ -691,9 +691,11 @@ impl PyDwelling {
 
     /// Per-phase wall-clock split of the work done so far, behind the `profiling`
     /// feature (`maturin develop --release --features profiling`). A flat dict of
-    /// seconds plus the memory high-water mark and the hot-path allocation
+    /// seconds plus the memory high-water mark, the hot-path allocation
     /// counters (each `None` when no measurement is available: the extension
-    /// does not install the counting allocator). Goes through the crate's own
+    /// does not install the counting allocator), and `per_actor`: the run's
+    /// per-actor totals as `{"name", "total_s", "calls"}` dicts, one per
+    /// registered actor in registration order. Goes through the crate's own
     /// acquire discipline: a fatal-error dwelling refuses, and lock poison surfaces as
     /// the same error type every other method raises. Without the feature the
     /// method raises `NotImplementedError` instead of returning zeros that
@@ -727,6 +729,19 @@ impl PyDwelling {
             d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
             d.set_item("hot_path_allocations", p.hot_path_allocations)?;
             d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
+            let per_actor_entries: Vec<pyo3::Bound<'_, pyo3::types::PyDict>> = p
+                .per_actor
+                .iter()
+                .map(|timing| {
+                    let entry = pyo3::types::PyDict::new(py);
+                    entry.set_item("name", timing.name.as_ref())?;
+                    entry.set_item("total_s", timing.total.as_secs_f64())?;
+                    entry.set_item("calls", timing.calls)?;
+                    Ok(entry)
+                })
+                .collect::<PyResult<_>>()?;
+            let per_actor = pyo3::types::PyList::new(py, per_actor_entries)?;
+            d.set_item("per_actor", per_actor)?;
             Ok(d.into())
         }
     }
@@ -3612,6 +3627,147 @@ mod tests {
                 assert_eq!(
                     result, expected,
                     "extract_seconds({input}) = {result}, expected {expected}"
+                );
+            }
+        });
+    }
+}
+
+/// `profiling_summary_lists_actors`: the per-actor
+/// totals reach the Python `profiling_summary()` dict in registration
+/// order, accumulated over the run. The probes are defined here because
+/// hares-core's test actors are test items another crate cannot import;
+/// the whole module compiles only under `test-profiling`, which enables
+/// the crate's `profiling` feature.
+#[cfg(all(test, feature = "profiling"))]
+mod profiling_summary_tests {
+    use std::path::PathBuf;
+
+    use hares_control::DispatchRequest;
+    use hares_core::Actor;
+    use hares_types::EnvironmentState;
+    use pyo3::Python;
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
+
+    use super::{PyDwelling, to_py_err};
+
+    /// No interests (the filter calls `decide()` every step) and dispatches
+    /// nothing.
+    struct ProbeActor {
+        name: &'static str,
+    }
+
+    impl Actor for ProbeActor {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
+    }
+
+    #[test]
+    fn profiling_summary_lists_actors() {
+        Python::attach(|py| {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.push("../..");
+            let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+            let defaults = root.join("defaults");
+
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("start_time", "2023-01-01T00:00:00-07:00")
+                .unwrap();
+            kwargs.set_item("duration_s", 96 * 3600_i64).unwrap();
+            kwargs.set_item("time_res_s", 3600_i64).unwrap();
+            kwargs
+                .set_item("defaults_path", defaults.to_string_lossy().into_owned())
+                .unwrap();
+            kwargs.set_item("bldg_id", 1_i64).unwrap();
+            kwargs.set_item("master_seed", 0_u64).unwrap();
+            kwargs.set_item("write_output", false).unwrap();
+
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                fixture.join("building.xml").to_string_lossy().into_owned(),
+                fixture.join("schedule.csv").to_string_lossy().into_owned(),
+                fixture.join("weather.epw").to_string_lossy().into_owned(),
+                Some(&kwargs),
+            )
+            .expect("cz2a fixture must load");
+
+            // Add the probes through the inner Dwelling, in that order.
+            {
+                let mut d = dwelling
+                    .acquire()
+                    .expect("fresh dwelling must not be poisoned");
+                d.add_actor(Box::new(ProbeActor { name: "probe_a" }))
+                    .map_err(to_py_err)
+                    .expect("probe_a must register");
+                d.add_actor(Box::new(ProbeActor { name: "probe_b" }))
+                    .map_err(to_py_err)
+                    .expect("probe_b must register");
+            }
+
+            dwelling.initialize().expect("initialize must succeed");
+            for _ in 0..96 {
+                dwelling.step(py).expect("cz2a fixture step must succeed");
+            }
+
+            let summary = dwelling
+                .profiling_summary(py)
+                .expect("a profiling build reports a summary");
+            let dict = summary
+                .bind(py)
+                .cast::<PyDict>()
+                .expect("profiling_summary returns a dict");
+            let per_actor = dict
+                .get_item("per_actor")
+                .expect("get_item must not raise")
+                .expect("the summary must carry a per_actor key")
+                .cast::<PyList>()
+                .expect("per_actor must be a list")
+                .clone();
+            // (name, calls) per entry, in the dict's registration order.
+            let listed: Vec<(String, u64)> = per_actor
+                .iter()
+                .map(|entry| {
+                    let entry = entry
+                        .cast::<PyDict>()
+                        .expect("per_actor entry must be a dict");
+                    let name: String = entry
+                        .get_item("name")
+                        .expect("get_item must not raise")
+                        .expect("entry must carry a name")
+                        .extract()
+                        .expect("name must be a str");
+                    let calls: u64 = entry
+                        .get_item("calls")
+                        .expect("get_item must not raise")
+                        .expect("entry must carry calls")
+                        .extract()
+                        .expect("calls must be an int");
+                    (name, calls)
+                })
+                .collect();
+            let position =
+                |name: &str| listed.iter().position(|(entry_name, _)| entry_name == name);
+            let probe_a = position("probe_a");
+            let probe_b = position("probe_b");
+            assert!(
+                probe_a.is_some() && probe_b.is_some(),
+                "per_actor must hold both probes: {listed:?}"
+            );
+            assert!(
+                probe_a.unwrap() < probe_b.unwrap(),
+                "probe_a must be listed before probe_b (registration order): {listed:?}"
+            );
+            for (name, calls) in listed
+                .iter()
+                .filter(|(n, _)| n == "probe_a" || n == "probe_b")
+            {
+                assert_eq!(
+                    calls, &96,
+                    "'{name}' declares no interests, so the filter must call decide() every step"
                 );
             }
         });

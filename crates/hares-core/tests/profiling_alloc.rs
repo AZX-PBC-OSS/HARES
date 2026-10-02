@@ -8,11 +8,13 @@
 #![cfg(feature = "profiling")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::Duration;
-use hares_core::{Dwelling, DwellingConfig};
+use hares_core::{ActorTimings, Dwelling, DwellingConfig};
 use hares_io::SimulationConfig;
-use hares_types::alloc_count::CountingAllocator;
+use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
@@ -86,5 +88,30 @@ fn profiled_steps_count_allocations_without_panicking() {
         allocations >= violations,
         "every violating step allocates at least once: allocations {allocations} \
          must be >= violations {violations}"
+    );
+}
+
+/// Accumulating per-actor timings allocates nothing: 96 x 2 `record` calls
+/// (one per slot per step) leave the stepping thread's allocation count
+/// unchanged. Only construction allocates (one slot per actor, off the hot
+/// path), so the baseline is read after it. Whole-step `Some(0)` is not
+/// asserted here: steps still allocate at this row (the telemetry map), and
+/// the runtime-memory ledger rows own that assertion.
+#[test]
+fn actor_timings_record_without_allocating() {
+    let mut timings = ActorTimings::new(["probe_a", "probe_b"].map(Arc::<str>::from));
+    let before = thread_allocations();
+
+    for _ in 0..96 {
+        timings.record(0, StdDuration::from_nanos(1), true);
+        timings.record(1, StdDuration::from_nanos(2), true);
+    }
+
+    let delta = thread_allocations().and_then(|after| before.map(|baseline| after - baseline));
+    assert_eq!(
+        delta,
+        Some(0),
+        "record must add to the slots in place without allocating (the test \
+         binary installs the counting allocator, so the delta is a measurement)"
     );
 }
