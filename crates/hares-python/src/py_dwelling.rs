@@ -693,18 +693,25 @@ impl PyDwelling {
     /// feature (`maturin develop --release --features profiling`). A flat dict of
     /// seconds plus the memory high-water mark and the hot-path allocation
     /// counters (each `None` when no measurement is available: the extension
-    /// does not install the counting allocator, and everything is zero with a
-    /// `note` key when the feature is compiled out). Goes through the crate's own
+    /// does not install the counting allocator). Goes through the crate's own
     /// acquire discipline: a fatal-error dwelling refuses, and lock poison surfaces as
-    /// the same error type every other method raises.
+    /// the same error type every other method raises. Without the feature the
+    /// method raises `NotImplementedError` instead of returning zeros that
+    /// would read as a measurement.
     pub fn profiling_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let d = pyo3::types::PyDict::new(py);
+        #[cfg(not(feature = "profiling"))]
+        {
+            let _ = py;
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "PyDwelling.profiling_summary() requires building the extension with the 'profiling' feature: maturin develop --release --features profiling",
+            ))
+        }
         #[cfg(feature = "profiling")]
         {
+            let d = pyo3::types::PyDict::new(py);
             // acquire discipline: a fatal-error dwelling refuses, and lock poison
             // surfaces as the same error type every other method raises.
             let p = self.acquire()?.profiling_summary();
-            d.set_item("note", "profiling feature enabled; timings are real")?;
             d.set_item("environment_s", p.environment.as_secs_f64())?;
             d.set_item("control_s", p.control.as_secs_f64())?;
             d.set_item("ideal_capacity_s", p.ideal_capacity.as_secs_f64())?;
@@ -720,30 +727,8 @@ impl PyDwelling {
             d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
             d.set_item("hot_path_allocations", p.hot_path_allocations)?;
             d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
+            Ok(d.into())
         }
-        #[cfg(not(feature = "profiling"))]
-        {
-            d.set_item(
-                "note",
-                "built without the 'profiling' feature; all timings zero",
-            )?;
-            d.set_item("environment_s", 0.0)?;
-            d.set_item("control_s", 0.0)?;
-            d.set_item("ideal_capacity_s", 0.0)?;
-            d.set_item("actors_s", 0.0)?;
-            d.set_item("dispatch_s", 0.0)?;
-            d.set_item("equipment_s", 0.0)?;
-            d.set_item("envelope_s", 0.0)?;
-            d.set_item("invariants_s", 0.0)?;
-            d.set_item("state_snapshot_s", 0.0)?;
-            d.set_item("output_s", 0.0)?;
-            d.set_item("accounting_s", 0.0)?;
-            d.set_item("step_total_s", 0.0)?;
-            d.set_item("memory_high_water_kb", py.None())?;
-            d.set_item("hot_path_allocations", py.None())?;
-            d.set_item("hot_path_alloc_violations", py.None())?;
-        }
-        Ok(d.into())
     }
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

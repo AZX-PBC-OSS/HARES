@@ -37,6 +37,30 @@ class SteppableBuildError(TypedDict):
     bldg_id: int
     error: str
 
+class ProfilingSummary(TypedDict):
+    """Per-phase wall-clock split returned by ``Dwelling.profiling_summary()``.
+
+    Seconds per phase, plus the process memory high-water mark and the
+    hot-path allocation counters (each ``None`` when no measurement is
+    available: the extension does not install the counting allocator).
+    """
+
+    environment_s: float
+    control_s: float
+    ideal_capacity_s: float
+    actors_s: float
+    dispatch_s: float
+    equipment_s: float
+    envelope_s: float
+    invariants_s: float
+    state_snapshot_s: float
+    output_s: float
+    accounting_s: float
+    step_total_s: float
+    memory_high_water_kb: int | None
+    hot_path_allocations: int | None
+    hot_path_alloc_violations: int | None
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -2406,6 +2430,13 @@ class Dwelling:
     # Available only when compiled with the "observe" feature.
     def enable_observer(self, capacity: int) -> None: ...
     def drain_observations(self) -> list[dict[str, Any]]: ...
+    # Available only when compiled with the "profiling" feature.
+    def profiling_summary(self) -> ProfilingSummary:
+        """Per-phase wall-clock split of the work done so far.
+
+        Raises ``NotImplementedError`` unless the extension is built with the
+        ``profiling`` feature (``maturin develop --release --features profiling``).
+        """
     def telemetry(self) -> Telemetry: ...
     def equipment_descriptors(self) -> list[EquipmentDescriptor]: ...
     def equipment(self) -> list[Equipment]: ...
