@@ -235,17 +235,109 @@ struct StageSnapshot {
     ports: PortSlots,
 }
 
+/// Wall-clock breakdown of one dwelling's `run_timestep` work, behind the
+/// `profiling` feature. The eleven phase fields partition every completed
+/// step exactly: each phase is the sum of spans closed by `Instant::now()`
+/// readings taken at the step's phase boundaries, so their sum equals
+/// `step_total` (no residual). Like every field, they accumulate over the
+/// run's steps.
 #[cfg(feature = "profiling")]
 #[derive(Debug, Clone, Default)]
 pub struct DwellingProfilingSummary {
-    pub envelope_solve: StdDuration,
-    pub hvac: StdDuration,
-    pub water_heater: StdDuration,
-    pub schedule_load: StdDuration,
-    pub io: StdDuration,
-    pub other: StdDuration,
+    pub environment: StdDuration,
+    pub control: StdDuration,
+    pub ideal_capacity: StdDuration,
+    pub actors: StdDuration,
+    pub dispatch: StdDuration,
+    pub equipment: StdDuration,
+    pub envelope: StdDuration,
+    pub invariants: StdDuration,
+    pub state_snapshot: StdDuration,
+    pub output: StdDuration,
+    pub accounting: StdDuration,
+    pub step_total: StdDuration,
     pub memory_high_water_kb: u64,
     pub hot_path_alloc_violations: u64,
+}
+
+/// The phases of `run_timestep`, named only by the step's phase clock.
+/// Declaration order is the spans' code order in `run_timestep`.
+#[cfg(feature = "profiling")]
+#[derive(Debug, Clone, Copy)]
+enum ProfilePhase {
+    Environment,
+    Control,
+    IdealCapacity,
+    Actors,
+    Dispatch,
+    Equipment,
+    Envelope,
+    Invariants,
+    StateSnapshot,
+    Output,
+    Accounting,
+}
+
+#[cfg(feature = "profiling")]
+impl DwellingProfilingSummary {
+    /// Adds one closed span to its phase. A phase may be closed more than
+    /// once per step; its spans are summed.
+    fn add_span(&mut self, phase: ProfilePhase, span: StdDuration) {
+        let field = match phase {
+            ProfilePhase::Environment => &mut self.environment,
+            ProfilePhase::Control => &mut self.control,
+            ProfilePhase::IdealCapacity => &mut self.ideal_capacity,
+            ProfilePhase::Actors => &mut self.actors,
+            ProfilePhase::Dispatch => &mut self.dispatch,
+            ProfilePhase::Equipment => &mut self.equipment,
+            ProfilePhase::Envelope => &mut self.envelope,
+            ProfilePhase::Invariants => &mut self.invariants,
+            ProfilePhase::StateSnapshot => &mut self.state_snapshot,
+            ProfilePhase::Output => &mut self.output,
+            ProfilePhase::Accounting => &mut self.accounting,
+        };
+        *field += span;
+    }
+}
+
+/// One phase clock per step: `Instant::now()` is read once at entry and once
+/// at each phase boundary, and each reading closes the open span into its
+/// phase and opens the next, so the phases partition the step exactly with
+/// no residual. A step that returns early (failed invariant, unhealthy
+/// actor) records nothing for that step.
+#[cfg(feature = "profiling")]
+struct PhaseClock {
+    started: Instant,
+    open: Instant,
+    phase: ProfilePhase,
+}
+
+#[cfg(feature = "profiling")]
+impl PhaseClock {
+    fn start() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            open: now,
+            phase: ProfilePhase::Environment,
+        }
+    }
+
+    /// Closes the open span into its phase and opens `next`.
+    fn enter(&mut self, profiling: &mut DwellingProfilingSummary, next: ProfilePhase) {
+        let now = Instant::now();
+        profiling.add_span(self.phase, now - self.open);
+        self.open = now;
+        self.phase = next;
+    }
+
+    /// Closes the final span at return and accumulates `step_total` (entry
+    /// to return) over the run.
+    fn finish(self, profiling: &mut DwellingProfilingSummary) {
+        let now = Instant::now();
+        profiling.add_span(self.phase, now - self.open);
+        profiling.step_total += now - self.started;
+    }
 }
 
 /// Pre-resolved output column indices for one equipment piece.
@@ -5391,6 +5483,12 @@ impl Dwelling {
             ));
         }
 
+        // One phase clock per step: read at entry, closed at each phase
+        // boundary below, finished at return. The phases partition the step
+        // exactly.
+        #[cfg(feature = "profiling")]
+        let mut phase_clock = PhaseClock::start();
+
         // Advance the dwelling RNG on every timestep so checkpoint captures
         // reflect simulation progress.  The value is intentionally discarded;
         // stochastic components use independent sub-RNGs derived from the
@@ -5452,17 +5550,7 @@ impl Dwelling {
         }
 
         #[cfg(feature = "profiling")]
-        let step_started = Instant::now();
-        #[cfg(feature = "profiling")]
         let alloc_before = hot_path_alloc_counter();
-        #[cfg(feature = "profiling")]
-        let step_schedule: Option<StdDuration>;
-        #[cfg(feature = "profiling")]
-        let step_hvac: Option<StdDuration>;
-        #[cfg(feature = "profiling")]
-        let step_envelope: Option<StdDuration>;
-        #[cfg(feature = "profiling")]
-        let mut step_io: Option<StdDuration> = None;
 
         #[cfg(feature = "observe")]
         let mut obs_phases = PhaseSnapshots::default();
@@ -5470,8 +5558,6 @@ impl Dwelling {
         // Step 1: update environment at current clock state.
         // Feed zone temperatures back first so the borrow on self.latest_env.zones
         // is released before we mutably borrow self.latest_env for update_in_place.
-        #[cfg(feature = "profiling")]
-        let schedule_started = Instant::now();
         self.environment.feed_zones(&self.latest_env.zones);
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
@@ -5582,6 +5668,10 @@ impl Dwelling {
             &mut self.warnings,
             &mut self.health.rejected_control_signals,
         );
+        // End of the `environment` phase: entry through Step 1a' (environment
+        // update, queued control dispatch).
+        #[cfg(feature = "profiling")]
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Control);
 
         // Step 1b: deposit deterministic internal gains (occupancy, plug loads)
         // BEFORE prepare_inputs so the ideal solver sees them when computing
@@ -5631,6 +5721,17 @@ impl Dwelling {
 
         self.actor_dispatch_buf.clear();
         for entry in self.scheduler.plan() {
+            // The scheduler loop interleaves `ideal_capacity` and `actors`
+            // spans in plan order: each entry closes the previous span and
+            // opens its own phase.
+            #[cfg(feature = "profiling")]
+            phase_clock.enter(
+                &mut self.profiling,
+                match entry.phase {
+                    ExecutionPhase::SolverFeedback => ProfilePhase::IdealCapacity,
+                    ExecutionPhase::ActorDecide => ProfilePhase::Actors,
+                },
+            );
             match entry.phase {
                 ExecutionPhase::SolverFeedback => {
                     #[cfg(feature = "observe")]
@@ -5703,6 +5804,12 @@ impl Dwelling {
                 }
             }
         }
+        // The `dispatch` phase opens here: the ActorDecide buffer drain, the
+        // post-loop actor health checks and Steps 2 and 2b all queue or apply
+        // control signals.
+        #[cfg(feature = "profiling")]
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Dispatch);
+
         // Drain dispatch from all ActorDecide entries.
         for req in self.actor_dispatch_buf.drain(..) {
             self.control_dispatcher.queue(req);
@@ -5791,9 +5898,6 @@ impl Dwelling {
         );
         #[cfg(feature = "profiling")]
         {
-            let elapsed = schedule_started.elapsed();
-            step_schedule = Some(elapsed);
-            self.profiling.schedule_load += elapsed;
             self.profiling.memory_high_water_kb = self
                 .profiling
                 .memory_high_water_kb
@@ -5869,6 +5973,11 @@ impl Dwelling {
             );
         }
 
+        // End of the `dispatch` phase (Steps 2 and 2b); Step 2a re-runs
+        // `update_control`, the second span of the `control` phase.
+        #[cfg(feature = "profiling")]
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Control);
+
         // Step 2a: re-run update_control for thermal equipment after control
         // dispatch so ThermalSetpoint / ModeOverride / DR signals take effect
         // on the current timestep, not one step later.
@@ -5879,7 +5988,7 @@ impl Dwelling {
         }
 
         #[cfg(feature = "profiling")]
-        let hvac_started = Instant::now();
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Equipment);
 
         // Step 3: unified equipment step in stage_rank order
         // (Independent → Electrical → Thermal).
@@ -6159,9 +6268,6 @@ impl Dwelling {
 
         #[cfg(feature = "profiling")]
         {
-            let elapsed = hvac_started.elapsed();
-            step_hvac = Some(elapsed);
-            self.profiling.hvac += elapsed;
             self.profiling.memory_high_water_kb = self
                 .profiling
                 .memory_high_water_kb
@@ -6196,9 +6302,11 @@ impl Dwelling {
             }
         }
 
-        // Step 4: envelope/domain resolution.
+        // End of the `equipment` phase (Steps 3 and 3c).
         #[cfg(feature = "profiling")]
-        let envelope_started = Instant::now();
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Envelope);
+
+        // Step 4: envelope/domain resolution.
         self.thermal_solver
             .integrate(&self.ports, &self.latest_env, &mut self.thermal_update_buf);
 
@@ -6355,11 +6463,11 @@ impl Dwelling {
             obs_phases.post_custom_solvers = Some(capture);
         }
 
+        // End of the `envelope` phase (Step 4 and its diagnostic capture);
+        // the always-on invariant checks and `check_invariants` follow.
         #[cfg(feature = "profiling")]
         {
-            let elapsed = envelope_started.elapsed();
-            step_envelope = Some(elapsed);
-            self.profiling.envelope_solve += elapsed;
+            phase_clock.enter(&mut self.profiling, ProfilePhase::Invariants);
             self.profiling.memory_high_water_kb = self
                 .profiling
                 .memory_high_water_kb
@@ -6473,6 +6581,11 @@ impl Dwelling {
         }
 
         self.check_invariants(dt)?;
+
+        // End of the `invariants` phase; the per-step telemetry snapshot
+        // (`state_snapshot` phase) follows.
+        #[cfg(feature = "profiling")]
+        phase_clock.enter(&mut self.profiling, ProfilePhase::StateSnapshot);
 
         // Push observer step snapshot after invariant checks so moisture invariant
         // capture data (populated in check_invariants) is available for the snapshot.
@@ -6668,33 +6781,26 @@ impl Dwelling {
             gas_power_w,
         };
 
+        // End of the `state_snapshot` phase (observer push, diagnostic
+        // accumulation, end-of-step equipment snapshot, step result).
+        #[cfg(feature = "profiling")]
+        phase_clock.enter(&mut self.profiling, ProfilePhase::Output);
+
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
         if record_output {
-            #[cfg(feature = "profiling")]
-            let io_started = Instant::now();
             self.record_step(&step_result)?;
-            #[cfg(feature = "profiling")]
-            {
-                let elapsed = io_started.elapsed();
-                step_io = Some(elapsed);
-                self.profiling.io += elapsed;
-                self.profiling.memory_high_water_kb = self
-                    .profiling
-                    .memory_high_water_kb
-                    .max(current_process_hwm_kb());
-            }
+        }
+        // End of the `output` phase (Step 5).
+        #[cfg(feature = "profiling")]
+        {
+            phase_clock.enter(&mut self.profiling, ProfilePhase::Accounting);
+            self.profiling.memory_high_water_kb = self
+                .profiling
+                .memory_high_water_kb
+                .max(current_process_hwm_kb());
         }
         #[cfg(feature = "profiling")]
         {
-            let accounted = step_envelope.unwrap_or_default()
-                + step_hvac.unwrap_or_default()
-                + step_schedule.unwrap_or_default()
-                + step_io.unwrap_or_default();
-            let elapsed = step_started.elapsed();
-            if elapsed > accounted {
-                self.profiling.other += elapsed - accounted;
-            }
-
             let alloc_after = hot_path_alloc_counter();
             if alloc_after > alloc_before {
                 self.profiling.hot_path_alloc_violations += 1;
@@ -6787,6 +6893,11 @@ impl Dwelling {
             rng_word_pos = self.rng.get_word_pos(),
             "dwelling RNG state at end of timestep"
         );
+
+        // Closes the `accounting` phase (billing, electrical summary, clock
+        // advance) and records `step_total` from entry to return.
+        #[cfg(feature = "profiling")]
+        phase_clock.finish(&mut self.profiling);
 
         Ok(())
     }

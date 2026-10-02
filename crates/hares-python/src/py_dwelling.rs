@@ -703,12 +703,18 @@ impl PyDwelling {
             // surfaces as the same error type every other method raises.
             let p = self.acquire()?.profiling_summary();
             d.set_item("note", "profiling feature enabled; timings are real")?;
-            d.set_item("envelope_solve_s", p.envelope_solve.as_secs_f64())?;
-            d.set_item("hvac_s", p.hvac.as_secs_f64())?;
-            d.set_item("water_heater_s", p.water_heater.as_secs_f64())?;
-            d.set_item("schedule_load_s", p.schedule_load.as_secs_f64())?;
-            d.set_item("io_s", p.io.as_secs_f64())?;
-            d.set_item("other_s", p.other.as_secs_f64())?;
+            d.set_item("environment_s", p.environment.as_secs_f64())?;
+            d.set_item("control_s", p.control.as_secs_f64())?;
+            d.set_item("ideal_capacity_s", p.ideal_capacity.as_secs_f64())?;
+            d.set_item("actors_s", p.actors.as_secs_f64())?;
+            d.set_item("dispatch_s", p.dispatch.as_secs_f64())?;
+            d.set_item("equipment_s", p.equipment.as_secs_f64())?;
+            d.set_item("envelope_s", p.envelope.as_secs_f64())?;
+            d.set_item("invariants_s", p.invariants.as_secs_f64())?;
+            d.set_item("state_snapshot_s", p.state_snapshot.as_secs_f64())?;
+            d.set_item("output_s", p.output.as_secs_f64())?;
+            d.set_item("accounting_s", p.accounting.as_secs_f64())?;
+            d.set_item("step_total_s", p.step_total.as_secs_f64())?;
             d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
             d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
         }
@@ -718,12 +724,18 @@ impl PyDwelling {
                 "note",
                 "built without the 'profiling' feature; all timings zero",
             )?;
-            d.set_item("envelope_solve_s", 0.0)?;
-            d.set_item("hvac_s", 0.0)?;
-            d.set_item("water_heater_s", 0.0)?;
-            d.set_item("schedule_load_s", 0.0)?;
-            d.set_item("io_s", 0.0)?;
-            d.set_item("other_s", 0.0)?;
+            d.set_item("environment_s", 0.0)?;
+            d.set_item("control_s", 0.0)?;
+            d.set_item("ideal_capacity_s", 0.0)?;
+            d.set_item("actors_s", 0.0)?;
+            d.set_item("dispatch_s", 0.0)?;
+            d.set_item("equipment_s", 0.0)?;
+            d.set_item("envelope_s", 0.0)?;
+            d.set_item("invariants_s", 0.0)?;
+            d.set_item("state_snapshot_s", 0.0)?;
+            d.set_item("output_s", 0.0)?;
+            d.set_item("accounting_s", 0.0)?;
+            d.set_item("step_total_s", 0.0)?;
             d.set_item("memory_high_water_kb", 0)?;
             d.set_item("hot_path_alloc_violations", 0)?;
         }

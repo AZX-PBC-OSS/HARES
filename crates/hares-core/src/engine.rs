@@ -364,28 +364,28 @@ impl SimulationEngine {
 
 #[cfg(feature = "profiling")]
 fn emit_dwelling_profiling_summary(summary: &DwellingProfilingSummary) {
-    let total = summary.envelope_solve
-        + summary.hvac
-        + summary.water_heater
-        + summary.schedule_load
-        + summary.io
-        + summary.other;
-    let total_secs = total.as_secs_f64();
+    let total_secs = summary.step_total.as_secs_f64();
     if total_secs <= 0.0 {
         return;
     }
 
     let pct = |duration: StdDuration| duration.as_secs_f64() * 100.0 / total_secs;
     tracing::info!(
-        "envelope_solve: {:.0}% | hvac: {:.0}% | water_heater: {:.0}% | schedule_load: {:.0}% | io: {:.0}% | other: {:.0}%",
-        pct(summary.envelope_solve),
-        pct(summary.hvac),
-        pct(summary.water_heater),
-        pct(summary.schedule_load),
-        pct(summary.io),
-        pct(summary.other),
+        "environment: {:.0}% | control: {:.0}% | ideal_capacity: {:.0}% | actors: {:.0}% | dispatch: {:.0}% | equipment: {:.0}% | envelope: {:.0}% | invariants: {:.0}% | state_snapshot: {:.0}% | output: {:.0}% | accounting: {:.0}%",
+        pct(summary.environment),
+        pct(summary.control),
+        pct(summary.ideal_capacity),
+        pct(summary.actors),
+        pct(summary.dispatch),
+        pct(summary.equipment),
+        pct(summary.envelope),
+        pct(summary.invariants),
+        pct(summary.state_snapshot),
+        pct(summary.output),
+        pct(summary.accounting),
     );
     tracing::info!(
+        step_total_s = summary.step_total.as_secs_f64(),
         memory_high_water_kb = summary.memory_high_water_kb,
         hot_path_alloc_violations = summary.hot_path_alloc_violations,
         "profiling stats"
