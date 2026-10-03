@@ -216,10 +216,10 @@ fn runtime_added_equipment_declares_its_loops() {
         .expect("runtime remove while no step has run");
     assert_eq!(
         dwelling.fluid_solver.loop_fluid_type(LoopId(7)),
-        Some(FluidType::Water),
-        "the map mirrors the port-slot table, whose rebuild retains \
-         accumulators whose declaring equipment left: the loop stays \
-         declared while its retained accumulator is processed"
+        None,
+        "the loop-type map comes from the live equipment's own fluid \
+         declarations alone: once its only declarer leaves, the loop is \
+         undeclared, freeing its fluid type for the next declarer"
     );
 
     // Re-add and step: the declared loop must survive into the run, and the

@@ -97,6 +97,10 @@ struct PumpFlowCheck {
 
 /// Builds the loop-type map from declared `(loop_id, fluid_type)` pairs,
 /// rejecting two declarations of one loop with different fluid types.
+///
+/// Exposed as [`plan_loop_types`] so a caller (the dwelling's roster
+/// planner) can validate a prospective loop map before committing it,
+/// without touching any live `FluidSolver`.
 fn loop_type_map(
     declared_loops: &[(LoopId, FluidType)],
 ) -> Result<HashMap<LoopId, FluidType>, HaresError> {
@@ -111,6 +115,18 @@ fn loop_type_map(
         }
     }
     Ok(loop_types)
+}
+
+/// Validates a prospective `(loop_id, fluid_type)` declaration set and
+/// returns the loop-type map it resolves to, without constructing or
+/// mutating a `FluidSolver`. Callers that must validate a candidate roster
+/// before committing it (the dwelling's roster planner) call this instead
+/// of `FluidSolver::new` or `rebuild_loop_types`, then install the result
+/// with [`FluidSolver::install_loop_types`] once the candidate is accepted.
+pub fn plan_loop_types(
+    declared_loops: &[(LoopId, FluidType)],
+) -> Result<HashMap<LoopId, FluidType>, HaresError> {
+    loop_type_map(declared_loops)
 }
 
 /// Precomputes the pump flow check wiring per declared loop: the pump node
@@ -210,9 +226,19 @@ impl FluidSolver {
         &mut self,
         declared_loops: &[(LoopId, FluidType)],
     ) -> Result<(), HaresError> {
-        self.loop_types = loop_type_map(declared_loops)?;
-        self.pump_flow_checks = pump_flow_checks(&self.config, &self.loop_types);
+        let loop_types = plan_loop_types(declared_loops)?;
+        self.install_loop_types(loop_types);
         Ok(())
+    }
+
+    /// Assigns an already-validated loop-type map (from [`plan_loop_types`])
+    /// and rebuilds the pump-flow-check wiring that depends on it.
+    /// Infallible: every rejection a loop-type change can produce already
+    /// happened in [`plan_loop_types`], so installing its result cannot
+    /// fail.
+    pub fn install_loop_types(&mut self, loop_types: HashMap<LoopId, FluidType>) {
+        self.pump_flow_checks = pump_flow_checks(&self.config, &loop_types);
+        self.loop_types = loop_types;
     }
 
     #[must_use]

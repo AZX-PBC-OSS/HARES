@@ -66,18 +66,18 @@ use hares_physics::constants::{
 use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
+#[cfg(test)]
+use hares_types::ElectricPower;
 use hares_types::rng::RngStream;
 use hares_types::{
-    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, CustomAccumulator, DomainSolver,
-    ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, FluidAccumulator,
-    GridState, HaresError, HumidityAccumulator, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalAccumulator, ThermalCategory, Warning,
-    ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
-    validate_fluid_type_consistency,
+    ALL_FUEL_TYPES, AmbientLocation, BmsMode, ChargingStrategy, ControlSignal, CustomAccumulator,
+    DomainSolver, ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage,
+    FluidType, GridState, HaresError, HumidityAccumulator, LoopId, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalAccumulator,
+    ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    validate_core_contract, validate_fluid_type_consistency,
 };
 use hares_types::{ControlCapabilities, validate_port_core_electrical_consistency};
-#[cfg(test)]
-use hares_types::{ElectricPower, LoopId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
@@ -3172,6 +3172,131 @@ fn build_from_blueprint_inner(
     Ok(dwelling)
 }
 
+/// Pre-step-only caches `plan_roster_caches` recomputes while no row has
+/// been recorded: the port-slot tables and the fluid solver's loop-type
+/// map, both pure layout derived from the prospective roster's own
+/// declarations. `None` once stepping has begun: the tables are frozen
+/// then, and a post-step candidate is checked against them by
+/// `Dwelling::ensure_ports_satisfied` at the entrance instead of being
+/// folded into a rebuild.
+struct PreStepRosterCaches {
+    ports: PortSlots,
+    rollback_ports: PortSlots,
+    fluid_loop_types: HashMap<LoopId, FluidType>,
+}
+
+/// The output-pipeline portion of a roster plan: which of the three states
+/// `Dwelling::write_output` and "no rows recorded yet" put the dwelling in,
+/// and the values that state's branch derives. Mirrors the three branches
+/// the deleted `refresh_equipment_caches` took.
+enum OutputCachesPlan {
+    /// Output disabled: nothing to plan or install.
+    Disabled,
+    /// No rows recorded yet: the schema itself is rebuilt from the
+    /// prospective roster, so a fresh column index and recorder follow.
+    FreshSchema {
+        schema: Schema,
+        output_value_count: usize,
+        output_column_index: HashMap<String, usize>,
+        equipment_column_map: Vec<EquipmentColumns>,
+        end_use_aggregate_indices: Vec<Option<usize>>,
+        actor_column_map: Vec<Vec<(String, usize)>>,
+        zone_caches: Box<ZoneColumnCaches>,
+    },
+    /// Rows already recorded: the schema and column index are frozen, only
+    /// the positional maps into them are re-derived for the prospective
+    /// roster.
+    FrozenUpdate {
+        equipment_column_map: Vec<EquipmentColumns>,
+        end_use_aggregate_indices: Vec<Option<usize>>,
+        actor_column_map: Vec<Vec<(String, usize)>>,
+    },
+}
+
+/// Everything `Dwelling::plan_roster_caches` derives from a prospective
+/// equipment and actor roster, installed verbatim by
+/// `Dwelling::install_roster_caches` once the caller accepts the plan.
+/// Computing every fallible decision here, against the candidate roster,
+/// before any entrance touches the live one, is what makes every roster
+/// change all-or-nothing: on `Err`, nothing in `self` has been written.
+struct RosterCaches {
+    equipment_id_by_name: HashMap<String, EquipmentId>,
+    equipment_execution_order: Vec<usize>,
+    equipment_ids: Vec<EquipmentId>,
+    dispatch_targets: Vec<DispatchTarget>,
+    ambient_locations: Vec<AmbientLocation>,
+    pre_step: Option<PreStepRosterCaches>,
+    hvac_thermal_consistency: Vec<Vec<usize>>,
+    output: OutputCachesPlan,
+}
+
+/// An actor evicted from a prospective roster, tagged with the index it
+/// held in that roster so it can be reinserted exactly where it was.
+type EvictedActor = (usize, Box<dyn Actor>);
+
+/// An equipment removed from a prospective roster, tagged with the index
+/// it held in that roster so it can be reinserted exactly where it was.
+type RemovedEquipment = (usize, Box<dyn Equipment>);
+
+/// Partitions a prospective actor roster into the actors kept (no dispatch
+/// target, or a target `is_evicted_target` does not match) and the actors
+/// evicted, each tagged with its original index so a rejected plan can
+/// reinsert it exactly where it was with [`restore_evicted_actors`];
+/// eviction and restoration must agree on order, since actor priority ties
+/// break on registration order.
+fn partition_actors_by_target(
+    actors: Vec<Box<dyn Actor>>,
+    is_evicted_target: impl Fn(&str) -> bool,
+) -> (Vec<Box<dyn Actor>>, Vec<EvictedActor>) {
+    let mut kept = Vec::with_capacity(actors.len());
+    let mut evicted = Vec::new();
+    for (idx, actor) in actors.into_iter().enumerate() {
+        if actor.dispatch_target_name().is_some_and(&is_evicted_target) {
+            evicted.push((idx, actor));
+        } else {
+            kept.push(actor);
+        }
+    }
+    (kept, evicted)
+}
+
+/// Reinserts actors evicted by [`partition_actors_by_target`] back into
+/// `roster` at their original indices, restoring the pre-eviction order.
+fn restore_evicted_actors(roster: &mut Vec<Box<dyn Actor>>, evicted: Vec<EvictedActor>) {
+    for (idx, actor) in evicted {
+        roster.insert(idx, actor);
+    }
+}
+
+/// Partitions a prospective equipment roster into the equipment kept and
+/// the equipment removed (its end-use matches `end_uses`), each tagged
+/// with its original index so a rejected plan can reinsert it exactly
+/// where it was with [`restore_removed_equipment`].
+fn partition_equipment_by_end_use(
+    equipment: Vec<Box<dyn Equipment>>,
+    end_uses: &[EndUse],
+) -> (Vec<Box<dyn Equipment>>, Vec<RemovedEquipment>) {
+    let mut kept = Vec::with_capacity(equipment.len());
+    let mut removed = Vec::new();
+    for (idx, eq) in equipment.into_iter().enumerate() {
+        if end_uses.contains(&eq.descriptor().end_use) {
+            removed.push((idx, eq));
+        } else {
+            kept.push(eq);
+        }
+    }
+    (kept, removed)
+}
+
+/// Reinserts equipment removed by [`partition_equipment_by_end_use`] back
+/// into `roster` at their original indices, restoring the pre-removal
+/// order.
+fn restore_removed_equipment(roster: &mut Vec<Box<dyn Equipment>>, removed: Vec<RemovedEquipment>) {
+    for (idx, eq) in removed {
+        roster.insert(idx, eq);
+    }
+}
+
 impl Dwelling {
     /// Runs the full configured horizon and returns accumulated results.
     pub fn simulate(&mut self) -> Result<SimulationResults> {
@@ -3404,30 +3529,24 @@ impl Dwelling {
                 "duplicate actor name '{actor_name}' is not allowed"
             )));
         }
-        self.actors.push(actor);
-        self.rebuild_schedule();
-        self.refresh_equipment_caches()?;
-        Ok(())
-    }
-
-    /// Evict actors bound to the named equipment — a controller without its
-    /// equipment is an orphan whose dispatches degrade to no-ops. Called by
-    /// every equipment-removal path.
-    fn evict_actors_targeting(&mut self, equipment_name: &str) {
-        let before = self.actors.len();
-        self.actors
-            .retain(|a| a.dispatch_target_name() != Some(equipment_name));
-        if self.actors.len() == before {
-            return;
+        // Plan against the candidate roster before touching `self.actors`:
+        // a rejected plan must never leave the new actor registered with no
+        // schedule entry, or vice versa.
+        let mut roster = std::mem::take(&mut self.actors);
+        roster.push(actor);
+        match self.plan_roster_caches(&self.equipment, &roster) {
+            Ok(caches) => {
+                self.actors = roster;
+                self.rebuild_schedule();
+                self.install_roster_caches(caches);
+                Ok(())
+            }
+            Err(err) => {
+                roster.pop();
+                self.actors = roster;
+                Err(err)
+            }
         }
-        self.auto_registered_actor_names
-            .retain(|name| !self.actors.iter().any(|a| a.name() == name));
-        self.rebuild_schedule();
-        tracing::info!(
-            equipment = %equipment_name,
-            evicted = before - self.actors.len(),
-            "actors targeting removed equipment evicted"
-        );
     }
 
     /// Creates and adds an actor from the registry using the provided config.
@@ -3485,8 +3604,9 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// Propagates the output-schema drift error from
-    /// [`Self::refresh_equipment_caches`].
+    /// Propagates the roster plan's output-schema drift or fluid-loop
+    /// conflict error (`plan_roster_caches`); on `Err` the actor roster and
+    /// schedule are exactly as before the call.
     pub fn auto_register_actors(&mut self) -> Result<()> {
         let interval_secs = self.clock.time_res.num_seconds() as u32;
         assert!(
@@ -3502,38 +3622,51 @@ impl Dwelling {
 
         let has_tariff = self.tariff_evaluator.is_some();
 
-        // Evict previously auto-registered actors so they can be rebuilt
-        // with updated tariff/price data.
-        if !self.auto_registered_actor_names.is_empty() {
-            self.actors
-                .retain(|a| !self.auto_registered_actor_names.contains(a.name()));
-            self.auto_registered_actor_names.clear();
-        }
+        // Split the live roster into the actors auto-registered by a prior
+        // call (rebuilt fresh below, with updated tariff/price data) and
+        // every actor the caller added. Both halves are held, not dropped,
+        // until the plan is accepted: a rejected plan restores them in
+        // their original relative order, the invariant every prior call to
+        // this method and `add_actor` maintains (auto-registered actors
+        // precede user actors, each group in its own registration order).
+        let actors = std::mem::take(&mut self.actors);
+        let (user_actors, old_auto_actors): (Vec<_>, Vec<_>) = actors
+            .into_iter()
+            .partition(|a| !self.auto_registered_actor_names.contains(a.name()));
 
         let built_in_actors = build_actors_from_seeds(
             &self.equipment,
-            &self.actors,
+            &user_actors,
             has_tariff,
             price_schedule,
             steps_per_day,
             &self.equipment_id_by_name,
             &self.rng,
         );
+        let built_in_count = built_in_actors.len();
+        let new_auto_names: HashSet<String> = built_in_actors
+            .iter()
+            .map(|a| a.name().to_string())
+            .collect();
+        let mut prospective_actors = built_in_actors;
+        prospective_actors.extend(user_actors);
 
-        if !built_in_actors.is_empty() {
-            for a in &built_in_actors {
-                self.auto_registered_actor_names
-                    .insert(a.name().to_string());
+        match self.plan_roster_caches(&self.equipment, &prospective_actors) {
+            Ok(caches) => {
+                self.actors = prospective_actors;
+                self.auto_registered_actor_names = new_auto_names;
+                self.rebuild_schedule();
+                self.install_roster_caches(caches);
+                Ok(())
             }
-            let user_actors = std::mem::take(&mut self.actors);
-            self.actors = built_in_actors;
-            self.actors.extend(user_actors);
+            Err(err) => {
+                let user_actors = prospective_actors.split_off(built_in_count);
+                let mut restored = old_auto_actors;
+                restored.extend(user_actors);
+                self.actors = restored;
+                Err(err)
+            }
         }
-
-        self.rebuild_schedule();
-        self.refresh_equipment_caches()?;
-
-        Ok(())
     }
 }
 
@@ -3755,24 +3888,46 @@ impl Dwelling {
         // Mark the equipment as initialized so post-registration LUT mutation
         // via the Equipment trait setters is rejected (T-0534).
         eq.mark_initialized();
-        self.equipment.push(eq);
-        // Warnings the equipment raised before joining (its `init` runs on
-        // the caller's side) drain beside the registration that made them
-        // reportable.
-        let mut drained: Vec<Warning> = Vec::new();
-        if let Some(joined) = self.equipment.last_mut() {
-            joined.drain_warnings(&mut drained);
+        // Plan against the candidate roster before it joins `self.equipment`:
+        // a rejected plan (schema drift, a fluid-loop conflict) must never
+        // leave the candidate in the vector. See the dwelling's roster
+        // planner (`plan_roster_caches`) for why every entrance follows
+        // plan-then-mutate-then-install.
+        let mut roster = std::mem::take(&mut self.equipment);
+        roster.push(eq);
+        match self.plan_roster_caches(&roster, &self.actors) {
+            Ok(caches) => {
+                self.equipment = roster;
+                // Warnings the equipment raised before joining (its `init`
+                // runs on the caller's side) drain beside the registration
+                // that made them reportable.
+                let mut drained: Vec<Warning> = Vec::new();
+                if let Some(joined) = self.equipment.last_mut() {
+                    joined.drain_warnings(&mut drained);
+                }
+                for warning in drained {
+                    self.warnings.push_warning(warning);
+                }
+                self.install_roster_caches(caches);
+                Ok(())
+            }
+            Err(err) => {
+                let mut rejected = roster.pop().expect("the candidate was just pushed");
+                self.equipment = roster;
+                let mut drained: Vec<Warning> = Vec::new();
+                rejected.drain_warnings(&mut drained);
+                for warning in drained {
+                    self.warnings.push_warning(warning);
+                }
+                Err(err)
+            }
         }
-        for warning in drained {
-            self.warnings.push_warning(warning);
-        }
-        self.refresh_equipment_caches()?;
-        Ok(())
     }
 
     /// The entrance validation `add_equipment` runs before a candidate may
     /// join the dwelling: duplicate-name rejection, identity assignment,
-    /// declared-zone validation, and (once stepping has begun) frozen
+    /// declared-zone and ambient-location validation, and (once stepping
+    /// has begun) frozen
     /// port-slot satisfaction. Runs against the candidate in place, before
     /// it is pushed, so a rejection leaves the vector untouched.
     fn validate_candidate_equipment(&mut self, eq: &mut Box<dyn Equipment>) -> Result<()> {
@@ -3797,9 +3952,9 @@ impl Dwelling {
 
     /// The entrance validation `replace_equipment` runs before the swap:
     /// the duplicate-surviving-name contract (the evictee exempt), identity
-    /// assignment, declared-zone validation, and (once stepping has begun)
-    /// frozen port-slot satisfaction. Runs against the candidate in place,
-    /// before the swap, so a rejection leaves the vector untouched.
+    /// assignment, declared-zone and ambient-location validation, and (once
+    /// stepping has begun) frozen port-slot satisfaction. Runs against the
+    /// candidate in place, before the swap, so a rejection leaves the vector untouched.
     fn validate_replacement_equipment(
         &mut self,
         eq: &mut Box<dyn Equipment>,
@@ -3969,23 +4124,42 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// Propagates the output-schema drift error from
-    /// [`Self::refresh_equipment_caches`].
+    /// Propagates the roster plan's error; on `Err` the equipment and actor
+    /// rosters are exactly as before the call.
     pub fn clear_equipment(&mut self) -> Result<()> {
-        self.equipment.clear();
-        // Every equipment-targeted actor is now an orphan.
-        self.actors.retain(|a| a.dispatch_target_name().is_none());
-        self.auto_registered_actor_names.clear();
-        self.rebuild_schedule();
-        self.refresh_equipment_caches()?;
-        Ok(())
+        let original_equipment = std::mem::take(&mut self.equipment);
+        let actors = std::mem::take(&mut self.actors);
+        // Every equipment-targeted actor becomes an orphan; actors with no
+        // dispatch target are untouched.
+        let (prospective_actors, evicted_actors) = partition_actors_by_target(actors, |_| true);
+        let empty_equipment: Vec<Box<dyn Equipment>> = Vec::new();
+        match self.plan_roster_caches(&empty_equipment, &prospective_actors) {
+            Ok(caches) => {
+                self.equipment = empty_equipment;
+                self.actors = prospective_actors;
+                self.auto_registered_actor_names.clear();
+                self.rebuild_schedule();
+                self.install_roster_caches(caches);
+                drop(original_equipment);
+                Ok(())
+            }
+            Err(err) => {
+                let mut restored_actors = prospective_actors;
+                restore_evicted_actors(&mut restored_actors, evicted_actors);
+                self.actors = restored_actors;
+                self.equipment = original_equipment;
+                Err(err)
+            }
+        }
     }
 
     /// Removes equipment by name and returns it.
     ///
-    /// Returns `Err` if no equipment with the given name exists. Actors
-    /// targeting the removed equipment are evicted — a controller without
-    /// its equipment is an orphan, and its survival would block re-adding a
+    /// Returns `Err` if no equipment with the given name exists, or if the
+    /// resulting roster's plan is rejected, in which case the equipment
+    /// and actor rosters are exactly as before the call. Actors targeting
+    /// the removed equipment are evicted: a controller without its
+    /// equipment is an orphan, and its survival would block re-adding a
     /// same-named replacement (see [`Self::add_actor`]).
     pub fn remove_equipment(&mut self, name: &str) -> Result<Box<dyn Equipment>> {
         let pos = self
@@ -3993,10 +4167,37 @@ impl Dwelling {
             .iter()
             .position(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
-        let removed = self.equipment.remove(pos);
-        self.evict_actors_targeting(name);
-        self.refresh_equipment_caches()?;
-        Ok(removed)
+        let mut roster = std::mem::take(&mut self.equipment);
+        let removed = roster.remove(pos);
+        let actors = std::mem::take(&mut self.actors);
+        let (mut prospective_actors, evicted_actors) =
+            partition_actors_by_target(actors, |t| t == name);
+        match self.plan_roster_caches(&roster, &prospective_actors) {
+            Ok(caches) => {
+                let evicted_count = evicted_actors.len();
+                self.equipment = roster;
+                self.actors = prospective_actors;
+                if evicted_count > 0 {
+                    self.auto_registered_actor_names
+                        .retain(|n| self.actors.iter().any(|a| a.name() == n));
+                    self.rebuild_schedule();
+                    tracing::info!(
+                        equipment = %name,
+                        evicted = evicted_count,
+                        "actors targeting removed equipment evicted"
+                    );
+                }
+                self.install_roster_caches(caches);
+                Ok(removed)
+            }
+            Err(err) => {
+                restore_evicted_actors(&mut prospective_actors, evicted_actors);
+                self.actors = prospective_actors;
+                roster.insert(pos, removed);
+                self.equipment = roster;
+                Err(err)
+            }
+        }
     }
 
     /// Removes all equipment whose end-use matches any of the given set.
@@ -4006,26 +4207,49 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// Propagates the output-schema drift error from
-    /// [`Self::refresh_equipment_caches`] when any equipment was removed.
+    /// Propagates the roster plan's error when any equipment matched; on
+    /// `Err` the equipment and actor rosters are exactly as before the
+    /// call.
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> Result<usize> {
-        let before = self.equipment.len();
-        let removed_names: Vec<String> = self
-            .equipment
-            .iter()
-            .filter(|e| end_uses.contains(&e.descriptor().end_use))
-            .map(|e| e.descriptor().name.clone())
-            .collect();
-        self.equipment
-            .retain(|e| !end_uses.contains(&e.descriptor().end_use));
-        let removed = before - self.equipment.len();
-        if removed > 0 {
-            for name in &removed_names {
-                self.evict_actors_targeting(name);
-            }
-            self.refresh_equipment_caches()?;
+        let roster = std::mem::take(&mut self.equipment);
+        let (kept_equipment, removed_equipment) = partition_equipment_by_end_use(roster, end_uses);
+        if removed_equipment.is_empty() {
+            self.equipment = kept_equipment;
+            return Ok(0);
         }
-        Ok(removed)
+        let removed_names: Vec<String> = removed_equipment
+            .iter()
+            .map(|(_, eq)| eq.descriptor().name.clone())
+            .collect();
+        let actors = std::mem::take(&mut self.actors);
+        let (mut prospective_actors, evicted_actors) =
+            partition_actors_by_target(actors, |t| removed_names.iter().any(|n| n == t));
+        match self.plan_roster_caches(&kept_equipment, &prospective_actors) {
+            Ok(caches) => {
+                let removed_count = removed_equipment.len();
+                self.equipment = kept_equipment;
+                self.actors = prospective_actors;
+                if !evicted_actors.is_empty() {
+                    self.auto_registered_actor_names
+                        .retain(|n| self.actors.iter().any(|a| a.name() == n));
+                    self.rebuild_schedule();
+                    tracing::info!(
+                        equipment = ?removed_names,
+                        "actors targeting removed equipment evicted"
+                    );
+                }
+                self.install_roster_caches(caches);
+                Ok(removed_count)
+            }
+            Err(err) => {
+                restore_evicted_actors(&mut prospective_actors, evicted_actors);
+                self.actors = prospective_actors;
+                let mut restored_equipment = kept_equipment;
+                restore_removed_equipment(&mut restored_equipment, removed_equipment);
+                self.equipment = restored_equipment;
+                Err(err)
+            }
+        }
     }
 
     /// Replaces equipment by name with new equipment, returning the old equipment.
@@ -4073,39 +4297,67 @@ impl Dwelling {
             return Err(err);
         }
         new_equipment.mark_initialized();
-        let mut old = std::mem::replace(&mut self.equipment[pos], new_equipment);
-        // The evicted equipment leaves with the swap. Its deferred step
-        // warnings drain into the log first so the eviction never loses
-        // them: before the first step they keep their construction-time
-        // (unstamped) form, after stepping they carry the step in flight.
-        let mut evicted_drained: Vec<Warning> = Vec::new();
-        old.drain_warnings(&mut evicted_drained);
-        for mut warning in evicted_drained {
-            if self.clock.current_step > 0 {
-                warning.step_index = Some(self.clock.current_step);
+        // Plan against the swapped-in candidate roster before the swap
+        // touches `self.equipment`: on `Err` the swap below is undone
+        // (restoring the evicted equipment to its slot) rather than left in
+        // place with the caller believing the replacement was rejected.
+        let mut roster = std::mem::take(&mut self.equipment);
+        let old = std::mem::replace(&mut roster[pos], new_equipment);
+        match self.plan_roster_caches(&roster, &self.actors) {
+            Ok(caches) => {
+                self.equipment = roster;
+                let mut old = old;
+                // The evicted equipment leaves with the swap. Its deferred
+                // step warnings drain into the log first so the eviction
+                // never loses them: before the first step they keep their
+                // construction-time (unstamped) form, after stepping they
+                // carry the step in flight.
+                let mut evicted_drained: Vec<Warning> = Vec::new();
+                old.drain_warnings(&mut evicted_drained);
+                for mut warning in evicted_drained {
+                    if self.clock.current_step > 0 {
+                        warning.step_index = Some(self.clock.current_step);
+                    }
+                    self.warnings.push_warning(warning);
+                }
+                // Warnings the replacement raised before joining (its
+                // `init` runs on the caller's side) drain beside the
+                // registration that made them reportable.
+                let mut drained: Vec<Warning> = Vec::new();
+                self.equipment[pos].drain_warnings(&mut drained);
+                for warning in drained {
+                    self.warnings.push_warning(warning);
+                }
+                self.install_roster_caches(caches);
+                Ok(old)
             }
-            self.warnings.push_warning(warning);
+            Err(err) => {
+                let mut rejected = std::mem::replace(&mut roster[pos], old);
+                self.equipment = roster;
+                let mut drained: Vec<Warning> = Vec::new();
+                rejected.drain_warnings(&mut drained);
+                for warning in drained {
+                    self.warnings.push_warning(warning);
+                }
+                Err(err)
+            }
         }
-        // Warnings the replacement raised before joining (its `init` runs on
-        // the caller's side) drain beside the registration that made them
-        // reportable.
-        let mut drained: Vec<Warning> = Vec::new();
-        self.equipment[pos].drain_warnings(&mut drained);
-        for warning in drained {
-            self.warnings.push_warning(warning);
-        }
-        self.refresh_equipment_caches()?;
-        Ok(old)
     }
 
     /// Monotonic pre-step port-slot rebuild: the layout
     /// [`PortSlots::from_declarations`] derives from the live declarations,
-    /// extended with every accumulator kind the previous table already
-    /// carried. Never drops coverage (the envelope solvers step against
-    /// env-zone thermal/humidity accumulators regardless of which equipment
-    /// currently declares them — e.g. after `clear_equipment`), and never
-    /// reuses the previous accumulators' *values* — before the first step
-    /// the table is pure layout.
+    /// extended with every zone and domain accumulator the previous table
+    /// already carried. Never drops zone/domain coverage (the envelope
+    /// solvers step against env-zone thermal/humidity accumulators
+    /// regardless of which equipment currently declares them (e.g. after
+    /// `clear_equipment`), and never reuses the previous accumulators'
+    /// *values*: before the first step the table is pure layout.
+    ///
+    /// Fluid accumulators are the one exception to the monotonic rule: a
+    /// loop no live equipment declares is dropped, not retained, so the
+    /// loop-type map derived from this table's fluid accumulators always
+    /// reflects the live declarations alone (`plan_roster_caches`), never a
+    /// stale type from equipment that has since left.
     fn rebuild_port_slots(declarations: &[PortDeclaration], previous: &PortSlots) -> PortSlots {
         let mut rebuilt = PortSlots::from_declarations(declarations);
         for acc in &previous.thermal {
@@ -4116,19 +4368,6 @@ impl Dwelling {
         for acc in &previous.humidity {
             if !rebuilt.humidity.iter().any(|h| h.zone == acc.zone) {
                 rebuilt.humidity.push(HumidityAccumulator::new(acc.zone));
-            }
-        }
-        for acc in &previous.fluid {
-            if !rebuilt.fluid.iter().any(|f| {
-                f.loop_id == acc.loop_id
-                    && f.fluid_type == acc.fluid_type
-                    && f.node_id == acc.node_id
-            }) {
-                rebuilt.fluid.push(FluidAccumulator::with_node(
-                    acc.loop_id,
-                    acc.fluid_type,
-                    acc.node_id,
-                ));
             }
         }
         for acc in &previous.custom {
@@ -4215,119 +4454,72 @@ impl Dwelling {
     /// `HaresError::InvariantViolation` when the output schema owes a
     /// column that the column map cannot resolve for schema-known
     /// equipment (schema drift).
-    pub fn refresh_equipment_caches(&mut self) -> Result<()> {
-        self.equipment_id_by_name = self
-            .equipment
+    /// Everything [`Self::plan_roster_caches`] derives from a prospective
+    /// equipment/actor roster and [`Self::install_roster_caches`] later
+    /// assigns verbatim. Keeping every derived value in one struct is what
+    /// makes the install step infallible: nothing in it is computed, only
+    /// moved into place.
+    fn plan_roster_caches(
+        &self,
+        equipment: &[Box<dyn Equipment>],
+        actors: &[Box<dyn Actor>],
+    ) -> Result<RosterCaches> {
+        let equipment_id_by_name: HashMap<String, EquipmentId> = equipment
             .iter()
             .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
             .collect();
-        // Re-resolve every actor's equipment binding against the rebuilt
-        // name→id map. The cached binding goes stale on any equipment
-        // identity change — a replacement equipment receives a new
-        // never-reused id, and an actor registered before its equipment
-        // existed had no binding at all — and a stale binding silently
-        // reads the old id's core output: the observation-misbinding class
-        // this dwelling's identity contract exists to prevent. Runs only
-        // on equipment/actor changes, never per step, so the map clone is
-        // off the hot path.
-        let id_by_name = self.equipment_id_by_name.clone();
-        for actor in &mut self.actors {
-            actor.resolve_equipment_id(&id_by_name);
-        }
-        // One `ActorTimings` slot per registered actor, rebuilt with the
-        // actor list: every actor-list mutation (`add_actor`,
-        // `auto_register_actors`, the equipment-removal evictions) runs this
-        // refresh right after, so the slots always match the live actor
-        // order the scheduler's plan slots index into. Totals restart with
-        // the actor list: the summary reports a run under one roster.
-        #[cfg(feature = "profiling")]
-        {
-            self.actor_timings = ActorTimings::new(self.actors.iter().map(|a| Arc::from(a.name())));
-        }
-        // Seed the environment snapshot for equipment whose id is not yet
-        // in `equipment_core` — equipment entering the vector mid-run (add,
-        // replace) has no entry until its first step completes, leaving
-        // actors reading its output blind for that step and tripping the
-        // start-of-step core-entry invariant. The equipment's own current
-        // `core_output()` is the truthful value (identical to what the
-        // end-of-step snapshot will write); the end-of-step retain drops
-        // ids that have since left the vector.
-        for eq in &self.equipment {
-            let id = eq.descriptor().id;
-            self.latest_env
-                .equipment_core
-                .entry(id)
-                .or_insert_with(|| eq.core_output().clone());
-        }
-        self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
-        self.equipment_ids = self.equipment.iter().map(|eq| eq.descriptor().id).collect();
-        self.environment
-            .set_ambient_locations(self.equipment.iter().filter_map(|eq| eq.ambient_location()))?;
-        self.solver_feedback_actor
-            .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
+        let equipment_execution_order = compute_equipment_execution_order(equipment);
+        let equipment_ids: Vec<EquipmentId> =
+            equipment.iter().map(|eq| eq.descriptor().id).collect();
+        let dispatch_targets = compute_equipment_dispatch_targets(equipment);
+        let ambient_locations = self
+            .environment
+            .plan_ambient_locations(equipment.iter().filter_map(|eq| eq.ambient_location()))?;
 
-        // Rebuild the port-slot table from the live equipment's declarations
-        // while no step has run. `PortSlots::from_declarations` otherwise runs
-        // only at assembly, so equipment added after construction (`add_equipment`,
-        // `replace_equipment` — every Python `add_*` call) declared ports
-        // against a table that predates it: contributions to zones, loops, or
-        // domains the table never allocated were silently miswired or
-        // dropped. Before the first step the rebuild is safe — the table is
-        // pure layout, no accumulator state has meaning yet — and it is
-        // monotonic: coverage the previous table already had is preserved
-        // (the envelope solvers step against env-zone accumulators even in a
-        // dwelling whose equipment was cleared), while every newly declared
-        // port gains its accumulator. After the first step the table cannot
-        // be rebuilt (per-step accumulator state and solver wiring are
-        // live), so post-step adds are instead guarded by
-        // [`Self::ensure_ports_satisfied`] at the entrance, which rejects an
-        // equipment whose declarations the frozen table cannot satisfy
-        // instead of letting its contributions vanish.
-        if self.clock.current_step == 0 {
-            let declarations: Vec<PortDeclaration> = self
-                .equipment
+        // Pre-step port-slot and loop-type rebuild (see `rebuild_port_slots`
+        // and `FluidSolver::plan_loop_types`): pure layout derived from the
+        // live declarations alone, never touching `self`. After the first
+        // step neither is recomputed: the table and loop-type map are
+        // frozen, and a post-step candidate is instead checked against them
+        // by `ensure_ports_satisfied` at the entrance.
+        let pre_step = if self.clock.current_step == 0 {
+            let declarations: Vec<PortDeclaration> = equipment
                 .iter()
                 .flat_map(|eq| eq.ports())
                 .copied()
                 .collect();
-            self.ports = Self::rebuild_port_slots(&declarations, &self.ports);
-            self.rollback_ports = Self::rebuild_port_slots(&declarations, &self.rollback_ports);
-            // Keep the fluid solver's loop-type map in step with the port-slot
-            // table it was just rebuilt from: a runtime-added water heater,
-            // tankless unit or wet appliance declares its loops here. The map
-            // derives from the table's fluid accumulators (which `resolve`
-            // iterates), so the table's documented monotonicity (accumulators
-            // whose declaring equipment left are retained) carries into the
-            // map and a retained loop never resolves as undeclared.
-            let fluid_loops = self
-                .ports
-                .fluid
-                .iter()
-                .map(|f| (f.loop_id, f.fluid_type))
-                .collect::<Vec<_>>();
-            self.fluid_solver.rebuild_loop_types(&fluid_loops)?;
-        }
+            let ports = Self::rebuild_port_slots(&declarations, &self.ports);
+            let rollback_ports = Self::rebuild_port_slots(&declarations, &self.rollback_ports);
+            // The loop-type map comes from the live equipment's own fluid
+            // declarations alone, not from the port-slot table's
+            // accumulators, which (for zone/domain accumulators) retain
+            // coverage the current equipment no longer declares. A loop
+            // whose only declarer just left is undeclared here, freeing its
+            // fluid type for the next declarer, instead of staying pinned
+            // to a type nothing live asserts any more.
+            let fluid_loop_types = hares_envelope::fluid_solver::plan_loop_types(
+                &hares_types::ports::fluid_loop_declarations(&declarations),
+            )?;
+            Some(PreStepRosterCaches {
+                ports,
+                rollback_ports,
+                fluid_loop_types,
+            })
+        } else {
+            None
+        };
+        let ports_for_wiring = pre_step.as_ref().map_or(&self.ports, |p| &p.ports);
+        let hvac_thermal_consistency = build_hvac_thermal_consistency(ports_for_wiring, equipment);
 
-        // The per-zone thermal consistency wiring mirrors the port-slot
-        // table: rebuilt with it (before the first step) and with every
-        // equipment-list change.
-        self.hvac_thermal_consistency =
-            build_hvac_thermal_consistency(&self.ports, &self.equipment);
-
-        // Rebuild output schema so dynamically added equipment and actors get columns.
-        // Only safe before any rows have been recorded; mid-simulation schema
-        // changes would corrupt the output file. Skipped entirely when output
-        // is disabled: record_step never runs, so schema/column-map work would
-        // be pure waste (mirrors the write_output gate at assembly).
-        if self.write_output
-            && self
-                .recorder
-                .as_ref()
-                .map_or(0, StreamingRecorder::total_rows)
-                == 0
+        let output = if !self.write_output {
+            OutputCachesPlan::Disabled
+        } else if self
+            .recorder
+            .as_ref()
+            .map_or(0, StreamingRecorder::total_rows)
+            == 0
         {
-            let specs = equipment_descriptor_specs(&self.equipment);
-
+            let specs = equipment_descriptor_specs(equipment);
             let mut schema = build_schema(
                 &specs,
                 self.output_verbosity,
@@ -4353,172 +4545,285 @@ impl Dwelling {
                     })
                     .collect::<Vec<_>>(),
             );
-            schema = extend_schema_with_actor_columns(&schema, &self.actors);
-            self.output_value_count = schema.fields().len() - 1;
-            self.output_column_index = build_output_column_index(&schema);
-            self.equipment_column_map = build_equipment_column_map(
-                &self.equipment,
-                &self.output_column_index,
-                self.output_verbosity,
-            )?;
-            self.end_use_aggregate_indices =
-                build_end_use_aggregate_indices(&specs, &self.output_column_index);
-
+            schema = extend_schema_with_actor_columns(&schema, actors);
+            let output_value_count = schema.fields().len() - 1;
+            let output_column_index = build_output_column_index(&schema);
+            let equipment_column_map =
+                build_equipment_column_map(equipment, &output_column_index, self.output_verbosity)?;
+            let end_use_aggregate_indices =
+                build_end_use_aggregate_indices(&specs, &output_column_index);
             // Pre-resolve actor telemetry column indices (shared with the
-            // frozen-schema branch below — one derivation, no drift).
-            self.actor_column_map = build_actor_column_map(&self.actors, &self.output_column_index);
-
-            #[cfg(feature = "observe")]
-            {
-                // Runtime diagnostic: report output-scoped telemetry keys that
-                // have no column mapping. This helps operators audit coverage:
-                // if a key is marked scope: output but no equipment publishes it
-                // to a visible column, the signal is silently absent from output.
-                let mut covered: HashSet<&str> = HashSet::new();
-                for cols in &self.equipment_column_map {
-                    for &(key, _idx) in &cols.v8_columns {
-                        covered.insert(key);
-                    }
-                }
-                // Keys resolved via per-equipment named columns (not v8_columns):
-                for cols in &self.equipment_column_map {
-                    if cols.defrost_state.is_some() {
-                        covered.insert(tk::DEFROST_CYCLE_STATE);
-                    }
-                    if cols.er_power.is_some() {
-                        covered.insert(tk::BACKUP_ER_KW);
-                    }
-                    if cols.shr.is_some() {
-                        covered.insert(tk::SHR);
-                    }
-                    if cols.fan_power.is_some() {
-                        covered.insert(tk::FAN_KW);
-                    }
-                    if cols.runtime_fraction.is_some() {
-                        covered.insert(tk::RUNTIME_FRACTION);
-                    }
-                    if cols.latent_gains.is_some() {
-                        covered.insert(tk::LATENT_GAINS_W);
-                    }
-                    if cols.duct_losses.is_some() {
-                        covered.insert(tk::DUCT_LOSS_W);
-                    }
-                }
-                // Setpoint chain columns are dwelling-level, not per-equipment.
-                if self
-                    .output_column_index
-                    .contains_key(SCHEDULED_HEATING_SETPOINT_COL)
-                {
-                    covered.insert(tk::SCHEDULE_HEATING_SETPOINT_C);
-                    covered.insert(tk::SCHEDULE_COOLING_SETPOINT_C);
-                    covered.insert(tk::RUNTIME_HEATING_SETPOINT_C);
-                    covered.insert(tk::RUNTIME_COOLING_SETPOINT_C);
-                }
-                // Actor telemetry pass-through columns cover all keys published
-                // by actors. Any key in any actor's telemetry is covered.
-                for actor in &self.actors {
-                    if let Some(tel) = actor.telemetry() {
-                        for key in tel.0.keys() {
-                            covered.insert(key.as_str());
-                        }
-                    }
-                }
-                for &key in tk::OUTPUT_SCOPE_KEYS {
-                    if !covered.contains(key) {
-                        // Key is output-scoped but has no column mapping at
-                        // the current verbosity level. This is not necessarily
-                        // a bug — the equipment publishing this key may not be
-                        // present in the dwelling, or the verbosity may be too
-                        // low. But it is worth flagging for diagnostic purposes.
-                        tracing::info!(
-                            target: "hares::output::coverage",
-                            key = key,
-                            "output-scoped telemetry key has no output column at verbosity {}",
-                            self.output_verbosity,
-                        );
-                    }
-                }
-            }
-
+            // frozen-schema branch below: one derivation, no drift).
+            let actor_column_map = build_actor_column_map(actors, &output_column_index);
             let zone_types = self.environment.zone_types().to_vec();
             let zone_caches = build_zone_column_caches(
                 &self.latest_env.zones,
                 &zone_types,
                 self.thermal_solver.config().indoor_zone_id,
-                &self.output_column_index,
+                &output_column_index,
             );
-            self.zone_temp_columns = zone_caches.temp_columns;
-            self.zone_infiltration_columns = zone_caches.infiltration_columns;
-            self.zone_lwr_columns = zone_caches.lwr_columns;
-            self.zone_hvac_columns = zone_caches.hvac_columns;
-            self.zone_temp_scratch = zone_caches
-                .sorted_zone_ids
-                .iter()
-                .map(|&z| (z, 0.0))
-                .collect();
-            self.sorted_zone_ids = zone_caches.sorted_zone_ids;
-            self.zone_env_indices = zone_caches.zone_env_indices;
-            self.zone_temp_col_indices = zone_caches.zone_temp_col_indices;
-            self.record_scratch.clear();
-            self.record_scratch.resize(self.output_value_count, 0.0);
-
-            // The enclosing block is gated on self.write_output.
-            match StreamingRecorder::new(
+            OutputCachesPlan::FreshSchema {
                 schema,
-                self.output_chunk_size,
-                self.output_format,
-                &self.output_path,
-                self.retain_batches,
-                self.output_rotation,
-            ) {
-                Ok(mut recorder) => {
-                    // Mirrors construction: streaming runs collect run
-                    // metrics incrementally; an init failure degrades to
-                    // zeroed metrics with a warning, not a failed refresh.
-                    if !self.retain_batches
-                        && let Err(err) = recorder
-                            .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
-                    {
-                        self.push_warning(format!(
-                            "MetricsCalculator init failed: {err} -- metrics are zeroed"
-                        ));
-                    }
-                    self.recorder = Some(recorder);
-                }
-                Err(err) => {
-                    // A failed re-init would otherwise silently drop all
-                    // subsequent output; surface it in the run warnings,
-                    // which the engine reports and flags.
-                    self.push_warning(format!(
-                        "output recorder re-init failed: {err} -- subsequent output is dropped"
-                    ));
-                }
+                output_value_count,
+                output_column_index,
+                equipment_column_map,
+                end_use_aggregate_indices,
+                actor_column_map,
+                zone_caches: Box::new(zone_caches),
             }
-        } else if self.write_output {
+        } else {
             // Rows are already recorded: the schema and column index are
-            // frozen with the output file, but the *positional* per-equipment,
-            // per-actor, and end-use-aggregate column maps must still track
-            // the live vectors. Without this re-derivation, a mid-run equipment
-            // or actor remove/reorder left the maps desynced from the vectors,
-            // and record_step's positional `zip`s silently wrote one entity's
-            // values into another's columns (a mid-run add silently
-            // truncated instead). The maps resolve columns by NAME against
-            // the frozen index, so surviving entities keep their own columns
-            // and entities with no columns (added after recording began) get
-            // empty maps — visible as missing values, never misattributed
-            // ones.
-            self.equipment_column_map = build_equipment_column_map(
-                &self.equipment,
+            // frozen with the output file, but the *positional*
+            // per-equipment, per-actor, and end-use-aggregate column maps
+            // must still track the prospective roster. Without this
+            // re-derivation, a mid-run equipment or actor remove/reorder
+            // left the maps desynced from the vectors, and record_step's
+            // positional `zip`s silently wrote one entity's values into
+            // another's columns (a mid-run add silently truncated
+            // instead). The maps resolve columns by NAME against the
+            // frozen index, so surviving entities keep their own columns
+            // and entities with no columns (added after recording began)
+            // get empty maps: visible as missing values, never
+            // misattributed ones.
+            let equipment_column_map = build_equipment_column_map(
+                equipment,
                 &self.output_column_index,
                 self.output_verbosity,
             )?;
-            self.end_use_aggregate_indices = build_end_use_aggregate_indices(
-                &equipment_descriptor_specs(&self.equipment),
+            let end_use_aggregate_indices = build_end_use_aggregate_indices(
+                &equipment_descriptor_specs(equipment),
                 &self.output_column_index,
             );
-            self.actor_column_map = build_actor_column_map(&self.actors, &self.output_column_index);
+            let actor_column_map = build_actor_column_map(actors, &self.output_column_index);
+            OutputCachesPlan::FrozenUpdate {
+                equipment_column_map,
+                end_use_aggregate_indices,
+                actor_column_map,
+            }
+        };
+
+        Ok(RosterCaches {
+            equipment_id_by_name,
+            equipment_execution_order,
+            equipment_ids,
+            dispatch_targets,
+            ambient_locations,
+            pre_step,
+            hvac_thermal_consistency,
+            output,
+        })
+    }
+
+    /// Installs a plan computed by [`Self::plan_roster_caches`] against the
+    /// live dwelling. Infallible: every fallible decision (schema drift, a
+    /// fluid-loop conflict) already happened inside the plan, so nothing
+    /// here can fail. Every roster entrance mutates the live equipment and
+    /// actor vectors itself, immediately before calling this, so install
+    /// only ever runs once the caller has committed to the new roster.
+    fn install_roster_caches(&mut self, caches: RosterCaches) {
+        self.equipment_id_by_name = caches.equipment_id_by_name;
+        // Re-resolve every actor's equipment binding against the rebuilt
+        // name→id map. The cached binding goes stale on any equipment
+        // identity change (a replacement equipment receives a new
+        // never-reused id, and an actor registered before its equipment
+        // existed had no binding at all), and a stale binding silently
+        // reads the old id's core output: the observation-misbinding class
+        // this dwelling's identity contract exists to prevent.
+        let id_by_name = &self.equipment_id_by_name;
+        for actor in &mut self.actors {
+            actor.resolve_equipment_id(id_by_name);
         }
-        Ok(())
+        // One `ActorTimings` slot per registered actor, rebuilt with the
+        // actor list: every actor-list mutation (`add_actor`,
+        // `auto_register_actors`, the equipment-removal evictions) installs
+        // its plan right after committing the new list, so the slots always
+        // match the live actor order the scheduler's plan slots index into.
+        // Totals restart with the actor list: the summary reports a run
+        // under one roster.
+        #[cfg(feature = "profiling")]
+        {
+            self.actor_timings = ActorTimings::new(self.actors.iter().map(|a| Arc::from(a.name())));
+        }
+        // Seed the environment snapshot for equipment whose id is not yet
+        // in `equipment_core`: equipment entering the vector mid-run (add,
+        // replace) has no entry until its first step completes, leaving
+        // actors reading its output blind for that step and tripping the
+        // start-of-step core-entry invariant. The equipment's own current
+        // `core_output()` is the truthful value (identical to what the
+        // end-of-step snapshot will write); the end-of-step retain drops
+        // ids that have since left the vector.
+        for eq in &self.equipment {
+            let id = eq.descriptor().id;
+            self.latest_env
+                .equipment_core
+                .entry(id)
+                .or_insert_with(|| eq.core_output().clone());
+        }
+        self.equipment_execution_order = caches.equipment_execution_order;
+        self.equipment_ids = caches.equipment_ids;
+        self.solver_feedback_actor
+            .set_dispatch_targets(caches.dispatch_targets);
+        self.environment
+            .install_ambient_locations(caches.ambient_locations);
+        if let Some(pre_step) = caches.pre_step {
+            self.ports = pre_step.ports;
+            self.rollback_ports = pre_step.rollback_ports;
+            self.fluid_solver
+                .install_loop_types(pre_step.fluid_loop_types);
+        }
+        self.hvac_thermal_consistency = caches.hvac_thermal_consistency;
+
+        match caches.output {
+            OutputCachesPlan::Disabled => {}
+            OutputCachesPlan::FrozenUpdate {
+                equipment_column_map,
+                end_use_aggregate_indices,
+                actor_column_map,
+            } => {
+                self.equipment_column_map = equipment_column_map;
+                self.end_use_aggregate_indices = end_use_aggregate_indices;
+                self.actor_column_map = actor_column_map;
+            }
+            OutputCachesPlan::FreshSchema {
+                schema,
+                output_value_count,
+                output_column_index,
+                equipment_column_map,
+                end_use_aggregate_indices,
+                actor_column_map,
+                zone_caches,
+            } => {
+                self.output_value_count = output_value_count;
+                self.output_column_index = output_column_index;
+                self.equipment_column_map = equipment_column_map;
+                self.end_use_aggregate_indices = end_use_aggregate_indices;
+                self.actor_column_map = actor_column_map;
+
+                #[cfg(feature = "observe")]
+                {
+                    // Runtime diagnostic: report output-scoped telemetry keys
+                    // that have no column mapping. This helps operators audit
+                    // coverage: if a key is marked scope: output but no
+                    // equipment publishes it to a visible column, the signal
+                    // is silently absent from output.
+                    let mut covered: HashSet<&str> = HashSet::new();
+                    for cols in &self.equipment_column_map {
+                        for &(key, _idx) in &cols.v8_columns {
+                            covered.insert(key);
+                        }
+                    }
+                    // Keys resolved via per-equipment named columns (not v8_columns):
+                    for cols in &self.equipment_column_map {
+                        if cols.defrost_state.is_some() {
+                            covered.insert(tk::DEFROST_CYCLE_STATE);
+                        }
+                        if cols.er_power.is_some() {
+                            covered.insert(tk::BACKUP_ER_KW);
+                        }
+                        if cols.shr.is_some() {
+                            covered.insert(tk::SHR);
+                        }
+                        if cols.fan_power.is_some() {
+                            covered.insert(tk::FAN_KW);
+                        }
+                        if cols.runtime_fraction.is_some() {
+                            covered.insert(tk::RUNTIME_FRACTION);
+                        }
+                        if cols.latent_gains.is_some() {
+                            covered.insert(tk::LATENT_GAINS_W);
+                        }
+                        if cols.duct_losses.is_some() {
+                            covered.insert(tk::DUCT_LOSS_W);
+                        }
+                    }
+                    // Setpoint chain columns are dwelling-level, not per-equipment.
+                    if self
+                        .output_column_index
+                        .contains_key(SCHEDULED_HEATING_SETPOINT_COL)
+                    {
+                        covered.insert(tk::SCHEDULE_HEATING_SETPOINT_C);
+                        covered.insert(tk::SCHEDULE_COOLING_SETPOINT_C);
+                        covered.insert(tk::RUNTIME_HEATING_SETPOINT_C);
+                        covered.insert(tk::RUNTIME_COOLING_SETPOINT_C);
+                    }
+                    // Actor telemetry pass-through columns cover all keys
+                    // published by actors. Any key in any actor's telemetry
+                    // is covered.
+                    for actor in &self.actors {
+                        if let Some(tel) = actor.telemetry() {
+                            for key in tel.0.keys() {
+                                covered.insert(key.as_str());
+                            }
+                        }
+                    }
+                    for &key in tk::OUTPUT_SCOPE_KEYS {
+                        if !covered.contains(key) {
+                            // Key is output-scoped but has no column mapping
+                            // at the current verbosity level. This is not
+                            // necessarily a bug: the equipment publishing
+                            // this key may not be present in the dwelling,
+                            // or the verbosity may be too low. But it is
+                            // worth flagging for diagnostic purposes.
+                            tracing::info!(
+                                target: "hares::output::coverage",
+                                key = key,
+                                "output-scoped telemetry key has no output column at verbosity {}",
+                                self.output_verbosity,
+                            );
+                        }
+                    }
+                }
+
+                self.zone_temp_columns = zone_caches.temp_columns;
+                self.zone_infiltration_columns = zone_caches.infiltration_columns;
+                self.zone_lwr_columns = zone_caches.lwr_columns;
+                self.zone_hvac_columns = zone_caches.hvac_columns;
+                self.zone_temp_scratch = zone_caches
+                    .sorted_zone_ids
+                    .iter()
+                    .map(|&z| (z, 0.0))
+                    .collect();
+                self.sorted_zone_ids = zone_caches.sorted_zone_ids;
+                self.zone_env_indices = zone_caches.zone_env_indices;
+                self.zone_temp_col_indices = zone_caches.zone_temp_col_indices;
+                self.record_scratch.clear();
+                self.record_scratch.resize(self.output_value_count, 0.0);
+
+                match StreamingRecorder::new(
+                    schema,
+                    self.output_chunk_size,
+                    self.output_format,
+                    &self.output_path,
+                    self.retain_batches,
+                    self.output_rotation,
+                ) {
+                    Ok(mut recorder) => {
+                        // Mirrors construction: streaming runs collect run
+                        // metrics incrementally; an init failure degrades to
+                        // zeroed metrics with a warning, not a failed install.
+                        if !self.retain_batches
+                            && let Err(err) = recorder.enable_metrics(
+                                self.sim_config.time_res_secs_u32(),
+                                &self.sim_config,
+                            )
+                        {
+                            self.push_warning(format!(
+                                "MetricsCalculator init failed: {err} -- metrics are zeroed"
+                            ));
+                        }
+                        self.recorder = Some(recorder);
+                    }
+                    Err(err) => {
+                        // A failed re-init would otherwise silently drop all
+                        // subsequent output; surface it in the run warnings,
+                        // which the engine reports and flags.
+                        self.push_warning(format!(
+                            "output recorder re-init failed: {err} -- subsequent output is dropped"
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -13648,8 +13953,6 @@ master_seed = 0
     /// constructor that hardcoded a loop ID instead of using its typed config.
     #[test]
     fn equipment_declaring_unallocated_loop_is_rejected_at_construction() {
-        use hares_types::FluidType;
-
         // LoopId(1) and LoopId(2) were allocated.
         let allocated: HashSet<u16> = [1, 2].into_iter().collect();
 
@@ -15226,6 +15529,255 @@ master_seed = 0
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
             .expect("build bestest dwelling")
+    }
+
+    /// Builds an initialized Electric Boiler declaring `loop_id` with
+    /// `fluid_type`: a real, fully-functional fluid-port equipment, not a
+    /// stub, so a dwelling carrying one can step for real.
+    fn boiler_on_loop(
+        name: &str,
+        loop_id: u16,
+        fluid_type: FluidType,
+        env: &EnvironmentState,
+    ) -> Box<dyn Equipment> {
+        let config = EquipmentConfig::from_typed(
+            name.to_string(),
+            "Electric Boiler".to_string(),
+            hares_equipment::ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(loop_id),
+                capacity_w: 0.0,
+                fluid_type,
+                ..hares_equipment::ElectricBoilerConfig::default()
+            },
+        )
+        .expect("boiler config");
+        let registry = EquipmentRegistry::new();
+        let mut eq = registry
+            .create("Electric Boiler", config.clone())
+            .expect("boiler equipment");
+        eq.init(&config, env).expect("init boiler");
+        eq
+    }
+
+    /// `add_equipment` rejecting a fluid-type-conflicting candidate must
+    /// leave the dwelling exactly as it was: it must not push the candidate
+    /// and then fail.
+    #[test]
+    fn rejected_add_leaves_roster_unchanged() {
+        let mut dwelling = bestest_dwelling();
+        let water = boiler_on_loop("Boiler-Water", 7, FluidType::Water, &dwelling.latest_env);
+        dwelling
+            .add_equipment(water)
+            .expect("the first declarer of loop 7 is accepted");
+
+        let names_before: Vec<String> = dwelling
+            .equipment()
+            .iter()
+            .map(|e| e.descriptor().name.clone())
+            .collect();
+        let loop_type_before = dwelling.fluid_solver.loop_fluid_type(LoopId(7));
+
+        let glycol = boiler_on_loop("Boiler-Glycol", 7, FluidType::Glycol, &dwelling.latest_env);
+        let err = dwelling
+            .add_equipment(glycol)
+            .expect_err("a second declarer of loop 7 with a conflicting fluid type is rejected");
+        assert!(matches!(err, HaresError::Envelope(_)), "got: {err:?}");
+
+        let names_after: Vec<String> = dwelling
+            .equipment()
+            .iter()
+            .map(|e| e.descriptor().name.clone())
+            .collect();
+        assert_eq!(
+            names_before, names_after,
+            "a rejected add must not leave the candidate in the vector"
+        );
+        assert_eq!(
+            dwelling.fluid_solver.loop_fluid_type(LoopId(7)),
+            loop_type_before,
+            "a rejected add must not perturb the fluid-loop map"
+        );
+    }
+
+    /// `replace_equipment` rejecting a fluid-type-conflicting candidate
+    /// must keep the original equipment installed, not destroy it and
+    /// install the rejected replacement.
+    #[test]
+    fn rejected_replace_keeps_the_original() {
+        let mut dwelling = bestest_dwelling();
+        let water = boiler_on_loop("Boiler-Water", 7, FluidType::Water, &dwelling.latest_env);
+        dwelling.add_equipment(water).expect("accepted");
+        let furnace = FunctionalPortEquipment::new("Furnace", 0.0, ExecutionStage::Independent);
+        dwelling.add_equipment(Box::new(furnace)).expect("accepted");
+        let count_before = dwelling.equipment().len();
+        let furnace_id = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == "Furnace")
+            .expect("Furnace present")
+            .descriptor()
+            .id;
+
+        let glycol_replacement =
+            boiler_on_loop("Furnace", 7, FluidType::Glycol, &dwelling.latest_env);
+        let err = match dwelling.replace_equipment("Furnace", glycol_replacement) {
+            Err(err) => err,
+            Ok(_) => panic!("a replacement conflicting with loop 7's fluid type must be rejected"),
+        };
+        assert!(matches!(err, HaresError::Envelope(_)), "got: {err:?}");
+
+        let furnace = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == "Furnace")
+            .expect("the original Furnace must still be installed");
+        assert_eq!(
+            furnace.descriptor().id,
+            furnace_id,
+            "the surviving equipment must be the original instance, not the rejected replacement"
+        );
+        assert_eq!(
+            dwelling.equipment().len(),
+            count_before,
+            "no equipment must be lost or gained"
+        );
+    }
+
+    /// Any entrance whose plan fails, not only a fluid-loop conflict,
+    /// must leave the actor roster and schedule untouched. A pre-existing
+    /// equipment/schema-column drift (injected directly, mirroring
+    /// `build_equipment_column_map_errors_on_schema_drift_for_known_equipment`)
+    /// is surfaced by the next roster-mutating call, here `add_actor`.
+    #[test]
+    fn rejected_actor_add_leaves_roster_unchanged() {
+        let mut dwelling = bestest_dwelling();
+        let mut battery = TestEquipment::new("Battery", ControlCapabilities::empty());
+        battery.descriptor.end_use = EndUse::BATTERY;
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(battery)]);
+
+        // Force the frozen-schema branch deterministically: a recorder
+        // with one row already pushed, and a column index built by hand
+        // carrying "Battery"'s membership column (Electric Power, Mode)
+        // but not the SOC column its end-use class demands at verbosity 3.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let schema = hares_io::build_schema(&[], 0, &[]);
+        let value_count = schema.fields().len() - 1;
+        let mut recorder = StreamingRecorder::new(
+            schema,
+            10,
+            hares_io::OutputFormat::Csv,
+            &tmp.path().join("drift.csv"),
+            false,
+            hares_io::RotationPolicy::None,
+        )
+        .expect("recorder");
+        recorder
+            .push_row("2023-01-01T00:00:00", &vec![0.0; value_count])
+            .expect("push row");
+        dwelling.recorder = Some(recorder);
+        dwelling.write_output = true;
+        dwelling.output_verbosity = 3;
+        dwelling.output_column_index.clear();
+        dwelling
+            .output_column_index
+            .insert("Battery Electric Power (kW)".to_string(), 0);
+        dwelling
+            .output_column_index
+            .insert("Battery Mode (-)".to_string(), 1);
+
+        let actors_before = dwelling.actor_count();
+        let err = dwelling
+            .add_actor(Box::new(StubActor {
+                name: "Observer".to_string(),
+            }))
+            .expect_err("a plan drifting on pre-existing equipment must reject the actor add");
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. }
+                if check_name.contains("Battery")),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            dwelling.actor_count(),
+            actors_before,
+            "a rejected actor add must not leave the actor registered"
+        );
+    }
+
+    /// Before the first step, removing a loop's only declarer frees its
+    /// fluid type: the loop-type map must come from the live equipment's
+    /// declarations, not from a retained port-slot accumulator.
+    #[test]
+    fn removed_loop_declarer_frees_its_fluid_type_before_first_step() {
+        let mut dwelling = bestest_dwelling();
+        let glycol = boiler_on_loop("Boiler-Glycol", 7, FluidType::Glycol, &dwelling.latest_env);
+        dwelling.add_equipment(glycol).expect("accepted");
+        assert_eq!(
+            dwelling.fluid_solver.loop_fluid_type(LoopId(7)),
+            Some(FluidType::Glycol)
+        );
+
+        dwelling
+            .remove_equipment("Boiler-Glycol")
+            .expect("remove the only declarer of loop 7");
+
+        let water = boiler_on_loop("Boiler-Water", 7, FluidType::Water, &dwelling.latest_env);
+        dwelling
+            .add_equipment(water)
+            .expect("loop 7 is free once its only declarer left");
+        assert_eq!(
+            dwelling.fluid_solver.loop_fluid_type(LoopId(7)),
+            Some(FluidType::Water),
+            "the loop-type map must resolve from the live declaration alone"
+        );
+    }
+
+    /// After the first step, a candidate declaring a running loop with a
+    /// conflicting fluid type is rejected by the frozen-table guard
+    /// (`ensure_ports_satisfied`), and the rejection leaves the roster,
+    /// the fluid-loop map and the output schema exactly as they were.
+    #[test]
+    fn post_step_conflicting_fluid_declaration_is_rejected() {
+        let mut dwelling = bestest_dwelling();
+        let water = boiler_on_loop("Boiler-Water", 7, FluidType::Water, &dwelling.latest_env);
+        dwelling.add_equipment(water).expect("accepted pre-step");
+
+        dwelling
+            .run_timestep(false)
+            .expect("the dwelling steps once, freezing the port-slot table");
+
+        let names_before: Vec<String> = dwelling
+            .equipment()
+            .iter()
+            .map(|e| e.descriptor().name.clone())
+            .collect();
+        let loop_type_before = dwelling.fluid_solver.loop_fluid_type(LoopId(7));
+        let column_index_before = dwelling.output_column_index.clone();
+
+        let glycol = boiler_on_loop("Boiler-Glycol", 7, FluidType::Glycol, dwelling.latest_env());
+        let err = dwelling
+            .add_equipment(glycol)
+            .expect_err("a post-step conflicting fluid declaration is rejected");
+        assert!(matches!(err, HaresError::Equipment(_)), "got: {err:?}");
+
+        let names_after: Vec<String> = dwelling
+            .equipment()
+            .iter()
+            .map(|e| e.descriptor().name.clone())
+            .collect();
+        assert_eq!(
+            names_before, names_after,
+            "a rejected post-step add must not leave the candidate in the vector"
+        );
+        assert_eq!(
+            dwelling.fluid_solver.loop_fluid_type(LoopId(7)),
+            loop_type_before,
+            "a rejected post-step add must not perturb the frozen fluid-loop map"
+        );
+        assert_eq!(
+            dwelling.output_column_index, column_index_before,
+            "a rejected post-step add must not perturb the frozen output schema"
+        );
     }
 
     /// The failing-equipment rollback path feeds the run-total health

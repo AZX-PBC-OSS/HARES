@@ -523,6 +523,18 @@ impl EnvironmentManager {
         &mut self,
         locations: impl IntoIterator<Item = AmbientLocation>,
     ) -> Result<(), HaresError> {
+        let planned = self.plan_ambient_locations(locations)?;
+        self.install_ambient_locations(planned);
+        Ok(())
+    }
+
+    /// The placements [`Self::set_ambient_locations`] would compute,
+    /// checked against this building without changing it, for a roster
+    /// change that must fail before it touches anything.
+    pub fn plan_ambient_locations(
+        &self,
+        locations: impl IntoIterator<Item = AmbientLocation>,
+    ) -> Result<Vec<AmbientLocation>, HaresError> {
         let mut wanted: Vec<AmbientLocation> = Vec::new();
         for location in locations {
             self.check_ambient_location(location)?;
@@ -530,8 +542,12 @@ impl EnvironmentManager {
                 wanted.push(location);
             }
         }
-        self.ambient_locations = wanted;
-        Ok(())
+        Ok(wanted)
+    }
+
+    /// Installs placements from [`Self::plan_ambient_locations`].
+    pub fn install_ambient_locations(&mut self, planned: Vec<AmbientLocation>) {
+        self.ambient_locations = planned;
     }
 
     /// The conditioned zone's air this step, for the placements that read
