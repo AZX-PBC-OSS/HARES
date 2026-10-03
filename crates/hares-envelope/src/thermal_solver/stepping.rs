@@ -371,6 +371,18 @@ impl ThermalSolver {
     /// allocates its result, so those zero allocations also prove the step
     /// performs zero factorizations.
     ///
+    /// Shared-prefix reuse: the solve's prefix (`N·x`, `B_eff·u` and their
+    /// elementwise sum) depends only on the step's `x` and `last_u`, so the
+    /// first call of a step fills it and later calls in the same step (the
+    /// remaining equipment of `collect_and_solve`) skip the recomputation
+    /// and run only the target-dependent tail into `SolveScratch`'s per-call
+    /// region. `prepare_inputs`, `integrate` and `restore_state` invalidate
+    /// the prefix, so the validity window is exactly "same x and u as when
+    /// the prefix was filled"; reuse of unchanged values is bitwise
+    /// identical to recomputation, and the test
+    /// `shared_terms_computed_once_per_step` proves the counts and the
+    /// bitwise equality.
+    ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
     ///
@@ -387,8 +399,26 @@ impl ThermalSolver {
             return 0.0;
         };
 
+        // Shared per-step prefix: filled by the first solve call of the step
+        // (or after any invalidation); later calls with unchanged x/last_u
+        // reuse it. The recorded variant guards the tail selection.
+        if !self.shared_prefix_valid || self.shared_prefix_variant != self.last_coupled_state {
+            self.model
+                .fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
+            self.shared_prefix_variant = self.last_coupled_state.clone();
+            self.shared_prefix_valid = true;
+            #[cfg(test)]
+            {
+                self.shared_prefix_fills += 1;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.solve_tail_calls += 1;
+        }
+
         let total = match &self.last_coupled_state {
-            CoupledState::Identity => self.model.solve_for_scalar_input_identity_coupled(
+            CoupledState::Identity => self.model.solve_identity_coupled_tail(
                 &self.x,
                 &self.last_u,
                 target_c,
@@ -397,7 +427,7 @@ impl ThermalSolver {
                 &self.last_coupling,
                 &mut self.solve_scratch,
             ),
-            CoupledState::Uncoupled => self.model.solve_for_output_input(
+            CoupledState::Uncoupled => self.model.solve_uncoupled_tail(
                 &self.x,
                 &self.last_u,
                 target_c,
@@ -670,6 +700,10 @@ impl ThermalSolver {
         // Clear per-step degradation tracking: a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
+        // The step's inputs (last_u, last_coupling, last_coupled_state) are
+        // rebuilt below: any shared ideal-capacity prefix is stale.
+        self.invalidate_shared_prefix();
+
         self.ext_temps_save_buf
             .copy_from_slice(&self.exterior_surface_temps);
         let (u, latent) = self.build_input_vector(ports, env)?;
@@ -701,6 +735,10 @@ impl ThermalSolver {
         env: &EnvironmentState,
         out: &mut DomainUpdate,
     ) -> Result<(), HaresError> {
+        // x (swapped below) and last_u (rebuilt here) change on this path:
+        // any shared ideal-capacity prefix is stale.
+        self.invalidate_shared_prefix();
+
         let (u, latent_by_zone) = self.build_input_vector(ports, env)?;
 
         self.build_coupling();

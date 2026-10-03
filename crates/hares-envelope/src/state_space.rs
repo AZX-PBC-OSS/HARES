@@ -116,7 +116,9 @@ impl std::fmt::Debug for StateSpaceModel {
 /// Persistent scratch for the scalar ideal-input solves
 /// ([`StateSpaceModel::solve_for_output_input`],
 /// [`StateSpaceModel::solve_for_input`],
-/// [`StateSpaceModel::solve_for_scalar_input_identity_coupled`]).
+/// [`StateSpaceModel::solve_for_scalar_input_identity_coupled`]), split into
+/// the step-shared prefix ([`StateSpaceModel::fill_shared_prefix`]) and the
+/// per-call target-dependent tail (the `solve_*_tail` methods).
 ///
 /// Sized once to the state dimension and reused across calls so a hot loop
 /// that solves every step performs no heap allocation. The solver's owned
@@ -124,13 +126,19 @@ impl std::fmt::Debug for StateSpaceModel {
 /// its own.
 #[derive(Debug, Clone)]
 pub struct SolveScratch {
-    /// Receives `N·x`.
+    /// Receives `N·x`: the shared per-step prefix.
     n_x: DVector<f64>,
-    /// Receives `B_eff·u`.
+    /// Receives `B_eff·u`: the shared per-step prefix.
     b_u: DVector<f64>,
-    /// Receives the fixed-input RHS `N·x + B_eff·u − b_col·u_i` (couplings
-    /// applied on top by the identity-coupled solve).
+    /// Receives the shared per-step prefix `N·x + B_eff·u`: the fixed-input
+    /// RHS before the target-dependent tail. The tails must not write it:
+    /// they copy it into `tail_rhs` first, so the prefix survives across the
+    /// step's calls.
     rhs: DVector<f64>,
+    /// Per-call copy of the shared `rhs`: the target-dependent tail (the
+    /// `b_col·u_i` subtraction, the couplings, the divisions) runs here so
+    /// the shared `rhs` is left untouched.
+    tail_rhs: DVector<f64>,
     /// Receives the effective-gain column of the identity-coupled solve.
     gain: DVector<f64>,
     /// Receives the aggregated diagonal damping per state index.
@@ -145,6 +153,7 @@ impl SolveScratch {
             n_x: DVector::zeros(state_dim),
             b_u: DVector::zeros(state_dim),
             rhs: DVector::zeros(state_dim),
+            tail_rhs: DVector::zeros(state_dim),
             gain: DVector::zeros(state_dim),
             d_agg: DVector::zeros(state_dim),
         }
@@ -446,10 +455,13 @@ impl StateSpaceModel {
     }
 
     /// Solves for a scalar input that drives a specific output row to `y_target`
-    /// after one coupled step.
+    /// after one uncoupled step.
     ///
-    /// Writes intermediates into `scratch` (sized to the state dimension)
-    /// so a hot loop that solves every step performs no heap allocation.
+    /// Full computation: fills the step-shared prefix into `scratch` (see
+    /// [`Self::fill_shared_prefix`]) and runs the target-dependent tail. A
+    /// caller solving several targets against one `(x, u)` pair can fill the
+    /// prefix once with [`Self::fill_shared_prefix`] and call
+    /// [`Self::solve_uncoupled_tail`] per target instead.
     pub fn solve_for_output_input(
         &self,
         x: &DVector<f64>,
@@ -602,6 +614,45 @@ impl StateSpaceModel {
         couplings: &[(usize, f64, f64)],
         scratch: &mut SolveScratch,
     ) -> Result<f64> {
+        self.fill_shared_prefix(x, u, scratch);
+        self.solve_identity_coupled_tail(
+            x,
+            u,
+            y_target,
+            output_index,
+            input_index,
+            couplings,
+            scratch,
+        )
+    }
+
+    /// Target-dependent tail of the identity-coupled scalar solve, reading
+    /// the shared prefix from `scratch.rhs` (see
+    /// [`Self::fill_shared_prefix`]).
+    ///
+    /// The tail runs on `scratch.tail_rhs`, a per-call copy of the shared
+    /// `rhs`, so the shared prefix survives across the step's calls: the
+    /// coupling subtraction, the `d_agg` aggregation, the gain division and
+    /// the 1×1 products are recomputed per target from inputs that are
+    /// unchanged within the step. The copy is exact and the tail applies the
+    /// same operations in the same order as the full solve, so the result is
+    /// bitwise equal.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tail takes x, u, the target, the two indices, the \
+                  couplings and the scratch; bundling them would obscure \
+                  every call site"
+    )]
+    pub(crate) fn solve_identity_coupled_tail(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        couplings: &[(usize, f64, f64)],
+        scratch: &mut SolveScratch,
+    ) -> Result<f64> {
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -618,18 +669,14 @@ impl StateSpaceModel {
         let u_i_original = u[input_index];
         let n = self.state_dim();
 
-        // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f.
-        // The `mul_to` calls are the same gemm kernels the owned products
-        // `&self.n_mat * x` and `&self.b_eff * u` make; the elementwise adds
-        // reproduce `left + right - b_col·u_i` operand for operand.
-        self.n_mat.mul_to(x, &mut scratch.n_x);
-        self.b_eff.mul_to(u, &mut scratch.b_u);
+        // Fixed-input RHS: the shared prefix minus the variable input's
+        // contribution, computed on the per-call copy. The `mul_to`-produced
+        // prefix is bitwise the numbers the full solve computes; the
+        // elementwise subtraction reproduces `left + right - b_col·u_i`
+        // operand for operand.
+        scratch.tail_rhs.copy_from(&scratch.rhs);
         {
-            let rhs = &mut scratch.rhs;
-            rhs.copy_from(&scratch.n_x);
-            for i in 0..n {
-                rhs[i] += scratch.b_u[i];
-            }
+            let rhs = &mut scratch.tail_rhs;
             let b_col = self.b_eff.column(input_index);
             for i in 0..n {
                 rhs[i] -= b_col[i] * u_i_original;
@@ -637,8 +684,8 @@ impl StateSpaceModel {
         }
         for &(idx, d_diag, forcing) in couplings {
             debug_assert!(idx < n, "coupling index {idx} out of bounds");
-            scratch.rhs[idx] -= d_diag * x[idx];
-            scratch.rhs[idx] += forcing;
+            scratch.tail_rhs[idx] -= d_diag * x[idx];
+            scratch.tail_rhs[idx] += forcing;
         }
 
         // Aggregate diagonal damping per state index before dividing.
@@ -652,7 +699,7 @@ impl StateSpaceModel {
         // Closed-form solve: (I + D)⁻¹ · rhs_fixed
         for i in 0..n {
             if scratch.d_agg[i] != 0.0 {
-                scratch.rhs[i] /= 1.0 + scratch.d_agg[i];
+                scratch.tail_rhs[i] /= 1.0 + scratch.d_agg[i];
             }
         }
 
@@ -667,7 +714,7 @@ impl StateSpaceModel {
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
         let y_fixed =
-            (c_row * &scratch.rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+            (c_row * &scratch.tail_rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &scratch.gain)[0] + self.d[(output_index, input_index)];
 
@@ -678,9 +725,45 @@ impl StateSpaceModel {
         Ok((y_target - y_fixed) / effective_gain)
     }
 
-    fn solve_for_scalar_input(
+    /// Computes the step-shared prefix of the scalar ideal-input solves:
+    /// `N·x` into `scratch.n_x`, `B_eff·u` into `scratch.b_u`, and their
+    /// elementwise sum into `scratch.rhs`.
+    ///
+    /// The prefix depends only on the step's `x` and `u`, so a caller solving
+    /// several targets against one `(x, u)` pair fills it once and runs only
+    /// the target-dependent tails ([`Self::solve_uncoupled_tail`],
+    /// [`Self::solve_identity_coupled_tail`]) afterwards. The `mul_to` calls
+    /// and the elementwise sum are the same operations in the same order the
+    /// full solves perform, so the reused prefix is bitwise the numbers a
+    /// per-call recomputation produces.
+    pub(crate) fn fill_shared_prefix(
         &self,
         x: &DVector<f64>,
+        u: &DVector<f64>,
+        scratch: &mut SolveScratch,
+    ) {
+        let n = self.state_dim();
+        self.n_mat.mul_to(x, &mut scratch.n_x);
+        self.b_eff.mul_to(u, &mut scratch.b_u);
+        let rhs = &mut scratch.rhs;
+        rhs.copy_from(&scratch.n_x);
+        for i in 0..n {
+            rhs[i] += scratch.b_u[i];
+        }
+    }
+
+    /// Target-dependent tail of the uncoupled scalar solve, reading the
+    /// shared prefix from `scratch.rhs` (see [`Self::fill_shared_prefix`]).
+    ///
+    /// The tail runs on `scratch.tail_rhs`, a per-call copy of the shared
+    /// `rhs`, so the shared prefix survives across the step's calls. The
+    /// copy is exact and the tail applies the same operations in the same
+    /// order as the full solve, so the result is bitwise equal. `x` is not
+    /// read (the uncoupled solve has no couplings); it is kept in the
+    /// signature so the tail mirrors the full solve it completes.
+    pub(crate) fn solve_uncoupled_tail(
+        &self,
+        _x: &DVector<f64>,
         u: &DVector<f64>,
         y_target: f64,
         output_index: usize,
@@ -703,19 +786,14 @@ impl StateSpaceModel {
         let u_i_original = u[input_index];
         let n = self.state_dim();
 
-        // Compute rhs without the variable input contribution.
-        // The `mul_to` calls are the same gemm kernels the owned products
-        // `&self.n_mat * x` and `&self.b_eff * u` make; the elementwise adds
-        // reproduce `left + right - b_col·u_i` operand for operand, so the
-        // result is bitwise equal to the allocating form.
-        self.n_mat.mul_to(x, &mut scratch.n_x);
-        self.b_eff.mul_to(u, &mut scratch.b_u);
+        // Fixed-input RHS: the shared prefix minus the variable input's
+        // contribution, computed on the per-call copy. The `mul_to`-produced
+        // prefix is bitwise the numbers the full solve computes; the
+        // elementwise subtraction reproduces `left + right - b_col·u_i`
+        // operand for operand.
+        scratch.tail_rhs.copy_from(&scratch.rhs);
         {
-            let rhs = &mut scratch.rhs;
-            rhs.copy_from(&scratch.n_x);
-            for i in 0..n {
-                rhs[i] += scratch.b_u[i];
-            }
+            let rhs = &mut scratch.tail_rhs;
             let b_col = self.b_eff.column(input_index);
             for i in 0..n {
                 rhs[i] -= b_col[i] * u_i_original;
@@ -730,7 +808,7 @@ impl StateSpaceModel {
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
         let y_fixed =
-            (c_row * &scratch.rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+            (c_row * &scratch.tail_rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * g)[0] + self.d[(output_index, input_index)];
 
@@ -739,6 +817,19 @@ impl StateSpaceModel {
         }
 
         Ok((y_target - y_fixed) / effective_gain)
+    }
+
+    fn solve_for_scalar_input(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        scratch: &mut SolveScratch,
+    ) -> Result<f64> {
+        self.fill_shared_prefix(x, u, scratch);
+        self.solve_uncoupled_tail(x, u, y_target, output_index, input_index, scratch)
     }
 }
 

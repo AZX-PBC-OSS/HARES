@@ -66,7 +66,7 @@ const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 /// Per-step coupled-solve state: tracks whether couplings are active, which
 /// selects the solver path for the HVAC capacity solve in
 /// [`ThermalSolver::solve_ideal_capacity_for_target`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CoupledState {
     /// No couplings active; use uncoupled solve path.
     Uncoupled,
@@ -98,8 +98,30 @@ pub struct ThermalSolver {
     du_buf: DVector<f64>,
     /// Reusable scratch for the per-zone ideal-capacity scalar solves
     /// (`solve_for_scalar_input_identity_coupled` / uncoupled), sized to the
-    /// state dimension at construction.
+    /// state dimension at construction. Its `n_x`/`b_u`/`rhs` half is the
+    /// step-shared prefix (filled once per step by the first
+    /// `solve_ideal_capacity_for_target` call); `tail_rhs`/`gain`/`d_agg`
+    /// are the per-call tail region.
     solve_scratch: SolveScratch,
+    /// Whether `solve_scratch`'s prefix half (`n_x`, `b_u`, `rhs`) holds the
+    /// shared terms of the step's ideal-capacity solves. Set when a
+    /// `solve_ideal_capacity_for_target` call fills them from the step's `x`
+    /// and `last_u`; cleared by every path that mutates either
+    /// (`prepare_inputs_inner`, `integrate_inner`, `restore_state`), so the
+    /// validity window is exactly "same x and u as when the prefix was
+    /// filled".
+    shared_prefix_valid: bool,
+    /// The [`CoupledState`] variant the shared prefix was computed under; a
+    /// solve running under a different variant must not reuse it.
+    shared_prefix_variant: CoupledState,
+    /// Test-visible instrumentation for `shared_terms_computed_once_per_step`:
+    /// number of shared-prefix fills in `solve_ideal_capacity_for_target`.
+    #[cfg(test)]
+    shared_prefix_fills: usize,
+    /// Test-visible instrumentation: number of target-dependent tails run by
+    /// `solve_ideal_capacity_for_target` (one per call that reaches the solve).
+    #[cfg(test)]
+    solve_tail_calls: usize,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
     /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
@@ -1097,6 +1119,12 @@ impl ThermalSolver {
             y_buf,
             du_buf,
             solve_scratch,
+            shared_prefix_valid: false,
+            shared_prefix_variant: last_coupled_state.clone(),
+            #[cfg(test)]
+            shared_prefix_fills: 0,
+            #[cfg(test)]
+            solve_tail_calls: 0,
             coupling_buf,
             last_coupling,
             last_coupled_state,
@@ -1174,6 +1202,17 @@ impl ThermalSolver {
     #[must_use]
     pub fn state(&self) -> &DVector<f64> {
         &self.x
+    }
+
+    /// Clears the shared ideal-capacity solve prefix: the caller is about to
+    /// change (or has changed) the step's `x` or `last_u` that the prefix was
+    /// computed from, so a cached prefix would be stale. Called by every
+    /// mutation path of `x`/`last_u` (`prepare_inputs_inner`,
+    /// `integrate_inner`, `restore_state`), which makes the prefix's
+    /// validity window exactly "same x and u as when the prefix was filled".
+    #[inline]
+    fn invalidate_shared_prefix(&mut self) {
+        self.shared_prefix_valid = false;
     }
 
     /// Returns checkpointable thermal state vectors.
@@ -1289,6 +1328,9 @@ impl ThermalSolver {
         }
 
         // ── Phase 2: all validation passed — apply mutations ─────────────
+        // x and last_u change here: the shared ideal-capacity prefix (if
+        // any) is stale from this point.
+        self.invalidate_shared_prefix();
         self.x = DVector::from_column_slice(&snap.x);
         if snap.last_u.is_empty() {
             self.last_u.fill(0.0);
@@ -7545,6 +7587,177 @@ mod tests {
                 "expected construction to fail for a negative surface coupling \
                  coefficient; its divisor 1 + d_i is not guaranteed positive"
             ),
+        }
+    }
+
+    /// The ideal-capacity solves of one step share the prefix (`N·x`,
+    /// `B_eff·u`, rhs): exactly one prefix fill per step no matter how many
+    /// targets run against the unchanged solver state, one target-dependent
+    /// tail per target, and every returned capacity is bitwise the per-call
+    /// computation's (same-run A/B against the full solve with a local
+    /// scratch). Runs twice, once with couplings active (the identity-coupled
+    /// tail) and once with none (the uncoupled tail). Each invalidation
+    /// window is exercised separately: a solve after `integrate` (before the
+    /// next prepare), after `prepare_inputs` with changed weather, and after
+    /// `restore_state`; each must refill exactly once and match a per-call
+    /// recomputation from the new state; a stale prefix would fail the
+    /// bitwise A/B.
+    #[test]
+    fn shared_terms_computed_once_per_step() {
+        for (scenario, coupled) in [
+            ("no couplings (uncoupled tail)", false),
+            ("couplings active (identity-coupled tail)", true),
+        ] {
+            let env = env_for_temp(20.0, 0.0);
+            let mut solver = if coupled {
+                solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 })
+            } else {
+                one_zone_solver(&env)
+            };
+            let ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            let cold_env = env_for_temp(20.0, -10.0);
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+
+            let input_idx = solver.wiring().zone_sensible_input_indices[&ZoneId(1)];
+            let output_idx = solver.wiring().zone_output_indices[&ZoneId(1)];
+            let n_states = solver.model_dims().0;
+            let mut reference_scratch = crate::state_space::SolveScratch::new(n_states);
+
+            // Per-call recomputation: the full solve with a local scratch,
+            // from the same (x, last_u, last_coupling), minus the same
+            // `last_u[input_idx]` baseline the solver subtracts. Asserts the
+            // shared path's capacity is bitwise identical.
+            let mut assert_bitwise_reference = |solver: &mut ThermalSolver, target: f64| {
+                let raw = if coupled {
+                    solver
+                        .model
+                        .solve_for_scalar_input_identity_coupled(
+                            &solver.x,
+                            &solver.last_u,
+                            target,
+                            output_idx,
+                            input_idx,
+                            &solver.last_coupling,
+                            &mut reference_scratch,
+                        )
+                        .unwrap()
+                } else {
+                    solver
+                        .model
+                        .solve_for_output_input(
+                            &solver.x,
+                            &solver.last_u,
+                            target,
+                            output_idx,
+                            input_idx,
+                            &mut reference_scratch,
+                        )
+                        .unwrap()
+                };
+                raw - solver.last_u[input_idx]
+            };
+            // Three equipment in one zone: three targets resolved against the
+            // same step state, as `SolverFeedbackActor::collect_and_solve`
+            // does per step.
+            let targets = [20.0, 21.0, 22.0];
+            let mut mid_snapshot: Option<ThermalSnapshot> = None;
+
+            for step in 0..2 {
+                solver.prepare_inputs(&ports, &env).unwrap();
+                solver.shared_prefix_fills = 0;
+                solver.solve_tail_calls = 0;
+
+                for &target in &targets {
+                    let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+                    let expected = assert_bitwise_reference(&mut solver, target);
+                    assert_eq!(
+                        capacity.to_bits(),
+                        expected.to_bits(),
+                        "{scenario}: step {step} target {target}: shared-path capacity \
+                         {capacity} is not bitwise the per-call computation's {expected}"
+                    );
+                }
+
+                assert_eq!(
+                    solver.shared_prefix_fills,
+                    1,
+                    "{scenario}: step {step} must fill the shared prefix exactly once \
+                     for {} targets",
+                    targets.len()
+                );
+                assert_eq!(
+                    solver.solve_tail_calls,
+                    targets.len(),
+                    "{scenario}: step {step} must run one target-dependent tail per target"
+                );
+
+                // Step the solver: integrate changes x and last_u.
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                if step == 0 {
+                    mid_snapshot = Some(solver.snapshot_state());
+                }
+            }
+
+            // Window 1: a solve between integrate and the next prepare (the
+            // public API allows it) must refill from the new x and last_u.
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-integrate solve is not bitwise the per-call \
+                 computation's: the prefix survived across integrate"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after integrate must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
+
+            // Window 2: prepare_inputs with changed weather rebuilds last_u;
+            // the first solve after it must refill.
+            solver.prepare_inputs(&ports, &cold_env).unwrap();
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-prepare solve is not bitwise the per-call \
+                 computation's: the prefix survived across prepare_inputs"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after prepare_inputs must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
+
+            // Window 3: restore_state replaces x and last_u (here with the
+            // step-0 values, which differ from the current ones); the first
+            // solve after it must refill.
+            let snap = mid_snapshot.expect("step 0 ran");
+            solver.restore_state(&snap).unwrap();
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-restore solve is not bitwise the per-call \
+                 computation's: the prefix survived across restore_state"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after restore_state must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
         }
     }
 }
