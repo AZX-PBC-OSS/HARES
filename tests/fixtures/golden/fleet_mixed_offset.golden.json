@@ -3,8 +3,8 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "226c1fd640695df65c67ccce2d7d18425429e240bc60fdc2eb076f047c4a5383",
-  "git_head": "69950a98d843139ff7da1cf07f8b8220cddb8ac3",
-  "git_dirty": true,
+  "git_head": "9d599117fbe1dbd7712ef27cffebb653ce5cca18",
+  "git_dirty": false,
   "metrics": [
     {
       "comfort_hours": {
