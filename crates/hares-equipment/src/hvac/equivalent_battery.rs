@@ -184,7 +184,9 @@ impl HvacEquipment {
                 return Err(HaresError::Equipment(format!(
                     "EBM invariant violation: max_energy_kwh={} equals min_energy_kwh={}, \
                      implying zero deadband range while capacitance is positive \
-                     ({zone_capacitance_kwh_per_k}). Check thermostat thresholds.",
+                     ({zone_capacitance_kwh_per_k}). The thermostat hysteresis is 0: a \
+                     ThermalSetpoint signal that names a setpoint is rejected for \
+                     deadband_c 0 at application, so check the configured hysteresis_c.",
                     max_e, min_energy_kwh
                 )));
             }

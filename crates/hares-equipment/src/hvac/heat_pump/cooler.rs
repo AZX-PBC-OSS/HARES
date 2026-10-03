@@ -1526,7 +1526,7 @@ mod tests {
         eq.apply_control(&ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(18.0),
             cooling_setpoint_c: Some(24.0),
-            deadband_c: Some(0.0),
+            deadband_c: None,
         })
         .unwrap();
 

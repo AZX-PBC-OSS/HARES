@@ -4765,7 +4765,11 @@ impl Dwelling {
     /// Runs in every build profile, over the zone and HVAC-equipment index
     /// lists resolved at assembly ([`Self::hvac_thermal_consistency`]): a
     /// mismatch is a physics violation (a typed error), not a flag.
-    fn verify_per_zone_thermal_consistency(&self, step: u64) -> Result<()> {
+    fn verify_per_zone_thermal_consistency(
+        &self,
+        step: u64,
+        step_succeeded: &[bool],
+    ) -> Result<()> {
         for (i, acc) in self.ports.thermal.iter().enumerate() {
             let port_total: f64 = [ThermalCategory::HvacHeating, ThermalCategory::HvacCooling]
                 .into_iter()
@@ -4781,7 +4785,17 @@ impl Dwelling {
                 .map(|indices| {
                     indices
                         .iter()
-                        .filter_map(|&ei| self.equipment.get(ei))
+                        .filter_map(|&ei| {
+                            // A failed-and-rolled-back equipment booked no
+                            // thermal power this step (its port
+                            // contributions were removed); its core_output
+                            // retains the last committed value, which must
+                            // not be summed against the rolled-back ports.
+                            if !step_succeeded.get(ei).copied().unwrap_or(false) {
+                                return None;
+                            }
+                            self.equipment.get(ei)
+                        })
                         .map(|eq| eq.core_output().flows.thermal_output_w.unwrap_or(0.0))
                         .sum()
                 })
@@ -7114,13 +7128,20 @@ impl Dwelling {
         // Physics checks raised from run_timestep in every build profile: the
         // per-equipment electric sum against the solver total, and the
         // per-zone HVAC port totals against the equipment thermal_output_w
-        // sums (over the wiring pre-resolved at assembly).
+        // sums (over the wiring pre-resolved at assembly). Both sums read
+        // core_output, which a failed-and-rolled-back equipment retains from
+        // its last successful step ("tolerated step failures retain the last
+        // committed entry"): the rollback removed its port contributions, so
+        // the sums must skip it too. Its stale power must not be counted
+        // against the solver total, which no longer carries it.
         {
             let total = self.electrical_solver.net_active_kw();
             let sum_equip: f64 = self
                 .equipment
                 .iter()
-                .map(|eq| {
+                .enumerate()
+                .filter(|(idx, _)| step_succeeded[*idx])
+                .map(|(_, eq)| {
                     eq.core_output()
                         .flows
                         .electric_kw
@@ -7128,7 +7149,7 @@ impl Dwelling {
                 })
                 .sum();
             DwellingTelemetry::verify_consistency(self.clock.current_step(), sum_equip, total)?;
-            self.verify_per_zone_thermal_consistency(self.clock.current_step())?;
+            self.verify_per_zone_thermal_consistency(self.clock.current_step(), &step_succeeded)?;
         }
         self.ports.zero();
         let _ = self.clock.next();
@@ -14979,6 +15000,165 @@ master_seed = 0
                 .contains_key(&functional_id),
             "functional equipment's core output must be snapshotted; id={:?}",
             functional_id
+        );
+    }
+
+    /// Equipment that books its electrical power and core_output on every
+    /// successful step, then fails on the step after `successful_steps`
+    /// successes (ports written first, then an error, so the rollback path
+    /// runs with a committed core_output from the previous step).
+    struct FlakyPortEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        power_w: f64,
+        remaining_successes: u32,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl FlakyPortEquipment {
+        fn new(name: &str, power_w: f64, successful_steps: u32) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(1002),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("FlakyPortEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC,
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: CoreOutput::default(),
+                power_w,
+                remaining_successes: successful_steps,
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    impl Equipment for FlakyPortEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            if self.remaining_successes == 0 {
+                // Book the port contribution, then fail: the rollback removes
+                // the contribution while core_output keeps the last
+                // committed power.
+                ports.accumulate(&PortContribution::Electrical {
+                    active_power_w: self.power_w,
+                    reactive_power_kvar: 0.0,
+                })?;
+                return Err(HaresError::Equipment("simulated step failure".to_string()));
+            }
+            self.remaining_successes -= 1;
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: self.power_w,
+                reactive_power_kvar: 0.0,
+            })?;
+            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
+                self.power_w / 1000.0,
+            )?);
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_signal(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    /// A tolerated equipment step failure must reconcile the electrical
+    /// accounting: the rollback removes the failed equipment's port
+    /// contributions, so its stale core_output power must not be summed
+    /// against the solver total. Before the reconciliation the consistency
+    /// check failed the step right after the tolerated one, contradicting
+    /// the tolerate-and-rollback design.
+    #[test]
+    fn tolerated_step_failure_reconciles_the_electrical_sum() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let flaky = FlakyPortEquipment::new("FlakyEq", 500.0, 1);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(flaky)]);
+
+        // Step 1: the equipment succeeds and books 500 W.
+        dwelling.run_timestep(false).expect("first dwelling step");
+
+        // Step 2: the equipment writes its port contribution, then fails. The
+        // step is tolerated (rollback + warning); the electrical consistency
+        // check must see the same equipment set on both sides: the sum skips
+        // the failed equipment exactly as the rolled-back ports do.
+        dwelling
+            .run_timestep(false)
+            .expect("a tolerated equipment failure must not desync the electrical sum");
+
+        assert_eq!(dwelling.health.port_rollbacks, 1, "the failure is counted");
+        assert!(
+            dwelling.warnings.iter().any(|w| w.contains("FlakyEq")),
+            "the failure stays loud as a warning; warnings: {:?}",
+            dwelling.warnings.iter().collect::<Vec<_>>()
         );
     }
 

@@ -199,15 +199,7 @@ pub fn apply_heating_control_unchecked(
     signal: &ControlSignal,
     _equipment_name: &str,
 ) -> crate::Result<()> {
-    hvac.apply_control_signal(signal)?;
-    if let ControlSignal::ThermalSetpoint {
-        deadband_c: Some(deadband_c),
-        ..
-    } = signal
-    {
-        hvac.thermostat_fsm.thermostat.hysteresis_c = *deadband_c;
-    }
-    Ok(())
+    hvac.apply_control_signal(signal)
 }
 
 /// Apply solver-driven ideal heating capacity for simple heating equipment.

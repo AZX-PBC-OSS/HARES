@@ -960,15 +960,33 @@ impl Equipment for IdealHvac {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
+                // A zero-width hysteresis is rejected before any state
+                // changes: the turn-on and turn-off thresholds would
+                // coincide and the EBM's energy window would collapse.
+                if let Some(db) = deadband_c
+                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
+                    && *db <= 0.0
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpoint deadband_c must be > 0 when the signal names a \
+                         setpoint, got {db}: a zero-width hysteresis gives the thermostat \
+                         no switching margin and degenerates the equivalent battery model \
+                         (max_energy_kwh == min_energy_kwh)"
+                    )));
+                }
                 let candidate = RuntimeSetpointOverride {
                     heating_c: *heating_setpoint_c,
                     cooling_c: *cooling_setpoint_c,
                 };
                 self.thermostat_fsm.runtime_setpoints =
                     Some(self.validate_runtime_override(candidate)?);
+                // The deadband applies as hysteresis only when the signal
+                // names a setpoint; the release form (neither named) is a
+                // pure pass-through and must not touch the hysteresis.
                 if let Some(db) = deadband_c
                     && db.is_finite()
                     && *db >= 0.0
+                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
                 {
                     self.thermostat_fsm.thermostat.hysteresis_c = *db;
                 }

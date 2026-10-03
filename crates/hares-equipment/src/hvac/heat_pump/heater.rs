@@ -2676,16 +2676,6 @@ impl HeatPumpHeaterCore {
     /// `apply_signal` forwarder above).
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::ThermalSetpoint { deadband_c, .. } => {
-                apply_heating_control_unchecked(
-                    &mut self.hvac,
-                    signal,
-                    &self.descriptor.equipment_type,
-                )?;
-                if let Some(db) = deadband_c {
-                    self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
-                }
-            }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 self.ctrl_duty_cycle = *on_fraction;
             }

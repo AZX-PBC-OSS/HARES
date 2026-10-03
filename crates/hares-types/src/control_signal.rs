@@ -36,6 +36,14 @@ pub enum DRLevel {
 /// Typed external control signals consumed by equipment models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ControlSignal {
+    /// Absolute thermostat override. When at least one setpoint is named
+    /// (`heating_setpoint_c` or `cooling_setpoint_c` is `Some`), `deadband_c`
+    /// is the thermostat hysteresis applied with those setpoints and must be
+    /// positive: a zero-width hysteresis gives the thermostat no switching
+    /// margin and degenerates the HVAC equivalent battery model. When neither
+    /// setpoint is named (the release form), the signal is a pass-through and
+    /// no state, `deadband_c` included, is modified; autonomous control
+    /// resumes.
     ThermalSetpoint {
         heating_setpoint_c: Option<f64>,
         cooling_setpoint_c: Option<f64>,
@@ -250,6 +258,28 @@ impl ControlSignal {
                     return Err(HaresError::Control(format!(
                         "ThermalSetpoint: heating ({h}) + deadband ({db}) = {} not < cooling ({c})",
                         h + db
+                    )));
+                }
+                // A zero-width hysteresis is rejected before it can reach the
+                // thermostat: with `deadband_c == 0.0` the turn-on and
+                // turn-off thresholds coincide, the equipment has no
+                // switching margin, and the HVAC equivalent battery model's
+                // energy window degenerates (`max_energy_kwh ==
+                // min_energy_kwh` with positive zone capacitance, an
+                // enforced invariant). Only the named-setpoint form applies
+                // the deadband: an all-`None` signal is the release form,
+                // clears the override so autonomous control resumes, and
+                // never writes the hysteresis (its deadband still passes
+                // this validator's range checks; it is simply inert).
+                if let Some(db) = deadband_c
+                    && *db == 0.0
+                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpoint deadband_c must be > 0 when the signal names a \
+                         setpoint, got {db}: a zero-width hysteresis gives the thermostat \
+                         no switching margin and degenerates the equivalent battery model \
+                         (max_energy_kwh == min_energy_kwh)"
                     )));
                 }
             }

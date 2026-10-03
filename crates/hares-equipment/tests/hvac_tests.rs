@@ -4694,3 +4694,140 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
          still drawing {er_kw_final:.4} kW after 20 steps"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: the actuate release form must not degenerate the HVAC
+// equivalent battery model or desync the electrical accounting.
+//
+// The release signal (ThermalSetpoint with neither setpoint named) used to
+// write its deadband_c into the thermostat hysteresis on every HVAC control
+// arm. A release of thermal_setpoint(None, None, 0.0) zeroed the hysteresis;
+// the EBM's energy window (capacitance * hysteresis) collapsed, the next
+// Heating/Cooling step failed the enforced EBM invariant, and the tolerated
+// rollback of that step left a stale core_output whose electric power no
+// longer matched the rolled-back ports.
+// ---------------------------------------------------------------------------
+#[test]
+fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+
+    let mut cfg = electric_furnace_config("furnace_release");
+    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
+    // Zone above the heating setpoint: the thermostat idles in Deadband,
+    // exactly as it does between the release and the next mode crossing.
+    let env_warm = env_with_zone_temp(22.0);
+    eq.init(&cfg, &env_warm).unwrap();
+
+    // The actuate sequence: an event setback, then the consumer's release
+    // form, which carries a zero deadband and names no setpoint.
+    eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+        heating_delta_c: Some(-4.0),
+        cooling_delta_c: Some(4.0),
+    })
+    .unwrap();
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: None,
+        deadband_c: Some(0.0),
+    })
+    .expect("the release form must be accepted and leave no state behind");
+
+    // After the release the zone drops below the heating setpoint: the next
+    // step runs in Heating mode, where the EBM is constructed. This step
+    // failed the degenerate-window invariant before the fix.
+    let env_cold = env_with_zone_temp(18.0);
+    eq.update_control(&env_cold);
+    let mut ports = ports_for_zone1();
+    eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+        .expect("a heating step after the release must not degenerate the EBM");
+
+    // The booked electrical power must reconcile with the port contribution
+    // (the dwelling-level consistency check's equipment half).
+    let core = eq.core_output();
+    let core_kw = core
+        .flows
+        .electric_kw
+        .expect("a heating furnace step must report its electric power")
+        .net_consumption_kw();
+    assert!(
+        core_kw > 0.0,
+        "the furnace must draw positive power in heating mode, got {core_kw}"
+    );
+    assert!(
+        (ports.electrical.load_power_w - core_kw * 1000.0).abs() < 1e-6,
+        "core_output electric power must equal the port contribution exactly once: \
+         port {} W vs core {} W",
+        ports.electrical.load_power_w,
+        core_kw * 1000.0
+    );
+
+    // The EBM window must still span capacitance * hysteresis: the release
+    // must not have written a zero hysteresis.
+    let t = eq.telemetry();
+    let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
+    let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
+    let range = ebm_max - ebm_min;
+    let expected = ZONE_CAPACITANCE_KWH_PER_K * 1.0; // default hysteresis_c
+    assert!(
+        (range - expected).abs() < 1e-9,
+        "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
+    );
+}
+
+#[test]
+fn named_form_zero_deadband_is_rejected_before_state_degenerates() {
+    let mut cfg = electric_furnace_config("furnace_zerodb");
+    cfg.zone_capacitance_kwh_per_k = 2.0;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
+    let env = env_with_zone_temp(22.0);
+    eq.init(&cfg, &env).unwrap();
+
+    let err = eq
+        .apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(22.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(0.0),
+        })
+        .expect_err("a zero deadband on a named setpoint must be rejected at application");
+    assert!(
+        err.to_string()
+            .contains("deadband_c must be > 0 when the signal names a setpoint"),
+        "the rejection must name the constraint, got: {err}"
+    );
+
+    // The rejected signal must have left the thermostat untouched: a normal
+    // event-then-release sequence afterwards still steps with an open EBM
+    // window at the default hysteresis.
+    eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+        heating_delta_c: Some(-4.0),
+        cooling_delta_c: Some(4.0),
+    })
+    .unwrap();
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: None,
+        deadband_c: Some(0.0),
+    })
+    .unwrap();
+    let env_cold = env_with_zone_temp(18.0);
+    eq.update_control(&env_cold);
+    let mut ports = ports_for_zone1();
+    eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+        .expect("a step after the rejected signal must succeed");
+    let ebm_min = eq
+        .telemetry()
+        .get(tk::EBM_MIN_ENERGY_KWH)
+        .unwrap_or(f64::NAN);
+    let ebm_max = eq
+        .telemetry()
+        .get(tk::EBM_MAX_ENERGY_KWH)
+        .unwrap_or(f64::NAN);
+    assert!(
+        (ebm_max - ebm_min - 2.0).abs() < 1e-9,
+        "the EBM window must equal capacitance * default hysteresis (2.0 kWh), got {}",
+        ebm_max - ebm_min
+    );
+}

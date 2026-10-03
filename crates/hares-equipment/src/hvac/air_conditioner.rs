@@ -1956,12 +1956,6 @@ impl CoolingCore {
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::ThermalSetpoint { deadband_c, .. } => {
-                self.hvac.apply_control_signal(signal)?;
-                if let Some(db) = deadband_c {
-                    self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
-                }
-            }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 self.ctrl_duty_cycle = *on_fraction;
             }

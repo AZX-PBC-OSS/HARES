@@ -517,11 +517,38 @@ impl ThermostatFsm {
     /// The deadband is taken from the `deadband_c` field of
     /// `ThermalSetpoint` when present, otherwise defaults to `2 ×
     /// hysteresis_c` (the thermostat's mechanical deadband).
+    ///
+    /// A `ThermalSetpoint` that names at least one setpoint also applies its
+    /// `deadband_c` as the thermostat hysteresis; the value must be > 0 (a
+    /// zero-width hysteresis leaves no switching margin and degenerates the
+    /// equivalent battery model, so the signal is rejected before any state
+    /// changes). A `ThermalSetpoint` that names neither setpoint is the
+    /// release form: a pure pass-through whose `deadband_c` has nothing to
+    /// constrain and is not applied.
     pub fn apply_thermal_setpoint_signal(
         &mut self,
         signal: &hares_types::ControlSignal,
     ) -> crate::Result<bool> {
         use hares_types::ControlSignal;
+        // Reject a zero-width hysteresis before any state changes: the
+        // turn-on and turn-off thresholds would coincide and the EBM's
+        // energy window would collapse. The all-None release form does not
+        // apply a deadband at all, so it is unconstrained.
+        if let ControlSignal::ThermalSetpoint {
+            heating_setpoint_c,
+            cooling_setpoint_c,
+            deadband_c: Some(db),
+        } = signal
+            && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
+            && (!db.is_finite() || *db <= 0.0)
+        {
+            return Err(HaresError::Control(format!(
+                "ThermalSetpoint deadband_c must be > 0 when the signal names a \
+                 setpoint, got {db}: a zero-width hysteresis gives the thermostat \
+                 no switching margin and degenerates the equivalent battery model \
+                 (max_energy_kwh == min_energy_kwh)"
+            )));
+        }
         let hysteresis = self.thermostat.hysteresis_c;
         let base = self
             .static_setpoints
@@ -618,6 +645,21 @@ impl ThermostatFsm {
                     tolerance: check_deadband,
                 });
             }
+        }
+
+        // A ThermalSetpoint that names at least one setpoint applies its
+        // deadband as the thermostat hysteresis. The release form (neither
+        // setpoint named) is a pure pass-through: its deadband_c has nothing
+        // to constrain and must not touch the hysteresis (writing a zero
+        // here collapsed the EBM's energy window).
+        if let ControlSignal::ThermalSetpoint {
+            heating_setpoint_c,
+            cooling_setpoint_c,
+            deadband_c: Some(db),
+        } = signal
+            && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
+        {
+            self.thermostat.hysteresis_c = *db;
         }
 
         self.runtime_setpoints = Some(candidate);
@@ -805,25 +847,65 @@ mod tests {
     }
 
     #[test]
-    fn apply_thermal_setpoint_signal_autocorrects_with_zero_deadband() {
+    fn apply_thermal_setpoint_signal_rejects_zero_deadband_on_named_setpoints() {
         let mut fsm = ThermostatFsm::new(ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 24.0,
         });
-        // deadband_c=0 → enforce strict cooling > heating.
-        // heating=25.0, cooling=25.0 → 25 <= 25 + 0 → violation.
-        // corrected cooling = 25 + 0 + 1 = 26.0
+        // A zero deadband on a signal that names setpoints would write a
+        // zero-width hysteresis: no switching margin and a degenerate EBM
+        // energy window. Rejected before any state changes.
         let result =
             fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(25.0),
                 cooling_setpoint_c: Some(25.0),
                 deadband_c: Some(0.0),
             });
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        let err = result.expect_err("a zero deadband on named setpoints must be rejected");
+        assert!(
+            err.to_string()
+                .contains("deadband_c must be > 0 when the signal names a setpoint"),
+            "got: {err}"
+        );
+        // No state may degenerate on the rejected signal.
+        assert!(fsm.runtime_setpoints.is_none());
+        assert_eq!(
+            fsm.thermostat.hysteresis_c,
+            ThermostatConfig::default().hysteresis_c
+        );
+    }
+
+    #[test]
+    fn release_form_with_zero_deadband_is_a_pure_pass_through() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        fsm.schedule_setpoints = Some(ScheduleSetpoints {
+            heating_c: Some(19.0),
+            cooling_c: Some(25.0),
+            ..ScheduleSetpoints::default()
+        });
+        // The release form names no setpoints: its deadband_c has nothing to
+        // constrain, so it must not be applied (a zero written here
+        // degenerated the EBM). The all-None override resolves each axis to
+        // the base, so autonomous control resumes.
+        let handled = fsm
+            .apply_thermal_setpoint_signal(&hares_types::ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: Some(0.0),
+            })
+            .expect("the release form must be accepted");
+        assert!(handled);
         let stored = fsm.runtime_setpoints.unwrap();
-        assert_eq!(stored.heating_c, Some(25.0));
-        assert_eq!(stored.cooling_c, Some(26.0));
+        assert_eq!(stored.heating_c, None);
+        assert_eq!(stored.cooling_c, None);
+        assert_eq!(
+            fsm.thermostat.hysteresis_c,
+            ThermostatConfig::default().hysteresis_c,
+            "the release form must not modify the thermostat hysteresis"
+        );
     }
 
     #[test]
