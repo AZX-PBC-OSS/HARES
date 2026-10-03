@@ -304,6 +304,11 @@ pub struct ElectricTariff {
     /// `energy_rates` by matching `period_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ev_tou_period_name: Option<String>,
+    /// Warnings raised while parsing the tariff (currently only the URDB
+    /// hemisphere rows), carried with the tariff so every run it is attached
+    /// to reports them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warnings: Vec<String>,
 }
 
 fn default_demand_window_minutes() -> u32 {
@@ -333,6 +338,7 @@ impl Default for ElectricTariff {
             rtp_schedule: None,
             cpp_config: None,
             ev_tou_period_name: None,
+            parse_warnings: Vec::new(),
         }
     }
 }
@@ -585,6 +591,7 @@ mod tests {
             rtp_schedule: None,
             cpp_config: None,
             ev_tou_period_name: None,
+            parse_warnings: Vec::new(),
         };
 
         let json = serde_json::to_string(&tariff).unwrap();

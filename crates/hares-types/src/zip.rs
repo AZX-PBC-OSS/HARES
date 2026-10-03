@@ -268,17 +268,6 @@ impl ZipLoad {
             let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
             real_kw * tan_phi * reactive_base
         };
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if (self.pf - 1.0).abs() < 1e-9 {
-            // `assert!`, not `debug_assert!`: a `debug_assert!` compiles out in
-            // release builds even when `check_invariants` is enabled, which
-            // would silently void the feature-gated half of the cfg above.
-            assert!(
-                reactive_kvar.abs() < 1e-9,
-                "pf=1.0 should produce zero reactive power, got {} kVAR",
-                reactive_kvar
-            );
-        }
         (real_kw, reactive_kvar)
     }
 

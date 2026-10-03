@@ -54,9 +54,9 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DEFROST_ELAPSED_S, 0.0);
     telemetry.insert(tk::SPEED_FRAC, 0.0);
     telemetry.insert(tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC, 0.0);
-    // Observe-gated diagnostics: Telemetry::set panics on unknown keys under
-    // debug_assertions/check_invariants, so every observe-only set site must
-    // have its key pre-populated here.
+    // Observe-gated diagnostics: an unknown telemetry key latches a typed
+    // error surfaced at the end of the step, so every observe-only set site
+    // must have its key pre-populated here.
     telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
     telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);

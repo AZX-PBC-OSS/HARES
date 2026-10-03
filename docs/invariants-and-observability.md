@@ -9,26 +9,24 @@ introspection for debugging simulation state.
 
 ### Compilation Model
 
-All invariant checks live in `hares-core/src/invariants.rs` behind a
-compile-time gate:
-
-```rust
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-```
+All invariant checks live in `hares-core/src/invariants.rs`. The physics,
+conservation, non-finite and wiring checks are unconditional: they are
+compiled into every build profile and fail the step with a typed
+`HaresError` when a check fails.
 
 | Build                                        | Checks active? |
 |----------------------------------------------|----------------|
 | `cargo build` / `cargo test`                 | Yes            |
-| `cargo build --release`                      | No (zero cost) |
-| `cargo build --release -F check_invariants`  | Yes            |
+| `cargo build --release`                      | Yes            |
 
-When inactive, every `check_*` method compiles to `Ok(())` — the compiler
-eliminates the body entirely.
+`debug_assert!`-style checks on internally-produced values stay gated to
+debug builds; every physics, conservation, non-finite and wiring check
+runs everywhere.
 
 ### Available Checks (InvariantChecker)
 
 These are the conservation-law checks defined in `InvariantChecker`. All are
-currently wired into `Dwelling::check_invariants`.
+currently wired into `Dwelling::check_step_invariants`.
 
 | Check                     | Equation                                            | Tolerance                          | Fatal? | Wired? |
 |---------------------------|-----------------------------------------------------|------------------------------------|--------|--------|
@@ -49,7 +47,7 @@ floor prevents division-by-zero when gains are near zero.
 
 **Moisture** uses h_fg = 2,501,000 J/kg (latent heat of vaporisation at 0 °C).
 
-### Active Checks in Dwelling::check_invariants
+### Active Checks in Dwelling::check_step_invariants
 
 These fire every timestep after solver resolution but before port zeroing:
 
@@ -69,7 +67,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | `fuel_observer_coverage`            | `InvariantViolation`      | All non-zero fuel accumulator slots have observer coverage     |
 | `hvac_power_non_negative`           | `NegativeDeliveredEnergy` | HVAC heating ≥ 0 W, cooling ≤ 0 W (signed convention)         |
 | `hvac_accumulator`                  | `NegativeDeliveredEnergy` | Per-zone cumulative heating/cooling sign-consistency           |
-| `port_core_electrical_consistency`  | `Equipment`               | Per-equipment port reactive delta == CoreOutput flows.reactive_power_kvar.unwrap_or(0.0) (debug-build, gates #[cfg(any(debug_assertions, feature = "check_invariants"))]); catches sign errors, missing REACTIVE cap, and port-vs-CoreOutput drifts |
+| `port_core_electrical_consistency`  | `Equipment`               | Per-equipment port reactive delta == CoreOutput flows.reactive_power_kvar.unwrap_or(0.0) (unconditional); catches sign errors, missing REACTIVE cap, and port-vs-CoreOutput drifts |
 | `nan_screen`                        | `NanDetected`             | Key float values screened for NaN before residual computation |
 
 ### Error Reporting
@@ -129,11 +127,11 @@ dwelling simulation — no silent corruption.
 ```
 Equipment::step()          ← accumulates into PortSlots
 ThermalSolver::resolve()   ← reads ports, produces DomainUpdate
-check_invariants()         ← reads solver net + port accumulators
+check_step_invariants()    ← reads solver net + port accumulators
 ports.zero()               ← resets accumulators for next step
 ```
 
-`check_invariants()` reads both `self.electrical_solver.net_active_kw()` and
+`check_step_invariants()` reads both `self.electrical_solver.net_active_kw()` and
 `self.ports.electrical.net_active_kw()` to compare them. It must run before
 `ports.zero()` clears the accumulator side of that comparison.
 
@@ -388,6 +386,6 @@ For per-equipment columns in recorder output (`Dwelling::record_step`):
 | `hares-core/src/observer.rs` | Observer types and ObserverBuffer |
 | `hares-core/src/observer_capture.rs` | Capture functions and port diffing (per-equipment reactive delta) |
 | `hares-core/src/diagnostics.rs` | Diagnostic CSV output (incl. `electrical_net_kvar`, per-equipment `reactive_kvar`) |
-| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_invariants, validate_port_core_electrical_consistency calls |
+| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_step_invariants, validate_port_core_electrical_consistency calls |
 | `hares-envelope/src/thermal_solver/config.rs` | EnvelopeComponentGains |
 | `crates/hares-types/src/equipment.rs` | `validate_port_core_electrical_consistency` — port/CoreOutput reactive consistency validator |

@@ -42,11 +42,10 @@ cargo check                        # type-check without codegen (fastest feedbac
 ```
 
 Debug builds enable runtime invariant checks (energy balance, temperature
-bounds) automatically. Release builds compile these out for zero overhead
-but can opt back in:
+bounds) automatically, and so do release builds: every physics,
+conservation, non-finite and wiring check runs in every build profile.
 
 ```bash
-cargo build --release -F check_invariants   # release + conservation checks
 cargo build --release -F observe            # release + step-level observer
 ```
 

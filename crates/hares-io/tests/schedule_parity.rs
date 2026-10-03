@@ -137,6 +137,7 @@ fn time_varying_lighting_schedule_is_not_constant() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -192,6 +193,7 @@ fn annual_energy_round_trip_matches_configured_kwh() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -238,6 +240,7 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -344,6 +347,7 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 

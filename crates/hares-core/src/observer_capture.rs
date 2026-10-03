@@ -164,10 +164,9 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
 
     let fuel_types = hares_types::ports::ALL_FUEL_TYPES;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert_eq!(
-        fuel_types.len(),
-        hares_types::ports::FUEL_TYPE_COUNT,
+    // Compile-time: ALL_FUEL_TYPES must carry every real fuel type.
+    const _: () = assert!(
+        hares_types::ports::ALL_FUEL_TYPES.len() == hares_types::ports::FUEL_TYPE_COUNT,
         "ALL_FUEL_TYPES length must match FUEL_TYPE_COUNT; ensure new FuelType variants are added to ALL_FUEL_TYPES"
     );
 
@@ -253,7 +252,7 @@ pub(crate) fn capture_custom_solvers(solvers: &[Box<dyn DomainSolver>]) -> Custo
 mod tests {
     use super::*;
     use hares_types::{
-        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType,
+        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, HaresError,
         HeatTransferDirection, LoopId, PortSlots, ThermalAccumulator, ZoneId,
     };
 
@@ -575,7 +574,8 @@ mod tests {
                 _env: &EnvironmentState,
                 _dt: Duration,
                 _out: &mut DomainUpdate,
-            ) {
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
             }
             fn observation_state(&self) -> Vec<f64> {
                 self.state.clone()

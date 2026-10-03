@@ -8,6 +8,7 @@ use std::f64::consts::PI;
 use std::sync::OnceLock;
 
 use super::constants::SECONDS_PER_DAY;
+use hares_types::HaresError;
 
 // ---------------------------------------------------------------------------
 // Unit conversion constants
@@ -611,8 +612,9 @@ pub fn design_temperatures_f(lat: f64, lon: f64) -> Option<(f64, f64)> {
 /// Calculate the ASHRAE 152 Duct Distribution System Efficiency.
 ///
 /// Returns a DSE clamped to `(0.0, 1.0]`.  All inputs must be in SI units;
-/// see [`DuctDseInput`] for field documentation.
-pub fn calculate_dse(input: &DuctDseInput) -> f64 {
+/// see [`DuctDseInput`] for field documentation. Resolved leakage fractions
+/// outside [0, 1] are a typed error in every build profile.
+pub fn calculate_dse(input: &DuctDseInput) -> Result<f64, HaresError> {
     let hvac_mult = if input.is_heating { 1.0 } else { -1.0 };
 
     // ------------------------------------------------------------------
@@ -642,20 +644,6 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     } else {
         2.0388 + 0.7053 * return_nom_r_ip
     };
-
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // ASHRAE 152-2014 §5: resolved effective R-value must be positive —
-        // a non-positive value implies a degenerate duct configuration.
-        assert!(
-            supply_r > 0.0,
-            "resolved supply effective R-value must be positive, got {supply_r}"
-        );
-        assert!(
-            return_r > 0.0,
-            "resolved return effective R-value must be positive, got {return_r}"
-        );
-    }
 
     #[cfg(feature = "observe")]
     {
@@ -824,17 +812,18 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
         None => input.return_leakage_frac,
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // ASHRAE 152-2014 §5: resolved leakage fractions must be in [0, 1].
-        assert!(
-            (0.0..=1.0).contains(&resolved_supply_leakage_frac),
+    // ASHRAE 152-2014 §5: resolved leakage fractions must be in [0, 1].
+    // The fractions are user input (directly, or resolved from a leakage
+    // class), so a violation is a typed error in every build profile.
+    if !(0.0..=1.0).contains(&resolved_supply_leakage_frac) {
+        return Err(HaresError::Physics(format!(
             "resolved supply leakage fraction must be in [0, 1], got {resolved_supply_leakage_frac}"
-        );
-        assert!(
-            (0.0..=1.0).contains(&resolved_return_leakage_frac),
+        )));
+    }
+    if !(0.0..=1.0).contains(&resolved_return_leakage_frac) {
+        return Err(HaresError::Physics(format!(
             "resolved return leakage fraction must be in [0, 1], got {resolved_return_leakage_frac}"
-        );
+        )));
     }
 
     #[cfg(feature = "observe")]
@@ -1013,9 +1002,9 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     if !seas_dse.is_finite() {
         // Degenerate duct config (e.g. extreme leakage) produced NaN/Inf.
         // Fall back to no distribution loss rather than propagating poison.
-        return 1.0;
+        return Ok(1.0);
     }
-    seas_dse.clamp(f64::MIN_POSITIVE, 1.0)
+    Ok(seas_dse.clamp(f64::MIN_POSITIVE, 1.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,7 +1094,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
         // Typical ASHRAE 152 result for this configuration is 0.70–0.95
         assert!(dse > 0.6, "DSE unexpectedly low: {dse}");
@@ -1137,7 +1126,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
     }
 
@@ -1166,7 +1155,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(
             dse > 0.0 && dse <= 1.0,
             "multi-speed cooling DSE out of bounds: {dse}"
@@ -1198,7 +1187,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse_h = calculate_dse(&heating_input);
+        let dse_h = calculate_dse(&heating_input).unwrap();
         assert!(dse_h > 0.0 && dse_h <= 1.0, "heating DSE: {dse_h}");
 
         let cooling_input = DuctDseInput {
@@ -1224,7 +1213,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse_c = calculate_dse(&cooling_input);
+        let dse_c = calculate_dse(&cooling_input).unwrap();
         assert!(dse_c > 0.0 && dse_c <= 1.0, "cooling DSE: {dse_c}");
     }
 
@@ -1305,7 +1294,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
     }
 
@@ -1455,7 +1444,7 @@ mod tests {
             soil_conductivity_w_m_k: None,
         };
         // The DSE must be valid — a zero default R-value would produce NaN.
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(
             dse > 0.0 && dse <= 1.0,
             "DSE with default insulation must be in (0, 1], got {dse}"
@@ -1469,7 +1458,7 @@ mod tests {
             zone_type: Ashrae152ZoneType::BasementInsCeiling,
             ..input
         };
-        let dse_basement = calculate_dse(&basement_input);
+        let dse_basement = calculate_dse(&basement_input).unwrap();
         assert!(
             dse_basement > 0.0 && dse_basement <= 1.0,
             "basement DSE with default insulation must be in (0, 1], got {dse_basement}"
@@ -1525,8 +1514,8 @@ mod tests {
             ..base
         };
 
-        let dse_cold = calculate_dse(&cold);
-        let dse_mild = calculate_dse(&mild);
+        let dse_cold = calculate_dse(&cold).unwrap();
+        let dse_mild = calculate_dse(&mild).unwrap();
 
         assert!(
             dse_cold > 0.0 && dse_cold <= 1.0,
@@ -1807,7 +1796,7 @@ mod tests {
             burial_depth_m: None,
             soil_conductivity_w_m_k: None,
         };
-        let dse = calculate_dse(&input);
+        let dse = calculate_dse(&input).unwrap();
         assert!(
             dse > 0.0 && dse <= 1.0,
             "DSE with seasonal multiplier path must be in (0, 1], got {dse}"
@@ -1873,9 +1862,9 @@ mod tests {
             ..base
         };
 
-        let dse_ws = calculate_dse(&well_sealed);
-        let dse_us = calculate_dse(&unsealed);
-        let dse_none = calculate_dse(&none);
+        let dse_ws = calculate_dse(&well_sealed).unwrap();
+        let dse_us = calculate_dse(&unsealed).unwrap();
+        let dse_none = calculate_dse(&none).unwrap();
 
         assert!(
             dse_ws > 0.0 && dse_ws <= 1.0,
@@ -2069,7 +2058,7 @@ mod tests {
             soil_conductivity_w_m_k: None,
         };
 
-        let uncorrected_dse = calculate_dse(&base);
+        let uncorrected_dse = calculate_dse(&base).unwrap();
         assert!(
             uncorrected_dse > 0.0 && uncorrected_dse <= 1.0,
             "uncorrected under-slab DSE out of bounds: {uncorrected_dse}"
@@ -2080,7 +2069,7 @@ mod tests {
             soil_conductivity_w_m_k: Some(1.5),
             ..base
         };
-        let corrected_dse = calculate_dse(&corrected);
+        let corrected_dse = calculate_dse(&corrected).unwrap();
         assert!(
             corrected_dse > 0.0 && corrected_dse <= 1.0,
             "corrected under-slab DSE out of bounds: {corrected_dse}"
@@ -2095,7 +2084,7 @@ mod tests {
             fan_flow_m3_s: 0.472,
             ..corrected
         };
-        let cooling_dse = calculate_dse(&cooling);
+        let cooling_dse = calculate_dse(&cooling).unwrap();
         assert!(
             cooling_dse > 0.0 && cooling_dse <= 1.0,
             "corrected cooling under-slab DSE out of bounds: {cooling_dse}"

@@ -114,7 +114,7 @@ impl SimulationEngine {
         let simulation_timer = KernelTimer::start(KERNEL_SIMULATE);
         let simulation_started = Instant::now();
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -142,7 +142,7 @@ impl SimulationEngine {
                     &batches,
                     &config.sim_config,
                     &mut warnings,
-                );
+                )?;
                 let status = match unavailable_reason {
                     Some(reason) => SimStatus::Flagged(reason.to_string()),
                     None if warnings.is_empty() => SimStatus::Ok,
@@ -178,13 +178,10 @@ impl SimulationEngine {
                     Ok(result) => result,
                     Err(_) => {
                         record_double_panic_prevented();
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        {
-                            tracing::error!(
-                                "CRITICAL: error handling panicked \
-                                 (double-panic prevented) in engine::run"
-                            );
-                        }
+                        tracing::error!(
+                            "CRITICAL: error handling panicked \
+                             (double-panic prevented) in engine::run"
+                        );
                         SimulationResults {
                             timeseries_path: None,
                             timeseries: None,
@@ -211,13 +208,10 @@ impl SimulationEngine {
                     Ok(result) => result,
                     Err(_) => {
                         record_double_panic_prevented();
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        {
-                            tracing::error!(
-                                "CRITICAL: error handling panicked \
-                                 (double-panic prevented) in engine::run"
-                            );
-                        }
+                        tracing::error!(
+                            "CRITICAL: error handling panicked \
+                             (double-panic prevented) in engine::run"
+                        );
                         SimulationResults {
                             timeseries_path: None,
                             timeseries: None,
@@ -256,7 +250,7 @@ impl SimulationEngine {
         let run_started = Instant::now();
 
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -272,7 +266,7 @@ impl SimulationEngine {
                 let batches = dwelling.flushed_batches().to_vec();
 
                 let (metrics, unavailable_reason) =
-                    finalize_run_metrics(dwelling, &batches, sim_config, &mut warnings);
+                    finalize_run_metrics(dwelling, &batches, sim_config, &mut warnings)?;
                 let status = match unavailable_reason {
                     Some(reason) => SimStatus::Flagged(reason.to_string()),
                     None if warnings.is_empty() => SimStatus::Ok,
@@ -303,13 +297,10 @@ impl SimulationEngine {
                     Ok(result) => result,
                     Err(_) => {
                         record_double_panic_prevented();
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        {
-                            tracing::error!(
-                                "CRITICAL: error handling panicked \
-                                 (double-panic prevented) in engine::run_dwelling"
-                            );
-                        }
+                        tracing::error!(
+                            "CRITICAL: error handling panicked \
+                             (double-panic prevented) in engine::run_dwelling"
+                        );
                         SimulationResults {
                             timeseries_path: None,
                             timeseries: None,
@@ -336,13 +327,10 @@ impl SimulationEngine {
                     Ok(result) => result,
                     Err(_) => {
                         record_double_panic_prevented();
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        {
-                            tracing::error!(
-                                "CRITICAL: error handling panicked \
-                                 (double-panic prevented) in engine::run_dwelling"
-                            );
-                        }
+                        tracing::error!(
+                            "CRITICAL: error handling panicked \
+                             (double-panic prevented) in engine::run_dwelling"
+                        );
                         SimulationResults {
                             timeseries_path: None,
                             timeseries: None,
@@ -440,7 +428,7 @@ fn resolved_output_path(config: &DwellingConfig) -> Option<PathBuf> {
 fn compute_metrics_from_batches(
     batches: &[RecordBatch],
     sim_config: &SimulationConfig,
-) -> MetricsOutcome {
+) -> Result<MetricsOutcome, HaresError> {
     debug_assert!(
         !batches.is_empty(),
         "compute_metrics_from_batches called with empty batches"
@@ -452,23 +440,28 @@ fn compute_metrics_from_batches(
     let mut calculator = match MetricsCalculator::new(&schema, time_res_secs, sim_config) {
         Ok(calc) => calc,
         Err(err) => {
-            return MetricsOutcome {
+            return Ok(MetricsOutcome {
                 metrics: empty_metrics(),
                 warning: Some(format!(
                     "MetricsCalculator init failed: {err} -- metrics are zeroed"
                 )),
-            };
+            });
         }
     };
 
     for batch in batches {
-        calculator.accumulate(batch);
+        calculator
+            .accumulate(batch)
+            .map_err(|e| HaresError::InvalidState(e.to_string()))?;
     }
 
-    MetricsOutcome {
-        metrics: calculator.finish().metrics,
+    Ok(MetricsOutcome {
+        metrics: calculator
+            .finish()
+            .map_err(|e| HaresError::InvalidState(e.to_string()))?
+            .metrics,
         warning: None,
-    }
+    })
 }
 
 /// Metrics for a completed run: from retained batches when available,
@@ -486,13 +479,13 @@ fn finalize_run_metrics(
     batches: &[RecordBatch],
     sim_config: &SimulationConfig,
     warnings: &mut Vec<String>,
-) -> (SimulationMetrics, Option<&'static str>) {
+) -> Result<(SimulationMetrics, Option<&'static str>), HaresError> {
     if !batches.is_empty() {
-        let outcome = compute_metrics_from_batches(batches, sim_config);
+        let outcome = compute_metrics_from_batches(batches, sim_config)?;
         if let Some(w) = &outcome.warning {
             warnings.push(w.clone());
         }
-        return (outcome.metrics, None);
+        return Ok((outcome.metrics, None));
     }
 
     // Diagnose from what was actually recorded. A zero-row run must be
@@ -502,21 +495,26 @@ fn finalize_run_metrics(
         Some(0) => {
             let reason = "zero-step simulation: no timesteps recorded";
             warnings.push(reason.to_string());
-            (empty_metrics(), Some(reason))
+            Ok((empty_metrics(), Some(reason)))
         }
         Some(_) => match dwelling.take_streamed_metrics() {
-            Some(full) => (full.metrics, None),
+            Some(Ok(full)) => Ok((full.metrics, None)),
+            Some(Err(err)) => {
+                // A non-finite metrics accumulator is a failed run, not a
+                // flagged one: the typed error surfaces to the caller.
+                Err(err)
+            }
             None => {
                 let reason = "streamed metrics unavailable (calculator missing or init failed; see warnings)";
                 warnings.push(reason.to_string());
-                (empty_metrics(), Some(reason))
+                Ok((empty_metrics(), Some(reason)))
             }
         },
         None => {
             let reason =
                 "no output recorder (write_output disabled or init failed); metrics unavailable";
             warnings.push(reason.to_string());
-            (empty_metrics(), Some(reason))
+            Ok((empty_metrics(), Some(reason)))
         }
     }
 }

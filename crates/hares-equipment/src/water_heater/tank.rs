@@ -332,7 +332,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         self.mix_inversions();
-        self.recompute_skin_loss_w(ambient_temp_c);
+        self.recompute_skin_loss_w(ambient_temp_c)?;
 
         #[cfg(feature = "observe")]
         {
@@ -348,7 +348,7 @@ impl StratifiedTank {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
             if has_heat {
@@ -418,7 +418,7 @@ impl StratifiedTank {
             raw_hot_draw_m3
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // OCHRE Water.py:305 -- when TMV is active and the tank is hotter
             // than the hot delivery target, the draw volume must be strictly
@@ -457,7 +457,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
         self.mix_inversions();
-        self.recompute_skin_loss_w(ambient_temp_c);
+        self.recompute_skin_loss_w(ambient_temp_c)?;
 
         // F5: warn when outlet falls below mains (physically impossible for a
         // passive tank; indicates numerical artefact or bad input).
@@ -485,7 +485,7 @@ impl StratifiedTank {
             0.0
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
             if has_heat {
@@ -658,7 +658,7 @@ impl StratifiedTank {
     /// EnergyPlus WaterThermalTanks.cc:8466-8519 adjusts Tavg during inversion
     /// mixing so that Qloss bookkeeping uses the post-mixing profile; HARES
     /// corrects the loss post-mixing instead.
-    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) {
+    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) -> Result<()> {
         let _pre_mix_loss = self.last_skin_loss_w;
         self.last_skin_loss_w = self.compute_skin_loss_w(&self.node_temps_c, ambient_temp_c);
 
@@ -669,14 +669,14 @@ impl StratifiedTank {
             "post-mixing skin loss correction"
         );
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                self.last_skin_loss_w.is_finite(),
-                "post-mixing skin loss must be finite, got {}",
-                self.last_skin_loss_w
-            );
+        if !self.last_skin_loss_w.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "tank_post_mixing_skin_loss_finite".to_string(),
+                value: self.last_skin_loss_w,
+                tolerance: 0.0,
+            });
         }
+        Ok(())
     }
 
     pub fn save_state(&self) -> Result<Vec<u8>> {

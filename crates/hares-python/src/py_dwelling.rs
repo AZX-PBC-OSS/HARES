@@ -748,7 +748,7 @@ impl PyDwelling {
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -786,7 +786,7 @@ impl PyDwelling {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
@@ -803,7 +803,7 @@ impl PyDwelling {
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -836,7 +836,7 @@ impl PyDwelling {
             }
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
@@ -1561,10 +1561,14 @@ impl PyDwelling {
             )?;
 
         for batch in &batches {
-            calculator.accumulate(batch);
+            calculator
+                .accumulate(batch)
+                .map_err(|e| PyValueError::new_err(format!("metrics accumulation failed: {e}")))?;
         }
 
-        let full_metrics = calculator.finish();
+        let full_metrics = calculator
+            .finish()
+            .map_err(|e| PyValueError::new_err(format!("metrics finalization failed: {e}")))?;
         Ok(PySimulationMetrics {
             inner: full_metrics,
         })
@@ -1628,12 +1632,8 @@ impl PyDwelling {
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let solar_data = parse_solar_override(py, data)?;
         // Loud on non-finite irradiance, at the boundary that received
-        // the value — never relying on the downstream screens: the
-        // dwelling's finiteness screens are cfg-gated to
-        // debug/`check_invariants` builds, so in release builds a
-        // non-finite value that crosses here silently poisons the solar
-        // gains (NaN propagates into the zone/surface energy balance).
-        // This is the documented external-pipeline channel (pvlib/PySAM
+        // the value: never relying on the downstream screens. This is
+        // the documented external-pipeline channel (pvlib/PySAM
         // injection — see
         // tests/python/generate_pvlib_solar_override.py), where a NaN
         // riding in from missing satellite data is the normal failure

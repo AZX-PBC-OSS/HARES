@@ -51,8 +51,8 @@ use std::time::Duration;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
-    ZoneId,
+    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HaresError, PortSlots, THERMAL,
+    ThermalCategory, ZoneId,
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -229,7 +229,7 @@ pub struct ThermalSolver {
     full_system_stored_energy_w: f64,
     /// Per-node external energy injection [W] from B_c × u weighted by capacitance.
     /// Single-element vec: each entry = Σ_i C_i × (B_c × u)[i] for one zone.
-    /// Populated by `integrate_inner`, consumed by check_thermal in check_invariants.
+    /// Populated by `integrate_inner`, consumed by check_thermal in check_step_invariants.
     thermal_balance_q_gains: Vec<f64>,
     /// Total envelope conduction to outdoor [W] = − Σ_i C_i × (A_c × x_prev)[i].
     /// Positive = heat leaving the system.  Populated by `integrate_inner`.
@@ -574,12 +574,12 @@ impl ThermalSolver {
         &mut self,
         ports: &hares_types::PortSlots,
         env: &hares_types::EnvironmentState,
-    ) -> ZoneSensibleBreakdown {
+    ) -> std::result::Result<ZoneSensibleBreakdown, HaresError> {
         let n = self.model.input_dim();
         let mut u = DVector::zeros(n);
         let zone_id = self.config.indoor_zone_id;
         let Some(&z_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) else {
-            return ZoneSensibleBreakdown::zeros();
+            return Ok(ZoneSensibleBreakdown::zeros());
         };
         self.apply_outdoor_inputs(&mut u, env);
         self.refresh_solar_slot_map(env);
@@ -588,7 +588,7 @@ impl ThermalSolver {
         let after_window_solar = u[z_idx];
         self.apply_exterior_solar_inputs(&mut u, env);
         let after_ext_solar = u[z_idx];
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
         let after_ext_lwr = u[z_idx];
         // Interior LWR: ScriptF iterative injection only when not using
         // StarMesh (star-mesh bakes radiation conductances into the A-matrix
@@ -612,7 +612,7 @@ impl ThermalSolver {
         let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
         let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
 
-        ZoneSensibleBreakdown {
+        Ok(ZoneSensibleBreakdown {
             after_outdoor_w: after_outdoor,
             after_window_solar_w: after_window_solar,
             after_ext_solar_w: after_ext_solar,
@@ -621,7 +621,7 @@ impl ThermalSolver {
             convective_direct_w,
             radiant_to_air_residual_w,
             radiant_to_surfaces_w,
-        }
+        })
     }
 
     pub fn new(
@@ -638,6 +638,19 @@ impl ThermalSolver {
         config
             .validate(model.state_dim(), model.input_dim())
             .map_err(ThermalSolverError::Configuration)?;
+
+        // Thermal port wiring: every env zone must own a sensible-heat input
+        // column. Equipment may declare a thermal port on any env zone, and a
+        // zone without a column would have its contributions silently
+        // dropped, so the mapping is checked once here instead of per step.
+        for zone in &env.zones {
+            if !wiring.zone_sensible_input_indices.contains_key(&zone.id) {
+                return Err(ThermalSolverError::MissingZoneMapping {
+                    zone: zone.id,
+                    field: "zone_sensible_input_indices",
+                });
+            }
+        }
 
         // Silent plausible-value fallbacks become construction-time
         // errors. Zone-map completeness checks live in the scoped block
@@ -1189,11 +1202,13 @@ impl ThermalSolver {
     ///
     /// Returns `(u, latent_by_zone)` where the infiltration couplings are
     /// stored in `self.infiltration_buf` for semi-implicit coupling wiring.
+    /// Run-path checks surfaced here (air density screen) are unconditional
+    /// typed errors.
     fn build_input_vector(
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
-    ) -> (DVector<f64>, HashMap<ZoneId, f64>) {
+    ) -> std::result::Result<(DVector<f64>, HashMap<ZoneId, f64>), HaresError> {
         let mut u = std::mem::replace(&mut self.u_buf, DVector::zeros(0));
         let n = self.model.input_dim();
         if u.len() == n {
@@ -1219,7 +1234,7 @@ impl ThermalSolver {
         self.ext_surface_diag_buf.clear();
         // Also accumulates `opaque_exterior_solar_w` (iterative-path absorbed
         // solar) and `opaque_exterior_lwr_w` (net skin LWR, both paths).
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
         let opaque_solar_w = opaque_solar_noniter_w + self.opaque_exterior_solar_w;
         // Net exterior LWR at the opaque skins [W], both paths. Neither `u`
         // delta isolates it: the iterative injection mixes solar and LWR at
@@ -1289,7 +1304,7 @@ impl ThermalSolver {
             hvac_active,
             &mut latent_by_zone,
             &mut self.infiltration_buf,
-        );
+        )?;
 
         let indoor_inf = self.infiltration_buf.iter().find(|c| c.zone == indoor_zone);
         let infiltration_indoor_w = indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
@@ -1462,7 +1477,7 @@ impl ThermalSolver {
             self.lwr_by_zone_buf.reserve(n_lwr);
         }
 
-        (u, latent_by_zone)
+        Ok((u, latent_by_zone))
     }
 
     /// Formats solver outputs into `out` in-place, reusing its allocations.
@@ -1595,24 +1610,33 @@ impl ThermalSolver {
         }
     }
 
-    pub fn prepare_inputs(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+    pub fn prepare_inputs(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (env.time_step_secs() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             env.time_step_secs(),
             self.dt_s
         );
-        self.prepare_inputs_inner(ports, env);
+        self.prepare_inputs_inner(ports, env)
     }
 
-    pub fn integrate(&mut self, ports: &PortSlots, env: &EnvironmentState, out: &mut DomainUpdate) {
+    pub fn integrate(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        out: &mut DomainUpdate,
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (env.time_step_secs() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             env.time_step_secs(),
             self.dt_s
         );
-        self.integrate_inner(ports, env, out);
+        self.integrate_inner(ports, env, out)
     }
 }
 
@@ -1627,14 +1651,14 @@ impl DomainSolver for ThermalSolver {
         env: &EnvironmentState,
         dt: Duration,
         out: &mut DomainUpdate,
-    ) {
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (dt.as_secs_f64() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             dt.as_secs_f64(),
             self.dt_s
         );
-        self.resolve_internal(ports, env, out);
+        self.resolve_internal(ports, env, out)
     }
 }
 
@@ -1872,7 +1896,9 @@ mod tests {
 
         let mut t_last = 20.0;
         for _ in 0..60 {
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             t_last = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_last;
         }
@@ -1899,7 +1925,9 @@ mod tests {
             let t = (k as f64) * dt_s;
             env.weather.outdoor_temp_c = 15.0 + 10.0 * (omega * t).sin();
             outdoor.push(env.weather.outdoor_temp_c);
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             let t_zone = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_zone;
             indoor.push(t_zone);
@@ -1937,7 +1965,9 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = boxed.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = boxed
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         assert_eq!(update.domain_id, hares_types::THERMAL);
     }
 
@@ -2099,7 +2129,9 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
 
         // Extract latent load from custom_payload
         let payload = update
@@ -2140,7 +2172,9 @@ mod tests {
         let dt = 60.0;
         for _ in 0..20 {
             let t_prev = solver.state()[0];
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             let t_next = update.zone_temperatures_c[0].1;
             let q_gain = 0.0;
             let d_e_storage = c * (t_next - t_prev) / dt;
@@ -2628,7 +2662,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_next = update.zone_temperatures_c[0].1;
 
         let h_inf = 1.2 * ach_infiltration(ach, env.zones[0].volume_m3) * CP_DRY_AIR_J_KG_K;
@@ -2662,6 +2698,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2677,6 +2714,7 @@ mod tests {
         );
         let t_with_inf = solver_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2709,6 +2747,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2723,6 +2762,7 @@ mod tests {
         );
         let t_ela = solver_ela
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2798,7 +2838,9 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -2986,7 +3028,9 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -3289,7 +3333,7 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         assert!(
             !solver.zone_capacity_degraded(ZoneId(1)),
             "degraded flag must be cleared at start of new step"
@@ -3506,12 +3550,14 @@ mod tests {
         let mut solver_no = make_solver(&env_no_solar);
         let t_no_solar = solver_no
             .resolve_new(&ports, &env_no_solar, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_with = make_solver(&env_solar);
         let t_solar = solver_with
             .resolve_new(&ports, &env_solar, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3663,18 +3709,21 @@ mod tests {
         let mut solver_full = make_solver(1.0);
         let t_full = solver_full
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_060 = make_solver(0.60);
         let t_060 = solver_060
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_005 = make_solver(0.05);
         let t_005 = solver_005
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3835,10 +3884,12 @@ mod tests {
 
         let t_dark = make_solver(0.25)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
         let t_light = make_solver(0.60)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3885,6 +3936,7 @@ mod tests {
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
             .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3893,6 +3945,7 @@ mod tests {
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
             .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3933,6 +3986,7 @@ mod tests {
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
             .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3941,6 +3995,7 @@ mod tests {
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
             .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4190,18 +4245,21 @@ mod tests {
         let env_base = make_env(0.0);
         let t_base = make_solver(&env_base)
             .resolve_new(&ports, &env_base, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let env_low = make_env(300.0);
         let t_low = make_solver(&env_low)
             .resolve_new(&ports, &env_low, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let env_high = make_env(600.0);
         let t_high = make_solver(&env_high)
             .resolve_new(&ports, &env_high, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4244,6 +4302,7 @@ mod tests {
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4297,6 +4356,7 @@ mod tests {
 
         let t_nv = solver_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4330,6 +4390,7 @@ mod tests {
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4383,6 +4444,7 @@ mod tests {
 
         let t_nv = solver_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4493,11 +4555,13 @@ mod tests {
 
         let t_no_lw = make_solver(false, &env)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_with_lw = make_solver(true, &env)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4655,11 +4719,13 @@ mod tests {
 
         let t_normal = make_solver(&env_normal)
             .resolve_new(&ports, &env_normal, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_oblique = make_solver(&env_oblique)
             .resolve_new(&ports, &env_oblique, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5215,6 +5281,7 @@ mod tests {
         );
         let t_no_recovery = solver_no_recovery
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5231,6 +5298,7 @@ mod tests {
         );
         let t_hrv = solver_hrv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5278,7 +5346,9 @@ mod tests {
         // No recovery
         let mut solver_no =
             solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
-        let update_no = solver_no.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_no = solver_no
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let latent_no = extract_latent(&update_no);
 
         // ERV: 70% sensible, 30% latent recovery
@@ -5292,7 +5362,9 @@ mod tests {
             },
             vent_flow,
         );
-        let update_erv = solver_erv.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_erv = solver_erv
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let latent_erv = extract_latent(&update_erv);
 
         // Outdoor humidity (0.004) < indoor (0.008) → latent gain is negative.
@@ -5324,6 +5396,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
         let t_inf_only = solver_inf_only
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5387,6 +5460,7 @@ mod tests {
         solver_combined.x[0] = env.zones[0].temperature_c;
         let t_combined = solver_combined
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5561,11 +5635,13 @@ mod tests {
 
         let t_jan = make_solver(&env_jan)
             .resolve_new(&ports, &env_jan, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_jul = make_solver(&env_jul)
             .resolve_new(&ports, &env_jul, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5613,7 +5689,7 @@ mod tests {
 
         // Now change outdoor to 0 C and only call prepare_inputs.
         let env_cold = env_for_temp(20.0, 0.0);
-        solver.prepare_inputs(&ports, &env_cold);
+        solver.prepare_inputs(&ports, &env_cold).unwrap();
 
         // Ideal capacity to hold 20 C should be positive (heating needed)
         // because prepare_inputs updated the background to use 0 C outdoor.
@@ -5636,13 +5712,17 @@ mod tests {
 
         let mut solver_single = one_zone_solver(&env);
         solver_single.x[0] = 20.0;
-        let update_single = solver_single.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_single = solver_single
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
 
         let mut solver_split = one_zone_solver(&env);
         solver_split.x[0] = 20.0;
-        solver_split.prepare_inputs(&ports, &env);
+        solver_split.prepare_inputs(&ports, &env).unwrap();
         let mut out_split = DomainUpdate::empty(hares_types::THERMAL);
-        solver_split.integrate(&ports, &env, &mut out_split);
+        solver_split
+            .integrate(&ports, &env, &mut out_split)
+            .unwrap();
 
         let t_single = update_single.zone_temperatures_c[0].1;
         let t_split = out_split.zone_temperatures_c[0].1;
@@ -5665,22 +5745,26 @@ mod tests {
         // Baseline: no HVAC
         let mut solver_base = one_zone_solver(&env);
         solver_base.x[0] = 20.0;
-        solver_base.prepare_inputs(&ports_zero, &env);
+        solver_base.prepare_inputs(&ports_zero, &env).unwrap();
         let mut out_base = DomainUpdate::empty(hares_types::THERMAL);
-        solver_base.integrate(&ports_zero, &env, &mut out_base);
+        solver_base
+            .integrate(&ports_zero, &env, &mut out_base)
+            .unwrap();
         let t_base = out_base.zone_temperatures_c[0].1;
 
         // With heating: add 1000 W between phases
         let mut solver_heat = one_zone_solver(&env);
         solver_heat.x[0] = 20.0;
-        solver_heat.prepare_inputs(&ports_zero, &env);
+        solver_heat.prepare_inputs(&ports_zero, &env).unwrap();
         let mut ports_heat = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
         ports_heat.thermal[0].sensible_gain_w = 1000.0;
         let mut out_heat = DomainUpdate::empty(hares_types::THERMAL);
-        solver_heat.integrate(&ports_heat, &env, &mut out_heat);
+        solver_heat
+            .integrate(&ports_heat, &env, &mut out_heat)
+            .unwrap();
         let t_heat = out_heat.zone_temperatures_c[0].1;
 
         assert!(
@@ -6434,7 +6518,9 @@ mod tests {
         };
 
         let mut update = DomainUpdate::empty(hares_types::THERMAL);
-        solver.resolve(&ports, &env, Duration::from_secs(60), &mut update);
+        solver
+            .resolve(&ports, &env, Duration::from_secs(60), &mut update)
+            .unwrap();
 
         let wall_gain = solver.component_gains().wall_heat_gain_w;
 
@@ -6501,7 +6587,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6642,7 +6728,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         let expected_total = indoor_jacket + garage_jacket;
@@ -6673,7 +6759,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports_indoor_only, &env);
+        solver.prepare_inputs(&ports_indoor_only, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6701,7 +6787,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports_garage_only, &env);
+        solver.prepare_inputs(&ports_garage_only, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6834,7 +6920,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         let by_zone: std::collections::HashMap<ZoneId, f64> =
@@ -6925,7 +7011,7 @@ mod tests {
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 26.0).unwrap();
         solver.x[0] = 26.0;
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(

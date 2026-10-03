@@ -15,7 +15,7 @@ use hares_types::{
     Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
+#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -411,7 +411,7 @@ impl HeatPumpWH {
         let c = config.require_typed::<HeatPumpWaterHeaterConfig>("Heat Pump Water Heater")?;
         c.validate()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if c.zone_id.is_none() && c.zone_type.is_some() {
             warn!(
                 water_heater = %config.name,
@@ -512,7 +512,7 @@ impl HeatPumpWH {
             self.cop_scale = cop_rated;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if !self.cop_curve_is_normalized {
                 debug_assert!(
@@ -642,7 +642,7 @@ impl HeatPumpWH {
         };
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if use_widened_bounds {
                 debug_assert!(
@@ -1141,15 +1141,15 @@ impl Equipment for HeatPumpWH {
             tk::TANK_AVG_TEMP_C,
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
         );
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !cop.is_finite() || !(0.0..=8.0).contains(&cop) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "hpwh_cop_bounds".to_string(),
-                    value: cop,
-                    tolerance: 0.0,
-                });
-            }
+        // HPWH COP finite and in [0, 8] after the clamp: non-finite input
+        // survives the clamp, so the finiteness half is a typed error in
+        // every build; the range half is tautological.
+        if !cop.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "hpwh_cop_finite".to_string(),
+                value: cop,
+                tolerance: 0.0,
+            });
         }
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);

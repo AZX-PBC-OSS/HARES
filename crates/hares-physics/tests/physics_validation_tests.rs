@@ -829,7 +829,8 @@ fn ela_model_varies_with_conditions_unlike_constant_ach() {
         garage_height_m,
         ShieldingClass::Normal,
         TerrainClass::Suburban,
-    );
+    )
+    .unwrap();
 
     // Coefficients must be positive (non-degenerate)
     assert!(

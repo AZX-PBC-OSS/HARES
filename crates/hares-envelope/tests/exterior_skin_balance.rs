@@ -285,7 +285,9 @@ fn run_to_steady_state(
     let mut calm_steps = 0usize;
     let mut gains = solver.component_gains().clone();
     for _ in 0..100_000usize {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         let t_next = update
             .zone_temperatures_c
             .iter()
@@ -436,7 +438,9 @@ fn skin_solve_is_timestep_independent_across_dt() {
         let steps = (6.0 * 3600.0 / dt_s) as usize;
         let mut t_zone = T_AIR_C;
         for _ in 0..steps {
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(dt_s as u64));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(dt_s as u64))
+                .unwrap();
             t_zone = update
                 .zone_temperatures_c
                 .iter()
@@ -696,7 +700,9 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
     let mut calm_steps = 0usize;
     let mut gains = solver.component_gains().clone();
     for _ in 0..100_000usize {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         let t_next = update
             .zone_temperatures_c
             .iter()

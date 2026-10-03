@@ -684,7 +684,6 @@ impl HeatPumpCoolerConfig {
 
         // Compile-time invariant: min_oat_cooling_c must be within a reasonable range.
         // -10 °C to 30 °C covers all practical climates and equipment.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if !(-10.0..=30.0).contains(&self.min_oat_cooling_c) {
             return Err(HaresError::Equipment(format!(
                 "HeatPumpCoolerConfig: min_oat_cooling_c must be in [-10, 30] °C, got {}",

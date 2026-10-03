@@ -34,7 +34,8 @@ use hares_control::{
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{
-    ElectricalSolver, FluidSolver, HumiditySolver, ThermalSnapshot, ThermalSolver,
+    ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSnapshot,
+    ThermalSolver,
 };
 use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
@@ -69,8 +70,8 @@ use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, CustomAccumulator, DomainSolver,
     ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, FluidAccumulator,
     GridState, HaresError, HumidityAccumulator, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalAccumulator, ThermalCategory, ZoneId,
-    ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalAccumulator, ThermalCategory, Warning,
+    ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
     validate_fluid_type_consistency,
 };
 use hares_types::{ControlCapabilities, validate_port_core_electrical_consistency};
@@ -1100,10 +1101,10 @@ struct ControlDispatcher {
 /// `ByEndUse(BATTERY)` vs `ByName("Battery #1")`) are correctly detected as
 /// conflicting when they target the same physical equipment.
 ///
-/// Used by the same-tier conflict pre-scans in `dispatch_into_observed` and
-/// the debug invariant block in `drain_tiers`, which operate on raw
+/// Used by the same-tier conflict pre-scans in `dispatch_into_observed`,
+/// which operate on raw
 /// pre-expansion queue entries where cross-variant calls are expected.
-#[cfg(any(feature = "observe", debug_assertions, feature = "check_invariants"))]
+#[cfg(feature = "observe")]
 fn targets_conflict(
     a: &DispatchTarget,
     b: &DispatchTarget,
@@ -1234,47 +1235,6 @@ impl ControlDispatcher {
         // earlier pass does not silently overwrite it.
 
         for (tier_idx, tier_que) in self.by_tier.iter_mut().enumerate() {
-            // Same-tier conflict invariant check: warn when two or more
-            // dispatch requests in the same tier target the same equipment.
-            // This is conditional (log::warn!) because it reflects a real
-            // design choice (last-write-wins) rather than a bug, but the
-            // diagnostic helps users understand non-deterministic outcomes.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let (head, tail) = tier_que.as_slices();
-                let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
-                for i in 0..requests.len() {
-                    for j in (i + 1)..requests.len() {
-                        if targets_conflict(&requests[i].target, &requests[j].target, equipment) {
-                            let tier = PriorityTier::from_index(tier_idx);
-                            let already_warned = (0..i).any(|k| {
-                                targets_conflict(
-                                    &requests[k].target,
-                                    &requests[i].target,
-                                    equipment,
-                                )
-                            });
-                            if !already_warned {
-                                let conflict_signals: Vec<&ControlSignal> = requests
-                                    .iter()
-                                    .filter(|r| {
-                                        targets_conflict(&r.target, &requests[i].target, equipment)
-                                    })
-                                    .map(|r| &r.signal)
-                                    .collect();
-                                tracing::warn!(
-                                    target = ?requests[i].target,
-                                    tier = ?tier,
-                                    signal_count = conflict_signals.len(),
-                                    signals = ?conflict_signals,
-                                    "same-tier conflict: multiple signals at the same priority tier target the same equipment; last-queued signal wins (FIFO / last-write-wins)"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             for request in tier_que.drain(..) {
                 match &request.target {
                     DispatchTarget::ByName(_) => {
@@ -1489,6 +1449,36 @@ fn compute_equipment_dispatch_targets(equipment: &[Box<dyn Equipment>]) -> Vec<D
         .collect()
 }
 
+/// Pre-resolve the per-zone thermal consistency wiring: for each thermal
+/// port accumulator (in `ports.thermal` order) collect the equipment indices
+/// whose descriptor assigns that zone and whose end use is HVAC heating or
+/// cooling. Only `HvacHeating` and `HvacCooling` categories are compared by
+/// the check; non-HVAC equipment is excluded even when it reports a zone.
+/// Called at assembly and wherever the equipment list changes; the per-step
+/// check is a lookup plus a sum over these lists.
+fn build_hvac_thermal_consistency(
+    ports: &PortSlots,
+    equipment: &[Box<dyn Equipment>],
+) -> Vec<Vec<usize>> {
+    ports
+        .thermal
+        .iter()
+        .map(|acc| {
+            equipment
+                .iter()
+                .enumerate()
+                .filter(|(_, eq)| {
+                    let desc = eq.descriptor();
+                    desc.zone == Some(acc.zone)
+                        && (desc.end_use == EndUse::HVAC_HEATING
+                            || desc.end_use == EndUse::HVAC_COOLING)
+                })
+                .map(|(idx, _)| idx)
+                .collect()
+        })
+        .collect()
+}
+
 /// Register PV array orientations as environment surfaces so Perez irradiance
 /// is computed for them. PV orientations use quantised surface IDs that differ
 /// from the sequential envelope boundary IDs.
@@ -1688,6 +1678,9 @@ pub struct Dwelling {
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
     /// overflow counted) — see [`Dwelling::take_warnings`].
     pub warnings: WarningLog,
+    /// Reused scratch for the per-step warning drain: a step in which no
+    /// equipment warns allocates nothing.
+    warning_scratch: Vec<Warning>,
     /// Per-equipment HPXML setpoint reconciliation records, keyed by instance name.
     /// Populated during `from_config()` / `from_preparsed()` from the typed configs
     /// attached to each `EquipmentSpec`.
@@ -1728,12 +1721,12 @@ pub struct Dwelling {
     #[cfg(debug_assertions)]
     test_assert_panic_on_step: bool,
     /// Test-only: causes the next thermal invariant check in
-    /// [`check_invariants`](Self::check_invariants) to receive deliberately
+    /// [`check_step_invariants`](Self::check_step_invariants) to receive deliberately
     /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
     #[cfg(any(test, debug_assertions))]
     test_thermal_invariant_failure: bool,
     /// Test-only: causes the HVAC delivered-energy non-negativity invariant
-    /// checks in [`check_invariants`](Self::check_invariants) to receive a
+    /// checks in [`check_step_invariants`](Self::check_step_invariants) to receive a
     /// deliberately negative `hvac_heating_w` and `hvac_cooling_w`, forcing
     /// `NegativeDeliveredEnergy`.
     #[cfg(any(test, debug_assertions))]
@@ -1824,17 +1817,29 @@ pub struct Dwelling {
     /// Pre-computed equipment execution order (sorted by stage rank).
     /// Computed once at init time, reused each timestep.
     equipment_execution_order: Vec<usize>,
+    /// Pre-resolved equipment ids, in equipment-vector order: the start-of-step
+    /// `equipment_core` presence check iterates these instead of doing a
+    /// per-equipment name→id hash lookup every step. Rebuilt wherever the
+    /// equipment list changes (assembly, `refresh_equipment_caches`).
+    equipment_ids: Vec<EquipmentId>,
+    /// Pre-resolved wiring for the per-zone thermal consistency check: one
+    /// entry per thermal port accumulator (in `ports.thermal` order), holding
+    /// the HVAC-equipment indices (into `equipment`) whose descriptor assigns
+    /// that zone and whose end use is HVAC heating or cooling. Resolved at
+    /// assembly and wherever the equipment list changes; the per-step check
+    /// is a lookup plus a sum.
+    hvac_thermal_consistency: Vec<Vec<usize>>,
     /// Numerical invariant checker, allocated once and reused each step.
     invariant_checker: InvariantChecker,
-    /// Pre-allocated scratch buffer for conditioned zone temps in check_invariants.
+    /// Pre-allocated scratch buffer for conditioned zone temps in check_step_invariants.
     invariant_conditioned_temps: Vec<f64>,
-    /// Pre-allocated scratch buffer for unconditioned zone temps in check_invariants.
+    /// Pre-allocated scratch buffer for unconditioned zone temps in check_step_invariants.
     invariant_unconditioned_temps: Vec<f64>,
-    /// Pre-allocated scratch buffer for tank node temps in check_invariants.
+    /// Pre-allocated scratch buffer for tank node temps in check_step_invariants.
     invariant_tank_temps: Vec<f64>,
     /// Pre-computed tank node telemetry keys, avoiding format!() per step.
     tank_node_keys: Vec<String>,
-    /// Pre-allocated scratch buffer for infiltration latent by zone in check_invariants.
+    /// Pre-allocated scratch buffer for infiltration latent by zone in check_step_invariants.
     invariant_infiltration_latent: Vec<(ZoneId, f64)>,
     /// Pre-allocated scratch maps for semi-implicit infiltration coupling data.
     invariant_infiltration_m_dot: HashMap<ZoneId, f64>,
@@ -1850,20 +1855,12 @@ pub struct Dwelling {
     step_hvac_heating_w: f64,
     step_hvac_cooling_w: f64,
     /// Per-zone moisture invariant capture data from `check_moisture`.
-    /// Populated by check_invariants; consumed by the observer push when
-    /// both `check_invariants` (or debug_assertions) and `observe` are active.
-    #[cfg(all(
-        feature = "observe",
-        any(debug_assertions, feature = "check_invariants")
-    ))]
+    /// Populated by check_step_invariants; consumed by the observer push
+    /// when both debug_assertions and `observe` are active.
+    #[cfg(all(feature = "observe", debug_assertions))]
     invariant_moisture_capture: Vec<MoistureZoneInvariant>,
-    /// Thermal consistency flag computed during `run_timestep` before ports
-    /// are zeroed, then consumed by `telemetry()` to populate
-    /// `telemetry_consistency_flag`.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    thermal_consistency_flag: bool,
     /// Set to `true` when `load_checkpoint` restores state. The first
-    /// post-restore `run_timestep` asserts that `equipment_core` is populated
+    /// post-restore `run_timestep` checks that `equipment_core` is populated
     /// for every equipment instance, then resets this flag to `false`.
     restored_from_checkpoint: bool,
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
@@ -2134,7 +2131,42 @@ impl Dwelling {
     }
 }
 
-pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
+pub(crate) fn build_from_blueprint(mut bp: DwellingBlueprint) -> Result<Dwelling> {
+    let mut warnings = WarningLog::new();
+    // Construction-time warnings first, in report order: the blueprint's
+    // HPXML parse warnings, then its equipment-resolution warnings. The
+    // schedule-injection warnings and each equipment's `init` warnings join
+    // them in the body below, in that order. The log is filled before the
+    // body runs so every failure path below can emit it.
+    for warning in bp.equipment_warnings.drain(..) {
+        warnings.push_warning(warning);
+    }
+    let result = build_from_blueprint_inner(bp, &mut warnings);
+    if let Err(err) = &result {
+        // A construction failure names what broke; the accumulated
+        // warnings are the context that led there. Emit each stored entry
+        // (the WarningLog's own formatting) so the error never arrives
+        // without its history; the success path keeps the log in the
+        // dwelling instead.
+        for entry in warnings.iter() {
+            tracing::warn!("{entry}");
+        }
+        if warnings.dropped() > 0 {
+            tracing::warn!(
+                "warning log capacity ({}) reached; {} additional warning(s) were dropped",
+                WarningLog::CAPACITY,
+                warnings.dropped()
+            );
+        }
+        tracing::warn!("dwelling construction failed: {err}");
+    }
+    result
+}
+
+fn build_from_blueprint_inner(
+    bp: DwellingBlueprint,
+    warnings: &mut WarningLog,
+) -> Result<Dwelling> {
     let site_location = bp.site_location;
     let local_start = bp.local_start;
     let mut defaults = bp.defaults;
@@ -2168,7 +2200,9 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
-    let mut warnings = WarningLog::new();
+    // Reused scratch for the per-equipment drains below and in the step
+    // loop: a step in which no equipment warns allocates nothing.
+    let mut init_warning_scratch: Vec<Warning> = Vec::new();
 
     // ── WH typed_config debug assertion ─────────────────────────────────
     // WH specs with autosize_water_heater = true will have typed_config = None
@@ -2278,7 +2312,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             &ctx,
             &bp.building,
             indoor_zone,
-        );
+        )?;
     }
 
     // ── Autosize water heater capacities ────────────────────────────────
@@ -2305,12 +2339,13 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             &mut equipment_specs,
             Some(n_bedrooms),
             initial_env.weather.mains_temp_c,
-        );
+        )?;
     }
 
     // Enable ideal HVAC on the indoor zone when both heating AND cooling
     // setpoints are configured -- the thermal solver back-calculates the exact
     // load needed to maintain the setpoint at each timestep.
+    let mut schedule_warnings: Vec<hares_types::Warning> = Vec::new();
     hares_io::inject_schedule_into_specs(
         &mut equipment_specs,
         environment.schedule_mut(),
@@ -2321,7 +2356,11 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         ),
         &defaults,
         bp.building.foundation_name.as_deref(),
+        &mut schedule_warnings,
     )?;
+    for warning in schedule_warnings.drain(..) {
+        warnings.push_warning(warning);
+    }
 
     // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
     // which may generate an occupancy column from HPXML extension fractions or
@@ -2358,11 +2397,11 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
 
     // Read number_of_occupants from the Occupancy spec to scale the raw
     // schedule fraction (0–1) into a person count for internal heat gains.
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(test, debug_assertions))]
     let has_occupancy_spec;
     let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
         Some(spec) => {
-            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+            #[cfg(any(test, debug_assertions))]
             {
                 has_occupancy_spec = true;
             }
@@ -2378,7 +2417,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             })?
         }
         None => {
-            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+            #[cfg(any(test, debug_assertions))]
             {
                 has_occupancy_spec = false;
             }
@@ -2389,7 +2428,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // Invariant: number_of_occupants must be non-negative regardless of
     // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
     // A negative value indicates a data error in the parser or input.
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(test, debug_assertions))]
     if has_occupancy_spec && occupancy_scale < 0.0 {
         return Err(HaresError::Dwelling(format!(
             "Occupancy 'number_of_occupants' must be non-negative; got {}; \
@@ -2409,7 +2448,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
     // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
     // cooling load; silently zeroing it produces a systematic underestimate.
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(test, debug_assertions))]
     if has_occupancy_spec && occupancy_column_idx.is_none() {
         let has_hpxml_fractions = equipment_specs
             .iter()
@@ -2476,7 +2515,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     // impossible — both paths now set `vented: true` for attics — so a runtime
     // assertion would never fire in practice. The `tracing::debug!` log remains as
     // a low-cost diagnostic to confirm attic zone vented status during development.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         for zone in &bp.building.zones {
             if zone.zone_type == hares_io::hpxml::ZoneType::Attic {
@@ -2551,7 +2590,14 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         {
             merged_cfg.zone_capacitance_kwh_per_k = cap;
         }
-        match eq.init(&merged_cfg, &initial_env) {
+        let init_result = eq.init(&merged_cfg, &initial_env);
+        // Drain the equipment's init warnings whether init succeeded or not:
+        // the warnings were raised before the failure and belong in the log.
+        eq.drain_warnings(&mut init_warning_scratch);
+        for warning in init_warning_scratch.drain(..) {
+            warnings.push_warning(warning);
+        }
+        match init_result {
             Ok(()) => equipment.push(eq),
             Err(err) => {
                 let end_use = eq.descriptor().end_use.clone();
@@ -2646,7 +2692,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     let ports = PortSlots::from_declarations(&declarations);
     let rollback_ports = PortSlots::from_declarations(&declarations);
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         // Invariant: every thermal accumulator must have at least one
         // equipment declarant matching its zone. A thermal accumulator
@@ -2676,6 +2722,17 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     validate_fluid_type_consistency(&declarations).map_err(|err| {
         HaresError::Dwelling(format!("fluid type consistency validation failed: {err}"))
     })?;
+
+    // The fluid solver's loop-type map is built from the instantiated
+    // equipment's own fluid port declarations: every loop a port declares
+    // exists, with the type its declaring ports agree on. This replaces the
+    // former name-matched extraction from equipment specs, which missed
+    // tankless units, the indirect tank, the wet appliances and the DHW
+    // demand loop, and never saw runtime equipment changes.
+    let fluid_solver = FluidSolver::new(
+        FluidSolverConfig::default(),
+        &hares_types::ports::fluid_loop_declarations(&declarations),
+    )?;
 
     let output_path = config
         .sim_config
@@ -2738,6 +2795,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&bp.building);
     let latitude_deg = bp.building.site.latitude_deg;
     let facility_type = bp.building.residential_facility_type.clone();
+    let hvac_thermal_consistency = build_hvac_thermal_consistency(&ports, &equipment);
 
     let equipment_column_map = if config.sim_config.write_output {
         build_equipment_column_map(
@@ -2770,6 +2828,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
     );
     let record_scratch = vec![0.0; output_value_count];
     let equipment_execution_order = compute_equipment_execution_order(&equipment);
+    let equipment_ids: Vec<EquipmentId> = equipment.iter().map(|eq| eq.descriptor().id).collect();
     let mut solver_feedback_actor = SolverFeedbackActor::new();
     solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
 
@@ -2798,14 +2857,16 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         thermal_solver: solvers.thermal,
         humidity_solver: solvers.humidity,
         electrical_solver: solvers.electrical,
-        fluid_solver: solvers.fluid,
+        fluid_solver,
         clock: clock.clone(),
         environment,
         ports,
         rollback_ports,
+        hvac_thermal_consistency,
         recorder,
         rng,
-        warnings,
+        warnings: std::mem::take(warnings),
+        warning_scratch: Vec::new(),
         setpoints_reconciled_by_equipment,
         roof_info,
         wall_azimuths,
@@ -2827,8 +2888,6 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         custom_update_bufs: Vec::new(),
         #[cfg(debug_assertions)]
         stage_snapshot: None,
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        thermal_consistency_flag: true,
         equipment_column_map,
         end_use_aggregate_indices,
         output_column_index,
@@ -2863,6 +2922,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         prev_price_signal: PriceSignal::default(),
         prev_equipment_modes: HashMap::new(),
         equipment_execution_order,
+        equipment_ids,
         invariant_checker: InvariantChecker::new(),
         invariant_conditioned_temps: Vec::with_capacity(bp.building.zones.len()),
         invariant_unconditioned_temps: Vec::with_capacity(bp.building.zones.len()),
@@ -2874,10 +2934,7 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         is_warming_up: false,
         step_hvac_heating_w: 0.0,
         step_hvac_cooling_w: 0.0,
-        #[cfg(all(
-            feature = "observe",
-            any(debug_assertions, feature = "check_invariants")
-        ))]
+        #[cfg(all(feature = "observe", debug_assertions))]
         invariant_moisture_capture: Vec::new(),
         zone_is_conditioned: if bp.building.zones.is_empty() {
             vec![true]
@@ -2915,7 +2972,15 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
         dwelling.push_warning(warning);
     }
 
-    dwelling.auto_register_actors()?;
+    if let Err(err) = dwelling.auto_register_actors() {
+        // The dwelling is about to be dropped carrying the accumulated
+        // warning log; emit it so this failure carries the context that
+        // led here.
+        for entry in dwelling.take_warnings() {
+            tracing::warn!("{entry}");
+        }
+        return Err(err);
+    }
 
     if let Some(_init_dur) = config.initialization_duration {
         // Save RNG state before warmup. The clock is reset after warmup for
@@ -2932,7 +2997,18 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             unused_variables,
             reason = "iterations is logged in the observe feature block below; #[cfg(feature = \"observe\")] gates the only use site"
         )]
-        let iterations = dwelling.run_warmup_converged(0.5, 25)?;
+        let iterations = match dwelling.run_warmup_converged(0.5, 25) {
+            Ok(iterations) => iterations,
+            Err(err) => {
+                // The dwelling is about to be dropped carrying the
+                // accumulated warning log; emit it so this failure carries
+                // the context that led here.
+                for entry in dwelling.take_warnings() {
+                    tracing::warn!("{entry}");
+                }
+                return Err(err);
+            }
+        };
 
         #[cfg(feature = "observe")]
         let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
@@ -2953,14 +3029,8 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert_eq!(
-                dwelling.rng.get_word_pos(),
-                rng_word_pos_before,
-                "RNG word_pos changed during warmup; restoration failed"
-            );
-        }
+        // Debug-build check: restates the restore above (the restore is
+        // unconditional), deleted.
 
         clock = SimClock::new(
             local_start,
@@ -2993,8 +3063,20 @@ pub(crate) fn build_from_blueprint(bp: DwellingBlueprint) -> Result<Dwelling> {
             path = %diag_path.display(),
             "diagnostic CSV output enabled (output_verbosity >= 4)"
         );
-        let file = std::fs::File::create(&diag_path)
-            .map_err(|err| HaresError::Io(format!("diagnostic file create failed: {err}")))?;
+        let file = match std::fs::File::create(&diag_path) {
+            Ok(file) => file,
+            Err(err) => {
+                // The dwelling is about to be dropped carrying the
+                // accumulated warning log; emit it so this failure carries
+                // the context that led here.
+                for entry in dwelling.take_warnings() {
+                    tracing::warn!("{entry}");
+                }
+                return Err(HaresError::Io(format!(
+                    "diagnostic file create failed: {err}"
+                )));
+            }
+        };
         let mut writer = std::io::BufWriter::new(file);
         let n_zones = dwelling.latest_env.zones.len();
         diagnostics::write_header(&mut writer, n_zones);
@@ -3128,7 +3210,7 @@ impl Dwelling {
     }
 
     /// Test-only hook: causes the thermal invariant check in the next
-    /// [`check_invariants`](Self::check_invariants) call to receive deliberately
+    /// [`check_step_invariants`](Self::check_step_invariants) call to receive deliberately
     /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
     ///
     /// Available in test builds (including plain-release test runs). Has no
@@ -3271,17 +3353,9 @@ impl Dwelling {
                 "duplicate actor name '{actor_name}' is not allowed"
             )));
         }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        let actor_name = actor.name().to_string();
         self.actors.push(actor);
         self.rebuild_schedule();
         self.refresh_equipment_caches()?;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        tracing::info!(
-            actor_name = actor_name,
-            actor_index = self.actors.len() - 1,
-            "actor registered"
-        );
         Ok(())
     }
 
@@ -3408,14 +3482,6 @@ impl Dwelling {
         self.rebuild_schedule();
         self.refresh_equipment_caches()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        for (i, actor) in self.actors.iter().enumerate() {
-            tracing::info!(
-                actor_name = actor.name(),
-                actor_index = i,
-                "actor registered"
-            );
-        }
         Ok(())
     }
 }
@@ -3610,14 +3676,6 @@ impl Dwelling {
     /// implementation fails registration loudly instead of collapsing
     /// every `EquipmentId`-keyed map onto a shared id.
     pub fn add_equipment(&mut self, mut eq: Box<dyn Equipment>) -> Result<()> {
-        let name = eq.descriptor().name.clone();
-        if self.equipment.iter().any(|e| e.descriptor().name == name) {
-            return Err(HaresError::Equipment(format!(
-                "duplicate equipment name '{}' is not allowed",
-                name
-            )));
-        }
-        self.assign_equipment_identity(&mut eq, &name, None)?;
         // Entrance validation, mirroring the assembly boundary: a declared
         // zone must exist in the environment model (the thermal solver's
         // wiring is built from env zones — a contribution to an unknown zone
@@ -3625,16 +3683,97 @@ impl Dwelling {
         // port-slot table must already carry an accumulator for every
         // declared port. Both run before the push so a rejected equipment
         // never joins the vector.
-        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
-        validate_equipment_zones(eq.ports(), &env_zone_ids)?;
-        if self.clock.current_step > 0 {
-            self.ensure_ports_satisfied(eq.as_ref())?;
+        if let Err(err) = self.validate_candidate_equipment(&mut eq) {
+            // The candidate never joined the dwelling: drain the warnings
+            // its `init` raised on the caller's side into the log so the
+            // rejection carries that context instead of them dying with
+            // the box.
+            let mut drained: Vec<Warning> = Vec::new();
+            eq.drain_warnings(&mut drained);
+            for warning in drained {
+                self.warnings.push_warning(warning);
+            }
+            return Err(err);
         }
         // Mark the equipment as initialized so post-registration LUT mutation
         // via the Equipment trait setters is rejected (T-0534).
         eq.mark_initialized();
         self.equipment.push(eq);
+        // Warnings the equipment raised before joining (its `init` runs on
+        // the caller's side) drain beside the registration that made them
+        // reportable.
+        let mut drained: Vec<Warning> = Vec::new();
+        if let Some(joined) = self.equipment.last_mut() {
+            joined.drain_warnings(&mut drained);
+        }
+        for warning in drained {
+            self.warnings.push_warning(warning);
+        }
         self.refresh_equipment_caches()?;
+        Ok(())
+    }
+
+    /// The entrance validation `add_equipment` runs before a candidate may
+    /// join the dwelling: duplicate-name rejection, identity assignment,
+    /// declared-zone validation, and (once stepping has begun) frozen
+    /// port-slot satisfaction. Runs against the candidate in place, before
+    /// it is pushed, so a rejection leaves the vector untouched.
+    fn validate_candidate_equipment(&mut self, eq: &mut Box<dyn Equipment>) -> Result<()> {
+        let name = eq.descriptor().name.clone();
+        if self.equipment.iter().any(|e| e.descriptor().name == name) {
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment name '{}' is not allowed",
+                name
+            )));
+        }
+        self.assign_equipment_identity(eq, &name, None)?;
+        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        if self.clock.current_step > 0 {
+            self.ensure_ports_satisfied(eq.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// The entrance validation `replace_equipment` runs before the swap:
+    /// the duplicate-surviving-name contract (the evictee exempt), identity
+    /// assignment, declared-zone validation, and (once stepping has begun)
+    /// frozen port-slot satisfaction. Runs against the candidate in place,
+    /// before the swap, so a rejection leaves the vector untouched.
+    fn validate_replacement_equipment(
+        &mut self,
+        eq: &mut Box<dyn Equipment>,
+        replaced_name: &str,
+        pos: usize,
+    ) -> Result<()> {
+        let new_name = eq.descriptor().name.clone();
+        // The name contract mirrors `add_equipment`'s duplicate-name
+        // rejection, with the evictee exempt: a replacement may keep the
+        // replaced equipment's own name (replace-in-kind), but a name held
+        // by any *surviving* equipment would collapse `equipment_id_by_name`
+        // (a last-wins `collect()`) and misbind every name-keyed snapshot
+        // lookup, the observation-misbinding class the identity contract
+        // exists to prevent, through a public, Python-reachable entrance.
+        // Checked before identity assignment, mirroring `add_equipment`'s
+        // ordering, so a rejected name never enters the vector.
+        if self
+            .equipment
+            .iter()
+            .enumerate()
+            .any(|(i, e)| i != pos && e.descriptor().name == new_name)
+        {
+            return Err(HaresError::Equipment(format!(
+                "duplicate equipment name '{new_name}' is not allowed: it is held by \
+                 a surviving equipment — a replacement may reuse only the replaced \
+                 equipment's own name"
+            )));
+        }
+        self.assign_equipment_identity(eq, &new_name, Some(replaced_name))?;
+        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        if self.clock.current_step > 0 {
+            self.ensure_ports_satisfied(eq.as_ref())?;
+        }
         Ok(())
     }
 
@@ -3847,39 +3986,51 @@ impl Dwelling {
             .equipment
             .iter()
             .position(|e| e.descriptor().name == name)
-            .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
-        let new_name = new_equipment.descriptor().name.clone();
-        // The name contract mirrors `add_equipment`'s duplicate-name
-        // rejection, with the evictee exempt: a replacement may keep the
-        // replaced equipment's own name (replace-in-kind), but a name held
-        // by any *surviving* equipment would collapse `equipment_id_by_name`
-        // (a last-wins `collect()`) and misbind every name-keyed snapshot
-        // lookup — the observation-misbinding class the identity contract
-        // exists to prevent, through a public, Python-reachable entrance.
-        // Checked before identity assignment, mirroring `add_equipment`'s
-        // ordering, so a rejected name never enters the vector.
-        if self
-            .equipment
-            .iter()
-            .enumerate()
-            .any(|(i, e)| i != pos && e.descriptor().name == new_name)
-        {
-            return Err(HaresError::Equipment(format!(
-                "duplicate equipment name '{new_name}' is not allowed: it is held by \
-                 a surviving equipment — a replacement may reuse only the replaced \
-                 equipment's own name"
-            )));
-        }
-        self.assign_equipment_identity(&mut new_equipment, &new_name, Some(name))?;
-        // Same entrance validation as `add_equipment`, checked before the
-        // swap so a rejected replacement never enters the vector.
-        let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
-        validate_equipment_zones(new_equipment.ports(), &env_zone_ids)?;
-        if self.clock.current_step > 0 {
-            self.ensure_ports_satisfied(new_equipment.as_ref())?;
+            .ok_or_else(|| {
+                // The candidate never joined the dwelling: drain the
+                // warnings its `init` raised on the caller's side into the
+                // log so the rejection carries that context instead of
+                // them dying with the box (mirrors `add_equipment`).
+                let mut drained: Vec<Warning> = Vec::new();
+                new_equipment.drain_warnings(&mut drained);
+                for warning in drained {
+                    self.warnings.push_warning(warning);
+                }
+                HaresError::Dwelling(format!("equipment '{name}' not found"))
+            })?;
+        if let Err(err) = self.validate_replacement_equipment(&mut new_equipment, name, pos) {
+            // Every rejection path drains the candidate's init warnings
+            // into the log before the box drops, mirroring
+            // `add_equipment`.
+            let mut drained: Vec<Warning> = Vec::new();
+            new_equipment.drain_warnings(&mut drained);
+            for warning in drained {
+                self.warnings.push_warning(warning);
+            }
+            return Err(err);
         }
         new_equipment.mark_initialized();
-        let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
+        let mut old = std::mem::replace(&mut self.equipment[pos], new_equipment);
+        // The evicted equipment leaves with the swap. Its deferred step
+        // warnings drain into the log first so the eviction never loses
+        // them: before the first step they keep their construction-time
+        // (unstamped) form, after stepping they carry the step in flight.
+        let mut evicted_drained: Vec<Warning> = Vec::new();
+        old.drain_warnings(&mut evicted_drained);
+        for mut warning in evicted_drained {
+            if self.clock.current_step > 0 {
+                warning.step_index = Some(self.clock.current_step);
+            }
+            self.warnings.push_warning(warning);
+        }
+        // Warnings the replacement raised before joining (its `init` runs on
+        // the caller's side) drain beside the registration that made them
+        // reportable.
+        let mut drained: Vec<Warning> = Vec::new();
+        self.equipment[pos].drain_warnings(&mut drained);
+        for warning in drained {
+            self.warnings.push_warning(warning);
+        }
         self.refresh_equipment_caches()?;
         Ok(old)
     }
@@ -4046,6 +4197,7 @@ impl Dwelling {
                 .or_insert_with(|| eq.core_output().clone());
         }
         self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
+        self.equipment_ids = self.equipment.iter().map(|eq| eq.descriptor().id).collect();
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
 
@@ -4075,7 +4227,27 @@ impl Dwelling {
                 .collect();
             self.ports = Self::rebuild_port_slots(&declarations, &self.ports);
             self.rollback_ports = Self::rebuild_port_slots(&declarations, &self.rollback_ports);
+            // Keep the fluid solver's loop-type map in step with the port-slot
+            // table it was just rebuilt from: a runtime-added water heater,
+            // tankless unit or wet appliance declares its loops here. The map
+            // derives from the table's fluid accumulators (which `resolve`
+            // iterates), so the table's documented monotonicity (accumulators
+            // whose declaring equipment left are retained) carries into the
+            // map and a retained loop never resolves as undeclared.
+            let fluid_loops = self
+                .ports
+                .fluid
+                .iter()
+                .map(|f| (f.loop_id, f.fluid_type))
+                .collect::<Vec<_>>();
+            self.fluid_solver.rebuild_loop_types(&fluid_loops)?;
         }
+
+        // The per-zone thermal consistency wiring mirrors the port-slot
+        // table: rebuilt with it (before the first step) and with every
+        // equipment-list change.
+        self.hvac_thermal_consistency =
+            build_hvac_thermal_consistency(&self.ports, &self.equipment);
 
         // Rebuild output schema so dynamically added equipment and actors get columns.
         // Only safe before any rows have been recorded; mid-simulation schema
@@ -4301,6 +4473,13 @@ impl Dwelling {
     /// that `run_timestep` can populate `EnvironmentState.price_signal` before
     /// actors run. Billing accumulation happens post-solver each step.
     pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
+        // Tariff parse warnings report in every run the tariff is attached
+        // to: a tariff parsed once and attached to many dwellings never
+        // warns silently.
+        for message in &tariff.parse_warnings {
+            self.warnings
+                .push_warning(Warning::new("tariff", message.clone()));
+        }
         let start = self.clock.start_time.with_timezone(&tz);
         let end_fixed = self.clock.start_time + self.clock.duration;
         let end = end_fixed.with_timezone(&tz);
@@ -4538,11 +4717,7 @@ impl Dwelling {
             }
         }
 
-        #[allow(
-            unused_mut,
-            reason = "telem is mutated only inside cfg(debug_assertions | check_invariants) blocks below"
-        )]
-        let mut telem = DwellingTelemetry {
+        let telem = DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
             zone_names,
@@ -4562,17 +4737,8 @@ impl Dwelling {
             outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
             dwelling_failed: self.failed,
-            telemetry_consistency_flag: true,
             initialized: self.clock.current_step() > 0,
         };
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let step = self.clock.current_step();
-            telem.verify_consistency(step);
-            telem.telemetry_consistency_flag =
-                telem.telemetry_consistency_flag && self.thermal_consistency_flag;
-        }
 
         Ok(telem)
     }
@@ -4595,68 +4761,43 @@ impl Dwelling {
     /// equipment are excluded even when they have a zone assigned and set
     /// `thermal_output_w`, because they do not deposit via `HvacHeating` or
     /// `HvacCooling` ports.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn verify_per_zone_thermal_consistency(&self, step: u64) -> bool {
-        let port_by_zone: HashMap<ZoneId, f64> = self
-            .ports
-            .thermal
-            .iter()
-            .map(|a| {
-                let cat_total: f64 = [ThermalCategory::HvacHeating, ThermalCategory::HvacCooling]
-                    .into_iter()
-                    .map(|cat| {
-                        a.sensible_for_category(cat)
-                            + a.radiant_for_category(cat)
-                            + a.latent_for_category(cat)
-                    })
-                    .sum();
-                (a.zone, cat_total)
-            })
-            .collect();
-
-        let equip_by_zone: HashMap<ZoneId, f64> = {
-            let mut map: HashMap<ZoneId, f64> = HashMap::new();
-            for eq in &self.equipment {
-                let desc = eq.descriptor();
-                if let Some(zone) = desc.zone
-                    && (desc.end_use == EndUse::HVAC_HEATING
-                        || desc.end_use == EndUse::HVAC_COOLING)
-                {
-                    let thermal_w = eq.core_output().flows.thermal_output_w.unwrap_or(0.0);
-                    *map.entry(zone).or_insert(0.0) += thermal_w;
-                }
-            }
-            map
-        };
-
-        // Sort zones so warning emission order is deterministic run-to-run.
-        let mut all_zones: Vec<ZoneId> = port_by_zone
-            .keys()
-            .chain(equip_by_zone.keys())
-            .copied()
-            .collect::<HashSet<ZoneId>>()
-            .into_iter()
-            .collect();
-        all_zones.sort();
-
-        for zone in all_zones {
-            let port_total = port_by_zone.get(&zone).copied().unwrap_or(0.0);
-            let equip_total = equip_by_zone.get(&zone).copied().unwrap_or(0.0);
+    ///
+    /// Runs in every build profile, over the zone and HVAC-equipment index
+    /// lists resolved at assembly ([`Self::hvac_thermal_consistency`]): a
+    /// mismatch is a physics violation (a typed error), not a flag.
+    fn verify_per_zone_thermal_consistency(&self, step: u64) -> Result<()> {
+        for (i, acc) in self.ports.thermal.iter().enumerate() {
+            let port_total: f64 = [ThermalCategory::HvacHeating, ThermalCategory::HvacCooling]
+                .into_iter()
+                .map(|cat| {
+                    acc.sensible_for_category(cat)
+                        + acc.radiant_for_category(cat)
+                        + acc.latent_for_category(cat)
+                })
+                .sum();
+            let equip_total: f64 = self
+                .hvac_thermal_consistency
+                .get(i)
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .filter_map(|&ei| self.equipment.get(ei))
+                        .map(|eq| eq.core_output().flows.thermal_output_w.unwrap_or(0.0))
+                        .sum()
+                })
+                .unwrap_or(0.0);
             let tolerance = 1.0_f64.max(1e-6 * port_total.abs());
             let diff = (port_total - equip_total).abs();
             if diff > tolerance {
-                tracing::warn!(
-                    step = step,
-                    zone = ?zone,
-                    port_total_w = port_total,
-                    equip_total_w = equip_total,
-                    diff_w = diff,
-                    "Telemetry consistency: per-zone thermal totals do not match equipment contributions"
-                );
-                return false;
+                return Err(HaresError::InvalidState(format!(
+                    "per-zone thermal consistency at step {step}: zone {:?} HVAC \
+                     port total {port_total:.6} W does not match the equipment \
+                     thermal_output_w sum {equip_total:.6} W (diff {diff:.6} W)",
+                    acc.zone
+                )));
             }
         }
-        true
+        Ok(())
     }
 
     /// Drains and returns warning messages accumulated since the previous
@@ -4771,9 +4912,16 @@ impl Dwelling {
     /// calculator was attached (retained-batch runs compute metrics post-hoc
     /// from [`Self::flushed_batches`] instead), or when an attached
     /// calculator failed to initialize — [`Self::recorded_rows`] and the
-    /// dwelling warnings distinguish the cases.
-    pub fn take_streamed_metrics(&mut self) -> Option<FullSimulationMetrics> {
-        self.recorder.as_mut()?.take_metrics()
+    /// dwelling warnings distinguish the cases. The inner `Result` carries
+    /// the calculator's typed error (a non-finite accumulator) when the
+    /// metrics could not be finalized.
+    pub fn take_streamed_metrics(
+        &mut self,
+    ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
+        self.recorder
+            .as_mut()?
+            .take_metrics()
+            .map(|res| res.map_err(|e| HaresError::InvalidState(e.to_string())))
     }
 
     /// Rows written to the output recorder over the run; `None` when no
@@ -5006,12 +5154,6 @@ impl Dwelling {
                 restored_count,
                 self.actors.len()
             )));
-        }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            for actor in self.actors.iter() {
-                tracing::debug!(actor = actor.name(), "post-restore actor state",);
-            }
         }
 
         self.prior_electrical_summary = cp.prior_electrical_summary;
@@ -5567,53 +5709,57 @@ impl Dwelling {
         let rng_word_pos_before = self.rng.get_word_pos();
         let _ = advance_dwelling_rng(&mut self.rng);
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         let rng_consumed_this_step = self.rng.get_word_pos() > rng_word_pos_before;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            // After the first step, every equipment instance must have a core
-            // output entry in the environment: actors observe equipment through
-            // these id-keyed entries, and a missing entry means the equipment
-            // is unobservable (the no-observation sentinel) for the rest of
-            // the run. Known causes this assert guards against: an identity
-            // refresh that failed to seed a newly entered equipment's entry,
-            // and a checkpoint restore that skipped the post-restore
-            // snapshot. A tolerated equipment-step failure is NOT a cause —
-            // the last committed entry is retained, not dropped.
-            if self.clock.current_step() > 0 {
-                for eq in &self.equipment {
-                    let desc = eq.descriptor();
-                    let id =
-                        self.equipment_id_by_name.get(&desc.name).copied().expect(
-                            "invariant: equipment_id_by_name is built from this equipment set",
-                        );
-                    debug_assert!(
-                        self.latest_env.equipment_core.contains_key(&id),
-                        "equipment_core missing entry for equipment '{}' (id={:?}) \
+        #[cfg(debug_assertions)]
+        if !rng_consumed_this_step {
+            debug_assert!(false, "dwelling RNG consumed no bits this step");
+        }
+
+        // After the first step, every equipment instance must have a core
+        // output entry in the environment: actors observe equipment through
+        // these id-keyed entries, and a missing entry means the equipment
+        // is unobservable (the no-observation sentinel) for the rest of
+        // the run. Known causes this check guards against: an identity
+        // refresh that failed to seed a newly entered equipment's entry,
+        // and a checkpoint restore that skipped the post-restore
+        // snapshot. A tolerated equipment-step failure is NOT a cause:
+        // the last committed entry is retained, not dropped.
+        // Unconditional in every build profile, over the ids pre-resolved
+        // at refresh (no per-equipment hash lookups on the step path).
+        if self.clock.current_step() > 0 {
+            for (idx, &id) in self.equipment_ids.iter().enumerate() {
+                if !self.latest_env.equipment_core.contains_key(&id) {
+                    let name = self
+                        .equipment
+                        .get(idx)
+                        .map(|eq| eq.descriptor().name.clone())
+                        .unwrap_or_default();
+                    return Err(HaresError::InvalidState(format!(
+                        "equipment_core missing entry for equipment '{name}' (id={id:?}) \
                          at start of step {}: every active equipment must be \
-                         observable — check the identity-refresh seeding and \
+                         observable; check the identity-refresh seeding and \
                          the checkpoint-restore snapshot (tolerated step \
                          failures retain the last committed entry)",
-                        desc.name,
-                        id,
                         self.clock.current_step(),
-                    );
+                    )));
                 }
             }
+        }
 
-            // First step after checkpoint restore: double-check that
-            // equipment_core is not accidentally empty when we expect
-            // restored state.
-            if self.restored_from_checkpoint && !self.equipment.is_empty() {
-                debug_assert!(
-                    !self.latest_env.equipment_core.is_empty(),
+        // First step after checkpoint restore: double-check that
+        // equipment_core is not accidentally empty when we expect
+        // restored state. The latch reset runs in every build profile.
+        if self.restored_from_checkpoint && !self.equipment.is_empty() {
+            if self.latest_env.equipment_core.is_empty() {
+                return Err(HaresError::InvalidState(format!(
                     "equipment_core is empty on first post-restore step {}; \
                      load_checkpoint must call snapshot_equipment_state",
                     self.clock.current_step(),
-                );
-                self.restored_from_checkpoint = false;
+                )));
             }
+            self.restored_from_checkpoint = false;
         }
 
         #[cfg(feature = "profiling")]
@@ -5757,7 +5903,7 @@ impl Dwelling {
 
         // Step 1d: build current-step inputs with all non-HVAC gains already on ports.
         self.thermal_solver
-            .prepare_inputs(&self.ports, &self.latest_env);
+            .prepare_inputs(&self.ports, &self.latest_env)?;
 
         // Steps 1e–1f: phase-ordered actor execution driven by the scheduler.
         // The scheduler plan replaces the previously hard-coded
@@ -6323,16 +6469,45 @@ impl Dwelling {
             }
         }
 
+        // Unknown telemetry keys (always on): a `set` on a key the
+        // equipment never registered is a wiring fault. The first one is
+        // latched by the telemetry map, and ANY latch (failed-and-rolled-
+        // back equipment included, mirroring the non-finite check above)
+        // turns the step into a run failure naming the equipment and the
+        // key.
+        for eq in &self.equipment {
+            if let Some(key) = eq.telemetry().unknown_key_latch() {
+                return Err(HaresError::Equipment(format!(
+                    "telemetry key '{key}' was never registered on equipment \
+                     '{}' (register telemetry keys via insert() at init)",
+                    eq.descriptor().name
+                )));
+            }
+        }
+
         // Curve-index clamps: once per timestep, after the equipment step
         // loops complete, drain each equipment's health counters into the
-        // run total. Failed-and-rolled-back equipment are skipped here:
-        // take-and-discard would lose nothing (their counts surface on the
-        // equipment's next successful step, take semantics reset per take),
-        // and their step already failed the port contract.
+        // run total. Failed-and-rolled-back equipment are skipped for the
+        // counters: take-and-discard would lose nothing (their counts
+        // surface on the equipment's next successful step, take semantics
+        // reset per take), and their step already failed the port contract.
         let mut step_curve_index_clamps: u64 = 0;
         for (idx, eq) in self.equipment.iter_mut().enumerate() {
             if step_succeeded[idx] {
                 step_curve_index_clamps += eq.take_health_counts().curve_index_clamps;
+            }
+            // Warnings raised this step drain beside the health counts,
+            // from failed-and-rolled-back equipment too (warnings only, no
+            // health counts): their warnings would otherwise sit undrained
+            // until the equipment's next successful step, stamped with the
+            // later step, or be lost entirely if the equipment never
+            // succeeds. The drain happens in the step the warnings fired
+            // in, so the stamp the dwelling adds is the step they belong
+            // to.
+            eq.drain_warnings(&mut self.warning_scratch);
+            for mut warning in self.warning_scratch.drain(..) {
+                warning.step_index = Some(self.clock.current_step);
+                self.warnings.push_warning(warning);
             }
         }
         self.health.curve_index_clamps += step_curve_index_clamps;
@@ -6377,8 +6552,11 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::Envelope);
 
         // Step 4: envelope/domain resolution.
-        self.thermal_solver
-            .integrate(&self.ports, &self.latest_env, &mut self.thermal_update_buf);
+        self.thermal_solver.integrate(
+            &self.ports,
+            &self.latest_env,
+            &mut self.thermal_update_buf,
+        )?;
 
         // Apply zone temps and capture observer data while we still have the borrow.
         apply_thermal_update_to_zones(&mut self.latest_env, &self.thermal_update_buf);
@@ -6406,19 +6584,19 @@ impl Dwelling {
             &self.latest_env,
             dt,
             &mut self.humidity_update_buf,
-        );
+        )?;
         self.electrical_solver.resolve(
             &self.ports,
             &self.latest_env,
             dt,
             &mut self.electrical_update_buf,
-        );
+        )?;
         self.fluid_solver.resolve(
             &self.ports,
             &self.latest_env,
             dt,
             &mut self.fluid_update_buf,
-        );
+        )?;
 
         apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
 
@@ -6514,7 +6692,7 @@ impl Dwelling {
                 &self.latest_env,
                 dt,
                 &mut self.custom_update_bufs[i],
-            );
+            )?;
             self.latest_env
                 .upsert_domain_ref(&self.custom_update_bufs[i]);
         }
@@ -6522,19 +6700,16 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             let capture = observer_capture::capture_custom_solvers(&self.custom_domain_solvers);
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                debug_assert_eq!(
-                    capture.solvers.len(),
-                    self.custom_domain_solvers.len(),
-                    "custom solver capture count mismatch"
-                );
-            }
+            debug_assert_eq!(
+                capture.solvers.len(),
+                self.custom_domain_solvers.len(),
+                "custom solver capture count mismatch"
+            );
             obs_phases.post_custom_solvers = Some(capture);
         }
 
         // End of the `envelope` phase (Step 4 and its diagnostic capture);
-        // the always-on invariant checks and `check_invariants` follow.
+        // the always-on invariant checks and check_step_invariants follow.
         #[cfg(feature = "profiling")]
         phase_clock.enter(&mut self.profiling, ProfilePhase::Invariants);
 
@@ -6545,7 +6720,7 @@ impl Dwelling {
 
         // Electrical finiteness: NaN or Inf in the electrical solver output is
         // unrecoverable data corruption. The check mirrors the one inside the
-        // cfg-gated check_invariants() so that release builds without the feature
+        // the always-on check_step_invariants() so that plain release builds
         // still catch it.
         {
             let net_kw = self.electrical_solver.net_active_kw();
@@ -6644,7 +6819,7 @@ impl Dwelling {
             }
         }
 
-        self.check_invariants(dt)?;
+        self.check_step_invariants(dt)?;
 
         // End of the `invariants` phase; the per-step telemetry snapshot
         // (`state_snapshot` phase) follows.
@@ -6652,15 +6827,12 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::StateSnapshot);
 
         // Push observer step snapshot after invariant checks so moisture invariant
-        // capture data (populated in check_invariants) is available for the snapshot.
+        // capture data (populated in check_step_invariants) is available for the snapshot.
         #[cfg(feature = "observe")]
         if let Some(buf) = &mut self.observer_buf {
             obs_phases.post_zone_update =
                 Some(observer_capture::capture_zone_update(&self.latest_env));
-            #[cfg(all(
-                feature = "observe",
-                any(debug_assertions, feature = "check_invariants")
-            ))]
+            #[cfg(all(feature = "observe", debug_assertions))]
             let moisture_invariant = if self.invariant_moisture_capture.is_empty() {
                 None
             } else {
@@ -6668,10 +6840,7 @@ impl Dwelling {
                     zones: std::mem::take(&mut self.invariant_moisture_capture),
                 })
             };
-            #[cfg(not(all(
-                feature = "observe",
-                any(debug_assertions, feature = "check_invariants")
-            )))]
+            #[cfg(not(all(feature = "observe", debug_assertions)))]
             let moisture_invariant: Option<MoistureInvariantCapture> = None;
             buf.push(StepSnapshot {
                 step_index: self.clock.current_step(),
@@ -6902,6 +7071,18 @@ impl Dwelling {
             }
         }
         let net_grid = self.electrical_solver.net_active_kw();
+        // The electrical summary observation is checked once here, where it
+        // is built (the consumers' per-decide PV re-checks were deleted):
+        // non-finite is covered by the solver's unconditional screens above,
+        // and a negative PV observation (PV equipment drawing power) is an
+        // invariant violation.
+        if !(-pv_kw).is_finite() || (-pv_kw) < 0.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: "electrical_summary_pv_observation".to_string(),
+                value: -pv_kw,
+                tolerance: 0.0,
+            });
+        }
         self.prior_electrical_summary = ElectricalSummary {
             pv_generation_kw: -pv_kw,
             actual_pv_kw: -pv_kw,
@@ -6927,13 +7108,27 @@ impl Dwelling {
         }
         self.prev_price_signal = self.latest_env.price_signal.clone();
 
-        // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
+        // ORDERING: ports.zero() must come AFTER check_step_invariants() (called above)
         // because the electrical balance check reads self.ports.electrical.load_power_w
         // and generation_power_w to compute the ZIP-adjusted port net.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Physics checks raised from run_timestep in every build profile: the
+        // per-equipment electric sum against the solver total, and the
+        // per-zone HVAC port totals against the equipment thermal_output_w
+        // sums (over the wiring pre-resolved at assembly).
         {
-            self.thermal_consistency_flag =
-                self.verify_per_zone_thermal_consistency(self.clock.current_step());
+            let total = self.electrical_solver.net_active_kw();
+            let sum_equip: f64 = self
+                .equipment
+                .iter()
+                .map(|eq| {
+                    eq.core_output()
+                        .flows
+                        .electric_kw
+                        .map_or(0.0, |e| e.net_consumption_kw())
+                })
+                .sum();
+            DwellingTelemetry::verify_consistency(self.clock.current_step(), sum_equip, total)?;
+            self.verify_per_zone_thermal_consistency(self.clock.current_step())?;
         }
         self.ports.zero();
         let _ = self.clock.next();
@@ -6943,8 +7138,9 @@ impl Dwelling {
         // Invariant: the dwelling RNG must have been consumed during this
         // timestep.  A zero-delta means run_timestep never called
         // advance_dwelling_rng, which would make checkpoint captures
-        // reflect a dead RNG state.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // reflect a dead RNG state. Debug-build logic check (the advance
+        // call above is unconditional and cannot skip).
+        #[cfg(debug_assertions)]
         debug_assert!(
             rng_consumed_this_step,
             "dwelling RNG was not consumed during timestep"
@@ -6987,7 +7183,7 @@ impl Dwelling {
         // Per-equipment columns via pre-resolved index map.
         for (eq, cols) in self.equipment.iter().zip(&self.equipment_column_map) {
             let co = eq.core_output();
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(debug_assertions)]
             {
                 let desc = eq.descriptor();
                 let name = &desc.name;
@@ -7348,7 +7544,7 @@ impl Dwelling {
     /// Compiled and executed in every build profile, warm-up included.
     /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
     /// the engine then quarantines this dwelling rather than propagating a panic.
-    fn check_invariants(&mut self, dt: StdDuration) -> Result<()> {
+    fn check_step_invariants(&mut self, dt: StdDuration) -> Result<()> {
         let checker = &mut self.invariant_checker;
 
         let dt_s = dt.as_secs_f64();
@@ -7605,10 +7801,7 @@ impl Dwelling {
         self.invariant_infiltration_latent.clear();
         self.invariant_infiltration_m_dot.clear();
         self.invariant_infiltration_w_outdoor.clear();
-        #[cfg(all(
-            feature = "observe",
-            any(debug_assertions, feature = "check_invariants")
-        ))]
+        #[cfg(all(feature = "observe", debug_assertions))]
         self.invariant_moisture_capture.clear();
         if let Some(thermal_update) = self
             .latest_env
@@ -7746,10 +7939,7 @@ impl Dwelling {
                 dt_s,
             )?;
 
-            #[cfg(all(
-                feature = "observe",
-                any(debug_assertions, feature = "check_invariants")
-            ))]
+            #[cfg(all(feature = "observe", debug_assertions))]
             {
                 let w_outdoor = self
                     .invariant_infiltration_w_outdoor
@@ -7808,7 +7998,7 @@ fn zone_display_name(
 /// programming errors that would cause two EV drivers to share identical
 /// stochastic behaviour — silently correlated streams are a latent data-quality
 /// hazard that is nearly impossible to detect from simulation output alone.
-#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
+#[cfg(any(debug_assertions, test))]
 fn check_ev_rng_stream_no_collision(
     seen: &mut HashMap<([u8; 32], u64), String>,
     seed: [u8; 32],
@@ -7865,7 +8055,7 @@ pub(crate) fn build_actors_from_seeds(
     let mut built_in_actors: Vec<Box<dyn Actor>> = Vec::new();
     let mut ev_actor_index: u64 = 0;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(debug_assertions, test))]
     let mut seen_rng_pairs: HashMap<([u8; 32], u64), String> = HashMap::new();
 
     for (name, seed) in seeds {
@@ -7955,7 +8145,7 @@ pub(crate) fn build_actors_from_seeds(
                 let ev_seed = {
                     let stream = RNG_STREAM_EV_DRIVER_BASE + ev_actor_index;
                     let sub = derive_sub_rng(rng, stream);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    #[cfg(any(debug_assertions, test))]
                     check_ev_rng_stream_no_collision(
                         &mut seen_rng_pairs,
                         sub.get_seed(),
@@ -8388,6 +8578,13 @@ fn cfg_gated_helper() {
             .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
             .collect();
         dwelling.equipment_execution_order = compute_equipment_execution_order(&dwelling.equipment);
+        dwelling.equipment_ids = dwelling
+            .equipment
+            .iter()
+            .map(|eq| eq.descriptor().id)
+            .collect();
+        dwelling.hvac_thermal_consistency =
+            build_hvac_thermal_consistency(&dwelling.ports, &dwelling.equipment);
         dwelling.equipment_column_map = build_equipment_column_map(
             &dwelling.equipment,
             &dwelling.output_column_index,
@@ -8670,8 +8867,7 @@ fn cfg_gated_helper() {
                 reactive_power_kvar: self.reactive_power_kvar,
             })?;
             // Keep CoreOutput consistent with the port contribution above
-            // (enforced by validate_port_core_electrical_consistency in
-            // debug / check_invariants builds).
+            // (validate_port_core_electrical_consistency is unconditional).
             self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
                 self.active_power_kw,
             )?);
@@ -8706,11 +8902,222 @@ fn cfg_gated_helper() {
         }
     }
 
+    /// Test equipment that raises one warning in `init` and one in its third
+    /// step, through the `drain_warnings` channel.
+    #[cfg(test)]
+    struct TestWarningEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        ports: Vec<PortDeclaration>,
+        warnings: Vec<Warning>,
+        steps_done: u32,
+    }
+
+    #[cfg(test)]
+    impl TestWarningEquipment {
+        fn new(name: &str) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(0),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("TestWarningEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC,
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(1),
+                core_output: CoreOutput::default(),
+                ports: vec![PortDeclaration::electrical()],
+                warnings: Vec::new(),
+                steps_done: 0,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl Equipment for TestWarningEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.warnings.clear();
+            self.steps_done = 0;
+            self.warnings.push(Warning::new(
+                self.descriptor.name.as_str(),
+                "test equipment init warning",
+            ));
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.steps_done += 1;
+            if self.steps_done == 3 {
+                self.warnings.push(Warning::new(
+                    self.descriptor.name.as_str(),
+                    "test equipment step warning",
+                ));
+            }
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: 0.0,
+                reactive_power_kvar: 0.0,
+            })?;
+            self.core_output.flows.electric_kw =
+                Some(hares_types::ElectricPower::consumption(0.0)?);
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_signal(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+            out.append(&mut self.warnings);
+        }
+    }
+
+    /// The warning channel carries an equipment's init and step warnings into
+    /// the dwelling's log: the init warning drains at registration, the step
+    /// warning drains beside the health counts carrying the step index.
+    #[test]
+    fn equipment_warnings_reach_the_dwelling_log() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut warner = TestWarningEquipment::new("Warner");
+        warner
+            .init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init warning test equipment");
+        dwelling
+            .add_equipment(Box::new(warner))
+            .expect("add warning test equipment");
+
+        let warnings = dwelling.take_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the init warning drains at registration, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("Warner") && warnings[0].contains("init warning"),
+            "the init warning names the equipment: {}",
+            warnings[0]
+        );
+
+        for _ in 0..3 {
+            dwelling.run_timestep(false).expect("dwelling step");
+        }
+        let warnings = dwelling.take_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one step warning from the third step, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].starts_with("step 2: "),
+            "the step warning carries the step index: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("Warner") && warnings[0].contains("step warning"),
+            "the step warning names the equipment: {}",
+            warnings[0]
+        );
+    }
+
+    /// A tariff's parse warnings report through `set_tariff` into the run's
+    /// warning log.
+    #[test]
+    fn set_tariff_reports_tariff_parse_warnings() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let tariff = ElectricTariff {
+            parse_warnings: vec!["test tariff parse warning".to_string()],
+            ..ElectricTariff::default()
+        };
+        dwelling
+            .set_tariff(tariff, chrono_tz::Tz::UTC)
+            .expect("set_tariff with a parse warning succeeds");
+
+        let warnings = dwelling.take_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the tariff parse warning reaches the log, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].starts_with("tariff: test tariff parse warning"),
+            "the warning is prefixed with the tariff source: {}",
+            warnings[0]
+        );
+    }
+
     /// Test equipment that correctly deposits power into ports but
     /// under-reports electric power in `core_output()`, used to verify
     /// that `validate_port_core_electrical_consistency` fails the step on
     /// the discrepancy.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     struct UnderReportingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -8720,7 +9127,7 @@ fn cfg_gated_helper() {
         ports: Vec<PortDeclaration>,
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl UnderReportingEquipment {
         fn new(name: &str, true_power_kw: f64, reported_power_kw: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -8753,7 +9160,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl Equipment for UnderReportingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -8832,7 +9239,7 @@ fn cfg_gated_helper() {
     /// `flows.reactive_power_kvar = None`. Active power is consistent, so
     /// only the reactive check of
     /// `validate_port_core_electrical_consistency` fires.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     struct ReactiveDivergentEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -8842,7 +9249,7 @@ fn cfg_gated_helper() {
         ports: Vec<PortDeclaration>,
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl ReactiveDivergentEquipment {
         fn new(name: &str, active_power_kw: f64, silent_reactive_kvar: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -8871,7 +9278,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl Equipment for ReactiveDivergentEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -9065,7 +9472,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     struct ThermalUnderReportingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -9074,7 +9481,7 @@ fn cfg_gated_helper() {
         ports: Vec<PortDeclaration>,
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl ThermalUnderReportingEquipment {
         fn new(name: &str, deposited_thermal_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -9109,7 +9516,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl Equipment for ThermalUnderReportingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -9189,7 +9596,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     struct WaterHeatingEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -9198,7 +9605,7 @@ fn cfg_gated_helper() {
         ports: Vec<PortDeclaration>,
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl WaterHeatingEquipment {
         fn new(name: &str, thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -9233,7 +9640,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl Equipment for WaterHeatingEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -9307,7 +9714,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     struct CoolingWithLatentEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
@@ -9317,7 +9724,7 @@ fn cfg_gated_helper() {
         ports: Vec<PortDeclaration>,
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl CoolingWithLatentEquipment {
         fn new(name: &str, sensible_w: f64, latent_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
@@ -9353,7 +9760,7 @@ fn cfg_gated_helper() {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     impl Equipment for CoolingWithLatentEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
@@ -9570,7 +9977,7 @@ fn cfg_gated_helper() {
     /// via `validate_port_core_electrical_consistency` before telemetry is
     /// ever assembled.
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     fn dwelling_step_errors_when_equipment_under_reports_power() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
@@ -9598,7 +10005,7 @@ fn cfg_gated_helper() {
     /// electrical port while reporting `flows.reactive_power_kvar = None` in
     /// `CoreOutput`. The port/core consistency validator must fail the step.
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     fn dwelling_step_errors_when_port_reactive_diverges_from_core_output() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
@@ -9624,8 +10031,7 @@ fn cfg_gated_helper() {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn telemetry_consistency_flag_goes_false_when_thermal_equipment_under_reports() {
+    fn run_timestep_fails_when_thermal_equipment_under_reports() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
@@ -9637,17 +10043,16 @@ fn cfg_gated_helper() {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
-        dwelling.run_timestep(false).expect("dwelling step");
-        let telemetry = dwelling.telemetry().unwrap();
-
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("thermal consistency must fail the step when equipment reports 50 W while depositing 1000 W into the HvacHeating port");
         assert!(
-            !telemetry.telemetry_consistency_flag,
-            "thermal consistency check should detect equipment reporting 50 W while depositing 1000 W into HvacHeating port"
+            err.to_string().contains("per-zone thermal consistency"),
+            "got: {err}"
         );
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn thermal_consistency_excludes_water_heating_by_end_use() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
@@ -9660,18 +10065,12 @@ fn cfg_gated_helper() {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
-        dwelling.run_timestep(false).expect("dwelling step");
-        let telemetry = dwelling.telemetry().unwrap();
-
-        assert!(
-            telemetry.telemetry_consistency_flag,
-            "water heating equipment depositing 1000 W via JacketLoss with thermal_output_w=1000 W \
-             should be excluded from thermal consistency check (end_use != HVAC_HEATING/COOLING)"
-        );
+        dwelling
+            .run_timestep(false)
+            .expect("water heating equipment depositing 1000 W via JacketLoss with thermal_output_w=1000 W must be excluded from the thermal consistency check (end_use != HVAC_HEATING/COOLING)");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn thermal_consistency_accounts_for_latent_cooling() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
@@ -9686,18 +10085,12 @@ fn cfg_gated_helper() {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
-        dwelling.run_timestep(false).expect("dwelling step");
-        let telemetry = dwelling.telemetry().unwrap();
-
-        assert!(
-            telemetry.telemetry_consistency_flag,
-            "cooling equipment depositing -1000 W sensible + -200 W latent with \
-             thermal_output_w=-1200 W should match when latent is included in port comparison"
-        );
+        dwelling
+            .run_timestep(false)
+            .expect("cooling equipment depositing -1000 W sensible + -200 W latent with thermal_output_w=-1200 W must match when latent is included in the port comparison");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn thermal_consistency_detects_cooling_latent_mismatch() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
@@ -9712,13 +10105,12 @@ fn cfg_gated_helper() {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
-        dwelling.run_timestep(false).expect("dwelling step");
-        let telemetry = dwelling.telemetry().unwrap();
-
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("thermal consistency must detect the -200 W latent mismatch when the equipment reports thermal_output_w=-1000 W but the ports receive -1200 W total");
         assert!(
-            !telemetry.telemetry_consistency_flag,
-            "thermal consistency should detect -200 W latent mismatch when equipment \
-             reports thermal_output_w=-1000 W but ports receive -1200 W total"
+            err.to_string().contains("per-zone thermal consistency"),
+            "got: {err}"
         );
     }
 
@@ -11758,7 +12150,7 @@ occupancy = 1.0
 
     // The panic relies on the actor-health invariant, which is gated the
     // same way as the check itself in run_timestep.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(test)]
     #[test]
     fn run_timestep_panics_on_unhealthy_actor() {
         let toml_path = unique_temp_toml("unhealthy_actor");
@@ -12971,6 +13363,7 @@ occupancy = 1.0
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // Build ZoneMap from building zones (same logic as from_preparsed()).
@@ -14341,8 +14734,7 @@ master_seed = 0
                 reactive_power_kvar: 0.0,
             })?;
             // Keep CoreOutput consistent with the port contribution above
-            // (enforced by validate_port_core_electrical_consistency in
-            // debug / check_invariants builds).
+            // (validate_port_core_electrical_consistency is unconditional).
             self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
                 self.power_w / 1000.0,
             )?);
@@ -14660,6 +15052,104 @@ master_seed = 0
             // every build profile; the dwelling turns the latch into a run
             // failure.
             self.telemetry.insert("corrupted_w", f64::NAN);
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(&mut self, _state: &[u8]) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+
+        fn apply_signal(&mut self, _signal: &ControlSignal) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+    }
+
+    /// Equipment that registers one telemetry key at init and then `set`s
+    /// an unregistered key during step; drives the dwelling's unknown-key
+    /// step-end check the same way [`NonFiniteTelemetryEquipment`] drives
+    /// the non-finite one.
+    struct UnknownKeyTelemetryEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+    }
+
+    impl UnknownKeyTelemetryEquipment {
+        fn new(name: &str) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(0),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("UnknownKeyTelemetryEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: CoreOutput::default(),
+            }
+        }
+    }
+
+    impl Equipment for UnknownKeyTelemetryEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(&mut self, id: EquipmentId) -> std::result::Result<(), HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), HaresError> {
+            // The one registered key: `set` may only target keys
+            // pre-populated here.
+            self.telemetry.insert("registered_w", 0.0);
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            _ports: &mut PortSlots,
+        ) -> std::result::Result<(), HaresError> {
+            // The unknown-key write is dropped and latched by Telemetry in
+            // every build profile; the dwelling turns the latch into a run
+            // failure.
+            self.telemetry.set("unregistered_w", 1.0);
             Ok(())
         }
 
@@ -15062,6 +15552,30 @@ master_seed = 0
         );
     }
 
+    /// A `set` on an unregistered telemetry key fails the step naming the
+    /// equipment and the key, in every build profile: the unknown-key
+    /// latch is enforced beside the non-finite latch at step end, turning
+    /// the wiring fault the telemetry map latched into a run failure.
+    #[test]
+    fn unknown_key_telemetry_fails_in_release() {
+        let mut dwelling = bestest_dwelling();
+        let mut eq = UnknownKeyTelemetryEquipment::new("MiswiredTelemetry");
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("a latched unknown telemetry key must fail the step");
+
+        assert!(
+            matches!(&err, HaresError::Equipment(message)
+                if message.contains("unregistered_w")
+                    && message.contains("MiswiredTelemetry")),
+            "the failure must name the equipment and the key, got: {err:?}"
+        );
+    }
+
     /// A NaN sensible gain into an unconditioned zone during warm-up fails
     /// the run: the zone NaN check covers every zone, warm-up included.
     #[test]
@@ -15318,7 +15832,8 @@ master_seed = 7
                 _env: &EnvironmentState,
                 _dt: Duration,
                 _out: &mut DomainUpdate,
-            ) {
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
             }
             fn observation_state(&self) -> Vec<f64> {
                 self.state.clone()
@@ -15429,7 +15944,8 @@ master_seed = 0
                 _env: &EnvironmentState,
                 _dt: Duration,
                 _out: &mut DomainUpdate,
-            ) {
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
             }
         }
 

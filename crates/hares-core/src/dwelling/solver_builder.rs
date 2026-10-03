@@ -6,18 +6,17 @@ use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
     DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
     ElectricalSolver, ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo,
-    ExteriorTarget, FilmCoefficientModel, FluidSolver, FluidSolverConfig, HumiditySolver,
-    HumiditySolverConfig, INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorConvectionInjection,
-    InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT,
-    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
-    ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
-    skin_rad_coupling,
+    ExteriorTarget, FilmCoefficientModel, HumiditySolver, HumiditySolverConfig,
+    INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorConvectionInjection, InteriorSolarSurfaceInfo,
+    InteriorSolarZoneConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
+    StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    assemble_building_rc, derive_zone_capacitances, skin_rad_coupling,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 #[cfg(feature = "observe")]
 use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
 use hares_physics::infiltration::{ShieldingClass, TerrainClass};
-use hares_types::{EnvironmentState, FluidType, HaresError, LoopId, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ZoneId};
 
 use super::Result;
 #[cfg(feature = "observe")]
@@ -200,21 +199,18 @@ fn build_solver_boundaries(
             None
         };
 
-        // Invariant: exterior boundaries with layer_info must resolve through node_index.
-        if is_exterior && let Some(info) = rc.layer_info.get(&surface_idx) {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            debug_assert!(
-                outer_wiring.is_some(),
-                "surface {surface_idx}: outer_node {:?} missing from node_index",
+        // Invariant: exterior boundaries with layer_info must resolve through
+        // node_index; a layer_info entry whose outer node is missing from
+        // node_index loses the exterior injection: a typed error.
+        if is_exterior
+            && let Some(info) = rc.layer_info.get(&surface_idx)
+            && outer_wiring.is_none()
+        {
+            return Err(HaresError::Dwelling(format!(
+                "surface {surface_idx}: outer_node {:?} missing from node_index; \
+                 exterior injection lost",
                 info.outer_node
-            );
-            if outer_wiring.is_none() {
-                tracing::warn!(
-                    surface_idx = surface_idx,
-                    outer_node = ?info.outer_node,
-                    "surface has layer_info entry but outer_node missing from node_index; exterior injection lost"
-                );
-            }
+            )));
         }
 
         // Inner wiring: conditioned-interior boundaries with RC layers.
@@ -230,21 +226,18 @@ fn build_solver_boundaries(
             None
         };
 
-        // Invariant: interior boundaries with layer_info must resolve through node_index.
-        if is_conditioned_interior && let Some(info) = rc.layer_info.get(&surface_idx) {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            debug_assert!(
-                inner_wiring.is_some(),
-                "surface {surface_idx}: inner_node {:?} missing from node_index",
+        // Invariant: interior boundaries with layer_info must resolve through
+        // node_index; a layer_info entry whose inner node is missing from
+        // node_index loses the interior wiring: a typed error.
+        if is_conditioned_interior
+            && let Some(info) = rc.layer_info.get(&surface_idx)
+            && inner_wiring.is_none()
+        {
+            return Err(HaresError::Dwelling(format!(
+                "surface {surface_idx}: inner_node {:?} missing from node_index; \
+                 interior wiring lost",
                 info.inner_node
-            );
-            if inner_wiring.is_none() {
-                tracing::warn!(
-                    surface_idx = surface_idx,
-                    inner_node = ?info.inner_node,
-                    "surface has layer_info entry but inner_node missing from node_index; interior wiring lost"
-                );
-            }
+            )));
         }
 
         #[cfg(feature = "observe")]
@@ -440,9 +433,9 @@ fn build_solver_boundaries(
                     base_shgc * win.interior_shading_fraction * win.exterior_shading_summer;
                 let shgc_winter =
                     base_shgc * win.winter_shading_fraction * win.exterior_shading_winter;
-                // Read only by the invariant block below, so the binding is
-                // gated to keep plain release builds lint-clean.
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                // Read only by the debug-build identity check below, so the
+                // binding is gated to keep plain release builds lint-clean.
+                #[cfg(debug_assertions)]
                 let r_total = 1.0 / u_factor.max(0.01);
                 // r_glass from the E+ Step 1 polynomial, computed once in
                 // building_to_boundary_inputs (conversions.rs) and stored as
@@ -453,7 +446,7 @@ fn build_solver_boundaries(
                 // (TARP/DOE-2) diverges from the E+ polynomial.
                 let r_glass = bd_input.fallback_r_m2_k_w;
 
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(debug_assertions)]
                 {
                     // Invariant: the stored r_glass must equal the r_glass
                     // recomputed from the stored film resistances.  For
@@ -600,12 +593,12 @@ fn build_solver_boundaries(
         });
     }
 
-    // Debug assertion: verify that all boundaries mapped to the same zone index
-    // originate from the same HPXML zone type. This catches the bug where
+    // Invariant: all boundaries mapped to the same zone index must originate
+    // from the same HPXML zone type. This catches the bug where
     // position-based zone indexing would map boundaries from a second
     // Conditioned zone in a duplex into zone 0 (the first Conditioned zone),
-    // creating phantom inter-zone coupling.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // creating phantom inter-zone coupling. Construction-cost-only typed
+    // error: a duplex input can reach the conflation it guards.
     {
         for z_idx in 0..rc.n_zones {
             // Only check boundaries that have an explicit interior zone type.
@@ -620,13 +613,14 @@ fn build_solver_boundaries(
                 .iter()
                 .enumerate()
                 .any(|(i, t1)| types_in_zone.iter().skip(i + 1).any(|t2| t1 != t2));
-            assert!(
-                !has_multiple_types,
-                "Zone index {z_idx} contains boundaries from multiple HPXML zone types \
-                 ({types:?}); each solver zone index should map to exactly one HPXML zone — \
-                 position-based indexing may have conflated separate zones of the same type",
-                types = types_in_zone,
-            );
+            if has_multiple_types {
+                return Err(HaresError::Dwelling(format!(
+                    "Zone index {z_idx} contains boundaries from multiple HPXML zone types \
+                     ({types:?}); each solver zone index should map to exactly one HPXML zone: \
+                     position-based indexing may have conflated separate zones of the same type",
+                    types = types_in_zone,
+                )));
+            }
         }
     }
 
@@ -753,74 +747,10 @@ pub(crate) fn compute_weather_averages(weather: &WeatherTimeSeries) -> WeatherAv
     }
 }
 
-/// Solvers plus per-zone thermal capacitances [J/K] for gain preview.
-/// Extract declared `(loop_id, fluid_type)` pairs from equipment specs.
-///
-/// Fluid-loop equipment (boilers, water heaters, etc.) carries `loop_id` and
-/// `fluid_type` in its typed config. This function collects the unique pairs
-/// so `FluidSolver::new` can validate loop identity at construction time and
-/// reject configuration errors before the first timestep.
-fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, FluidType)> {
-    let mut loops = Vec::new();
-
-    for spec in specs {
-        let Some(ref cfg) = spec.typed_config else {
-            continue;
-        };
-
-        // Boilers: typed config carries both loop_id and fluid_type.
-        match spec.name.as_str() {
-            "Gas Boiler" => {
-                if let Ok(typed) = cfg.typed::<hares_equipment::GasBoilerConfig>()
-                    && let Some(lid) = typed.loop_id
-                {
-                    loops.push((LoopId(lid), typed.fluid_type));
-                }
-            }
-            "Electric Boiler" => {
-                if let Ok(typed) = cfg.typed::<hares_equipment::ElectricBoilerConfig>()
-                    && let Some(lid) = typed.loop_id
-                {
-                    loops.push((LoopId(lid), typed.fluid_type));
-                }
-            }
-            // Water heaters: always fluid_type=Water, with optional loop_id
-            // from the typed config. Tankless uses DHW_DEMAND_LOOP when loop_id
-            // is absent, but that is a runtime assignment; here we only collect
-            // what's explicitly configured.
-            "Gas Water Heater" | "Electric Resistance Water Heater" | "Heat Pump Water Heater" => {
-                if let Ok(typed) = cfg.typed::<hares_equipment::GasWaterHeaterConfig>() {
-                    if let Some(lid) = typed.loop_id {
-                        loops.push((LoopId(lid), FluidType::Water));
-                    }
-                } else if let Ok(typed) =
-                    cfg.typed::<hares_equipment::ElectricResistanceWaterHeaterConfig>()
-                {
-                    if let Some(lid) = typed.loop_id {
-                        loops.push((LoopId(lid), FluidType::Water));
-                    }
-                } else if let Ok(typed) = cfg.typed::<hares_equipment::HeatPumpWaterHeaterConfig>()
-                    && let Some(lid) = typed.loop_id
-                {
-                    loops.push((LoopId(lid), FluidType::Water));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Deduplicate: if the same (loop_id, fluid_type) appears from multiple
-    // specs, keep only one.
-    loops.sort_by_key(|&(lid, ft)| (lid.0, ft));
-    loops.dedup();
-    loops
-}
-
 pub(crate) struct SolverBundle {
     pub thermal: ThermalSolver,
     pub humidity: HumiditySolver,
     pub electrical: ElectricalSolver,
-    pub fluid: FluidSolver,
     pub zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub envelope_diagnostics: EnvelopeDiagnostics,
@@ -1646,9 +1576,10 @@ pub(crate) fn build_default_solvers(
     let humidity_solver = HumiditySolver::new(HumiditySolverConfig::default(), env);
     let electrical_solver = ElectricalSolver::new(ElectricalSolverConfig::default())
         .map_err(|err| HaresError::Envelope(format!("electrical solver init failed: {err}")))?;
-    let fluid_loops = extract_fluid_loops_from_specs(equipment_specs);
-    let fluid_solver = FluidSolver::new(FluidSolverConfig::default(), &fluid_loops)
-        .map_err(|err| HaresError::Envelope(format!("fluid solver init failed: {err}")))?;
+    // The fluid solver is constructed after equipment instantiation, from the
+    // equipment's own fluid port declarations (see the assembly site in
+    // `Dwelling::new`); the loop-type map cannot be built here from specs
+    // without name matching.
 
     let zone_caps: Vec<(ZoneId, f64)> = env
         .zones
@@ -1670,7 +1601,6 @@ pub(crate) fn build_default_solvers(
         thermal: thermal_solver,
         humidity: humidity_solver,
         electrical: electrical_solver,
-        fluid: fluid_solver,
         zone_capacitances_j_k: zone_caps,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics,
@@ -1757,7 +1687,7 @@ fn attic_infiltration_method(
             .map(|v| 2.0 * v / floor_area_m2)
             .unwrap_or(1.5);
         let (stack_coeff, wind_coeff) =
-            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain);
+            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain)?;
 
         #[cfg(feature = "observe")]
         tracing::info!(
@@ -1793,7 +1723,7 @@ fn attic_infiltration_method(
             .map(|v| 2.0 * v / floor_area_m2)
             .unwrap_or(1.5);
         let (stack_coeff, wind_coeff) =
-            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain);
+            attic_ela_coefficients(attic_height_m, building_height_m, shielding, terrain)?;
 
         #[cfg(feature = "observe")]
         tracing::info!(
@@ -1856,7 +1786,7 @@ fn garage_infiltration_method(
         .unwrap_or(28.0);
 
     let ela_m2 = sla * floor_area_m2;
-    let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m, shielding, terrain);
+    let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m, shielding, terrain)?;
 
     #[cfg(feature = "observe")]
     tracing::info!(
@@ -2832,7 +2762,8 @@ mod tests {
             } => {
                 assert!((ela_m2 - 0.0084).abs() < 1e-9);
                 let (expected_stack, expected_wind) =
-                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban);
+                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban)
+                        .unwrap();
                 assert!((stack_coeff - expected_stack).abs() < 1e-12);
                 assert!((wind_coeff - expected_wind).abs() < 1e-12);
             }
@@ -2861,7 +2792,8 @@ mod tests {
                 // SLA = 3.0e-4, floor area = 28 m² → ela_m2 = 0.0084
                 assert!((ela_m2 - 0.0084).abs() < 1e-9);
                 let (expected_stack, expected_wind) =
-                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban);
+                    garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban)
+                        .unwrap();
                 assert!((stack_coeff - expected_stack).abs() < 1e-12);
                 assert!((wind_coeff - expected_wind).abs() < 1e-12);
             }
@@ -2958,9 +2890,12 @@ mod tests {
     fn garage_height_derived_from_zone_geometry() {
         // Zone has volume=67.2 m³, floor_area=28 m² → height = 2.4 m.
         let (stack_coeff, wind_coeff) =
-            garage_ela_coefficients(67.2 / 28.0, ShieldingClass::Normal, TerrainClass::Suburban);
+            garage_ela_coefficients(67.2 / 28.0, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap();
         let expected_stack =
-            garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban).0;
+            garage_ela_coefficients(2.4, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap()
+                .0;
         assert!(
             (stack_coeff - expected_stack).abs() < 1e-12,
             "coefficients must match for equivalent height"
@@ -3033,12 +2968,10 @@ mod tests {
     }
 
     /// When a surface has a `layer_info` entry but the referenced `outer_node`
-    /// is not present in `node_index`, the wiring silently produces `None` —
-    /// the invariant check must catch this in debug/check_invariants builds.
+    /// is not present in `node_index`, the wiring produces `None`, and the
+    /// construction check must reject it with a typed error, ungated.
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "surface 0")]
-    fn missing_node_id_asserts_in_wiring() {
+    fn missing_node_id_is_a_typed_error_in_wiring() {
         use super::{RCContext, WeatherAverages, build_solver_boundaries};
         use chrono::TimeZone;
         use hares_envelope::{
@@ -3121,10 +3054,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3228,7 +3162,15 @@ mod tests {
             avg_ground_c: 10.0,
         };
 
-        let _ = build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs);
+        let err = build_solver_boundaries(&building, &boundary_inputs, &rc, &env, &weather_avgs)
+            .map(|_| ())
+            .expect_err(
+                "a layer_info entry whose node is missing from node_index must be a typed error",
+            );
+        assert!(
+            err.to_string().contains("surface 0"),
+            "the error must name the surface, got: {err}"
+        );
     }
 
     /// A surface with no `layer_info` entry (fallback-R) correctly produces
@@ -3318,10 +3260,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3549,10 +3492,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // Production resolves an attic exterior zone to ExteriorTarget::Zone
@@ -3783,10 +3727,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         let (r_glass, r_film_int, r_film_ext) =
@@ -4069,10 +4014,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // r_glass and film resistances from the E+ Step 1 polynomial for U=1.8.
@@ -4333,10 +4279,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
@@ -4587,10 +4534,11 @@ mod tests {
             hvac_deadband_c: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
-                attrs: HashMap::new(),
+                attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // High wind (15 m/s) — boundary_input still carries E+ polynomial values.
@@ -4733,70 +4681,22 @@ mod tests {
     }
 
     #[test]
-    fn validates_fluid_type_consistency_at_solver_init() {
+    fn conflicting_port_fluid_types_are_a_construction_error() {
         use hares_envelope::fluid_solver::{FluidSolver, FluidSolverConfig};
-        use hares_equipment::{ElectricBoilerConfig, EquipmentConfig, GasBoilerConfig};
-        use hares_types::{FluidType, LoopId};
+        use hares_types::{FluidType, LoopId, PortDeclaration};
 
-        // Two equipment specs, same loop_id=1, different fluid types.
-        let gas_boiler = EquipmentConfig::from_typed(
-            "Gas Boiler".to_string(),
-            "Gas Boiler".to_string(),
-            GasBoilerConfig {
-                loop_id: Some(1),
-                fluid_type: FluidType::Water,
-                capacity_w: 10_000.0,
-                afue: 0.90,
-                ..GasBoilerConfig::default()
-            },
-        )
-        .unwrap();
-        let electric_boiler = EquipmentConfig::from_typed(
-            "Electric Boiler".to_string(),
-            "Electric Boiler".to_string(),
-            ElectricBoilerConfig {
-                loop_id: Some(1),
-                fluid_type: FluidType::Glycol,
-                capacity_w: 8_000.0,
-                eir: 1.0,
-                ..ElectricBoilerConfig::default()
-            },
-        )
-        .unwrap();
-
-        let specs = [
-            hares_io::EquipmentSpec {
-                name: "Gas Boiler".to_string(),
-                instance_name: None,
-                fuel_type: hares_types::FuelType::Gas,
-                parameters: serde_json::Map::new(),
-                zip_params: None,
-                typed_config: Some(gas_boiler),
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-            },
-            hares_io::EquipmentSpec {
-                name: "Electric Boiler".to_string(),
-                instance_name: None,
-                fuel_type: hares_types::FuelType::Electric,
-                parameters: serde_json::Map::new(),
-                zip_params: None,
-                typed_config: Some(electric_boiler),
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-            },
+        // Two fluid ports on loop_id=1 declaring different fluid types, as
+        // two pieces of equipment wired to the same loop would.
+        let declarations = vec![
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(1), FluidType::Glycol),
         ];
-
-        let loops = super::extract_fluid_loops_from_specs(&specs);
+        let loops = hares_types::ports::fluid_loop_declarations(&declarations);
         assert_eq!(
             loops.len(),
             2,
-            "both (loop_id=1, Water) and (loop_id=1, Glycol) should be extracted"
+            "both (loop_id=1, Water) and (loop_id=1, Glycol) should be collected"
         );
-        assert!(loops.contains(&(LoopId(1), FluidType::Water)));
-        assert!(loops.contains(&(LoopId(1), FluidType::Glycol)));
 
         // Passing both conflicting pairs to the fluid solver constructor
         // must produce a hard error.

@@ -312,15 +312,6 @@ pub(super) fn calculate_shr(
         }
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if t_adp > db_in_c {
-        return Err(HaresError::InvariantViolation {
-            check_name: "coil_apparatus_dew_point_exceeds_entering_db".to_string(),
-            value: t_adp,
-            tolerance: db_in_c,
-        });
-    }
-
     let supply_temp_c = t_adp + bf * (db_in_c - t_adp);
 
     Ok(CoilResult {

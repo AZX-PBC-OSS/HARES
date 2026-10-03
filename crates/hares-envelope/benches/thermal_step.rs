@@ -252,11 +252,11 @@ fn thermal_step_benchmark(c: &mut Criterion) {
         // Warm the exterior-surface-temperature fixed points so the measured
         // step is the steady-state hot path, not the first-call transient.
         for _ in 0..20 {
-            solver.resolve(&ports, &env, std::time::Duration::from_secs(900), &mut out);
+            let _ = solver.resolve(&ports, &env, std::time::Duration::from_secs(900), &mut out);
             out.clear();
         }
         b.iter(|| {
-            solver.resolve(
+            let _ = solver.resolve(
                 black_box(&ports),
                 black_box(&env),
                 black_box(std::time::Duration::from_secs(900)),

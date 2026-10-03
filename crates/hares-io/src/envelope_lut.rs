@@ -175,7 +175,7 @@ const FILM_R_WALL_ROOF: f64 = 0.1585;
 ///
 /// This allows monotonicity checks to group variants that differ only in
 /// insulation level, not in construction type or siding material.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(test)]
 fn split_r_variant(variant: &str) -> Option<(&str, u32)> {
     if variant.eq_ignore_ascii_case("Uninsulated") {
         return Some(("", 0));
@@ -229,18 +229,7 @@ impl EnvelopeLookup {
         let boundary_types = Self::load_boundary_types(&bt_path)?;
         let materials = Self::load_materials(&mat_path)?;
         let boundary_names = if boundaries_path.exists() {
-            let names = Self::load_boundaries(&boundaries_path)?;
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let check_lut = Self {
-                    boundary_types: boundary_types.clone(),
-                    materials: materials.clone(),
-                    boundary_names: names.clone(),
-                };
-                check_lut.check_csv_vs_hardcoded_consistency();
-                check_lut.check_material_invariants(&mat_path);
-            }
-            names
+            Self::load_boundaries(&boundaries_path)?
         } else {
             tracing::warn!(
                 path = %boundaries_path.display(),
@@ -248,16 +237,6 @@ impl EnvelopeLookup {
             );
             HashMap::new()
         };
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if boundary_names.is_empty() {
-            let check_lut = Self {
-                boundary_types: boundary_types.clone(),
-                materials: materials.clone(),
-                boundary_names: HashMap::new(),
-            };
-            check_lut.check_material_invariants(&mat_path);
-        }
 
         Ok(Self {
             boundary_types,
@@ -331,69 +310,96 @@ impl EnvelopeLookup {
 
     /// Verify CSV-derived boundary names match the hardcoded mapping.
     ///
-    /// Logs a warning for each `(BoundaryType, ZoneType, ZoneType)` triple
-    /// where the CSV name and the hardcoded name disagree. Activation is
-    /// gated on `debug_assertions` or `check_invariants` to avoid runtime
-    /// cost in release builds.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_csv_vs_hardcoded_consistency(&self) {
+    /// Returns one finding per `(BoundaryType, ZoneType, ZoneType)` triple
+    /// where the CSV name and the hardcoded name disagree. Test-only: the
+    /// shipped LUT is static and the property is pinned by a unit test.
+    #[cfg(test)]
+    fn check_csv_vs_hardcoded_consistency(&self) -> Vec<String> {
+        let mut findings = Vec::new();
         for ((bt, int, ext), csv_name) in &self.boundary_names {
             if let Some(hardcoded_name) = resolve_boundary_name(bt, Some(int), Some(ext))
                 && csv_name != hardcoded_name
             {
-                tracing::warn!(
-                    boundary_type = ?bt,
-                    interior_zone = ?int,
-                    exterior_zone = ?ext,
-                    csv_name = %csv_name,
-                    hardcoded_name = %hardcoded_name,
-                    "Boundary name mismatch between CSV and hardcoded mapping"
-                );
+                findings.push(format!(
+                    "boundary name mismatch between CSV and hardcoded mapping: \
+                     {bt:?} {int:?}/{ext:?}: csv='{csv_name}' hardcoded='{hardcoded_name}'"
+                ));
             }
         }
+        findings
     }
 
     /// Verify STUD AND CAVITY R-values are monotonic within each boundary-name
     /// group and flag layers whose conductivity exceeds a physically plausible
     /// threshold for insulated cavities.
     ///
-    /// Activation is gated on `debug_assertions` or `check_invariants`.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_material_invariants(&self, mat_path: &Path) {
+    /// Returns one `(group, finding)` pair per violation, the group being the
+    /// `boundary_name/prefix` key. Test-only: the shipped LUT is static and
+    /// its known findings are pinned by a unit test.
+    #[cfg(test)]
+    fn check_material_invariants(&self, mat_path: &Path) -> Vec<(String, String)> {
+        let mut findings: Vec<(String, String)> = Vec::new();
         let mut rdr = match csv::Reader::from_path(mat_path) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(path = %mat_path.display(), error = %e, "cannot open materials CSV for invariant check");
-                return;
+                findings.push((
+                    "materials CSV".into(),
+                    format!("cannot open materials CSV for invariant check: {e}"),
+                ));
+                return findings;
             }
         };
         let headers = match rdr.headers() {
             Ok(h) => h.clone(),
             Err(e) => {
-                tracing::warn!(error = %e, "cannot read materials CSV headers");
-                return;
+                findings.push((
+                    "materials CSV".into(),
+                    format!("cannot read materials CSV headers: {e}"),
+                ));
+                return findings;
             }
         };
 
         let boundary_name_idx = match headers.iter().position(|h| h == "Boundary Name") {
             Some(i) => i,
-            None => return,
+            None => {
+                findings.push(("materials CSV".into(), "no Boundary Name column".into()));
+                return findings;
+            }
         };
         let boundary_type_idx = match headers.iter().position(|h| h == "Boundary Type") {
             Some(i) => i,
-            None => return,
+            None => {
+                findings.push(("materials CSV".into(), "no Boundary Type column".into()));
+                return findings;
+            }
         };
         let material_name_idx = match headers.iter().position(|h| h == "Material Name") {
             Some(i) => i,
-            None => return,
+            None => {
+                findings.push(("materials CSV".into(), "no Material Name column".into()));
+                return findings;
+            }
         };
         let resistance_idx = match headers.iter().position(|h| h == "Resistance (m^2-K/W)") {
             Some(i) => i,
-            None => return,
+            None => {
+                findings.push((
+                    "materials CSV".into(),
+                    "no Resistance (m^2-K/W) column".into(),
+                ));
+                return findings;
+            }
         };
         let conductivity_idx = match headers.iter().position(|h| h == "Conductivity (W/m-K)") {
             Some(i) => i,
-            None => return,
+            None => {
+                findings.push((
+                    "materials CSV".into(),
+                    "no Conductivity (W/m-K) column".into(),
+                ));
+                return findings;
+            }
         };
 
         // Group rows by (boundary_name, variant_prefix) where variant_prefix is
@@ -463,19 +469,14 @@ impl EnvelopeLookup {
                 let (prev_rank, prev_r, _prev_k) = window[0];
                 let (next_rank, next_r, _next_k) = window[1];
                 if next_r < prev_r {
-                    tracing::warn!(
-                        boundary = %boundary_name,
-                        prefix = %prefix,
-                        from_rank = prev_rank,
-                        to_rank = next_rank,
-                        from_r = prev_r,
-                        to_r = next_r,
-                        "Non-monotonic stud cavity R-value within variant group: rank {} (R={:.4}) → rank {} (R={:.4})",
-                        prev_rank,
-                        prev_r,
-                        next_rank,
-                        next_r,
-                    );
+                    let group = format!("{boundary_name}/{prefix}");
+                    findings.push((
+                        group,
+                        format!(
+                            "non-monotonic stud cavity R-value: rank {prev_rank} \
+                             (R={prev_r:.4}) → rank {next_rank} (R={next_r:.4})"
+                        ),
+                    ));
                 }
             }
 
@@ -489,19 +490,20 @@ impl EnvelopeLookup {
             const MAX_PLAUSIBLE_CAVITY_K: f64 = 0.5;
             for (&rank, &(_r, k)) in variants.iter() {
                 if rank > 0 && k > MAX_PLAUSIBLE_CAVITY_K {
-                    tracing::warn!(
-                        boundary = %boundary_name,
-                        prefix = %prefix,
-                        rank = rank,
-                        conductivity = k,
-                        threshold = MAX_PLAUSIBLE_CAVITY_K,
-                        "Insulated stud cavity conductivity {:.4} W/m·K exceeds plausible maximum {:.4} W/m·K; back-calculation may have produced physically wrong per-layer properties",
-                        k,
-                        MAX_PLAUSIBLE_CAVITY_K,
-                    );
+                    let group = format!("{boundary_name}/{prefix}");
+                    findings.push((
+                        group,
+                        format!(
+                            "insulated stud cavity conductivity {k:.4} W/m·K exceeds \
+                             plausible maximum {MAX_PLAUSIBLE_CAVITY_K:.4} W/m·K (rank {rank}); \
+                             back-calculation may have produced physically wrong \
+                             per-layer properties"
+                        ),
+                    ));
                 }
             }
         }
+        findings
     }
 
     /// Implements OCHRE's `get_boundary_rc_values` matching algorithm.
@@ -936,6 +938,102 @@ mod tests {
                 Some(&ZoneType::Outdoor),
             ),
             None
+        );
+    }
+
+    /// The shipped LUT's CSV-derived boundary names must agree with the
+    /// hardcoded mapping on every triple the CSV carries (the runtime check
+    /// moved here: the shipped data is static). The one known exception is
+    /// pinned: the CSV carries an Interior Wall entry for the
+    /// Conditioned/Conditioned triple, which `resolve_name` never reaches
+    /// because the same-zone furniture path short-circuits first.
+    #[test]
+    fn shipped_lut_names_match_hardcoded_mapping() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults")
+            .join("envelope");
+        let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
+        let findings = lut.check_csv_vs_hardcoded_consistency();
+        assert_eq!(
+            findings.len(),
+            1,
+            "shipped envelope LUT name disagreements changed: {findings:?}"
+        );
+        assert!(
+            findings[0].contains("Conditioned/Conditioned")
+                && findings[0].contains("Interior Wall"),
+            "the pinned mismatch is the Interior Wall same-zone entry, got: {}",
+            findings[0]
+        );
+    }
+
+    /// The shipped materials LUT must keep its known per-layer property set:
+    /// the per-layer R values are back-calculated from assembly R-values, so
+    /// several variant groups are legitimately non-monotonic and a few
+    /// insulated cavities exceed the plausible conductivity threshold. The
+    /// runtime check moved here; the pinned (group, count) summary fails when
+    /// a data edit changes the LUT's derived per-layer properties.
+    #[test]
+    fn shipped_lut_materials_monotone_and_plausible() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults")
+            .join("envelope");
+        let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
+        let findings = lut.check_material_invariants(&dir.join("Envelope Materials.csv"));
+
+        let mut by_group: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for (group, _finding) in &findings {
+            *by_group.entry(group.clone()).or_default() += 1;
+        }
+        let expected: &[(&str, usize)] = &[
+            ("Attic Floor/", 2),
+            ("Exterior Wall/WoodStud, aluminum siding, ", 1),
+            ("Exterior Wall/WoodStud, asbestos siding, ", 1),
+            ("Exterior Wall/WoodStud, brick veneer, ", 1),
+            ("Exterior Wall/WoodStud, composite shingle siding, ", 1),
+            ("Exterior Wall/WoodStud, fiber cement siding, ", 1),
+            ("Exterior Wall/WoodStud, stucco, ", 1),
+            ("Exterior Wall/WoodStud, vinyl siding, ", 1),
+            ("Exterior Wall/WoodStud, wood siding, ", 1),
+            ("Garage Attached Wall/WoodStud, brick veneer, ", 1),
+            (
+                "Garage Attached Wall/WoodStud, composite shingle siding, ",
+                1,
+            ),
+            ("Garage Attached Wall/WoodStud, stucco, ", 1),
+            ("Garage Attached Wall/WoodStud, vinyl siding, ", 1),
+            ("Garage Attached Wall/WoodStud, wood siding, ", 2),
+            ("Rim Joist/aluminum siding, ", 1),
+            ("Rim Joist/asbestos siding, ", 1),
+            ("Rim Joist/brick veneer, ", 1),
+            ("Rim Joist/composite shingle siding, ", 1),
+            ("Rim Joist/fiber cement siding, ", 1),
+            ("Rim Joist/none, ", 1),
+            ("Rim Joist/stucco, ", 1),
+            ("Rim Joist/vinyl siding, ", 1),
+            ("Rim Joist/wood siding, ", 1),
+            ("Roof/asphalt or fiberglass shingles, Finished, ", 3),
+            ("Roof/metal surfacing, Finished, ", 3),
+            ("Roof/slate or tile shingles, Finished, ", 3),
+            ("Roof/wood shingles or shakes, Finished, ", 3),
+        ];
+        let actual: Vec<(String, usize)> = by_group.into_iter().collect();
+        let expected: Vec<(String, usize)> = expected
+            .iter()
+            .map(|(g, n)| ((*g).to_string(), *n))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "shipped envelope materials findings changed: {findings:?}"
         );
     }
 }

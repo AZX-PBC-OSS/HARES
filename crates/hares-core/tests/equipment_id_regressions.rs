@@ -445,12 +445,16 @@ impl Equipment for IdentityProbeEquipment {
         ports: &mut PortSlots,
     ) -> Result<(), HaresError> {
         if let Some(zone) = self.thermal_port_zone {
+            // InternalGain, not HvacHeating: the probe is not HVAC equipment
+            // and reports no thermal_output_w, so an HVAC-category deposit
+            // would trip the (now unconditional) per-zone thermal
+            // consistency check (a non-HVAC deposit is what it is).
             ports.accumulate(&hares_types::PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 100.0,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
-                category: hares_types::ThermalCategory::HvacHeating,
+                category: hares_types::ThermalCategory::InternalGain,
             })?;
         }
         if self.electric_load_kw > 0.0 {

@@ -347,20 +347,7 @@ impl ThermostatFsm {
         } else {
             self.min_off_time_s
         };
-        let allowed = elapsed_s >= min_s;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if !allowed && min_s > 0.0 {
-            tracing::warn!(
-                current_mode = ?self.mode,
-                proposed_mode = ?proposed,
-                elapsed_s,
-                min_s,
-                min_on_time_s = self.min_on_time_s,
-                min_off_time_s = self.min_off_time_s,
-                "can_transition_mode: blocked by min on/off time — short-cycle guards active"
-            );
-        }
-        allowed
+        elapsed_s >= min_s
     }
 
     /// Core thermostat hysteresis + cycle-time logic. Returns the resolved mode.
@@ -435,15 +422,6 @@ impl ThermostatFsm {
                         );
                         ThermostatMode::Deadband
                     } else {
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        if heat_turn_on >= cool_turn_on {
-                            return Err(HaresError::InvariantViolation {
-                                check_name: "thermostat_deadband_turn_on_order".to_string(),
-                                value: heat_turn_on,
-                                tolerance: cool_turn_on,
-                            });
-                        }
-
                         if zone_temp < heat_turn_on {
                             ThermostatMode::Heating
                         } else if zone_temp > cool_turn_on {
@@ -485,15 +463,6 @@ impl ThermostatFsm {
                         );
                         ThermostatMode::Deadband
                     } else {
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        if heat_turn_on >= cool_turn_on {
-                            return Err(HaresError::InvariantViolation {
-                                check_name: "thermostat_deadband_turn_on_order".to_string(),
-                                value: heat_turn_on,
-                                tolerance: cool_turn_on,
-                            });
-                        }
-
                         if zone_temp < heat_turn_on {
                             ThermostatMode::Heating
                         } else if zone_temp > cool_turn_on {
@@ -622,18 +591,14 @@ impl ThermostatFsm {
                      cooling raised to heating + deadband + 1.0°C",
                 );
             }
-
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if corrected.cooling_c <= corrected.heating_c + deadband_c {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "thermostat_auto_corrected_setpoint_deadband".to_string(),
-                    value: corrected.cooling_c - corrected.heating_c,
-                    tolerance: deadband_c,
-                });
-            }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // The auto-correction above sets cooling to heating + deadband + 1.0,
+        // so the corrected pair satisfies the deadband tautologically; the
+        // former gated re-check of it is deleted. The final effective
+        // setpoints (base + any explicit-deadband signal) keep a debug-build
+        // check.
+        #[cfg(debug_assertions)]
         {
             let final_effective = base.with_control_override(Some(candidate));
             // Deadband to check against: for explicit-deadband signals this

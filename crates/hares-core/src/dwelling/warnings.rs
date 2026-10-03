@@ -41,6 +41,19 @@ impl WarningLog {
         }
     }
 
+    /// Append a structured [`Warning`], formatted `"{source}: {message}"`
+    /// (prefixed `"step {n}: "` when the warning carries a step index).
+    ///
+    /// Every producer of the run's warnings pushes through this method, so
+    /// the Python `take_warnings()` keeps returning `list[str]`.
+    pub fn push_warning(&mut self, warning: hares_types::Warning) {
+        let message = match warning.step_index {
+            Some(step) => format!("step {step}: {}: {}", warning.source, warning.message),
+            None => format!("{}: {}", warning.source, warning.message),
+        };
+        self.push(message);
+    }
+
     /// Number of warnings dropped (counted but not stored) since the last
     /// [`Self::take`].
     #[must_use]

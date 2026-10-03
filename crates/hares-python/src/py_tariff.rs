@@ -669,6 +669,7 @@ impl PyTariffBuilder {
             rtp_schedule: None,
             cpp_config: None,
             ev_tou_period_name: None,
+            parse_warnings: Vec::new(),
         };
         tariff
             .validate()

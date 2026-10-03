@@ -940,7 +940,7 @@ impl HeatPumpHeaterCore {
                         fan_flow_low_m3_s: flow_low,
                         is_heat_pump: true,
                     },
-                )
+                )?
             };
         }
 
@@ -1412,17 +1412,16 @@ impl HeatPumpHeaterCore {
             0.0
         }
         // AHRI 210/240-2023: ASHP heating COP ~1.5–5.0; clamp to [0.0, 10.0]
-        // to exclude physically impossible values from telemetry.
+        // to exclude physically impossible values from telemetry. Non-finite
+        // input survives the clamp: a NaN COP reaching telemetry is a typed
+        // error in every build.
         .clamp(0.0, 10.0);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(cop.is_finite() && (0.0..=10.0).contains(&cop)) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "ashp_heater_cop_range".to_string(),
-                    value: cop,
-                    tolerance: 0.0,
-                });
-            }
+        if !cop.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "ashp_heater_cop_finite".to_string(),
+                value: cop,
+                tolerance: 0.0,
+            });
         }
         self.telemetry.set(tk::COP, cop);
         // Runtime fraction = duty cycle (PLR) when on, 0 when off.
@@ -1569,7 +1568,7 @@ impl HeatPumpHeaterCore {
             zone_temp_c,
             delivered_thermal_w,
             &mut self.telemetry,
-        );
+        )?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
@@ -1808,7 +1807,7 @@ impl HeatPumpHeaterCore {
         let staged_capacity_w =
             self.hvac
                 .apply_startup_capacity_degradation(steady_capacity_w, dt_min, hp_on_control);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if self.operating_mode == OperatingMode::HeatingER {
                 assert!(
@@ -2271,7 +2270,7 @@ impl HeatPumpHeaterCore {
             self.er_soft_lockout = true;
             self.soft_lockout_elapsed_s += dt_s;
         } else {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(feature = "observe")]
             {
                 if self.er_soft_lockout {
                     let release_cause = if soft_lockout_timeout {

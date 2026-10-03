@@ -240,7 +240,7 @@ impl Equipment for ElectricBaseboard {
             zone_temp_c,
             thermal_output_w,
             &mut self.telemetry,
-        );
+        )?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),

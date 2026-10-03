@@ -629,7 +629,9 @@ fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
         ..Default::default()
     };
     let env = env_20c();
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
 
     // Verify the solver produced finite zone temperatures and that the
     // LWR convergence loop completed successfully.

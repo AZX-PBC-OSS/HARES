@@ -153,9 +153,9 @@ fn ground_temperature_drives_zone() {
     let dt = Duration::from_secs_f64(DT_S);
 
     // Run 48 hours to approach steady state.
-    let mut last_update = solver.resolve_new(&ports, &env, dt);
+    let mut last_update = solver.resolve_new(&ports, &env, dt).unwrap();
     for _ in 1..576 {
-        last_update = solver.resolve_new(&ports, &env, dt);
+        last_update = solver.resolve_new(&ports, &env, dt).unwrap();
     }
 
     let t_zone = zone_temp(&last_update);
@@ -310,7 +310,7 @@ fn interior_solar_distribution_damps_peak_temp() {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = if step < solar_steps { solar_w } else { 0.0 };
-        let update = solver.resolve_new(&ports, &env, dt);
+        let update = solver.resolve_new(&ports, &env, dt).unwrap();
         let t = zone_temp(&update);
         peak = peak.max(t);
     }
@@ -330,14 +330,18 @@ fn interior_solar_distribution_damps_peak_temp() {
     );
 
     // After solar ends (10h cooldown), zone should approach outdoor temp
-    let t_final = zone_temp(&solver.resolve_new(
-        &PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZONE)],
-            ..Default::default()
-        },
-        &env,
-        dt,
-    ));
+    let t_final = zone_temp(
+        &solver
+            .resolve_new(
+                &PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZONE)],
+                    ..Default::default()
+                },
+                &env,
+                dt,
+            )
+            .unwrap(),
+    );
     assert!(
         t_final < peak,
         "zone should cool after solar ends: final={t_final:.1}°C, peak={peak:.1}°C"
@@ -534,7 +538,7 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         ..Default::default()
     };
 
-    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env);
+    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env).unwrap();
 
     // With radiation_frac = 0.5:
     //   300 W radiant × (1 - 0.5) = 150 W returned to zone air
@@ -700,7 +704,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
     };
     let dt = Duration::from_secs_f64(DT_S);
 
-    solver.resolve_new(&ports, &env, dt);
+    solver.resolve_new(&ports, &env, dt).unwrap();
 
     let gains = solver.component_gains();
 

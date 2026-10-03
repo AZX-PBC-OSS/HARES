@@ -19,6 +19,7 @@ pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod warning;
 pub mod zip;
 pub mod zone_map;
 
@@ -29,6 +30,7 @@ pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
 pub use health::*;
+pub use warning::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are
 // internal plumbing for `validate_core_contract`. Only the observability

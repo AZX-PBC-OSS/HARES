@@ -133,9 +133,21 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             };
             let duration_s = match dur_str {
                 Some("inf") | Some("Inf") | Some("none") | Some("None") => None,
-                Some(s) => Some(s.parse::<f64>().map_err(|_| {
-                    HaresError::Control(format!("invalid duration_s for DemandResponse in '{raw}'"))
-                })?),
+                Some(s) => {
+                    let d = s.parse::<f64>().map_err(|_| {
+                        HaresError::Control(format!(
+                            "invalid duration_s for DemandResponse in '{raw}'"
+                        ))
+                    })?;
+                    // A non-positive duration is invalid input: the DR event
+                    // can never run.
+                    if d <= 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "DemandResponse duration_s must be positive, got {d} in '{raw}'"
+                        )));
+                    }
+                    Some(d)
+                }
                 None => None,
             };
             Ok(DrAction::demand_response(level, duration_s))
@@ -443,23 +455,24 @@ impl ActorRegistry {
                         actor = actor.with_load_target(target, action);
                     }
                 }
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 {
+                    // A half-configured pair can never dispatch: the
+                    // unmatched half silently emits nothing.
                     let has_hvac_target = config.get_str("hvac_target").is_some();
                     let has_hvac_action = config.get_str("hvac_action").is_some();
                     if has_hvac_target && !has_hvac_action {
-                        tracing::debug!(
-                            name = %config.name,
-                            "DrCompliance actor has hvac_target but no hvac_action; \
-                             dispatch will use DrAction::None (no signal emitted)"
-                        );
+                        return Err(HaresError::Dwelling(format!(
+                            "DrCompliance actor '{}': hvac_target set without \
+                             hvac_action; the pair must be fully configured",
+                            config.name
+                        )));
                     }
                     if has_hvac_action && !has_hvac_target {
-                        tracing::debug!(
-                            name = %config.name,
-                            "DrCompliance actor has hvac_action but no hvac_target; \
-                             hvac_action will not dispatch"
-                        );
+                        return Err(HaresError::Dwelling(format!(
+                            "DrCompliance actor '{}': hvac_action set without \
+                             hvac_target; the pair must be fully configured",
+                            config.name
+                        )));
                     }
                 }
                 Ok(Box::new(actor))

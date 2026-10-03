@@ -86,21 +86,6 @@ impl BiquadraticCurve {
                 "biquadratic output clamped to output limits"
             );
         }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if let Some(min) = self.output_min {
-                debug_assert!(
-                    clamped >= min,
-                    "biquadratic output {clamped} below output_min {min}"
-                );
-            }
-            if let Some(max) = self.output_max {
-                debug_assert!(
-                    clamped <= max,
-                    "biquadratic output {clamped} above output_max {max}"
-                );
-            }
-        }
         clamped
     }
 }

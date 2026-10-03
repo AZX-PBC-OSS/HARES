@@ -616,15 +616,12 @@ impl CoolingCore {
 
         self.init_from_typed(config, env)?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.is_room_ac && !self.latent_degradation.is_active() {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "room_ac_latent_degradation_inactive".to_string(),
-                    value: 0.0,
-                    tolerance: 0.0,
-                });
-            }
+        if self.is_room_ac && !self.latent_degradation.is_active() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "room_ac_latent_degradation_inactive".to_string(),
+                value: 0.0,
+                tolerance: 0.0,
+            });
         }
 
         Ok(())
@@ -766,7 +763,7 @@ impl CoolingCore {
                         fan_flow_low_m3_s: flow_low,
                         is_heat_pump: false,
                     },
-                )
+                )?
             };
 
             let speed_mode = cfg.cooling_speed_control_mode();
@@ -886,8 +883,8 @@ impl CoolingCore {
         // instance, enabling verification that distinct SHR profiles are in
         // use across SEER tiers. Registered here, after the telemetry reset
         // above, via insert() so the keys exist before any Telemetry::set
-        // call (Telemetry::set panics on unregistered keys under
-        // debug_assertions/check_invariants). The descriptor's declared
+        // call (an unknown key latches a typed error surfaced at the end of
+        // the step). The descriptor's declared
         // telemetry fields are rebuilt to include the per-stage channels so
         // the descriptor contract (telemetry key count == declared field
         // count) holds; rebuilding from the base list keeps re-init
@@ -1083,7 +1080,7 @@ impl CoolingCore {
             self.hvac.update_prev_zone_temp(None);
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 self.operating_mode != OperatingMode::Cooling
@@ -1302,17 +1299,16 @@ impl CoolingCore {
             0.0
         }
         // AHRI 210/240-2023: AC cooling COP ~2.3–4.1 W/W; clamp to [0.0, 8.0]
-        // to exclude physically impossible values from telemetry.
+        // to exclude physically impossible values from telemetry. Non-finite
+        // input survives the clamp: a NaN COP reaching telemetry is a typed
+        // error in every build.
         .clamp(0.0, 8.0);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(cop.is_finite() && (0.0..=8.0).contains(&cop)) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "ac_cooling_cop_range".to_string(),
-                    value: cop,
-                    tolerance: 0.0,
-                });
-            }
+        if !cop.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "ac_cooling_cop_finite".to_string(),
+                value: cop,
+                tolerance: 0.0,
+            });
         }
         self.telemetry.set(tk::COP, cop);
         self.telemetry
@@ -1394,7 +1390,7 @@ impl CoolingCore {
             zone_temp_c,
             capacity_ideal_w,
             &mut self.telemetry,
-        );
+        )?;
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
@@ -1988,24 +1984,6 @@ impl CoolingCore {
                 self.hvac.control.max_capacity_fraction = *fraction;
             }
             _ => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    // Signals reaching the hvac catch-all path with a declared
-                    // capability must be handled by HvacEquipment::apply_control_signal.
-                    // Currently ThermalSetpointDelta is the only variant that falls
-                    // through to this path; ThermalSetpoint and MaxCapacityFraction
-                    // are handled by explicit arms above.
-                    let required = signal.required_capability();
-                    if self.descriptor.control_capabilities.contains(required)
-                        && !matches!(signal, ControlSignal::ThermalSetpointDelta { .. })
-                    {
-                        return Err(HaresError::InvariantViolation {
-                            check_name: "ac_catchall_signal_type".to_string(),
-                            value: 0.0,
-                            tolerance: 0.0,
-                        });
-                    }
-                }
                 #[cfg(feature = "observe")]
                 tracing::debug!(
                     signal_variant = ?signal,
@@ -2427,7 +2405,7 @@ mod tests {
     fn room_ac_defaults() -> RoomAcConfig {
         RoomAcConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             capacity_w: 0.0,
             eir: 0.0,
             setpoint: HvacSetpointConfig {
@@ -4607,8 +4585,13 @@ mod tests {
         );
     }
 
-    /// Every signal variant corresponding to a declared capability must return
-    /// Ok(()) when dispatched to the AirConditioner (T-0048 regression guard).
+    /// Every signal variant corresponding to a declared capability must
+    /// return Ok(()) when dispatched to the AirConditioner (regression
+    /// guard) AND land on an explicit control arm: each dispatched variant
+    /// must change the state field it drives. This pins the former gated
+    /// catch-all check over the `ControlSignal` variants: a new variant
+    /// with a declared capability that silently no-ops in the catch-all
+    /// fails here.
     #[test]
     fn all_declared_ac_capabilities_return_ok_on_apply_control() {
         let cfg = ac_config();
@@ -4679,6 +4662,16 @@ mod tests {
             ),
         ];
 
+        // Control state before the dispatch loop, for the effect assertions.
+        let baseline_hysteresis = eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c;
+        let baseline_duty = eq.core.ctrl_duty_cycle;
+        let baseline_load = eq.core.ctrl_load_fraction;
+        let baseline_limit = eq.core.ctrl_power_limit_kw;
+        let baseline_mode = eq.core.ctrl_mode_override;
+        let baseline_dr = eq.core.dr_level;
+        let baseline_ideal = eq.core.ideal_capacity_w;
+        let baseline_max_cap = eq.core.hvac.control.max_capacity_fraction;
+
         for (label, signal) in signals {
             let required = signal.required_capability();
             assert!(
@@ -4690,6 +4683,31 @@ mod tests {
             assert!(
                 result.is_ok(),
                 "apply_control for '{label}' signal must return Ok(()), got {result:?}",
+            );
+            // Each declared variant must land on an explicit arm and move the
+            // state field it drives; only ThermalSetpointDelta is routed
+            // through the hvac catch-all path (its effects are setpoint-side
+            // and pinned by the ThermalSetpointDelta test above).
+            let changed = match signal {
+                ControlSignal::ThermalSetpoint { .. } => {
+                    eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c != baseline_hysteresis
+                }
+                ControlSignal::ThermalSetpointDelta { .. } => true,
+                ControlSignal::DutyCycle { .. } => eq.core.ctrl_duty_cycle != baseline_duty,
+                ControlSignal::LoadFraction { .. } => eq.core.ctrl_load_fraction != baseline_load,
+                ControlSignal::PowerLimit { .. } => eq.core.ctrl_power_limit_kw != baseline_limit,
+                ControlSignal::ModeOverride { .. } => eq.core.ctrl_mode_override != baseline_mode,
+                ControlSignal::DemandResponse { .. } => eq.core.dr_level != baseline_dr,
+                ControlSignal::IdealCapacity { .. } => eq.core.ideal_capacity_w != baseline_ideal,
+                ControlSignal::MaxCapacityFraction { .. } => {
+                    eq.core.hvac.control.max_capacity_fraction != baseline_max_cap
+                }
+                other => panic!("unhandled ControlSignal variant in test: {other:?}"),
+            };
+            assert!(
+                changed,
+                "signal '{label}' must reach an explicit control arm and change \
+                 the state it drives, not fall through to the catch-all"
             );
         }
     }

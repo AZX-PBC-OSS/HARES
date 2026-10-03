@@ -154,44 +154,6 @@ impl TariffEvaluator {
             .map(|ss| (1..=12u32).filter(|&m| ss.is_shoulder(m as u8)).collect())
             .unwrap_or_default();
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(split) = seasonal_split {
-            if split.has_seasonal() {
-                for m in 1..=12u8 {
-                    let split_summer = split.is_summer(m);
-                    let default_summer = (6..=9).contains(&m);
-                    if split_summer != default_summer {
-                        tracing::debug!(
-                            month = m,
-                            split_summer,
-                            default_summer,
-                            summer_start = split.summer_start_month,
-                            summer_end = split.summer_end_month,
-                            "SeasonalSplit reclassifies month relative to June–September default"
-                        );
-                    }
-                }
-            }
-            if split.has_shoulder() {
-                for m in 1..=12u8 {
-                    if split.is_summer(m) && split.is_shoulder(m) {
-                        debug_assert!(
-                            false,
-                            "SeasonalSplit shoulder range overlaps with summer range at month {m}"
-                        );
-                        tracing::error!(
-                            month = m,
-                            summer_start = split.summer_start_month,
-                            summer_end = split.summer_end_month,
-                            shoulder_start = split.shoulder_start,
-                            shoulder_end = split.shoulder_end,
-                            "SeasonalSplit shoulder range overlaps with summer range; shoulder takes precedence"
-                        );
-                    }
-                }
-            }
-        }
-
         for i in 0..num_steps {
             let ts = simulation_start + Duration::seconds(i as i64 * interval_seconds as i64);
             let civil = ts.with_timezone(&timezone);
@@ -491,15 +453,10 @@ impl TariffEvaluator {
         let export_price = self.current_export_price();
 
         // Resolve effective import price: CPP event override.
+        // The event schedule's length is validated to exactly 8760 entries by
+        // `CppConfig::validate` at construction, so an out-of-range hour
+        // cannot exist and no per-step scan is needed here.
         let ci = self.clamped_index();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if let Some(ref cpp) = self.tariff.cpp_config {
-                for (i, &val) in cpp.event_schedule.iter().enumerate() {
-                    debug_assert!(val == 0 || i < 8760, "cpp event_schedule index {i} >= 8760");
-                }
-            }
-        }
         let _cpp_active = if let Some(ref cpp) = self.tariff.cpp_config {
             let hoy = self.hour_of_year_array[ci];
             let is_event = cpp.event_schedule.get(hoy).copied().unwrap_or(0) != 0;
@@ -572,7 +529,11 @@ impl TariffEvaluator {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build wiring tripwires only: `Tariff::validate` enforces
+        // schedule lengths and value finiteness at construction, so these
+        // cannot fire on a constructed tariff; release builds compile the
+        // block out.
+        #[cfg(debug_assertions)]
         {
             if let Some(ref cpp) = self.tariff.cpp_config {
                 debug_assert!(

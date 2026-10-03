@@ -123,7 +123,7 @@ impl HvacEquipment {
                     }
                     desired_index
                 };
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(debug_assertions)]
                 {
                     if speed_index != old_speed
                         && self.config.min_time_per_speed_s > 0.0
@@ -352,17 +352,8 @@ impl HvacEquipment {
         compressor_on: bool,
     ) -> f64 {
         if !self.config.equipment_type.is_heat_pump() {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if self.runtime.startup.c_d > 0.0 {
-                    tracing::warn!(
-                        equipment_type = ?self.config.equipment_type,
-                        c_d = self.runtime.startup.c_d,
-                        "startup cap degradation: non-HP equipment with non-zero Cd; \
-                         ramp bypassed (multiplier = 1.0). OCHRE HVAC.py:977 gate."
-                    );
-                }
-            }
+            // Behaviour by design: a non-heat-pump with a configured startup
+            // ramp simply skips the multiplier, per step; no warning.
             return steady_capacity_w;
         }
         let on_now = compressor_on;

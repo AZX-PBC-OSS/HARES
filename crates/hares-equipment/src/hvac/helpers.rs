@@ -58,8 +58,11 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
 ///
 /// When `zone_id` is missing from the equipment's typed config, HPXML parsing
 /// did not inject the conditioned-zone identifier. Logging the fallback makes
-/// this gap visible during development and integration testing.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// this gap visible during development and integration testing. The fallback
+/// stays: HPXML locations that map to no modeled zone ("other heated
+/// space", "other housing unit") legitimately leave the equipment zone
+/// unresolved, and the equipment runs on ZoneId(1).
+#[cfg(debug_assertions)]
 pub fn zone_id_from_config_or_default(
     config: &EquipmentConfig,
     equipment_name: &str,
@@ -78,7 +81,7 @@ pub fn zone_id_from_config_or_default(
     }
 }
 
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+#[cfg(not(debug_assertions))]
 pub fn zone_id_from_config_or_default(
     config: &EquipmentConfig,
     _equipment_name: &str,
@@ -385,18 +388,18 @@ pub struct DuctDseContext {
     pub is_heat_pump: bool,
 }
 
-pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
+pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> crate::Result<f64> {
     // Direct override takes priority.
     if let Some(dse) = first_f64(config, &["duct_dse", "duct_distribution_efficiency"]) {
-        return dse.clamp(0.0, 1.0);
+        return Ok(dse.clamp(0.0, 1.0));
     }
 
     // Check for raw duct params from ASHRAE 152 passthrough.
     let Some(zone_type_str) = config.get_str("duct_zone_type") else {
-        return 1.0;
+        return Ok(1.0);
     };
     let Some(zone_type) = parse_ashrae152_zone_type(zone_type_str) else {
-        return 1.0;
+        return Ok(1.0);
     };
 
     let lat = config.get_f64("duct_latitude_deg").unwrap_or(40.0);
@@ -417,7 +420,7 @@ pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
 
     // Need positive capacity and fan flow for meaningful DSE calculation.
     if ctx.capacity_w <= 0.0 || ctx.fan_flow_m3_s <= 0.0 {
-        return 1.0;
+        return Ok(1.0);
     }
 
     let (supply_class, return_class) = zone_type.default_leakage_class(ctx.is_heating);
@@ -524,21 +527,23 @@ pub fn compute_and_write_ebm_telemetry(
     zone_temp_c: f64,
     capacity_ideal_w: f64,
     telemetry: &mut Telemetry,
-) {
+) -> crate::Result<()> {
     use hares_types::telemetry_keys as tk;
 
     let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
     if cap_kwh <= 0.0 {
-        return;
+        return Ok(());
     }
     let rated_eir = hvac.eir_at_stage(0);
-    let ebm = hvac.make_equivalent_battery_model(zone_temp_c, cap_kwh, rated_eir, capacity_ideal_w);
+    let ebm =
+        hvac.make_equivalent_battery_model(zone_temp_c, cap_kwh, rated_eir, capacity_ideal_w)?;
     telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
     telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
     telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
     telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_kwh);
     telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_kwh.unwrap_or(0.0));
     telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_kw.unwrap_or(0.0));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -848,8 +853,8 @@ mod tests {
             )
         };
 
-        let attic_dse = resolve_duct_dse(&make_config("attic_unvented"), &ctx);
-        let basement_dse = resolve_duct_dse(&make_config("unins_basement"), &ctx);
+        let attic_dse = resolve_duct_dse(&make_config("attic_unvented"), &ctx).unwrap();
+        let basement_dse = resolve_duct_dse(&make_config("unins_basement"), &ctx).unwrap();
 
         assert!(
             attic_dse < basement_dse,
@@ -892,7 +897,7 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 18.0, 3000.0, &mut telemetry);
+        compute_and_write_ebm_telemetry(&hvac, 18.0, 3000.0, &mut telemetry).unwrap();
 
         let efficiency = telemetry.get(tk::EBM_EFFICIENCY).unwrap();
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
@@ -921,7 +926,7 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 20.0, 5000.0, &mut telemetry);
+        compute_and_write_ebm_telemetry(&hvac, 20.0, 5000.0, &mut telemetry).unwrap();
 
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
         assert_eq!(

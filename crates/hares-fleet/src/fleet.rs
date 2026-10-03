@@ -334,7 +334,7 @@ impl Fleet {
         // but this one covers the gap before worker guards are constructed and
         // serves as defense-in-depth in case a worker path skips the guard.
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -373,14 +373,11 @@ impl Fleet {
                             Ok(result) => result,
                             Err(_) => {
                                 record_double_panic_prevented();
-                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                                {
-                                    tracing::error!(
-                                        bldg_id = entry.config.bldg_id,
-                                        "CRITICAL: error handling panicked \
-                                         (double-panic prevented) in fleet::simulate_parallel"
-                                    );
-                                }
+                                tracing::error!(
+                                    bldg_id = entry.config.bldg_id,
+                                    "CRITICAL: error handling panicked \
+                                     (double-panic prevented) in fleet::simulate_parallel"
+                                );
                                 Err(SimError::Panic {
                                     bldg_id: entry.config.bldg_id,
                                     message: "panic handling failed (double-panic prevented)"
@@ -459,7 +456,7 @@ impl SteppableFleet {
         let mut build_errors = Vec::new();
 
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -487,14 +484,11 @@ impl SteppableFleet {
                         Ok(err) => build_errors.push(err),
                         Err(_) => {
                             record_double_panic_prevented();
-                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                            {
-                                tracing::error!(
-                                    bldg_id,
-                                    "CRITICAL: error handling panicked \
-                                     (double-panic prevented) in fleet::SteppableFleet::from_configs"
-                                );
-                            }
+                            tracing::error!(
+                                bldg_id,
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in fleet::SteppableFleet::from_configs"
+                            );
                             build_errors.push(DwellingBuildError {
                                 bldg_id,
                                 message: "panic handling failed (double-panic prevented)".into(),
@@ -583,7 +577,7 @@ impl SteppableFleet {
         // that become failed during this step (via a panic caught in
         // step_dwellings_parallel) are not asserted — they were not failed when
         // step() was called, and a Panic result is valid for them.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         let was_already_failed: Vec<bool> = self.dwellings.iter().map(|d| d.failed).collect();
 
         let results = if let Some(pool) = &self.step_pool {
@@ -592,7 +586,7 @@ impl SteppableFleet {
             step_dwellings_parallel(&mut self.dwellings)
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             for (i, (dwelling, result)) in self.dwellings.iter().zip(results.iter()).enumerate() {
                 if was_already_failed[i] {
@@ -730,7 +724,7 @@ fn step_dwellings_parallel(
     dwellings: &mut [Dwelling],
 ) -> Vec<std::result::Result<StepResult, SimError>> {
     let _guard = PanicHookGuard::new();
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         assert!(
             panic_hook::is_installed(),
@@ -765,14 +759,11 @@ fn step_dwellings_parallel(
                         Ok(result) => result,
                         Err(_) => {
                             record_double_panic_prevented();
-                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                            {
-                                tracing::error!(
-                                    bldg_id = dwelling.bldg_id,
-                                    "CRITICAL: error handling panicked \
-                                     (double-panic prevented) in fleet::step_dwellings_parallel"
-                                );
-                            }
+                            tracing::error!(
+                                bldg_id = dwelling.bldg_id,
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in fleet::step_dwellings_parallel"
+                            );
                             Err(SimError::Panic {
                                 bldg_id: dwelling.bldg_id,
                                 message: "panic handling failed (double-panic prevented)".into(),

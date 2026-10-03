@@ -20,7 +20,8 @@ use chrono::{FixedOffset, TimeZone};
 use hares_equipment::battery::Battery;
 use hares_equipment::pv::surface_id_for_orientation;
 use hares_equipment::{
-    BatteryConfig, Equipment, EquipmentConfig, EquipmentRegistry, GeneratorConfig, PvConfig,
+    BatteryConfig, Equipment, EquipmentConfig, EquipmentRegistry, GeneratorConfig,
+    GeneratorEfficiencyCurvePoint, PvConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
@@ -698,7 +699,28 @@ fn generator_fuel_efficiency_at_half_load() {
             eta_jacket_water: None,
             eta_lube_oil: None,
             eta_exhaust: None,
-            efficiency_curve_points: None,
+            efficiency_curve_points: Some(vec![
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.0,
+                    efficiency_ratio: 0.0,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.1,
+                    efficiency_ratio: 0.47,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.333,
+                    efficiency_ratio: 0.78,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.666,
+                    efficiency_ratio: 0.94,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 1.0,
+                    efficiency_ratio: 1.0,
+                },
+            ]),
             efficiency_type: None,
             delta_kw_per_s: Some(100.0),
             capacity_min_kw: None,
@@ -802,7 +824,28 @@ fn generator_ramp_rate_is_kw_per_second() {
             eta_jacket_water: None,
             eta_lube_oil: None,
             eta_exhaust: None,
-            efficiency_curve_points: None,
+            efficiency_curve_points: Some(vec![
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.0,
+                    efficiency_ratio: 0.0,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.1,
+                    efficiency_ratio: 0.47,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.333,
+                    efficiency_ratio: 0.78,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.666,
+                    efficiency_ratio: 0.94,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 1.0,
+                    efficiency_ratio: 1.0,
+                },
+            ]),
             efficiency_type: None,
             delta_kw_per_s: Some(delta_kw_per_s),
             capacity_min_kw: None,
@@ -888,7 +931,28 @@ fn generator_capacity_min_enforced() {
             eta_jacket_water: None,
             eta_lube_oil: None,
             eta_exhaust: None,
-            efficiency_curve_points: None,
+            efficiency_curve_points: Some(vec![
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.0,
+                    efficiency_ratio: 0.0,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.1,
+                    efficiency_ratio: 0.47,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.333,
+                    efficiency_ratio: 0.78,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.666,
+                    efficiency_ratio: 0.94,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 1.0,
+                    efficiency_ratio: 1.0,
+                },
+            ]),
             efficiency_type: None,
             delta_kw_per_s: Some(100.0),
             capacity_min_kw: Some(2.0),

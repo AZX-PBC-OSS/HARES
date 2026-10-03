@@ -6,9 +6,9 @@
 //! (`NegativeDeliveredEnergy`) when deliberately negative HVAC power values are
 //! injected via the test seam.
 //!
-//! Tests are gated on `debug_assertions` because the invariant check is
-//! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
-//! is active.
+//! Tests are gated on `debug_assertions` because the test seam itself is
+//! `cfg(any(test, debug_assertions))`: the invariant check it arms runs
+//! unconditionally in every build profile.
 #![cfg(debug_assertions)]
 
 use std::env;
@@ -85,7 +85,7 @@ fn dwelling_step_hvac_energy_invariant_wired() {
 }
 
 /// Verifies that the HVAC negative-energy invariant wiring inside
-/// `Dwelling::check_invariants` catches deliberately incorrect HVAC power
+/// `Dwelling::check_step_invariants` catches deliberately incorrect HVAC power
 /// values injected via the test seam.
 ///
 /// Steps the dwelling once to confirm the invariant passes for correct models,
@@ -94,7 +94,7 @@ fn dwelling_step_hvac_energy_invariant_wired() {
 /// `Err(HaresError::NegativeDeliveredEnergy { .. })`.
 ///
 /// If the `check_hvac_power_non_negative` or `check_heating_accumulator`
-/// calls were accidentally removed from `check_invariants`, this test would
+/// calls were accidentally removed from `check_step_invariants`, this test would
 /// fail — the seam would have no effect and `step()` would return `Ok`.
 #[test]
 fn hvac_negative_energy_invariant_catches_injected_negative() {

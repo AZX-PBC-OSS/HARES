@@ -283,7 +283,7 @@ pub fn autosize_equipment_capacities(
     ctx: &AutosizeContext,
     building: &Building,
     indoor_zone_id: ZoneId,
-) {
+) -> hares_types::Result<()> {
     // Resolve outdoor design temperatures.
     // Prefer EPW design conditions; fall back to ASHRAE 152 station lookup.
     let (heating_design_c, cooling_design_c) = resolve_design_temperatures(
@@ -334,6 +334,9 @@ pub fn autosize_equipment_capacities(
         if needs_heating {
             let raw_capacity = thermal
                 .autosize_design_day_heating(indoor_zone_id, heating_setpoint_c, heating_design_c)
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("heating autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Oversizing factor: prefer HPXML <HeatingAutosizingFactor>;
@@ -349,7 +352,8 @@ pub fn autosize_equipment_capacities(
             // ACCA Manual S-2017 §4-5: oversized heat pumps cycle excessively
             // during mild weather, degrading COP and increasing auxiliary heat
             // runtime. The HPXML <HeatingAutosizingFactor> override takes
-            // precedence when present.
+            // precedence when present. The default-path clamp below is the
+            // behavior; the former gated re-check of it is deleted.
             if is_heat_pump_equipment(spec) {
                 if !has_factor_override {
                     // Default factor path: cap at 1.25×.
@@ -372,20 +376,6 @@ pub fn autosize_equipment_capacities(
                         "HPXML <HeatingAutosizingFactor> exceeds ACCA Manual S-2017 §4-5 \
                          heat pump heating limit of 1.25×; override is respected but may \
                          cause excessive cycling"
-                    );
-                }
-            }
-
-            // Invariant: heat pump heating factor with default path must not
-            // exceed Manual S §4-5 limit.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if is_heat_pump_equipment(spec) && !has_factor_override {
-                    assert!(
-                        factor <= HEATING_OVERSIZE_FACTOR_HEAT_PUMP + f64::EPSILON,
-                        "invariant: heat pump heating factor {factor} exceeds Manual S §4-5 \
-                         limit of {HEATING_OVERSIZE_FACTOR_HEAT_PUMP} for equipment {}",
-                        spec.name
                     );
                 }
             }
@@ -469,6 +459,9 @@ pub fn autosize_equipment_capacities(
                     ctx.weather_elevation_m,
                     internal_gains_w,
                 )
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("cooling autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Oversizing factor: prefer HPXML <CoolingAutosizingFactor>;
@@ -549,6 +542,9 @@ pub fn autosize_equipment_capacities(
             // capacity applies. Otherwise recompute it.
             let raw_capacity = thermal
                 .autosize_design_day_heating(indoor_zone_id, heating_setpoint_c, heating_design_c)
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("heating autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Backup factor: prefer HPXML <BackupHeatingAutosizingFactor>;
@@ -593,6 +589,8 @@ pub fn autosize_equipment_capacities(
         spec.typed_config =
             rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params);
     }
+
+    Ok(())
 }
 
 // ── Water heater autosizing ────────────────────────────────────────────
@@ -630,7 +628,7 @@ pub fn autosize_water_heater_capacities(
     specs: &mut [EquipmentSpec],
     n_bedrooms: Option<f64>,
     mains_temp_c: f64,
-) {
+) -> hares_types::Result<()> {
     // Validate mains temperature — clamp or use default if unreasonable.
     // Upper bound allows tropical cold-water temperatures up to 50 °C.
     let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 50.0 {
@@ -676,17 +674,14 @@ pub fn autosize_water_heater_capacities(
             0.0
         });
 
-        // Invariant: check bedroom count in debug/check_invariants builds.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if n_bedrooms <= 0.0 {
-                tracing::warn!(
-                    equipment = %spec.name,
-                    n_bedrooms,
-                    "water heater autosizing: bedroom count is zero or negative; \
-                     sizing based on defaults"
-                );
-            }
+        // A negative bedroom count is invalid input (a studio's zero is
+        // valid and sizes from defaults; the unavailable case already warns
+        // above).
+        if n_bedrooms < 0.0 {
+            return Err(hares_types::HaresError::Dwelling(format!(
+                "water heater autosizing for '{}': n_bedrooms must be >= 0, got {n_bedrooms}",
+                spec.name
+            )));
         }
 
         // Size tank volume from bedrooms (or default).
@@ -787,27 +782,29 @@ pub fn autosize_water_heater_capacities(
                 );
             }
 
-            // Invariant: computed values must be positive and non-NaN.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                assert!(
-                    fhr_gph > 0.0 && fhr_gph.is_finite(),
+            // Invariant: computed values must be positive and finite. The
+            // autosized values are construction inputs to the water-heater
+            // model; a non-finite or non-positive value is a typed error.
+            if !fhr_gph.is_finite() || fhr_gph <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: FHR must be positive and finite, \
                      got {fhr_gph} for {}",
                     spec.name
-                );
-                assert!(
-                    tank_volume_gal > 0.0 && tank_volume_gal.is_finite(),
+                )));
+            }
+            if !tank_volume_gal.is_finite() || tank_volume_gal <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: tank volume must be positive \
                      and finite, got {tank_volume_gal} for {}",
                     spec.name
-                );
-                assert!(
-                    sized_capacity_w > 0.0 && sized_capacity_w.is_finite(),
+                )));
+            }
+            if !sized_capacity_w.is_finite() || sized_capacity_w <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: capacity must be positive and \
                      finite, got {sized_capacity_w} for {}",
                     spec.name
-                );
+                )));
             }
         } else {
             // Autosizing computed zero or negative capacity — fall back to a
@@ -847,6 +844,7 @@ pub fn autosize_water_heater_capacities(
         // downstream consumers see the autosized capacity and volume.
         spec.typed_config = rebuild_wh_typed_config(&spec.name, &spec.parameters);
     }
+    Ok(())
 }
 
 /// Required First-Hour Rating [GPH] from bedroom count.
@@ -1132,6 +1130,7 @@ mod tests {
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -1207,7 +1206,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1264,7 +1263,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1326,7 +1325,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1385,7 +1384,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1447,7 +1446,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1506,7 +1505,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1528,6 +1527,7 @@ mod tests {
                 0.0,
                 internal_gains_w,
             )
+            .unwrap()
             .abs();
         // internal_gains_w = 132.0 (occupancy-only, no floor area in
         // minimal_building).  This matches what autosize_equipment_capacities
@@ -1580,7 +1580,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1685,6 +1685,7 @@ mod tests {
                 1609.0,
                 0.0, // zero internal gains for baseline
             )
+            .unwrap()
             .abs();
 
         // Cooling with solar should be meaningfully larger than zero-solar.
@@ -1715,8 +1716,9 @@ mod tests {
         let env = one_zone_env(18.0, -10.0);
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 18.0, 180.0);
 
-        let heating_design_day =
-            thermal.autosize_design_day_heating(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0);
+        let heating_design_day = thermal
+            .autosize_design_day_heating(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .unwrap();
         let dc_gain = thermal
             .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
             .abs();
@@ -1772,7 +1774,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let backup_w = result
@@ -1832,7 +1834,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let backup_w = result
@@ -1896,7 +1898,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         // Cooler specs should NOT receive backup_capacity_w.
@@ -1923,6 +1925,7 @@ mod tests {
             .abs();
         let solar = thermal
             .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap()
             .abs();
 
         assert!(
@@ -2174,8 +2177,14 @@ mod tests {
     /// (the first HVAC spec in the resolved list).
     fn resolve_furnace_spec(xml: &str) -> EquipmentSpec {
         let building = parse_building(xml).expect("HPXML must parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
-            .expect("equipment must resolve");
+        let specs = resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        )
+        .expect("equipment must resolve");
         specs
             .into_iter()
             .find(|s| s.name == "Gas Furnace")
@@ -2222,7 +2231,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -2302,7 +2311,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -2385,7 +2394,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         assert!(
@@ -2416,7 +2425,9 @@ mod tests {
         let env = one_zone_env(target, design_outdoor);
         let thermal = build_1r1c_solver(&env, target);
 
-        let peak = thermal.autosize_design_day_heating(ZONE, target, design_outdoor);
+        let peak = thermal
+            .autosize_design_day_heating(ZONE, target, design_outdoor)
+            .unwrap();
         assert!(
             peak.abs() < 1.0,
             "zero ΔT: peak load {peak} W should be near zero (< 1 W)"
@@ -2435,8 +2446,9 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let peak =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
+        let peak = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
         assert!(peak.is_finite(), "cooling peak load must be finite");
         assert!(peak >= 0.0, "cooling capacity must be non-negative");
         assert!(
@@ -2460,7 +2472,9 @@ mod tests {
         let dc_gain_capacity = thermal
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
-        let design_day_capacity = thermal.autosize_design_day_heating(ZONE, target, design_outdoor);
+        let design_day_capacity = thermal
+            .autosize_design_day_heating(ZONE, target, design_outdoor)
+            .unwrap();
 
         let rel_error = (design_day_capacity - dc_gain_capacity).abs() / dc_gain_capacity;
         assert!(
@@ -2486,8 +2500,9 @@ mod tests {
         let dc_gain_capacity = thermal
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
-        let design_day_capacity =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
+        let design_day_capacity = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
 
         // The design-day method uses a diurnal range of 11.7 °C, so the
         // outdoor temperature cycles between 23.3 and 35.0 °C. The peak
@@ -2559,12 +2574,16 @@ mod tests {
         };
 
         // Heating
-        let h = thermal.autosize_design_day_heating(ZONE, 21.0, -10.0);
+        let h = thermal
+            .autosize_design_day_heating(ZONE, 21.0, -10.0)
+            .unwrap();
         assert!(h.is_finite(), "heating design-day must return finite value");
         assert!(h >= 0.0, "heating capacity must be non-negative");
 
         // Cooling
-        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0, 0.0);
+        let c = thermal
+            .autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
         assert!(c.is_finite(), "cooling design-day must return finite value");
         assert!(c >= 0.0, "cooling capacity must be non-negative");
     }
@@ -2599,6 +2618,7 @@ mod tests {
                 0.0,
                 0.0,
             )
+            .unwrap()
             .abs();
 
         let diurnal = thermal
@@ -2611,6 +2631,7 @@ mod tests {
                 0.0,
                 0.0,
             )
+            .unwrap()
             .abs();
 
         // Both should produce positive cooling capacity.
@@ -2662,6 +2683,7 @@ mod tests {
                 0.0,
                 0.0,
             )
+            .unwrap()
             .abs();
 
         let diurnal = thermal
@@ -2674,6 +2696,7 @@ mod tests {
                 0.0,
                 0.0,
             )
+            .unwrap()
             .abs();
 
         // Both should produce positive cooling capacity.
@@ -2719,6 +2742,7 @@ mod tests {
                 0.0,
                 0.0,
             )
+            .unwrap()
             .abs();
 
         let with_gains_capacity = thermal
@@ -2731,6 +2755,7 @@ mod tests {
                 0.0,
                 500.0, // 500 W internal gains
             )
+            .unwrap()
             .abs();
 
         // Cooling with internal gains should be larger than without by
@@ -2765,6 +2790,7 @@ mod tests {
         // should match the DC-gain baseline.
         let cooling_zero_gains = thermal
             .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap()
             .abs();
 
         assert!(
@@ -2897,10 +2923,12 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let zero_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
-        let with_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 500.0);
+        let zero_gains = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
+        let with_gains = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 500.0)
+            .unwrap();
 
         assert!(
             with_gains > zero_gains + 400.0,
@@ -2943,7 +2971,7 @@ mod tests {
             FuelType::Electric,
             &[("setpoint_c", json!(setpoint_c))],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3018,7 +3046,7 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3052,7 +3080,7 @@ mod tests {
             FuelType::Electric,
             &[],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(0.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(0.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3084,7 +3112,7 @@ mod tests {
         // autosizer should fall back to the default (25 °C) and produce a
         // reasonable capacity.
         let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3117,7 +3145,7 @@ mod tests {
             FuelType::Electric,
             &[],
         )];
-        autosize_water_heater_capacities(&mut specs, None, 10.0);
+        autosize_water_heater_capacities(&mut specs, None, 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3150,7 +3178,7 @@ mod tests {
             FuelType::Electric,
             &[("autosize_water_heater_factor", json!(1.5))],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3187,7 +3215,7 @@ mod tests {
         )];
         // 1 BR → tank = 40 gal, FHR = 36 GPH, usable = 28 gal, deficit = 8 gal
         // capacity = 8 × 4.395 × 41.67 ≈ 1465 W, below 10kW min
-        autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3237,7 +3265,7 @@ mod tests {
         // Heat Pump Water Heater uses `backup_element_power_w` as the
         // capacity field name, not `heating_capacity_w`.
         let mut specs = vec![wh_spec("Heat Pump Water Heater", FuelType::Electric, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         // The autosizer writes `heating_capacity_w` to params (generic key)
@@ -3266,7 +3294,7 @@ mod tests {
         // because the config struct uses a different field name for capacity.
         // This test verifies: tank volume is set, flag is consumed.
         let mut specs = vec![wh_spec("Indirect Tank", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let volume_m3 = result
@@ -3306,7 +3334,7 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let volume_m3 = result

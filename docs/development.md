@@ -178,23 +178,18 @@ is disabled, the gated code is excluded from the compiled binary entirely.
 Enable one or more flags with `-F` (short for `--features`):
 
 ```bash
-cargo build --release -F check_invariants
-cargo build --release -F "check_invariants,observe"
+cargo build --release -F observe
 ```
 
-### `check_invariants`
+### Invariant checks (no flag)
 
 Per-timestep conservation-law checks: energy balance, electrical balance,
-temperature bounds, humidity. These halt the simulation with a descriptive
-error when a check fails.
-
-Automatically enabled in debug builds. Use this flag to enable them in
-release builds — useful for CI or validation runs where you want both
-optimisation and correctness checking.
+temperature bounds, humidity. These run in every build profile, debug and
+release alike, and halt the simulation with a descriptive typed error
+when a check fails.
 
 ```bash
-cargo build --release -F check_invariants
-cargo nextest run --release -F check_invariants
+cargo nextest run --release
 ```
 
 See [Invariants & Observability](invariants-and-observability.md) for the
@@ -251,11 +246,8 @@ cargo build --release -F dst
 
 Maturin passes `-F` flags through to Cargo, but only features defined on
 the `hares-python` crate are available. Currently those are `observe`
-(state snapshots for Gymnasium RL environments), `profiling` (the
-phase and per-actor timings of `Dwelling.profiling_summary()`) and
-`check_invariants` (turns on the boundary rejections and assertion
-gates that debug builds run anyway, so a release extension can enforce
-them too):
+(state snapshots for Gymnasium RL environments) and `profiling` (the
+phase and per-actor timings of `Dwelling.profiling_summary()`):
 
 ```bash
 uv run maturin develop --release -F observe
@@ -461,8 +453,8 @@ physics equations and model descriptions.
 | Lint | `cargo clippy -- -D warnings` |
 | Format code | `cargo fmt` |
 | Build optimised | `cargo build --release` |
-| Release build with validation | `cargo build --release -F check_invariants` |
-| Release build with observer | `cargo build --release -F "check_invariants,observe"` |
+| Release build | `cargo build --release` |
+| Release build with observer | `cargo build --release -F observe` |
 | Profile the simulation loop | `cargo build --release -F profiling` |
 | Build Python bindings (dev) | `uv run maturin develop` |
 | Build Python bindings (optimised) | `uv run maturin develop --release` |

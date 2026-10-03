@@ -518,19 +518,10 @@ impl DrCompliance {
                 max_power_kw: *max_kw,
                 ramp_rate_kw_per_s: None,
             },
-            DrAction::DemandResponse { level, duration_s } => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    debug_assert!(
-                        duration_s.is_none_or(|d| d > 0.0),
-                        "DemandResponse duration_s must be positive or None, got {duration_s:?}"
-                    );
-                }
-                ControlSignal::DemandResponse {
-                    level: *level,
-                    duration_s: *duration_s,
-                }
-            }
+            DrAction::DemandResponse { level, duration_s } => ControlSignal::DemandResponse {
+                level: *level,
+                duration_s: *duration_s,
+            },
             DrAction::None => return,
         };
 
@@ -566,13 +557,6 @@ impl DrCompliance {
                     // Full clearing requires equipment-side changes to
                     // apply_dr_level(DRLevel::Normal).
                     // See Implementation Notes / Known Limitations.
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        tracing::debug!(
-                            target = ?target,
-                            "TurnOff ModeOverride cannot be cleared via actor-side signal; equipment ctrl_mode_override remains sticky"
-                        );
-                    }
                 }
                 DrAction::LoadCurtailment { .. }
                 | DrAction::SetpointAdjust { .. }
@@ -619,7 +603,6 @@ impl Actor for DrCompliance {
             .set("dr_active", if self.is_dr_active() { 1.0 } else { 0.0 });
 
         if self.current_dr_level == DRLevel::Normal {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
                 // All tracked entries must be sticky actions (PowerLimit or
                 // TurnOff). Non-sticky actions create no clearing obligation
@@ -809,7 +792,7 @@ impl Actor for DrCompliance {
             self.signals_rejected_count = rejected;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // Invariant: when any TurnOff action targets HVAC equipment and zone
             // temperature is below the freeze-risk threshold, no TurnOff should be

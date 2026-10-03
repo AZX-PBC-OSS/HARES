@@ -22,7 +22,7 @@ use hares_types::{
     ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
+#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -232,21 +232,21 @@ impl IndirectTank {
         let c = config.require_typed::<IndirectTankConfig>("Indirect Tank")?;
         c.validate()?;
 
-        // Preserve-when-absent: an absent `equipment_id` key keeps the
-        // descriptor's existing (assembly-injected) identity instead of
-        // clobbering it — `None` from the tri-state reader means "not
-        // configured here", not "unassigned".
-        if let Some(id) = equipment_id_from_config(config)? {
-            self.descriptor.id = EquipmentId(id);
-        }
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if c.zone_id.is_none() && c.zone_type.is_some() {
             warn!(
                 water_heater = %config.name,
                 zone_type = ?c.zone_type,
                 "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
             );
+        }
+
+        // Preserve-when-absent: an absent `equipment_id` key keeps the
+        // descriptor's existing (assembly-injected) identity instead of
+        // clobbering it: `None` from the tri-state reader means "not
+        // configured here", not "unassigned".
+        if let Some(id) = equipment_id_from_config(config)? {
+            self.descriptor.id = EquipmentId(id);
         }
 
         let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);

@@ -111,41 +111,6 @@ pub struct ScheduledLoad {
     power_source: ScheduleSource,
 }
 
-/// Warns if a scheduled load template uses `EndUse::OTHER` when a more
-/// specific standard end-use constant exists. This is a construction-time
-/// invariant check gated behind `debug_assertions` or `check_invariants`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_other_end_use_for_known_template(equipment_type: &str) {
-    // Template names that now have dedicated `EndUse` constants per HPXML 4.2.
-    // This is a best-effort guard — a false positive (template renamed) is a
-    // compile-time cue to update the check; a missing entry here means
-    // the invariant is silently not checked for that template.
-    let known = matches!(
-        equipment_type,
-        "Pool Pump"
-            | "Pool Heater"
-            | "Spa Pump"
-            | "Spa Heater"
-            | "Gas Grill"
-            | "Ceiling Fan"
-            | "Refrigerator"
-            | "Freezer"
-            | "MELs"
-            | "TV"
-            | "Well Pump"
-    );
-    if known {
-        tracing::warn!(
-            equipment_type = %equipment_type,
-            "ScheduledLoad template '{equipment_type}' uses EndUse::OTHER but a more \
-             specific standard end-use constant exists (POOL_PUMP, POOL_HEATER, \
-             SPA_PUMP, SPA_HEATER, COOKING, CEILING_FAN, REFRIGERATION, PLUG_LOADS, \
-             or LIGHTING). Update the registry entry to use the correct EndUse \
-             constant so energy can be disaggregated by HPXML-aligned end-use."
-        );
-    }
-}
-
 impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
@@ -166,12 +131,6 @@ impl ScheduledLoad {
             // the ZoneMap for name-based auto-routing (garage, basement, etc.).
             None
         };
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if end_use == EndUse::OTHER {
-                check_other_end_use_for_known_template(equipment_type);
-            }
-        }
 
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
@@ -291,8 +250,19 @@ impl ScheduledLoad {
     fn init_from_config(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
+        // The zone set is fixed at construction: an assigned zone that is not
+        // in the environment is a stale ZoneId from a misconfigured ZoneMap,
+        // and its heat gain would be silently dropped every step.
+        if let Some(zone) = self.descriptor.zone
+            && !env.zones.iter().any(|z| z.id == zone)
+        {
+            return Err(HaresError::Equipment(format!(
+                "ScheduledLoad '{}': assigned zone {zone:?} not found in environment state",
+                self.descriptor.name,
+            )));
+        }
         self.power_source = parse_power_schedule_source(config)?;
         let (gas_source, gas_unit) = parse_optional_gas_schedule_source(config)?;
         self.gas_source = gas_source;
@@ -465,21 +435,6 @@ impl Equipment for ScheduledLoad {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            crate::config::debug_assert_zip_sums(&self.zip, "ScheduledLoad", &self.descriptor.name);
-            // Verify that the assigned zone (if any) exists in the current
-            // environment state. A missing zone indicates a stale ZoneId from
-            // a misconfigured ZoneMap.
-            if let Some(zone) = self.descriptor.zone {
-                assert!(
-                    env.zones.iter().any(|z| z.id == zone),
-                    "ScheduledLoad '{}': assigned zone {zone} not found in environment state",
-                    self.descriptor.name,
-                );
-            }
-        }
-
         // Grid outage (de-energized bus): all outputs are zero. Gas scheduled
         // loads are also zeroed — modern gas appliances (ranges, dryers,
         // fireplaces with electronic ignition) need electricity to operate.
@@ -2026,6 +1981,51 @@ mod tests {
         assert!(registry.get("Lighting").is_some());
         assert!(registry.get("Plug Loads").is_some());
         assert!(registry.get("Other").is_some());
+    }
+
+    /// Over the static registry: every template with a dedicated standard
+    /// end-use constant must not register as `EndUse::OTHER`, so energy
+    /// disaggregates by HPXML-aligned end use. This replaced the gated
+    /// construction warn (`check_other_end_use_for_known_template`): the
+    /// registry is static, so the property is a unit test. The documented
+    /// OTHER users are pinned: the generic "Other" template, "Well Pump"
+    /// (no dedicated constant) and "Gas Fireplace" (no HPXML end use).
+    #[test]
+    fn registry_templates_with_dedicated_end_use_do_not_use_other() {
+        use crate::config::ConfigValue;
+        use hares_types::EndUse as Eu;
+
+        let registry = EquipmentRegistry::new();
+        let config = |name: &str| {
+            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+            raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+            raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+            raw.insert("frac_sensible".to_string(), 1.0.into());
+            EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
+        };
+        let end_use_of = |name: &str| {
+            let factory = registry.get(name).expect(name);
+            let eq = factory(config(name));
+            eq.descriptor().end_use.clone()
+        };
+
+        assert_ne!(end_use_of("Refrigerator"), Eu::OTHER);
+        assert_ne!(end_use_of("Freezer"), Eu::OTHER);
+        assert_ne!(end_use_of("MELs"), Eu::OTHER);
+        assert_ne!(end_use_of("TV"), Eu::OTHER);
+        assert_ne!(end_use_of("Pool Pump"), Eu::OTHER);
+        assert_ne!(end_use_of("Pool Heater"), Eu::OTHER);
+        assert_ne!(end_use_of("Spa Pump"), Eu::OTHER);
+        assert_ne!(end_use_of("Spa Heater"), Eu::OTHER);
+        assert_ne!(end_use_of("Gas Grill"), Eu::OTHER);
+        assert_ne!(end_use_of("Ceiling Fan"), Eu::OTHER);
+        assert_ne!(end_use_of("Gas Lighting"), Eu::OTHER);
+        assert_ne!(end_use_of("Lighting"), Eu::OTHER);
+        assert_ne!(end_use_of("Plug Loads"), Eu::OTHER);
+
+        assert_eq!(end_use_of("Other"), Eu::OTHER);
+        assert_eq!(end_use_of("Well Pump"), Eu::OTHER);
+        assert_eq!(end_use_of("Gas Fireplace"), Eu::OTHER);
     }
 
     #[test]

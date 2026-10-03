@@ -921,13 +921,10 @@ fn normal_operation_produces_no_dispatch_warnings() {
 // Test: IdealThermostat deadband validation prevents FSM oscillation
 //
 // The thermostat pushes setpoints with a gap that violates the equipment's
-// hysteresis deadband. The actor must reject the signal, preventing the
+// hysteresis deadband. The actor must reject the signal and mark itself
+// unhealthy, so the step fails with a typed error, protecting the
 // equipment FSM from receiving invalid setpoints that would cause it to
 // oscillate between Heating and Cooling.
-//
-// In debug/check_invariants builds, decide() panics on the violation
-// (correct — loud failure). In release, the signal is gracefully rejected
-// and recorded in telemetry. Either path proves the FSM is protected.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -990,8 +987,8 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
                 equipment_modes_history.push(mode_map);
             }
             Err(_) => {
-                // Debug/check_invariants panic in decide() — correct behavior.
-                // The simulation stops, preventing any oscillation.
+                // The unhealthy-actor step failure (typed error): correct
+                // behavior. The simulation stops, preventing any oscillation.
                 break;
             }
         }

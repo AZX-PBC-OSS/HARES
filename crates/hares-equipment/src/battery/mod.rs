@@ -19,7 +19,7 @@ use hares_types::{
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, Warning, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -423,6 +423,9 @@ pub struct Battery {
     #[cfg(feature = "observe")]
     #[allow(dead_code)]
     setpoint_violation_count: u64,
+
+    /// Warnings raised since the last drain (init plausibility checks).
+    warnings: Vec<Warning>,
 }
 
 impl Battery {
@@ -523,6 +526,7 @@ impl Battery {
             initialized: false,
             #[cfg(feature = "observe")]
             setpoint_violation_count: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -888,8 +892,8 @@ impl Battery {
 
         // Invariant check: when both explicit topology and cell params were
         // provided, verify the explicit values are reasonably close to what
-        // cell-parameter derivation would have produced.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // cell-parameter derivation would have produced. Always-on warning at
+        // init: an explicit topology may legitimately differ, but silently.
         {
             if has_any_explicit
                 && has_cell_params
@@ -912,16 +916,15 @@ impl Battery {
                 let parallel_diff =
                     (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
                 if series_diff > 1 || parallel_diff > 1 {
-                    tracing::warn!(
-                        self.n_series,
-                        self.n_parallel,
-                        derived_n_series = derived_series,
-                        derived_n_parallel = derived_parallel,
-                        series_diff,
-                        parallel_diff,
-                        "Battery topology invariant: explicit topology differs \
-                                 from cell-parameter derivation by >1 cell"
-                    );
+                    self.warnings.push(Warning::new(
+                        "battery",
+                        format!(
+                            "battery topology invariant: explicit topology \
+                             ({}, {}) differs from cell-parameter derivation \
+                             ({derived_series}, {derived_parallel}) by >1 cell",
+                            self.n_series, self.n_parallel
+                        ),
+                    ));
                 }
 
                 // Capacity consistency invariant: warn when the declared
@@ -933,21 +936,16 @@ impl Battery {
                 let implied_kwh = self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
                 let relative_error = (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
                 if relative_error > 0.10 {
-                    tracing::warn!(
-                        self.n_series,
-                        self.n_parallel,
-                        ah_cell = ah,
-                        v_cell = vc,
-                        capacity_kwh = self.capacity_kwh,
-                        implied_capacity_kwh = implied_kwh,
-                        relative_error,
-                        "Battery topology invariant: declared capacity_kwh \
-                                 ({:.2} kWh) inconsistent with topology-implied \
-                                 capacity ({:.2} kWh, {:.1}% error)",
-                        self.capacity_kwh,
-                        implied_kwh,
-                        relative_error * 100.0,
-                    );
+                    self.warnings.push(Warning::new(
+                        "battery",
+                        format!(
+                            "battery topology invariant: declared capacity_kwh \
+                             ({:.2} kWh) inconsistent with topology-implied \
+                             capacity ({implied_kwh:.2} kWh, {:.1}% error)",
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                        ),
+                    ));
                 }
             }
         }
@@ -1006,16 +1004,16 @@ impl Battery {
         self.import_limit_kw = c.import_limit_w.map(power_w_to_kw);
         self.export_limit_kw = c.export_limit_w.map(power_w_to_kw);
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.heater_power_w > 700.0 {
-                tracing::warn!(
-                    heater_power_w = self.heater_power_w,
-                    "Battery heater power {:.0} W exceeds 700 W plausibility threshold \
-                     for residential batteries; verify catalog entry or config",
-                    self.heater_power_w,
-                );
-            }
+        if self.heater_power_w > 700.0 {
+            self.warnings.push(Warning::new(
+                "battery",
+                format!(
+                    "battery heater power {:.0} W exceeds 700 W plausibility \
+                     threshold for residential batteries; verify catalog entry \
+                     or config",
+                    self.heater_power_w
+                ),
+            ));
         }
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
         self.min_discharge_temp_c = c
@@ -1139,7 +1137,12 @@ impl Equipment for Battery {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.warnings.clear();
         self.init_typed(config, env)
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn island_source_available(&self) -> bool {
@@ -1258,15 +1261,12 @@ impl Equipment for Battery {
         // -- Temperature-dependent capacity derating --
         let capacity_derate = self.capacity_derate_model.evaluate(self.cell_temp_c);
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
-                    value: self.capacity_kwh,
-                    tolerance: 0.0,
-                });
-            }
+        if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
+            return Err(HaresError::InvariantViolation {
+                check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
+                value: self.capacity_kwh,
+                tolerance: 0.0,
+            });
         }
 
         // -- Compute electrical model --
@@ -1477,15 +1477,12 @@ impl Equipment for Battery {
 
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "battery_capacity_nominal_underflow".to_string(),
-                        value: self.capacity_kwh_nominal,
-                        tolerance: 0.0,
-                    });
-                }
+            if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_capacity_nominal_underflow".to_string(),
+                    value: self.capacity_kwh_nominal,
+                    tolerance: 0.0,
+                });
             }
             tracing::debug!(
                 soh,
@@ -1496,7 +1493,8 @@ impl Equipment for Battery {
             self.rainflow.reset_daily();
 
             // Invariant: after reset, per-day accumulators must be zero.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            // Reset-logic debug check, compiled out of release builds.
+            #[cfg(debug_assertions)]
             {
                 const EPS: f64 = 1e-15;
                 if self.degradation.b1_accum.abs() >= EPS {
@@ -1530,20 +1528,6 @@ impl Equipment for Battery {
             }
 
             self.last_daily_update_day = current_day;
-        }
-
-        // Invariant: after the boundary block, last_daily_update_day must
-        // equal current_day (either the block ran and advanced it, or no
-        // boundary was crossed).
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.last_daily_update_day != current_day {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "battery_last_daily_update_day_mismatch".to_string(),
-                    value: self.last_daily_update_day as f64,
-                    tolerance: 0.0,
-                });
-            }
         }
 
         // -- Rainflow tracking (current step belongs to the new day) --
@@ -1904,7 +1888,7 @@ impl Equipment for Battery {
                     );
                 }
 
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(debug_assertions)]
                 {
                     let stored_min = self.soc_target_min.unwrap_or(self.min_soc);
                     let stored_max = self.soc_target_max.unwrap_or(self.max_soc);
@@ -7373,5 +7357,38 @@ mod tests {
             "first timestep of new day must accumulate into b1_accum, got {}",
             bat.degradation.b1_accum
         );
+    }
+
+    /// The init plausibility warning (heater power above 700 W) reaches the
+    /// drain, not just the tracing log.
+    #[test]
+    fn battery_heater_above_700_w_warns_at_init() {
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                heater_power_w: Some(900.0),
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let mut drained: Vec<Warning> = Vec::new();
+        bat.drain_warnings(&mut drained);
+        assert_eq!(drained.len(), 1, "one drained warning, got {drained:?}");
+        assert!(
+            drained[0].message.contains("900") || drained[0].message.contains("700"),
+            "the warning must name the heater power: {}",
+            drained[0].message
+        );
+        // Drain is a take: a second drain is empty.
+        let mut again: Vec<Warning> = Vec::new();
+        bat.drain_warnings(&mut again);
+        assert!(again.is_empty());
     }
 }

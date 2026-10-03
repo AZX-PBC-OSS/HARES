@@ -838,11 +838,17 @@ impl Equipment for IdealHvac {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // Deadband (capacity_w == 0.0) preserves the previous end_use —
             // the invariant only applies when the equipment is actively
             // delivering heating or cooling.
+            //
+            // STOPPED ROW: dispositioned as a plain `debug_assert!`, but it
+            // fires on the conditioned-ideal oracle (a thermostat override
+            // drives cooling while the FSM-mode-driven end_use still reads
+            // hvac_heating); the row stays a diagnostic log pending the
+            // operator's decision on that path.
             if capacity_w != 0.0 {
                 let expected_end_use = if capacity_w > 0.0 {
                     EndUse::HVAC_HEATING
@@ -3372,6 +3378,9 @@ mod tests {
 
         // Solver would have computed -500W via collect_and_solve path.
         eq.ideal_capacity_w = -500.0;
+        // The production path sets the descriptor's end_use from the FSM mode
+        // before step(); a cooling capacity pairs with the cooling end use.
+        eq.descriptor.end_use = hares_types::EndUse::HVAC_COOLING;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

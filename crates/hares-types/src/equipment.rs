@@ -1604,8 +1604,6 @@ pub fn validate_core_contract(
         // --- mode-vs-flows consistency checks ---
         crate::mode_flow_guard::check_mode_flow_consistency(desc, co)
             .map_err(|v| HaresError::Equipment(v.message))?;
-        crate::mode_flow_guard::invariant_recheck_mode_flow_consistency(desc, co);
-        invariant_recheck_range_consistency(desc, co);
 
         return Ok(());
     }
@@ -1649,56 +1647,6 @@ pub fn validate_core_contract(
         details.join("; "),
     )))
 }
-
-/// Invariant re-check for physical-range validation.
-///
-/// Re-runs the same range constraints independently and logs a warning if a
-/// violation is found. Called after the production check has passed — a
-/// warning here means the production path has a logic bug.
-///
-/// Present only in debug or `check_invariants` builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn invariant_recheck_range_consistency(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    if let Some(c) = co.performance.cop
-        && c < 0.0
-    {
-        tracing::warn!(
-            equipment = %desc.name,
-            cop = c,
-            "invariant violation: negative COP ({c}) passed production check"
-        );
-    }
-    if let Some(p) = co.performance.main_power_kw
-        && p < 0.0
-    {
-        tracing::warn!(
-            equipment = %desc.name,
-            main_power_kw = p,
-            "invariant violation: negative main_power_kw ({p}) passed production check"
-        );
-    }
-    if let Some(sc) = co.flows.sensible_cooling_w
-        && sc > 0.0
-    {
-        tracing::warn!(
-            equipment = %desc.name,
-            sensible_cooling_w = sc,
-            "invariant violation: positive sensible_cooling_w ({sc}) passed production check"
-        );
-    }
-    if let Some(lc) = co.flows.latent_cooling_w
-        && lc > 0.0
-    {
-        tracing::warn!(
-            equipment = %desc.name,
-            latent_cooling_w = lc,
-            "invariant violation: positive latent_cooling_w ({lc}) passed production check"
-        );
-    }
-}
-
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-fn invariant_recheck_range_consistency(_desc: &EquipmentDescriptor, _co: &CoreOutput) {}
 
 /// Returns the total number of physical-range rejections in this process.
 #[cfg(feature = "observe")]

@@ -485,14 +485,13 @@ impl Dehumidifier {
         Ok(())
     }
 
-    /// Check PLF/RTF invariant bounds.
+    /// Check PLF/RTF part-load bounds.
     ///
     /// EnergyPlus CalcZoneDehumidifier lines 769–808 require
-    /// `0.7 ≤ PLF ≤ 1.0` and `0 ≤ RTF ≤ 1`.  Gated behind
-    /// `debug_assertions` or `feature = "check_invariants"` so the
-    /// check compiles to nothing in production release builds.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_invariants(&self, plf: f64, rtf: f64) -> crate::Result<()> {
+    /// `0.7 ≤ PLF ≤ 1.0` and `0 ≤ RTF ≤ 1`. Runs in every build profile:
+    /// a part-load factor outside the bounds is a physics violation, not a
+    /// debug-only concern.
+    fn check_part_load_bounds(&self, plf: f64, rtf: f64) -> crate::Result<()> {
         use hares_types::HaresError;
         if plf < self.plf_min || plf > 1.0 {
             return Err(HaresError::InvariantViolation {
@@ -508,12 +507,6 @@ impl Dehumidifier {
                 tolerance: 0.0,
             });
         }
-        Ok(())
-    }
-
-    /// Stub for unchecked builds — the body is eliminated by the compiler.
-    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-    fn check_invariants(&self, _plf: f64, _rtf: f64) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -549,7 +542,7 @@ impl Equipment for Dehumidifier {
         }
         let new_zone = zone_id_from_config(config);
         let explicit = new_zone.is_some();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if !explicit {
             tracing::warn!(
                 equipment = %self.descriptor.name,
@@ -682,7 +675,7 @@ impl Equipment for Dehumidifier {
         } else {
             raw
         };
-        self.check_invariants(snapshot.plf, snapshot.rtf)?;
+        self.check_part_load_bounds(snapshot.plf, snapshot.rtf)?;
         #[cfg(feature = "observe")]
         {
             tracing::debug!(

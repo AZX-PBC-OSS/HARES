@@ -11,22 +11,11 @@ use super::ThermalSolver;
 impl ThermalSolver {
     /// Accumulates per-zone convective sensible heat gains from equipment ports
     /// into the input vector at the corresponding zone sensible input indices.
+    ///
+    /// The wiring check this loop used to run per step (each thermal zone has
+    /// a sensible input index) moved to [`ThermalSolver::new`] as an
+    /// unconditional construction error.
     pub(super) fn apply_port_convective_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            for thermal in &ports.thermal {
-                assert!(
-                    self.wiring
-                        .zone_sensible_input_indices
-                        .contains_key(&thermal.zone),
-                    "PortSlots thermal accumulator for zone {} has no corresponding entry \
-                     in zone_sensible_input_indices; this zone was declared by equipment \
-                     but is unknown to the thermal solver — thermal contributions are silently dropped",
-                    thermal.zone
-                );
-            }
-        }
-
         for thermal in &ports.thermal {
             if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
                 && idx < u.len()

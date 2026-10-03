@@ -321,8 +321,9 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0, 2.0]),
         ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
-    ]));
-    let metrics = calc.finish();
+    ]))
+    .unwrap();
+    let metrics = calc.finish().unwrap();
 
     assert!(
         metrics.gas_energy.is_some(),
@@ -343,8 +344,9 @@ fn total_energy_includes_both_electric_and_gas() {
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0]),
         ("Total Gas Power (therms/hour)", vec![1.0]),
-    ]));
-    let metrics = calc.finish();
+    ]))
+    .unwrap();
+    let metrics = calc.finish().unwrap();
 
     let electric_kwh = metrics.total_energy_kwh.net_energy_kwh;
     let gas = metrics.gas_energy.as_ref().unwrap();
@@ -634,6 +636,13 @@ tdb_bounds = [-20.0, 30.0]
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
+    // The generator efficiency curve is mandatory at load.
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load defaults");
 
@@ -732,6 +741,13 @@ tdb_bounds = [-25.0, 25.0]
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
+    // The generator efficiency curve is mandatory at load.
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load");
 

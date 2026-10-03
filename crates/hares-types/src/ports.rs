@@ -474,17 +474,14 @@ impl FluidAccumulator {
         // When the accumulator was created from a declaration without direction
         // info, the first contribution sets the direction. Subsequent
         // contributions must match (same node = same equipment = same role).
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(existing) = self.direction
+            && existing != direction
         {
-            if let Some(existing) = self.direction
-                && existing != direction
-            {
-                return Err(HaresError::Equipment(format!(
-                    "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
-                         got {direction:?}, expected {existing:?}",
-                    self.loop_id, self.fluid_type, self.node_id
-                )));
-            }
+            return Err(HaresError::Equipment(format!(
+                "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
+                     got {direction:?}, expected {existing:?}",
+                self.loop_id, self.fluid_type, self.node_id
+            )));
         }
         if self.direction.is_none() {
             self.direction = Some(direction);
@@ -578,9 +575,6 @@ pub struct PortSlots {
     pub fluid: Vec<FluidAccumulator>,
     pub custom: Vec<CustomAccumulator>,
     pub humidity: Vec<HumidityAccumulator>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[serde(skip)]
-    pub write_log: std::collections::HashSet<String>,
 }
 
 impl PortSlots {
@@ -644,8 +638,6 @@ impl PortSlots {
             fluid,
             custom,
             humidity,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            write_log: std::collections::HashSet::new(),
         }
     }
 
@@ -665,16 +657,9 @@ impl PortSlots {
         self.fluid.clone_from(&source.fluid);
         self.custom.clone_from(&source.custom);
         self.humidity.clone_from(&source.humidity);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            self.write_log.clone_from(&source.write_log);
-        }
     }
 
     pub fn zero(&mut self) {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        self.warn_unwritten();
-
         for thermal in &mut self.thermal {
             thermal.zero();
         }
@@ -691,46 +676,6 @@ impl PortSlots {
         }
     }
 
-    /// Check whether every declared port slot received at least one write
-    /// during the preceding timestep. Logs a warning for each declared port
-    /// that received zero contributions.
-    ///
-    /// Gated behind `debug_assertions` or the `check_invariants` feature so
-    /// it imposes zero overhead in release builds.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn warn_unwritten(&mut self) {
-        use tracing::warn;
-
-        // Derive expected keys from accumulator vectors built by
-        // from_declarations. Only vector-based accumulators are checked;
-        // Electrical and Fuel are singletons always present regardless of
-        // declarations, so we cannot distinguish "declared" from "default".
-        let mut expected: Vec<String> = Vec::new();
-        for acc in &self.thermal {
-            expected.push(format!("Thermal:{:?}", acc.zone));
-        }
-        for acc in &self.fluid {
-            expected.push(format!("Fluid:{:?}:{:?}", acc.loop_id, acc.fluid_type));
-        }
-        for acc in &self.custom {
-            expected.push(format!("Custom:{:?}", acc.domain_id));
-        }
-        for acc in &self.humidity {
-            expected.push(format!("Humidity:{:?}", acc.zone));
-        }
-
-        for key in &expected {
-            if !self.write_log.contains(key.as_str()) {
-                warn!(
-                    port = key.as_str(),
-                    "declared port received zero contributions during preceding timestep"
-                );
-            }
-        }
-
-        self.write_log.clear();
-    }
-
     pub fn accumulate(&mut self, contribution: &PortContribution) -> Result<(), HaresError> {
         match contribution {
             PortContribution::Thermal {
@@ -742,10 +687,6 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*sensible_gain_w, *radiant_gain_w, *latent_gain_w, *category);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Thermal:{zone:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared thermal zone: {zone:?}"
@@ -758,15 +699,15 @@ impl PortSlots {
             } => {
                 // Defensive sign-convention validation: electrical power values
                 // must be finite. Non-finite (NaN, ±∞) values indicate an
-                // equipment bug upstream of the port boundary.
-                debug_assert!(
-                    active_power_w.is_finite(),
-                    "PortContribution::Electrical received non-finite active_power_w: {active_power_w}"
-                );
-                debug_assert!(
-                    reactive_power_kvar.is_finite(),
-                    "PortContribution::Electrical received non-finite reactive_power_kvar: {reactive_power_kvar}"
-                );
+                // equipment bug upstream of the port boundary, so the write is
+                // a typed error in every build profile.
+                if !active_power_w.is_finite() || !reactive_power_kvar.is_finite() {
+                    return Err(HaresError::Equipment(format!(
+                        "non-finite electrical contribution: \
+                         active_power_w={active_power_w}, \
+                         reactive_power_kvar={reactive_power_kvar}"
+                    )));
+                }
 
                 self.electrical.reactive_power_kvar += reactive_power_kvar;
                 if *active_power_w >= 0.0 {
@@ -775,49 +716,31 @@ impl PortSlots {
                     self.electrical.generation_power_w += active_power_w;
                 }
 
-                // Defense against unit regression: if a callee re-introduces
-                // kW-scaled values into the W port (e.g. writes 15 W from a
-                // 15 kW piece of equipment) the accumulator will surge to
-                // factor-1000 the true value.
-
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    // Invariant: accumulated load power must be non-negative, and
-                    // generation must be non-positive. A sign violation indicates a
-                    // contributor mis-classified its contribution (e.g. a generator
-                    // writing a positive value to the electrical port).
-                    //
-                    // Absolute magnitude is not clamped — a single unrealistic
-                    // accumulation (e.g. a pathological COP→0 heat-pump test drawing
-                    // GW-scale electric power in one step) would be a false positive.
-                    // The guard exists to catch sign errors, NaN/Inf propagation,
-                    // and the factor-1000 unit regression pattern where a kW value
-                    // silently enters the W port.
-                    //
-                    // `assert!`, not `debug_assert!`: a `debug_assert!` compiles
-                    // out in release builds even when `check_invariants` is
-                    // enabled, which would silently void the feature-gated half
-                    // of the cfg on this block.
-                    assert!(
-                        self.electrical.load_power_w >= 0.0,
+                // Invariant: accumulated load power must be non-negative, and
+                // generation must be non-positive. A sign violation indicates a
+                // contributor mis-classified its contribution (e.g. a generator
+                // writing a positive value to the electrical port). Absolute
+                // magnitude is not clamped: a single unrealistic accumulation
+                // (e.g. a pathological COP→0 heat-pump test drawing GW-scale
+                // electric power in one step) would be a false positive. The
+                // guard exists to catch sign errors and the factor-1000 unit
+                // regression pattern where a kW value silently enters the W port.
+                if self.electrical.load_power_w < 0.0 {
+                    return Err(HaresError::Equipment(format!(
                         "electrical load_power_w must be non-negative, got {}",
                         self.electrical.load_power_w
-                    );
-                    assert!(
-                        self.electrical.generation_power_w <= 0.0,
+                    )));
+                }
+                if self.electrical.generation_power_w > 0.0 {
+                    return Err(HaresError::Equipment(format!(
                         "electrical generation_power_w must be non-positive, got {}",
                         self.electrical.generation_power_w
-                    );
+                    )));
                 }
 
                 #[cfg(feature = "observe")]
                 {
                     self.electrical.electrical_contribution_count += 1;
-                }
-
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    self.write_log.insert("Electrical".to_string());
                 }
             }
             PortContribution::Fuel {
@@ -825,10 +748,6 @@ impl PortSlots {
                 consumption_w,
             } => {
                 self.fuel.add(*fuel_type, *consumption_w)?;
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    self.write_log.insert(format!("Fuel:{fuel_type:?}"));
-                }
             }
             PortContribution::Fluid {
                 loop_id,
@@ -852,11 +771,6 @@ impl PortSlots {
                         *thermal_power_w,
                         *direction,
                     )?;
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log
-                            .insert(format!("Fluid:{loop_id:?}:{fluid_type:?}:{node_id:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?} and node {node_id:?}"
@@ -870,10 +784,6 @@ impl PortSlots {
                     .find(|entry| entry.domain_id == *domain_id)
                 {
                     total.add(*payload);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Custom:{domain_id:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared custom domain: {domain_id:?}"
@@ -886,10 +796,6 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.humidity.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*moisture_mass_flow_kg_s);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Humidity:{zone:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared humidity zone: {zone:?}"
@@ -899,6 +805,29 @@ impl PortSlots {
         }
         Ok(())
     }
+}
+
+/// Collect the distinct `(loop_id, fluid_type)` pairs declared by fluid
+/// ports, in first-declaration order.
+///
+/// This is the fluid loop map's source of truth: every loop a fluid port
+/// declares exists, with the type its declaring ports agree on. Declarations
+/// without a loop id or fluid type are inert and skipped; disagreements
+/// between two ports on one loop are rejected by
+/// [`validate_fluid_type_consistency`].
+pub fn fluid_loop_declarations(decls: &[PortDeclaration]) -> Vec<(LoopId, FluidType)> {
+    let mut loops: Vec<(LoopId, FluidType)> = Vec::new();
+    for decl in decls {
+        if decl.port_type != PortType::Fluid {
+            continue;
+        }
+        if let (Some(loop_id), Some(fluid_type)) = (decl.loop_id, decl.fluid_type)
+            && !loops.contains(&(loop_id, fluid_type))
+        {
+            loops.push((loop_id, fluid_type));
+        }
+    }
+    loops
 }
 
 /// Validate that all `PortDeclaration`s with the same `loop_id` agree on
@@ -1106,8 +1035,6 @@ mod tests {
                 zone: ZoneId(1),
                 moisture_mass_flow_kg_s: 0.001,
             }],
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            write_log: std::collections::HashSet::new(),
         };
 
         slots.zero();
@@ -1133,6 +1060,51 @@ mod tests {
         approx_eq(slots.fluid[0].mean_return_temp_c, 0.0);
         assert_eq!(slots.custom[0].payload, [0.0; 16]);
         approx_eq(slots.humidity[0].moisture_mass_flow_kg_s, 0.0);
+    }
+
+    #[test]
+    fn ports_non_finite_write_is_an_error_in_release() {
+        let mut slots = PortSlots::default();
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: f64::NAN,
+            reactive_power_kvar: 0.0,
+        });
+        assert!(
+            result.is_err(),
+            "a non-finite electrical write must be a typed error in every build profile"
+        );
+        let mut slots = PortSlots::default();
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: 1500.0,
+            reactive_power_kvar: f64::NAN,
+        });
+        assert!(
+            result.is_err(),
+            "a non-finite electrical write must be a typed error in every build profile"
+        );
+    }
+
+    #[test]
+    fn electrical_sign_violation_is_an_error_in_every_profile() {
+        let mut slots = PortSlots::default();
+        slots
+            .accumulate(&PortContribution::Electrical {
+                active_power_w: -500.0,
+                reactive_power_kvar: 0.0,
+            })
+            .expect("a negative write seeds the generation side");
+        // A positive write onto the generation side is impossible via the sign
+        // split; force the accumulator past the bound the way a mis-classified
+        // contribution would and confirm the check fires.
+        slots.electrical.generation_power_w = 10.0;
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: 1.0,
+            reactive_power_kvar: 0.0,
+        });
+        assert!(
+            result.is_err(),
+            "a sign-violating accumulation must be a typed error in every build profile"
+        );
     }
 
     #[test]
@@ -1503,25 +1475,29 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "non-finite active_power_w")]
-    fn non_finite_active_power_triggers_debug_assert() {
+    fn non_finite_active_power_is_a_typed_error() {
         let mut slots = PortSlots::default();
-        let _ = slots.accumulate(&PortContribution::Electrical {
+        let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: f64::NAN,
             reactive_power_kvar: 0.0,
         });
+        assert!(
+            result.is_err(),
+            "a non-finite active_power_w must be a typed error in every build profile"
+        );
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "non-finite reactive_power_kvar")]
-    fn non_finite_reactive_power_triggers_debug_assert() {
+    fn non_finite_reactive_power_is_a_typed_error() {
         let mut slots = PortSlots::default();
-        let _ = slots.accumulate(&PortContribution::Electrical {
+        let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: 0.0,
             reactive_power_kvar: f64::INFINITY,
         });
+        assert!(
+            result.is_err(),
+            "a non-finite reactive_power_kvar must be a typed error in every build profile"
+        );
     }
 
     #[test]

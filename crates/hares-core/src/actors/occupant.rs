@@ -238,7 +238,7 @@ impl Occupant {
     fn advance_step(&mut self) {
         self.previous_presence = self.current_presence();
         self.current_step = self.current_step.saturating_add(1);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_targets = self.lighting.is_some()
                 || self.appliance.is_some()

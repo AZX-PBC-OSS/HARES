@@ -180,6 +180,7 @@ fn io_injection_to_scheduled_load_step_column_source() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -225,6 +226,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         Some(defaults_dir.path()),
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -282,6 +284,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -327,6 +330,7 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -369,6 +373,7 @@ fn missing_column_index_errors_at_init_not_step() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -419,8 +424,14 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
-        .expect("resolve_equipment should succeed");
+    let mut specs = resolve_equipment(
+        &building,
+        &DefaultsStore::empty(),
+        &json!({}),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
         "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",
@@ -444,6 +455,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         None,
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -558,6 +570,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         Some(&defaults_dir),
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -659,6 +672,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
         Some(dir.path()),
         &DefaultsStore::empty(),
         None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 

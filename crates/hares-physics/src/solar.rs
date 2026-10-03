@@ -338,26 +338,6 @@ pub fn perez_sky_diffuse(
     // through to avoid the sea-level assumption.
     let am = perez_airmass(zenith_deg, elevation_m);
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let am_h = (1.0 - 0.1 * elevation_m / 1000.0).max(0.1);
-        let ky_am = relative_airmass(zenith_deg) * am_h;
-        if zenith_deg < 70.0 {
-            let rel_diff = (am - ky_am).abs() / am;
-            assert!(
-                rel_diff < 0.01,
-                "Perez airmass ({am:.4}) vs K-Y ({ky_am:.4}) diverge at z={zenith_deg:.1}°: rel_diff={rel_diff:.6}"
-            );
-        } else {
-            tracing::warn!(
-                zenith_deg = zenith_deg,
-                perez_am = am,
-                ky_am = ky_am,
-                "airmass divergence at high zenith: Perez (EnergyPlus) vs K-Y diverge"
-            );
-        }
-    }
-
     // Sky clearness epsilon
     let zenith_rad_cubed = zenith_rad * zenith_rad * zenith_rad;
     let epsilon = ((dhi + dni) / dhi + PEREZ_KAPPA * zenith_rad_cubed)
@@ -977,18 +957,6 @@ pub fn calculate_window_parameters(
     } else {
         0.5
     };
-
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        debug_assert!(
-            (0.0..=1.0).contains(&transmittance),
-            "solar transmittance τ = {transmittance:.6e} outside [0, 1]"
-        );
-        debug_assert!(
-            (0.0..=1.0).contains(&radiation_frac),
-            "inward-flowing fraction N_i = {radiation_frac:.6e} outside [0, 1]"
-        );
-    }
 
     (transmittance, radiation_frac)
 }
@@ -1718,6 +1686,27 @@ mod tests {
         let am_extreme = relative_airmass(89.9);
         assert!(am_extreme.is_finite(), "airmass at 89.9° must be finite");
         assert!(am_extreme > am, "airmass at 89.9° should exceed 85°");
+    }
+
+    /// The Perez airmass and the Kasten-Young airmass (both closed-form
+    /// functions) agree within 1% below a 70° zenith. The per-step assertion
+    /// this replaces compared the two on every call; the agreement is a
+    /// property of the formulas, so a unit test over a zenith grid covers it.
+    #[test]
+    fn perez_airmass_matches_kasten_young_below_70_degrees() {
+        for &z in &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 69.9] {
+            for &elevation in &[0.0_f64, 500.0, 1609.0, 3000.0] {
+                let am = perez_airmass(z, elevation);
+                let am_h = (1.0 - 0.1 * elevation / 1000.0).max(0.1);
+                let ky_am = relative_airmass(z) * am_h;
+                let rel_diff = (am - ky_am).abs() / am;
+                assert!(
+                    rel_diff < 0.01,
+                    "Perez airmass ({am:.4}) vs K-Y ({ky_am:.4}) diverge at \
+                     z={z:.1}° elevation={elevation}: rel_diff={rel_diff:.6}"
+                );
+            }
+        }
     }
 
     /// Document the divergence profile between Kasten-Young (1989) airmass

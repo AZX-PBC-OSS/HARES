@@ -86,11 +86,15 @@ pub trait ChargingPreference: Send + Sync {
     }
 
     /// Estimated hours needed to reach target SOC from current state.
-    /// Returns `f64::INFINITY` for preferences that don't produce a
+    /// Returns `Ok(f64::INFINITY)` for preferences that don't produce a
     /// time-to-charge estimate. The composer aggregates by taking the
     /// minimum across all preferences.
-    fn needed_charge_hours(&self, _ctx: &DecisionContext) -> f64 {
-        f64::INFINITY
+    ///
+    /// # Errors
+    /// A non-negative-finite-or-+inf estimate is enforced in every build;
+    /// an estimate bug (NaN, negative) is a typed error.
+    fn needed_charge_hours(&self, _ctx: &DecisionContext) -> Result<f64, hares_types::HaresError> {
+        Ok(f64::INFINITY)
     }
 }
 
@@ -134,14 +138,14 @@ pub(super) fn needed_charge_hours_to_target(
     target_soc: f64,
     charging_efficiency: f64,
     ctx: &DecisionContext,
-) -> f64 {
+) -> Result<f64, hares_types::HaresError> {
     let soc_gap = (target_soc - ctx.current_soc).max(0.0);
     let energy_kwh = soc_gap * ctx.capacity_kwh;
     if energy_kwh <= 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
     if ctx.max_charge_kw <= 0.0 || charging_efficiency <= 0.0 {
-        return f64::INFINITY;
+        return Ok(f64::INFINITY);
     }
     // Cold-charge capability: the equipment's own published derate when
     // observable (one source of truth with the model that actually moves
@@ -156,7 +160,7 @@ pub(super) fn needed_charge_hours_to_target(
     // strands the driver).
     let effective_efficiency = match ctx.observed_charge_derate {
         Some(derate) if derate > 0.0 => charging_efficiency * derate,
-        Some(0.0) => return f64::INFINITY,
+        Some(0.0) => return Ok(f64::INFINITY),
         // Unobserved equipment (no EV registered): the ambient curve —
         // calibrated for driving energy consumption (AAA 2019, Geotab
         // 2020, DOE/Argonne 2024, Recurrent Auto) but applicable to
@@ -171,16 +175,17 @@ pub(super) fn needed_charge_hours_to_target(
         raw_hours
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // +∞ is a legitimate value (charging impossible right now); NaN
-        // and negatives are estimate bugs.
-        debug_assert!(
-            hours.is_infinite() && hours.is_sign_positive() || (hours.is_finite() && hours >= 0.0),
-            "needed_charge_hours: result must be a non-negative finite number or +∞; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
-            ctx.max_charge_kw,
-        );
+    // +inf is a legitimate value (charging impossible right now); NaN and
+    // negatives are estimate bugs (0/0 with a zero efficiency is reachable),
+    // so the bound is a typed error in every build profile.
+    if hours.is_nan() || hours < 0.0 || hours == f64::NEG_INFINITY {
+        return Err(hares_types::HaresError::InvalidState(format!(
+            "needed_charge_hours: result must be a non-negative finite number or +inf; \
+             got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, \
+             max_charge_kw={}, effective_efficiency={effective_efficiency}",
+            ctx.max_charge_kw
+        )));
     }
 
-    hours
+    Ok(hours)
 }

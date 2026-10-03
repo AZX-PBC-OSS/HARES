@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DomainId, EnvironmentState, PortSlots, ZoneId};
+use crate::{DomainId, EnvironmentState, HaresError, PortSlots, ZoneId};
 
 pub const THERMAL: DomainId = DomainId(0);
 pub const ELECTRICAL: DomainId = DomainId(1);
@@ -39,13 +39,17 @@ impl DomainUpdate {
 
 pub trait DomainSolver: Send + Sync {
     fn domain_id(&self) -> DomainId;
+    /// Advance the solver one step. Physics, conservation, non-finite and
+    /// wiring checks on the run path are unconditional and surface as a
+    /// typed error instead of panicking; a failing step must leave the
+    /// simulation state untouched for the caller to report.
     fn resolve(
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
         dt: Duration,
         out: &mut DomainUpdate,
-    );
+    ) -> Result<(), HaresError>;
 
     /// Optional observation state for the observer framework.
     ///
@@ -63,9 +67,9 @@ pub trait DomainSolver: Send + Sync {
         ports: &PortSlots,
         env: &EnvironmentState,
         dt: Duration,
-    ) -> DomainUpdate {
+    ) -> Result<DomainUpdate, HaresError> {
         let mut out = DomainUpdate::empty(self.domain_id());
-        self.resolve(ports, env, dt, &mut out);
-        out
+        self.resolve(ports, env, dt, &mut out)?;
+        Ok(out)
     }
 }

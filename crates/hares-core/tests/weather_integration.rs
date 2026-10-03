@@ -256,6 +256,7 @@ fn minimal_building() -> hares_io::Building {
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml,
+        parse_warnings: Vec::new(),
     }
 }
 
@@ -691,6 +692,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             mass_multiplier_override: None,
             hvac_deadband_c: None,
             details_xml,
+            parse_warnings: Vec::new(),
         }
     };
 
@@ -904,6 +906,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);
@@ -1010,6 +1013,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);
@@ -1112,6 +1116,7 @@ fn window_missing_azimuth_returns_error() {
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);

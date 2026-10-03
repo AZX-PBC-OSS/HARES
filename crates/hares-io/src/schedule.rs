@@ -49,6 +49,30 @@ pub enum ColumnAggregation {
     Sum,
 }
 
+/// Resolves the schedule's occupancy column, shared by the environment (which
+/// reads the column's values) and the unknown-schedule-column check (which
+/// treats the column the environment reads as read).
+///
+/// Resolution order: the exact keys `occupants` then `occupancy`, then a
+/// case-insensitive match on the first key starting with `occupan` (which
+/// reads the parity and BEopt files' `Occupancy (Persons)`). Returns the
+/// matched key with its column index.
+#[must_use]
+pub fn resolve_occupancy_column(column_index: &HashMap<String, usize>) -> Option<(String, usize)> {
+    if let Some(&idx) = column_index.get("occupants") {
+        return Some(("occupants".to_string(), idx));
+    }
+    if let Some(&idx) = column_index.get("occupancy") {
+        return Some(("occupancy".to_string(), idx));
+    }
+    // Case-insensitive fallback: matches "Occupancy (Persons)" and similar variants.
+    column_index
+        .iter()
+        .filter(|(key, _)| key.to_lowercase().starts_with("occupan"))
+        .min_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()))
+        .map(|(key, &idx)| (key.clone(), idx))
+}
+
 /// Column-major schedule time series.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleTimeSeries {

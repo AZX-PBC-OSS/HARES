@@ -10,23 +10,34 @@ use serde::{Deserialize, Serialize};
 /// non-finite write this map saw. Non-finite writes are rejected uniformly in
 /// every build profile (reject, latch, log, continue) so the behavior never
 /// depends on the build; the value is latched but deliberately never stored in
-/// the map. The dwelling turns a latched telemetry into a run failure
-/// (`HaresError::NanDetected` naming the owner and the key); that dwelling
-/// check is the only enforcement, and it is always on. The latch joins the
-/// derived traits naturally: a latched map differs from a clean one, and that
-/// is correct.
+/// the map.
+///
+/// The third field is the unknown-key latch: the name of the first key a
+/// `set` call saw that was never pre-populated via `insert()`. Like the
+/// non-finite latch it is a wiring fault recorded for the step-end check.
+///
+/// The dwelling turns a latched telemetry into a run failure (a
+/// `HaresError` naming the owner and the key); that dwelling check is the
+/// only enforcement, and it is always on. The latches join the derived
+/// traits naturally: a latched map differs from a clean one, and that is
+/// correct. The unknown-key latch carries no simulation state, so it is not
+/// serialized.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Telemetry(pub HashMap<String, f64>, Option<(String, f64)>);
+pub struct Telemetry(
+    pub HashMap<String, f64>,
+    Option<(String, f64)>,
+    #[serde(skip)] Option<String>,
+);
 
 impl Telemetry {
     #[must_use]
     pub fn new() -> Self {
-        Self(HashMap::new(), None)
+        Self(HashMap::new(), None, None)
     }
 
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(HashMap::with_capacity(capacity), None)
+        Self(HashMap::with_capacity(capacity), None, None)
     }
 
     pub fn insert(&mut self, key: impl Into<String>, value: f64) -> Option<f64> {
@@ -50,10 +61,11 @@ impl Telemetry {
     /// Update an existing key's value without allocating.
     ///
     /// All keys must be pre-populated via `insert()` at init time.
-    /// Missing keys are a logic error: under `debug_assertions` or the
-    /// `check_invariants` feature this panics; in plain release builds it
-    /// emits a `tracing::error!` and the write is silently dropped (no-op).
-    /// That unknown-key contract is unchanged.
+    /// Missing keys are a logic error: the write is dropped, the first
+    /// unknown key is latched (see [`Self::unknown_key_latch`]), and an
+    /// error is logged. The dwelling turns a latched unknown key into a
+    /// run failure naming the equipment and the key; that check is
+    /// unconditional.
     ///
     /// Non-finite values are rejected uniformly in every build profile: the
     /// write is dropped, the map is untouched, the first rejection is
@@ -74,19 +86,15 @@ impl Telemetry {
         if let Some(v) = self.0.get_mut(key) {
             *v = value;
         } else {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                panic!(
-                    "Telemetry::set called with unknown key '{key}'; pre-populate via insert() at init"
-                );
+            // The first bad write is the diagnosis: never overwrite an
+            // existing latch with a later rejection.
+            if self.2.is_none() {
+                self.2 = Some(key.to_string());
             }
-            #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-            {
-                tracing::error!(
-                    key = %key,
-                    "Telemetry::set called with unknown key; pre-populate via insert() at init"
-                );
-            }
+            tracing::error!(
+                key = %key,
+                "Telemetry::set called with unknown key; pre-populate via insert() at init"
+            );
         }
     }
 
@@ -94,7 +102,7 @@ impl Telemetry {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<f64> {
         let value = self.0.get(key).copied();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if let Some(v) = value {
             assert!(
                 v.is_finite(),
@@ -126,9 +134,21 @@ impl Telemetry {
         self.1.as_ref()
     }
 
+    /// The first unknown key a `set` call saw, if any.
+    ///
+    /// The dwelling fails the step naming the equipment and the key. The
+    /// first bad write is the diagnosis: later rejections never overwrite an
+    /// existing latch. `clear()` resets the latch: a cleared map is a clean
+    /// map.
+    #[must_use]
+    pub fn unknown_key_latch(&self) -> Option<&str> {
+        self.2.as_deref()
+    }
+
     pub fn clear(&mut self) {
         self.0.clear();
         self.1 = None;
+        self.2 = None;
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &f64)> {
@@ -147,7 +167,7 @@ impl<'a> IntoIterator for &'a Telemetry {
 
 impl FromIterator<(String, f64)> for Telemetry {
     fn from_iter<T: IntoIterator<Item = (String, f64)>>(iter: T) -> Self {
-        Self(iter.into_iter().collect(), None)
+        Self(iter.into_iter().collect(), None, None)
     }
 }
 
@@ -175,23 +195,32 @@ mod tests {
     }
 
     #[test]
-    fn set_panics_on_unregistered_key() {
+    fn set_unknown_key_is_latched() {
         let mut t = Telemetry::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                t.set("nonexistent", 1.0);
-            }));
-            assert!(
-                result.is_err(),
-                "set on unregistered key must panic in debug/check_invariants"
-            );
-        }
-        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-        {
-            // In plain release, set on unknown key is a silent no-op with error log.
-            t.set("nonexistent", 1.0);
-        }
+        t.set("nonexistent", 1.0);
+        assert_eq!(
+            t.get("nonexistent"),
+            None,
+            "a set on an unregistered key must not add the key"
+        );
+        assert_eq!(
+            t.unknown_key_latch(),
+            Some("nonexistent"),
+            "a set on an unregistered key must latch"
+        );
+    }
+
+    #[test]
+    fn unknown_key_latch_keeps_the_first_rejection() {
+        let mut t = Telemetry::new();
+        t.set("first", 1.0);
+        t.set("second", 1.0);
+        assert_eq!(
+            t.unknown_key_latch(),
+            Some("first"),
+            "the first bad write is the diagnosis; later rejections must not \
+             overwrite the latch"
+        );
     }
 
     #[test]

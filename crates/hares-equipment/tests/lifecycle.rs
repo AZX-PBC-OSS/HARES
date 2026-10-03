@@ -355,7 +355,7 @@ fn lifecycle_battery() {
         "Battery",
         BatteryConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             capacity_kwh: 13.5,
             max_charge_kw: 5.0,
             max_discharge_kw: 5.0,
@@ -429,7 +429,7 @@ fn lifecycle_gas_furnace() {
         "Gas Furnace".to_string(),
         GasFurnaceConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             afue: 0.80,
             capacity_w: 10_000.0,
             number_of_speeds: 1,
@@ -605,7 +605,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             GasFurnaceConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 afue: 0.8,
                 capacity_w: 8_000.0,
                 number_of_speeds: 1,
@@ -620,7 +620,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricFurnaceConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 eir: 1.0,
                 capacity_w: 6_000.0,
                 number_of_speeds: 1,
@@ -633,7 +633,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricBaseboardConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 2_000.0,
                 eir: 1.0,
                 setpoint: HvacSetpointConfig::default(),
@@ -643,7 +643,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             GasBoilerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 afue: 0.82,
                 capacity_w: 7_000.0,
@@ -660,7 +660,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricBoilerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 eir: 1.0,
                 capacity_w: 7_000.0,
@@ -676,7 +676,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             CentralAirConditionerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 8_000.0,
                 eir: 3.412_141_633 / 14.0,
                 shr: Some(0.75),
@@ -712,7 +712,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             RoomAcConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 4_000.0,
                 eir: 3.412_141_633 / 10.0,
                 setpoint: HvacSetpointConfig::default(),
@@ -738,7 +738,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             DehumidifierConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_liters_per_day: Some(20.0),
                 energy_factor: Some(2.0),
                 integrated_energy_factor: None,
@@ -757,7 +757,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 HeatPumpHeaterConfig {
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
-                        zone_id: Some(1),
+                        zone_id: None,
                         heating_capacity_w: Some(8_000.0),
                         heating_eir: Some(3.412_141_633 / 9.0),
                         stage_heating_capacities_w: None,
@@ -810,7 +810,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             HeatPumpCoolerConfig {
                 common: HeatPumpCommonConfig {
                     equipment_id: None,
-                    zone_id: Some(1),
+                    zone_id: None,
                     heating_capacity_w: Some(8_000.0),
                     heating_eir: Some(3.412_141_633 / 9.0),
                     stage_heating_capacities_w: None,
@@ -857,7 +857,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             IdealHvacConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 heating_capacity_w: Some(8_000.0),
                 cooling_capacity_w: Some(8_000.0),
                 ..IdealHvacConfig::default()
@@ -868,7 +868,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             GasWaterHeaterConfig {
                 fan_power_w: None,
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 fuel_type: FuelType::Gas,
                 tank_volume_m3: None,
@@ -904,7 +904,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -937,7 +937,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             TanklessWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 fuel_type: FuelType::Electric,
                 energy_factor: Some(0.95),
@@ -960,7 +960,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             TanklessWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 fuel_type: FuelType::Gas,
                 energy_factor: Some(0.82),
@@ -983,7 +983,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -1028,7 +1028,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             IndirectTankConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 boiler_loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -1056,7 +1056,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             BatteryConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_kwh: 13.5,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
@@ -1097,7 +1097,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             PvConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_kw: 5.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(0.0),
@@ -1179,7 +1179,27 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 eta_jacket_water: None,
                 eta_lube_oil: None,
                 eta_exhaust: None,
-                efficiency_curve_points: None,
+                // The hardcoded fallback curve is gone: a curve config
+                // without points is a typed error, so the alias fixture
+                // carries the shipped defaults curve's points.
+                efficiency_curve_points: Some(vec![
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.0,
+                        efficiency_ratio: 0.0,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.1,
+                        efficiency_ratio: 0.47,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.333,
+                        efficiency_ratio: 0.78,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 1.0,
+                        efficiency_ratio: 1.0,
+                    },
+                ]),
                 efficiency_type: None,
                 delta_kw_per_s: Some(1.0),
                 capacity_min_kw: Some(0.0),
@@ -1595,7 +1615,7 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpHeaterConfig {
         common: HeatPumpCommonConfig {
-            zone_id: Some(1),
+            zone_id: None,
             heating_capacity_w: Some(8_000.0),
             heating_eir: Some(3.412_141_633 / 9.0),
             cooling_capacity_w: Some(8_000.0),
@@ -1671,7 +1691,7 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpCoolerConfig {
         common: HeatPumpCommonConfig {
-            zone_id: Some(1),
+            zone_id: None,
             heating_capacity_w: Some(8_000.0),
             heating_eir: Some(3.412_141_633 / 9.0),
             cooling_capacity_w: Some(8_000.0),

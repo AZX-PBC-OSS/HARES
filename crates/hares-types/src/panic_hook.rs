@@ -76,7 +76,7 @@ static PANIC_WITH_LOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Returns `true` when the HARES custom panic hook is believed to be installed.
 ///
-/// Used by `cfg(any(debug_assertions, feature = "check_invariants"))` assertions.
+/// Used by `cfg(debug_assertions)` assertions.
 #[inline]
 pub fn is_installed() -> bool {
     HOOK_INSTALLED.load(Ordering::Acquire)

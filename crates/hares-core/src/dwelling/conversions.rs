@@ -383,7 +383,11 @@ pub fn building_to_boundary_inputs(
             // pre-computed RC layers from the envelope LUT.  They use the
             // Window struct's U-factor code path (EnergyPlus Simple Window
             // Model Step 1), not the LUT.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            // Fenestration boundaries (windows, skylights) must not receive
+            // pre-computed RC layers from the envelope LUT; they use the
+            // Window struct's U-factor code path. Debug-build check of the
+            // assembler logic.
+            #[cfg(debug_assertions)]
             if matches!(
                 bd.boundary_type,
                 BoundaryType::Window | BoundaryType::Skylight
@@ -485,13 +489,14 @@ pub(crate) fn find_zone_idx(
 
     // Adjacent zones are rewritten to the non-Adjacent side's type during
     // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
-    // zone reaches this function, it indicates a bug in that rewrite.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            !matches!(target, hares_io::hpxml::ZoneType::Adjacent),
-            "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
-        );
+    // zone reaches this function, it indicates a bug in that rewrite:
+    // an unconditional typed error (the function already returns Result).
+    if matches!(target, hares_io::hpxml::ZoneType::Adjacent) {
+        return Err(HaresError::Dwelling(format!(
+            "Adjacent zone type reached find_zone_idx (boundary '{bid}'): the \
+             rewrite in building.rs was not applied",
+            bid = boundary_id.unwrap_or("<unknown>")
+        )));
     }
 
     // Primary: match by boundary ID + zone type for disambiguation when
@@ -1189,8 +1194,9 @@ mod tests {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
-                children: Vec::new(),
+                children: vec![],
             },
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -2271,13 +2277,11 @@ mod tests {
         );
     }
 
-    /// `find_zone_idx` must assert when passed an Adjacent zone type: the rewrite
-    /// in `building.rs` should eliminate all Adjacent references before this
-    /// function is called.
+    /// `find_zone_idx` must reject an Adjacent zone type with a typed error:
+    /// the rewrite in `building.rs` should eliminate all Adjacent references
+    /// before this function is called.
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "Adjacent zone type reached find_zone_idx")]
-    fn find_zone_idx_panics_on_adjacent_input() {
+    fn find_zone_idx_errors_on_adjacent_input() {
         let building = minimal_building(
             vec![Zone {
                 zone_type: ZoneType::Conditioned,
@@ -2294,7 +2298,13 @@ mod tests {
         // Adjacent is filtered from the zones vec in building.rs and should
         // never reach find_zone_idx after the rewrite. This call asserts
         // that invariant.
-        let _ = find_zone_idx(&building, None, Some(&ZoneType::Adjacent), 1);
+        let err = find_zone_idx(&building, None, Some(&ZoneType::Adjacent), 1)
+            .expect_err("an Adjacent zone input must be a typed error");
+        assert!(
+            err.to_string()
+                .contains("Adjacent zone type reached find_zone_idx"),
+            "got: {err}"
+        );
     }
 
     /// `find_zone_idx` with boundary ID resolves the correct zone when two

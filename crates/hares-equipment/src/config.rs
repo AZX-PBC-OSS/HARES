@@ -668,22 +668,6 @@ pub(crate) fn validate_zip_sums(
     Ok(())
 }
 
-/// Debug-build twin of [`validate_zip_sums`]: panics with the validation
-/// error message when the coefficient-sum invariant is violated at step
-/// time. Shared by the full-ZIP consumers (ScheduledLoad, EventBasedLoad,
-/// WetAppliance) so the per-step invariant lives in exactly one place;
-/// typed equipment validates once at init via [`resolve_reactive_zip`].
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub(crate) fn debug_assert_zip_sums(
-    zip: &hares_types::zip::ZipLoad,
-    kind: &str,
-    equipment_name: &str,
-) {
-    if let Err(err) = validate_zip_sums(zip, &format!("{kind} '{equipment_name}'")) {
-        panic!("{err}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

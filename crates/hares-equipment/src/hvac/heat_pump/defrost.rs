@@ -1,7 +1,6 @@
 //! Defrost control for heat-pump heating: OnDemand (humidity-based) and Timed modes.
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -284,7 +283,7 @@ impl DefrostCycleTracker {
         outdoor_db_c: f64,
     ) -> crate::Result<()> {
         #[cfg_attr(
-            not(any(debug_assertions, feature = "check_invariants", feature = "observe")),
+            not(any(debug_assertions, feature = "observe")),
             allow(unused_variables)
         )]
         let frost_before = self.accumulated_frost_s;
@@ -334,7 +333,9 @@ impl DefrostCycleTracker {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // State bounds (frost non-negative, EWMA fraction in [0, 1]) and the
+        // warm-period frost decay guard run in every build profile: state
+        // corruption here silently corrupts the defrost model.
         {
             if self.accumulated_frost_s < 0.0 {
                 return Err(HaresError::InvariantViolation {

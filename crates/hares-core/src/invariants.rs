@@ -550,7 +550,8 @@ impl InvariantChecker {
     /// context-rich NaN-screening gate that fires at the earliest possible
     /// phase boundary — before any residual is computed.
     ///
-    /// Called from the dwelling's [`check_invariants`] at the top of the
+    /// Called from the dwelling's [`Dwelling::check_step_invariants`] at the
+    /// top of the
     /// per-step invariant pass, and from diagnostic / telemetry construction
     /// sites as a backstop.
     ///

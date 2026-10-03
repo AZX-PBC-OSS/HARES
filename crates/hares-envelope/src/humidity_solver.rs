@@ -9,7 +9,8 @@ use hares_physics::psychrometrics::{
     humidity_ratio_from_tdp, relative_humidity, wet_bulb_from_humidity_ratio,
 };
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HUMIDITY, PortSlots, THERMAL, ZoneId,
+    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HUMIDITY, HaresError, PortSlots,
+    THERMAL, ZoneId,
 };
 
 #[derive(Debug, Clone)]
@@ -135,7 +136,7 @@ impl DomainSolver for HumiditySolver {
         env: &EnvironmentState,
         dt: Duration,
         out: &mut DomainUpdate,
-    ) {
+    ) -> Result<(), HaresError> {
         let dt_s = dt.as_secs_f64();
         let p_pa = env.weather.pressure_pa();
 
@@ -368,6 +369,7 @@ impl DomainSolver for HumiditySolver {
             ]);
         }
         out.zone_temperatures_c.sort_by_key(|(zone_id, _)| *zone_id);
+        Ok(())
     }
 }
 
@@ -529,7 +531,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let payload = update.custom_payload.unwrap();
         let w = payload[1];
         let rh = payload[2];

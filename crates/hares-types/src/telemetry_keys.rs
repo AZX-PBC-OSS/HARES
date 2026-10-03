@@ -823,8 +823,8 @@ pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
 // ── Generator ───────────────────────────────────────────────────────────────
 /// Sum of `thermal_power_w` values written to fluid port contributions.
 /// Tracks the actual energy declared to the loop, enabling cross-validation
-/// against `THERMAL_OUTPUT_W`. In debug / check_invariants builds an assertion
-/// guards that these two values match within tolerance.
+/// against `THERMAL_OUTPUT_W`. In debug builds a debug assertion guards that
+/// these two values match within tolerance.
 ///
 /// scope: internal
 pub const THERMAL_POWER_DELIVERED_W: &str = "thermal_power_delivered_w";

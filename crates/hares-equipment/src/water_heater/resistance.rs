@@ -14,6 +14,7 @@ use hares_types::{
     TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -301,7 +302,7 @@ impl ResistanceWH {
         )?;
         c.validate()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if c.zone_id.is_none() && c.zone_type.is_some() {
             warn!(
                 water_heater = %config.name,
@@ -1136,7 +1137,7 @@ mod tests {
     fn typed_config() -> ElectricResistanceWaterHeaterConfig {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1855,7 +1856,7 @@ mod tests {
         let make_cfg = |jacket: Option<f64>| {
             config_from_typed(ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2100,7 +2101,7 @@ mod element_priority_tests {
             "Resistance Water Heater".to_string(),
             crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2427,7 +2428,7 @@ mod element_priority_tests {
     fn simultaneous_max_combined_power_clamps_lower_element() {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -2503,7 +2504,7 @@ mod element_priority_tests {
         for max_w in [None, Some(7_200.0)] {
             let cfg = crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2570,7 +2571,7 @@ mod element_priority_tests {
     fn state_round_trip_preserves_max_combined_power_w() {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,

@@ -26,6 +26,12 @@ pub struct DwellingBlueprint {
     pub(super) defaults: DefaultsStore,
     pub defaults_path: Option<PathBuf>,
     pub equipment_specs: Vec<EquipmentSpec>,
+    /// Warnings raised while building the blueprint, in the order they are
+    /// reported: the HPXML parse warnings first, then the equipment
+    /// resolution warnings. The dwelling build moves these into its warning
+    /// log before the schedule-injection warnings and each equipment's
+    /// `init` warnings.
+    pub(super) equipment_warnings: Vec<hares_types::Warning>,
     pub(super) local_start: DateTime<FixedOffset>,
     pub(super) init_chrono: Duration,
     pub(super) time_res: std::time::Duration,
@@ -141,11 +147,15 @@ impl DwellingBlueprint {
 
         let empty_overrides = Value::Object(Map::new());
 
+        // The blueprint's construction-time warnings, in report order: the
+        // HPXML parse warnings first, then the equipment resolution warnings.
+        let mut equipment_warnings = building.parse_warnings.clone();
         let equipment_specs = resolve_equipment(
             &building,
             &defaults,
             &empty_overrides,
             config.patches.as_ref(),
+            &mut equipment_warnings,
         )
         .map_err(|e| HaresError::Io(e.to_string()))?;
 
@@ -160,6 +170,7 @@ impl DwellingBlueprint {
             defaults,
             defaults_path: Some(resolved_defaults_dir),
             equipment_specs,
+            equipment_warnings,
             local_start,
             init_chrono,
             time_res,

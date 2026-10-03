@@ -347,27 +347,20 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
     let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
 
-    // Invariant: if the file has 8784 records but the header says "No" for
-    // leap year observation, Feb 29 must have been stripped.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        if records.len() == EXPECTED_RECORDS_LEAP && !wf_allows_leap_years {
-            panic!(
-                "EPW invariant violation: 8784 records present but wf_allows_leap_years is false. \
-                 Feb 29 data should have been stripped."
-            );
-        }
-        // Also assert: if records.len() == 8784 and wf_allows_leap_years is true,
-        // there must be at least one Feb 29 record (the file is a leap year).
-        if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
-            let has_feb29 = record_datetimes
-                .iter()
-                .any(|(date, _)| date.month() == 2 && date.day() == 29);
-            assert!(
-                has_feb29,
-                "EPW invariant violation: 8784 records with wf_allows_leap_years=true \
-                 but no Feb 29 record found."
-            );
+    // A leap-year file that claims leap observation must actually carry a
+    // Feb 29 record; an 8784-record file without leap observation cannot
+    // exist because the strip loop above removed Feb 29 when the header
+    // said No.
+    if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
+        let has_feb29 = record_datetimes
+            .iter()
+            .any(|(date, _)| date.month() == 2 && date.day() == 29);
+        if !has_feb29 {
+            return Err(WeatherError::Validation(
+                "EPW file has 8784 records with leap year observed=true \
+                 but no Feb 29 record"
+                    .to_string(),
+            ));
         }
     }
 
@@ -672,33 +665,6 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
     for (i, &day) in DOE2_MID_MONTH_DAYS.iter().enumerate() {
         let argument = 2.0 * std::f64::consts::PI / DOE2_GROUND_DAYS_PER_YEAR * day - phase;
         result[i] = t_avg - dt_monthly * gm * argument.cos();
-    }
-
-    // Invariant: the DOE-2 damped ground temperature must have strictly less
-    // seasonal amplitude than the outdoor air temperature. If ground amplitude
-    // equals or exceeds the air amplitude, the depth is too shallow or soil
-    // diffusivity is implausibly low.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let result_min = result.iter().copied().fold(f64::INFINITY, f64::min);
-        let result_max = result.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let ground_pp = result_max - result_min;
-        let air_pp = t_max - t_min;
-        if ground_pp >= air_pp {
-            tracing::error!(
-                ground_peak_to_peak_c = ground_pp,
-                air_peak_to_peak_c = air_pp,
-                beta = beta,
-                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
-                "DOE-2 ground temperature amplitude ({ground_pp_c:.2}°C) is not \
-                 strictly less than outdoor air temperature amplitude ({air_pp_c:.2}°C); \
-                 the DOE-2 fallback depth ({depth_m} m) may be too shallow or soil \
-                 diffusivity is implausibly low",
-                ground_pp_c = ground_pp,
-                air_pp_c = air_pp,
-                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
-            );
-        }
     }
 
     // Observer capture: record the DOE-2 fallback configuration and resulting

@@ -85,7 +85,27 @@ fn generator_fluid_solver_invariant_passes() {
         eta_lube_oil: None,
         eta_exhaust: None,
         efficiency_type: None,
-        efficiency_curve_points: None,
+        // The hardcoded fallback curve is gone: a curve config without
+        // points is a typed error, so the test carries the shipped defaults
+        // curve's points.
+        efficiency_curve_points: Some(vec![
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.1,
+                efficiency_ratio: 0.47,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.333,
+                efficiency_ratio: 0.78,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ]),
         delta_kw_per_s: Some(100.0),
         capacity_min_kw: None,
         grid_import_limit_kw: None,
@@ -158,7 +178,9 @@ fn generator_fluid_solver_invariant_passes() {
     let mut solver =
         FluidSolver::new(FluidSolverConfig::default(), &[(loop_id, FluidType::Water)]).unwrap();
 
-    let update = solver.resolve_new(&slots, &env(), Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&slots, &env(), Duration::from_secs(60))
+        .unwrap();
     let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
     assert_eq!(states.len(), 1);
 

@@ -6,9 +6,8 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
-use hares_types::{normalize_ascii, parse_trimmed_f64};
+use hares_types::{Warning, normalize_ascii, parse_trimmed_f64};
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::check_specific_heat_plausible;
 use hares_physics::infiltration::{NATURAL_TO_50PA_EXPONENT, ach_nat_to_ach50};
 use hares_physics::units as conv;
@@ -289,6 +288,10 @@ pub struct Building {
     /// Raw HPXML parse tree retained for downstream consumers that still read
     /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
+    /// Schema warnings the parse raised (for example the HPXML 3.x
+    /// deprecated-`EnergyFactor` notice), carried to the run instead of
+    /// living only as `tracing` lines.
+    pub parse_warnings: Vec<Warning>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1107,7 +1110,9 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // Garage and Attic remain. The compound attic volume formula already
     // geometrically accounts for the shared attic-garage space; keeping the
     // wall boundary would double-count thermal coupling.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Debug-build assembler topology check: no input reaches it (the removal
+    // pass above is unconditional).
+    #[cfg(debug_assertions)]
     {
         let has_attic = zones_vec.iter().any(|z| z.zone_type == ZoneType::Attic);
         let has_garage = zones_vec.iter().any(|z| z.zone_type == ZoneType::Garage);
@@ -1133,7 +1138,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // OCHRE hpxml.py:96-97 rewrites exterior=interior when exterior is "Adjacent";
     // HARES applies the same rewrite via rewrite_adjacent_zone_pair during boundary
     // and window parsing. An Adjacent zone surviving to this point is a bug.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Debug-build check of the rewrite logic: no input reaches it.
+    #[cfg(debug_assertions)]
     {
         for bd in &boundaries {
             assert!(
@@ -1146,58 +1152,6 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 "boundary '{}' exterior_zone is Adjacent after rewrite stage",
                 bd.id
             );
-        }
-
-        // Detect multifamily building types where the zone adjacency logic
-        // produces only a single conditioned zone. HARES models each HPXML
-        // file as a single dwelling unit — the correct interpretation of the
-        // HPXML spec, which represents one unit per file. Multi-unit fleet
-        // simulation composes multiple files at the orchestration layer, not
-        // within a single building parse.
-        if let Some(ref facility_type) = residential_facility_type {
-            let is_multifamily = {
-                let lower = facility_type.to_ascii_lowercase();
-                lower.contains("apartment") || lower.contains("multifamily")
-            };
-            if is_multifamily {
-                let conditioned_zone_count = zones_vec
-                    .iter()
-                    .filter(|z| z.zone_type == ZoneType::Conditioned)
-                    .count();
-                if conditioned_zone_count <= 1 {
-                    tracing::warn!(
-                        facility_type = %facility_type,
-                        conditioned_zone_count = conditioned_zone_count,
-                        "multifamily building parsed as single conditioned zone; \
-                         HPXML represents one dwelling per file — multi-unit fleet \
-                         simulation composes multiple files at the orchestration layer"
-                    );
-                }
-            }
-        }
-    }
-
-    // Invariant: Roof boundary with zero tilt must come from an explicit
-    // HPXML <Pitch> value of 0, not from a missing <Pitch> element. Missing
-    // <Pitch> now defaults to 4:12 (~18.4°) — see parse_boundary(). A 0°
-    // tilt here signals a deliberate flat-roof declaration and is valid,
-    // but unusual for single-family residential — flag for review.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for bd in &boundaries {
-            if bd.boundary_type == BoundaryType::Roof
-                && bd.tilt_deg == Some(0.0)
-                && bd.area_m2 > 0.0
-            {
-                tracing::warn!(
-                    boundary_id = bd.id,
-                    area_m2 = bd.area_m2,
-                    interior_zone = ?bd.interior_zone,
-                    exterior_zone = ?bd.exterior_zone,
-                    "Roof boundary has tilt=0° (explicit flat roof); if this is a pitched roof \
-                     verify that <Pitch> is present in the HPXML input"
-                );
-            }
         }
     }
 
@@ -1251,6 +1205,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml: details.clone(),
+        parse_warnings: Vec::new(),
     })
 }
 
@@ -2253,11 +2208,10 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLay
             area_m2,
         });
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if let Some(cp) = specific_heat_j_kg_k
             && cp > 0.0
         {
-            check_specific_heat_plausible(cp, "HPXML material layer");
+            check_specific_heat_plausible(cp, "HPXML material layer")?;
         }
     }
 

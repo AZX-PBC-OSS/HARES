@@ -28,8 +28,8 @@ pub struct StepSnapshot {
     /// Number of actors that were unhealthy (error flag set) after `decide()` this step.
     pub actor_error_count: usize,
     /// Per-step moisture invariant capture from `check_moisture`.
-    /// Populated when `check_invariants` is active; `None` when only
-    /// the `observe` feature is enabled without invariant checks.
+    /// Populated whenever the `observe` feature is on; `None` only in
+    /// builds without `observe`.
     #[cfg(feature = "observe")]
     pub moisture_invariant: Option<MoistureInvariantCapture>,
     /// sin(2π · fractional_hour / 24) for verifying time_sin observation field.

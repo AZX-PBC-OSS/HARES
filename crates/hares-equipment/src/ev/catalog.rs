@@ -126,18 +126,6 @@ impl VehicleSpec {
     pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
         let fuel_economy = self.fuel_economy_kwh_per_mi;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let dc_kwh_per_mi = self.capacity_kwh / self.range_miles;
-            assert!(
-                fuel_economy >= dc_kwh_per_mi,
-                "{}: fuel_economy_kwh_per_mi ({:.6}) must be >= DC efficiency ({:.6})",
-                self.label,
-                fuel_economy,
-                dc_kwh_per_mi,
-            );
-        }
-
         #[cfg(feature = "observe")]
         tracing::debug!(
             vehicle = self.label,
@@ -957,6 +945,24 @@ mod tests {
     use chrono::Duration as ChronoDuration;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{EnvironmentState, GridState, WeatherState, ZoneState};
+
+    /// Every catalog vehicle's fuel economy must cover its DC efficiency
+    /// (capacity/range): the battery-to-wheel energy can never exceed the
+    /// wall-to-wheel energy. Replaced the gated assert in `to_config`: the
+    /// catalog is static, so the property is a unit test.
+    #[test]
+    fn catalog_fuel_economy_covers_dc_efficiency() {
+        for spec in CATALOG {
+            let dc_kwh_per_mi = spec.capacity_kwh / spec.range_miles;
+            assert!(
+                spec.fuel_economy_kwh_per_mi >= dc_kwh_per_mi,
+                "{}: fuel_economy_kwh_per_mi ({:.6}) must be >= DC efficiency ({:.6})",
+                spec.label,
+                spec.fuel_economy_kwh_per_mi,
+                dc_kwh_per_mi,
+            );
+        }
+    }
 
     fn sample_env() -> EnvironmentState {
         EnvironmentState {

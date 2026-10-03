@@ -152,7 +152,6 @@ jobs:
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F profiling
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F observe
       - run: cargo nextest run --workspace --release --no-fail-fast --profile ci
-      - run: cargo nextest run --workspace --release -F check_invariants --no-fail-fast --profile ci
       - run: cargo nextest run --release --no-fail-fast --profile ci -p hares-equipment
       - name: Stray check
         run: |

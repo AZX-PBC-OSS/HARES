@@ -71,6 +71,7 @@ pub use resstock::{
 };
 pub use resstock_csv::parse_resstock_csv;
 pub use sample_weight::{SampleWeightClass, classify_sample_weight};
+pub use schedule::resolve_occupancy_column;
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 pub use schedule_resolve::check_hvac_setpoint_invariants;
 pub use schedule_resolve::inject_schedule_into_specs;

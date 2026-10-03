@@ -281,19 +281,8 @@ impl Equipment for ProtocolBridge {
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ProtocolNative { protocol, payload } => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                if !self
-                    .descriptor
-                    .control_capabilities
-                    .contains(ControlCapabilities::PROTOCOL_NATIVE)
-                {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "protocol_bridge_capability_check".to_string(),
-                        value: 0.0,
-                        tolerance: 0.0,
-                    });
-                }
-
+                // Capability gating ran in `apply_control` via
+                // `ensure_signal_supported` before this arm.
                 if payload.is_empty() {
                     return Err(HaresError::Control(
                         "ProtocolNative payload must be non-empty".to_string(),

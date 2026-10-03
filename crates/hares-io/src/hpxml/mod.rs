@@ -19,6 +19,7 @@ pub mod water_heater_ua;
 pub(crate) mod xml_helpers;
 
 use building::{parse_building_from_node, parse_xml_document};
+use hares_types::Warning;
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
 pub use building::{
@@ -186,7 +187,11 @@ pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
         tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
     }
 
-    let building = parse_building_from_node(&root)?;
+    let mut building = parse_building_from_node(&root)?;
+    building.parse_warnings = schema_warnings
+        .iter()
+        .map(|w| Warning::new("hpxml", format!("{}: {}", w.field, w.message)))
+        .collect();
 
     let report = validate_building_ranges(&building);
     if report.has_errors() {

@@ -322,6 +322,10 @@ pub struct EvDriverActor {
     drive_cancelled: u32,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
+    /// First estimate-contract error (a non-finite or negative
+    /// needed-charge-hours result): the actor reports unhealthy and the step
+    /// fails at the post-decide health check.
+    estimate_error: Option<String>,
 }
 
 use efficiency::temp_efficiency_multiplier;
@@ -420,6 +424,7 @@ impl EvDriverActor {
             needs_away_charge: false,
             drive_cancelled: 0,
             telemetry,
+            estimate_error: None,
         }
     }
 
@@ -942,7 +947,7 @@ impl EvDriverActor {
     /// `Schedule` tier — the EV driver is a schedule-level actor; this override is
     /// a pre-defined operational rule, not a user or grid action.
     fn range_anxiety_override_request(
-        &self,
+        &mut self,
         env: &EnvironmentState,
         current_minute: u16,
     ) -> Option<DispatchRequest> {
@@ -983,7 +988,15 @@ impl EvDriverActor {
             let hours_left =
                 minutes_until(current_minute, u32::from(event.departure_minute)) / 60.0;
             let ctx = self.decision_context(env, current_minute);
-            let needed = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx);
+            // The estimate's typed error (NaN or negative result) marks the
+            // actor unhealthy; the step fails at the post-decide health
+            // check, and the override stays inactive for that step.
+            let Ok(needed) = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx)
+            else {
+                self.estimate_error =
+                    Some("needed_charge_hours estimate is not a valid number".to_string());
+                return None;
+            };
             if hours_left >= needed * 1.2 {
                 return None;
             }
@@ -1066,8 +1079,16 @@ impl EvDriverActor {
     fn record_anxiety_plan_hours(&mut self, env: &EnvironmentState, current_minute: u16) {
         let ctx = self.telemetry_estimate_context(env, current_minute);
         let (anxiety_soc, _) = self.anxiety_band(env);
-        let hours =
-            needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx);
+        // The estimate's typed error marks the actor unhealthy (the step
+        // fails at the post-decide health check); the telemetry publish is
+        // skipped for that step.
+        let Ok(hours) =
+            needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx)
+        else {
+            self.estimate_error =
+                Some("needed_charge_hours estimate is not a valid number".to_string());
+            return;
+        };
         // +∞ (charging physically impossible right now — observed derate 0,
         // preconditioning in progress) cannot cross the telemetry channel's
         // finiteness contract; publish the ambient-curve fallback for the
@@ -1077,14 +1098,19 @@ impl EvDriverActor {
         let hours = if hours.is_finite() {
             hours
         } else {
-            needed_charge_hours_to_target(
+            let Ok(fallback) = needed_charge_hours_to_target(
                 anxiety_soc.clamp(0.0, 1.0),
                 CHARGING_EFFICIENCY,
                 &DecisionContext {
                     observed_charge_derate: None,
                     ..ctx.clone()
                 },
-            )
+            ) else {
+                self.estimate_error =
+                    Some("needed_charge_hours estimate is not a valid number".to_string());
+                return;
+            };
+            fallback
         };
         self.composer.set_needed_charge_hours(hours);
     }
@@ -1149,6 +1175,10 @@ impl Actor for EvDriverActor {
         &self.name
     }
 
+    fn healthy(&self) -> bool {
+        self.estimate_error.is_none()
+    }
+
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
     }
@@ -1198,7 +1228,12 @@ impl Actor for EvDriverActor {
         // replace this value with the override's own (anxiety-band)
         // estimate.
         let ctx = self.telemetry_estimate_context(env, current_minute);
-        self.composer.refresh_needed_charge_hours(&ctx);
+        // The estimate's typed error marks the actor unhealthy (the step
+        // fails at the post-decide health check); the channel keeps its
+        // previous value for that step.
+        if let Err(err) = self.composer.refresh_needed_charge_hours(&ctx) {
+            self.estimate_error = Some(err.to_string());
+        }
 
         // A non-driving day changes only *future* departures. An in-flight
         // trip — mid-route, or parked away awaiting its own arrival minute —
@@ -2959,7 +2994,7 @@ mod tests {
             time_res_minutes: 1.0,
             observed_charge_derate: Some(0.0),
         };
-        let estimate = needed_charge_hours_to_target(0.9, 0.9, &ctx);
+        let estimate = needed_charge_hours_to_target(0.9, 0.9, &ctx).unwrap();
         assert!(
             estimate.is_infinite() && estimate.is_sign_positive(),
             "a zero published derate means charging is impossible right now — the \

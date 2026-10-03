@@ -265,13 +265,6 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
         )));
     }
     let result = rounded as i64;
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            (result as f64 - v).abs() < 1.0,
-            "extract_seconds: round-trip error f64 {v} -> i64 {result} exceeds 1-second tolerance"
-        );
-    }
     Ok(result)
 }
 
@@ -283,9 +276,9 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
 // rejected **here** — at the boundary that received the user's value —
 // never downstream: a NaN's comparisons are always false, so a crossed
 // NaN silently stops every consuming conditional (a NaN price never arms
-// the price actors; a NaN heating setpoint never heats), and the
-// dwelling's downstream finiteness screens are cfg-gated to
-// debug/`check_invariants` builds — silent in release. One shared home
+// the price actors; a NaN heating setpoint never heats), and a NaN
+// crossing into the dwelling's physics is caught only several layers
+// later. One shared home
 // (this file), not per-module copies: the two former `dict_optional`
 // copies (py_dwelling.rs, py_control.rs) and py_control.rs's local
 // validators are unified here so a future extraction site grabs a

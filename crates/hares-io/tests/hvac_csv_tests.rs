@@ -315,6 +315,14 @@ fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
          MSHP Cooler,16.0 SEER,2,0.70,0.80,4.3,1.0,1.0,3.0,0.80,0.75\n",
     )
     .unwrap();
+    // The generator efficiency curve is mandatory at load.
+    std::fs::create_dir_all(dir.path().join("generator")).unwrap();
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
 
     let store = DefaultsStore::load(dir.path()).expect("load defaults");
 

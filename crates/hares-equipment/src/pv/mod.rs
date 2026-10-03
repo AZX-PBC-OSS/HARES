@@ -33,7 +33,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
+    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, Warning,
+    telemetry_keys as tk,
     zip::{ResolvedZip, ZipLoad},
 };
 use serde::{Deserialize, Serialize};
@@ -127,16 +128,10 @@ fn cell_temperature_noct_wind(
 
 /// Compute direct-path (non-LUT) DC and AC power for a single array.
 ///
-/// Used by the invariant check and observer histogram to compare LUT-path
-/// results against the equivalent direct computation. Only compiled when
-/// at least one of `test`, `debug_assertions`, `check_invariants`, or
-/// `observe` is active — in stripped release builds the function is dead.
-#[cfg(any(
-    test,
-    debug_assertions,
-    feature = "check_invariants",
-    feature = "observe"
-))]
+/// Used by the observer histogram to compare LUT-path results against the
+/// equivalent direct computation. Only compiled when at least one of `test`
+/// or `observe` is active: in stripped release builds the function is dead.
+#[cfg(any(test, feature = "observe"))]
 #[inline]
 fn compute_direct_power(
     array: &PvArray,
@@ -259,6 +254,8 @@ pub struct PV {
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
     init_error: Option<HaresError>,
+    /// Warnings raised since the last drain (init-time LUT and loss checks).
+    warnings: Vec<Warning>,
 }
 
 impl PV {
@@ -346,6 +343,7 @@ impl PV {
             soiling_state: None,
             shading_model,
             init_error,
+            warnings: Vec::new(),
         }
     }
 
@@ -475,70 +473,6 @@ impl PV {
                 let ac_power_kw = dc_soiled * self.inverter_efficiency;
                 (dc_soiled, ac_power_kw)
             };
-
-            // T-0107 invariant check: warn when system_losses_fraction
-            // deviates from the PVWatts v5 default by more than
-            // 1 percentage point. The LUT embeds the SAM default losses;
-            // a large deviation may cause inconsistent results between
-            // LUT and non-LUT paths.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let abs_diff = (self.system_losses_fraction - DEFAULT_SYSTEM_LOSSES_FRACTION).abs();
-                if abs_diff > 0.01 {
-                    // Why: gated behind check_invariants — using
-                    // tracing::warn! because this is a diagnostic, not
-                    // a correctness guarantee. The user may deliberately
-                    // configure a different loss value.
-                    tracing::warn!(
-                        system_losses_fraction = self.system_losses_fraction,
-                        pvwatts_default = DEFAULT_SYSTEM_LOSSES_FRACTION,
-                        abs_diff = abs_diff,
-                        "PV system_losses_fraction deviates from PVWatts v5 default \
-                         by >1pp. If the SAM LUT was generated with default losses, the \
-                         LUT and non-LUT paths may produce inconsistent results.",
-                    );
-                }
-            }
-
-            // Invariant check: in debug/invariant builds, compare LUT-path
-            // AC against the direct-path AC computed from the same array
-            // specification. This catches metadata-aware correction bugs.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let (_, ac_direct) = compute_direct_power(
-                    array,
-                    irradiance_w_m2,
-                    ambient_temp_c,
-                    env.weather.wind_speed_m_s,
-                    self.effective_system_losses_fraction,
-                    self.inverter_efficiency,
-                );
-                let diff = if ac_direct > 0.0 {
-                    (ac_power_kw - ac_direct).abs() / ac_direct
-                } else if ac_power_kw > 0.0 {
-                    1.0
-                } else {
-                    0.0
-                };
-                // T-0086 requires 0.1% relative tolerance. SAM's PVWatts v8
-                // uses the same NOCT cell temperature model as HARES and the
-                // same DC = capacity*(POA/STC)*temp_derate formula, so the
-                // two paths should agree closely when SAM_inv_eff ≈ HARES_inv_eff
-                // and SAM_losses ≈ HARES_losses. The LUT transposition from
-                // GHI/DNI/DHI to POA may differ from the weather file's POA.
-                if diff >= 0.001 {
-                    // Why: this is gated behind check_invariants — using
-                    // tracing::error! instead of assert! because the feature
-                    // can be enabled in release builds and an invariant
-                    // diagnostic should not abort the simulation.
-                    tracing::error!(
-                        lut_ac_kw = ac_power_kw,
-                        direct_ac_kw = ac_direct,
-                        diff_ratio = diff,
-                        "PV LUT vs direct AC power mismatch {diff:.6} exceeds 0.1% threshold",
-                    );
-                }
-            }
 
             // Observer capture: record LUT vs direct AC power ratio.
             #[cfg(feature = "observe")]
@@ -815,6 +749,23 @@ impl PV {
         self.system_losses_fraction = c
             .system_losses_fraction
             .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
+        // Diagnostic, once at init: the LUT embeds the SAM default
+        // losses, so a configured loss value far from the PVWatts v5 default
+        // may produce inconsistent results between the LUT and non-LUT paths.
+        // The user may deliberately configure a different loss value.
+        let abs_diff = (self.system_losses_fraction - DEFAULT_SYSTEM_LOSSES_FRACTION).abs();
+        if abs_diff > 0.01 {
+            self.warnings.push(Warning::new(
+                self.descriptor.name.as_str(),
+                format!(
+                    "PV system_losses_fraction ({}) deviates from the PVWatts v5 \
+                     default ({DEFAULT_SYSTEM_LOSSES_FRACTION}) by >1pp. If the SAM \
+                     LUT was generated with default losses, the LUT and non-LUT \
+                     paths may produce inconsistent results.",
+                    self.system_losses_fraction
+                ),
+            ));
+        }
 
         self.luts_by_surface.clear();
         for array in &mut self.arrays {
@@ -837,10 +788,8 @@ impl PV {
             };
             if let Some(path) = array.sam_lut_path.as_deref() {
                 let lut = PvLut::from_path(Path::new(path))?;
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                check_lut_location(&lut, path);
-                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-                let _ = path;
+                let source = self.descriptor.name.clone();
+                check_lut_location(&lut, path, &mut self.warnings, &source);
 
                 // T-0086: warn once at load time if the LUT lacks SAM's
                 // internal inverter efficiency and system losses metadata.
@@ -886,7 +835,7 @@ impl PV {
         }
 
         // Invariant check: arrays must exist and have positive capacity.
-        self.check_invariants()?;
+        self.check_arrays()?;
 
         // Resolve inverter capacity default.
         // OCHRE PV.py:122 defaults inverter_capacity to capacity (1:1 DC/AC
@@ -972,7 +921,9 @@ impl PV {
         };
 
         // T-0423 invariant: soiling_config and soiling_state must agree.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build staging check: init_typed() constructs SoilingState
+        // from the config above.
+        #[cfg(debug_assertions)]
         {
             if self.soiling_config.is_some() && self.soiling_state.is_none() {
                 panic!(
@@ -1006,11 +957,8 @@ impl PV {
     /// Validate that the PV model is in a consistent state.
     ///
     /// Checks that at least one array exists and every array has positive
-    /// capacity. Gated behind `cfg(any(debug_assertions, feature =
-    /// "check_invariants"))` so it compiles to nothing in production release
-    /// builds without the feature flag.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_invariants(&self) -> crate::Result<()> {
+    /// capacity. Runs in every build profile at init.
+    fn check_arrays(&self) -> crate::Result<()> {
         if self.arrays.is_empty() {
             return Err(HaresError::InvariantViolation {
                 check_name: "pv_has_arrays".to_string(),
@@ -1023,37 +971,24 @@ impl PV {
         }
         Ok(())
     }
-
-    /// Stub for unchecked builds — the body is eliminated by the compiler.
-    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-    fn check_invariants(&self) -> crate::Result<()> {
-        Ok(())
-    }
 }
 
 /// Validate LUT location metadata on load.
 ///
-/// Gated behind `debug_assertions` or `feature = "check_invariants"` so the
-/// check compiles to nothing in production release builds. Logs the embedded
-/// latitude/longitude; warns if metadata is absent (both ≈ 0.0) since that
-/// indicates a pre-T-0085 LUT that was regenerated without location metadata.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_lut_location(lut: &PvLut, path: &str) {
+/// Pushes a warning when the embedded latitude/longitude are absent (both
+/// ≈ 0.0): that indicates a LUT generated without location metadata. Runs in
+/// every build profile.
+fn check_lut_location(lut: &PvLut, path: &str, warnings: &mut Vec<Warning>, source: &str) {
     let lut_lat = lut.latitude_deg();
     let lut_lon = lut.longitude_deg();
     if lut_lat.abs() < 1e-9 && lut_lon.abs() < 1e-9 {
-        tracing::warn!(
-            lut_path = %path,
-            "PV LUT missing location metadata (lat/lon ≈ 0.0); \
-             re-generate with updated sam_pv.py adapter",
-        );
-    } else {
-        tracing::info!(
-            lut_path = %path,
-            lut_latitude_deg = lut_lat,
-            lut_longitude_deg = lut_lon,
-            "PV LUT loaded with location metadata",
-        );
+        warnings.push(Warning::new(
+            source,
+            format!(
+                "PV LUT at '{path}' is missing location metadata (lat/lon ≈ 0.0); \
+                 re-generate with updated sam_pv.py adapter"
+            ),
+        ));
     }
 }
 
@@ -1071,7 +1006,12 @@ impl Equipment for PV {
         if let Some(e) = self.init_error.take() {
             return Err(e);
         }
+        self.warnings.clear();
         self.init_typed(config, env)
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -1117,32 +1057,16 @@ impl Equipment for PV {
         );
 
         // T-0108 invariant: when soiling is active, verify the soiling ratio
-        // is plausible and that combined soiling (dynamic + any residual static)
-        // does not exceed 35%, which would indicate a likely misconfiguration.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(0.0..=1.0).contains(&soiling_ratio) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "pv_soiling_ratio_bounds".to_string(),
-                    value: soiling_ratio,
-                    tolerance: 0.0,
-                });
-            }
-            let static_soiling_in_losses = if self.soiling_config.is_some() {
-                0.0 // removed by reconciliation
-            } else {
-                PVWATTS_SOILING_COMPONENT
-            };
-            let combined = soiling_ratio * (1.0 - static_soiling_in_losses);
-            if combined < 0.65 {
-                tracing::warn!(
-                    soiling_ratio = soiling_ratio,
-                    static_soiling_removed = self.soiling_config.is_some(),
-                    combined = combined,
-                    "PV combined soiling exceeds 35% (>{:.2}); check soiling config and loss parameters",
-                    1.0 - combined,
-                );
-            }
+        // is plausible (in [0, 1], a typed error in every build). Combined
+        // soiling above 35% is legitimate (heavy soiling configs), so the
+        // former warn on it is deleted: the ratio is published in
+        // `SOILING_RATIO` telemetry.
+        if !(0.0..=1.0).contains(&soiling_ratio) {
+            return Err(HaresError::InvariantViolation {
+                check_name: "pv_soiling_ratio_bounds".to_string(),
+                value: soiling_ratio,
+                tolerance: 0.0,
+            });
         }
 
         let mut total_dc_power_kw = 0.0;
@@ -1261,7 +1185,8 @@ impl Equipment for PV {
         // ReactiveSetpoint), then reactive_power_kvar must be 0.0 and no PF
         // override may have occurred. This guards against the original bug
         // where q_setpoint_kvar = 0.0 was indistinguishable from "unset".
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build control-logic check.
+        #[cfg(debug_assertions)]
         {
             // q_setpoint_source == 1 is ReactiveSetpoint.
             if self.q_setpoint_active

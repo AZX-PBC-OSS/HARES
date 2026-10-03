@@ -223,7 +223,7 @@ impl BillingState {
                 "skipping peak demand update: demand window not yet full"
             );
         }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             debug_assert!(
                 self.demand_window.count <= self.demand_window.samples.len(),

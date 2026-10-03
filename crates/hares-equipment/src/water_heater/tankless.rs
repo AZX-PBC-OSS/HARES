@@ -12,7 +12,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
+#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use hares_physics::constants::{
@@ -106,7 +106,7 @@ impl TanklessWH {
             .expect("Tankless Water Heater requires typed FuelType");
         let fuel_type = typed.fuel_type;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if typed.zone_id.is_none() && typed.zone_type.is_some() {
             warn!(
                 water_heater = %config.name,
@@ -891,7 +891,7 @@ mod tests {
     fn typed_config() -> TanklessWaterHeaterConfig {
         TanklessWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type: FuelType::Gas,
             energy_factor: Some(0.8),

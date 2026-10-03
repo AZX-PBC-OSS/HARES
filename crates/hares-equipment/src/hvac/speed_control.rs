@@ -1,8 +1,6 @@
 //! Speed staging and control types for HVAC equipment.
 
 use serde::{Deserialize, Serialize};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use tracing::warn;
 
 /// Dynamic speed-control mode for HVAC performance selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +115,7 @@ impl StartupConfig {
         let transitioning_on = !self.was_on && on_now;
         self.was_on = on_now;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         let prev_time = self.time_since_start_min;
 
         if !on_now {
@@ -155,7 +153,7 @@ impl StartupConfig {
             self.time_since_start_min += dt_min;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if self.time_since_start_min < prev_time {
                 assert!(
@@ -218,17 +216,9 @@ pub fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
     if max_cap <= 0.0 {
         return vec![];
     }
+    // `max_cap` is the last entry, so the last fraction is exactly 1.0; the
+    // former gated warn restated that property and is deleted.
     let fractions: Vec<f64> = caps.iter().map(|&c| c / max_cap).collect();
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if (fractions.last().copied().unwrap_or(1.0) - 1.0).abs() > 1e-6 {
-        warn!(
-            max_entry = max_cap,
-            normalized_max = fractions.last().copied().unwrap_or(1.0),
-            "capacity_fractions_for normalizes max to {} instead of 1.0; \
-             capacity ratios may have non-unity max fraction",
-            fractions.last().unwrap()
-        );
-    }
     fractions
 }
 

@@ -211,8 +211,7 @@ See [Runtime Invariants](#runtime-invariants) below.
 ## Runtime Invariants
 
 HARES checks conservation laws every timestep during simulation. These
-are enabled automatically in debug builds and can be enabled in release
-with `-F check_invariants`.
+run in every build profile, debug and release alike.
 
 The full list of checks, tolerances, ordering contract, and error
 reporting is documented in

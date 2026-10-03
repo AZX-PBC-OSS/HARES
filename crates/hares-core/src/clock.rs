@@ -133,19 +133,9 @@ impl SimClock {
             let fixed = self.current_time();
             let civil = fixed.with_timezone(&tz);
 
-            // Invariant: verify the conversion is plausible. The conversion
-            // itself is always unambiguous (both representations reference the
-            // same UTC instant), so this check documents intent rather than
-            // catches a real failure path. It does verify that no internal
-            // panic occurred in chrono's timezone machinery.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let _ = &civil;
-                debug_assert!(
-                    civil.naive_utc() == fixed.naive_utc(),
-                    "civil time UTC does not match fixed-offset UTC"
-                );
-            }
+            // The conversion is always unambiguous (both representations
+            // reference the same UTC instant), so no plausibility check
+            // remains here.
 
             #[cfg(feature = "observe")]
             {

@@ -7,10 +7,9 @@
 //! (`InvariantViolation { check_name: "thermal_balance" }`) when balance terms
 //! are deliberately broken.
 //!
-//! Tests are gated on `debug_assertions` because the invariant check is
-//! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
-//! is active. In release-mode test builds the invariant is not compiled and
-//! these tests would provide no signal.
+//! Tests are gated on `debug_assertions` because the test seam itself is
+//! `cfg(any(test, debug_assertions))`: the invariant check it arms runs
+//! unconditionally in every build profile.
 #![cfg(debug_assertions)]
 
 use std::env;
@@ -24,7 +23,7 @@ use hares_types::HaresError;
 /// A single boundary with one material layer produces RC nodes which populate
 /// `node_capacitances`, enabling the full-system stored energy computation and
 /// three-term affine balance terms consumed by the thermal invariant in
-/// `Dwelling::check_invariants`.
+/// `Dwelling::check_step_invariants`.
 const SYNTHETIC_RC_DWELLING_TOML: &str = r#"building_id = 999
 
 [simulation]
@@ -111,7 +110,8 @@ fn dwelling_step_thermal_invariant_wired() {
     );
 }
 
-/// Verifies that the thermal invariant wiring inside `Dwelling::check_invariants`
+/// Verifies that the thermal invariant wiring inside
+/// `Dwelling::check_step_invariants`
 /// catches deliberately broken balance terms.
 ///
 /// Steps the dwelling once to confirm the invariant passes for correct models,
@@ -121,7 +121,7 @@ fn dwelling_step_thermal_invariant_wired() {
 /// "thermal_balance", .. })`.
 ///
 /// If the `check_thermal` call were accidentally removed from
-/// `check_invariants`, or if the balance terms were cleared before the check,
+/// `check_step_invariants`, or if the balance terms were cleared before the check,
 /// this test would fail — the seam would have no effect and `step()` would
 /// return `Ok`.
 #[test]
@@ -133,7 +133,7 @@ fn thermal_invariant_catches_broken_gain() {
         .step()
         .expect("first step must pass invariant check on correct model");
 
-    // Enable test seam: poisons balance terms inside check_invariants.
+    // Enable test seam: poisons balance terms inside check_step_invariants.
     dwelling.set_thermal_invariant_failure_for_test();
 
     // This step must fail with thermal_balance invariant violation.

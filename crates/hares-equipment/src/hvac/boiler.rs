@@ -268,7 +268,17 @@ impl Equipment for ElectricBoiler {
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
-        self.ports[1].loop_id = Some(self.loop_id);
+        // The fluid port's declared loop id and fluid type follow the
+        // configuration: rebuild_thermal_ports pushes the thermal ports to
+        // the end of the vector, so the fluid port is located by type, not
+        // by index. A glycol boiler declares a glycol loop, and a shared
+        // loop with a water port is the conflicting-type construction error.
+        for port in &mut self.ports {
+            if port.port_type == hares_types::PortType::Fluid {
+                port.loop_id = Some(self.loop_id);
+                port.fluid_type = Some(self.fluid_type);
+            }
+        }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_boiler_default_telemetry();
@@ -325,14 +335,6 @@ impl Equipment for ElectricBoiler {
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
         let cp_used = cp_j_kg_k(self.fluid_type);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                cp_used > 0.0 && cp_used.is_finite(),
-                "ElectricBoiler fluid_type {:?} returned invalid cp {cp_used}",
-                self.fluid_type
-            );
-        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
@@ -401,7 +403,7 @@ impl Equipment for ElectricBoiler {
             zone_temp_c,
             thermal_output_w,
             &mut self.telemetry,
-        );
+        )?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -688,7 +690,17 @@ impl Equipment for GasBoiler {
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
-        self.ports[3].loop_id = Some(self.loop_id);
+        // The fluid port's declared loop id and fluid type follow the
+        // configuration: rebuild_thermal_ports pushes the thermal ports to
+        // the end of the vector, so the fluid port is located by type, not
+        // by index. A glycol boiler declares a glycol loop, and a shared
+        // loop with a water port is the conflicting-type construction error.
+        for port in &mut self.ports {
+            if port.port_type == hares_types::PortType::Fluid {
+                port.loop_id = Some(self.loop_id);
+                port.fluid_type = Some(self.fluid_type);
+            }
+        }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_boiler_default_telemetry();
@@ -749,14 +761,6 @@ impl Equipment for GasBoiler {
         let fuel_input_w = thermal_output_w * eir;
 
         let cp_used = cp_j_kg_k(self.fluid_type);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                cp_used > 0.0 && cp_used.is_finite(),
-                "GasBoiler fluid_type {:?} returned invalid cp {cp_used}",
-                self.fluid_type
-            );
-        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
@@ -848,7 +852,7 @@ impl Equipment for GasBoiler {
             zone_temp_c,
             thermal_output_w,
             &mut self.telemetry,
-        );
+        )?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -1239,6 +1243,7 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_physics::constants::cp_j_kg_k;
     use hares_types::{
         ControlSignal, CoreCapabilities, DRLevel, DomainUpdate, EnvironmentState, ExecutionStage,
         FLUID, FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId, OperatingMode,
@@ -1249,6 +1254,19 @@ mod tests {
         DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler, GasBoiler,
     };
 
+    /// The per-fluid cp table must be positive and finite for every fluid
+    /// type (exhaustive match: a fluid type without a cp cannot compile).
+    /// Replaced the gated per-step asserts in both boiler step paths.
+    #[test]
+    fn cp_table_positive_and_finite_for_every_fluid_type() {
+        for fluid_type in [FluidType::Water, FluidType::Glycol, FluidType::Refrigerant] {
+            let cp = cp_j_kg_k(fluid_type);
+            assert!(
+                cp > 0.0 && cp.is_finite(),
+                "{fluid_type:?}: cp must be positive and finite, got {cp}"
+            );
+        }
+    }
     use crate::hvac::heating_config::{ElectricBoilerConfig, GasBoilerConfig};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
@@ -2549,5 +2567,88 @@ mod tests {
             (actual - expected_efficiency).abs() < 1e-9,
             "ElectricBoiler EBM efficiency should be 1/1.05 = {expected_efficiency}, got {actual}"
         );
+    }
+
+    /// Port declarations are truthful: `init` sets the fluid port's declared
+    /// fluid type from the configured `fluid_type`, where it already sets the
+    /// port's loop id, so a glycol boiler declares a glycol loop and the
+    /// default configuration declares water.
+    #[test]
+    fn boiler_port_declares_configured_fluid_type() {
+        let env = env(18.0);
+
+        // Electric boiler configured Glycol.
+        let cfg = EquipmentConfig::from_typed(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fluid_type: FluidType::Glycol,
+                ..ElectricBoilerConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports.len(), 1);
+        assert_eq!(
+            fluid_ports[0].fluid_type,
+            Some(FluidType::Glycol),
+            "an electric boiler configured Glycol must declare a Glycol fluid port after init"
+        );
+
+        // Electric boiler, default configuration: Water.
+        let cfg = eb_config(8_000.0, 1.05);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports[0].fluid_type, Some(FluidType::Water));
+
+        // Gas boiler configured Glycol.
+        let cfg = EquipmentConfig::from_typed(
+            "GB".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fluid_type: FluidType::Glycol,
+                ..GasBoilerConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GasBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports.len(), 1);
+        assert_eq!(
+            fluid_ports[0].fluid_type,
+            Some(FluidType::Glycol),
+            "a gas boiler configured Glycol must declare a Glycol fluid port after init"
+        );
+
+        // Gas boiler, default configuration: Water.
+        let cfg = gb_config(8_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports[0].fluid_type, Some(FluidType::Water));
     }
 }

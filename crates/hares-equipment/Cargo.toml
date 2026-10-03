@@ -22,7 +22,6 @@ serde_json = { workspace = true }
 
 [features]
 observe = []
-check_invariants = []
 
 [dev-dependencies]
 proptest = { workspace = true }

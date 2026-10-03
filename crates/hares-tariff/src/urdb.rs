@@ -290,6 +290,7 @@ fn cluster_summer_months(
 fn detect_by_december_reference(
     weekday: &Schedule,
     weekend: &Schedule,
+    parse_warnings: &mut Vec<String>,
 ) -> Option<SummerMonthDetection> {
     let dec_wd = weekday.get(11)?;
     let dec_we = weekend.get(11)?;
@@ -309,11 +310,10 @@ fn detect_by_december_reference(
 
     let diff_count = differ_from_dec.len() as u32;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     if diff_count == 6 {
-        tracing::warn!(
-            diff_count,
+        parse_warnings.push(
             "borderline hemisphere classification: exactly 6 months differ from December"
+                .to_string(),
         );
     }
 
@@ -345,11 +345,12 @@ fn detect_summer_months(
     weekend: &Schedule,
     root: &Value,
     rates: &[f64],
+    parse_warnings: &mut Vec<String>,
 ) -> Option<SummerMonthDetection> {
     let geo_hemisphere = geographic_hemisphere(root);
 
     let schedule_detection = cluster_summer_months(weekday, weekend, rates)
-        .or_else(|| detect_by_december_reference(weekday, weekend));
+        .or_else(|| detect_by_december_reference(weekday, weekend, parse_warnings));
 
     match (geo_hemisphere, schedule_detection) {
         (Some(geo_hemi), Some(sched_det)) => {
@@ -361,12 +362,11 @@ fn detect_summer_months(
                     hemisphere: geo_hemi,
                 })
             } else {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                tracing::warn!(
-                    geographic = geo_hemi,
-                    schedule_based = sched_det.hemisphere,
-                    "geographic metadata contradicts schedule-based hemisphere detection"
-                );
+                parse_warnings.push(format!(
+                    "geographic hemisphere metadata ({geo_hemi}) contradicts the \
+                     schedule-based hemisphere detection ({})",
+                    sched_det.hemisphere
+                ));
                 let summer_months = default_hemisphere_months(geo_hemi);
                 Some(SummerMonthDetection {
                     summer_months,
@@ -879,27 +879,18 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
 
     // Detect summer months from schedule data, defaulting to June-September.
     let default_summer: BTreeSet<u8> = (6..=9).collect();
+    let mut parse_warnings: Vec<String> = Vec::new();
     let detection_result = detect_summer_months(
         &weekday_sched,
         &weekend_sched,
         &root,
         &energy_rates_by_period,
+        &mut parse_warnings,
     );
     let summer_months = detection_result
         .as_ref()
         .map(|d| d.summer_months.clone())
         .unwrap_or_else(|| default_summer.clone());
-
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if let Some(ref det) = detection_result {
-        tracing::debug!(
-            hemisphere_detection_method = det.method,
-            detected_hemisphere = det.hemisphere,
-            hemisphere_diff_count = det.diff_count,
-            ?summer_months,
-            "URDB hemisphere detection result"
-        );
-    }
 
     #[cfg(feature = "observe")]
     {
@@ -1157,7 +1148,6 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     let seasonal_split = if has_seasonal {
         let split_result = seasonal_split_from_months(&summer_months);
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if summer_months.is_empty() {
             debug_assert!(
                 split_result
@@ -1211,6 +1201,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         rtp_schedule: None,
         cpp_config: None,
         ev_tou_period_name: None,
+        parse_warnings,
     };
 
     tariff.validate().map_err(|e| UrdbParseError {
@@ -1843,7 +1834,7 @@ mod tests {
             }
         }
         let weekend = weekday.clone();
-        let result = detect_by_december_reference(&weekday, &weekend);
+        let result = detect_by_december_reference(&weekday, &weekend, &mut Vec::new());
 
         assert!(result.is_some());
         let det = result.unwrap();
@@ -1870,7 +1861,7 @@ mod tests {
         let weekend = weekday.clone();
         let root = empty_root();
         let rates = vec![0.0, 0.10, 0.0, 0.25];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(result.is_some(), "should find seasonal variation");
         let det = result.unwrap();
@@ -1899,7 +1890,7 @@ mod tests {
         let weekend = weekday.clone();
         let root = empty_root();
         let rates = vec![0.0, 0.10, 0.0, 0.25];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(result.is_some());
         let det = result.unwrap();
@@ -1925,7 +1916,7 @@ mod tests {
         let weekend = weekday.clone();
         let root = empty_root();
         let rates = vec![0.0, 0.10, 0.0, 0.25];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(result.is_some());
         let det = result.unwrap();
@@ -1949,7 +1940,7 @@ mod tests {
         let weekday: Schedule = vec![vec![1; 24]; 12];
         let weekend = weekday.clone();
         let rates = vec![0.0, 0.10];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(
             result.is_some(),
@@ -1972,7 +1963,7 @@ mod tests {
         let weekend = weekday.clone();
         let root = empty_root();
         let rates = vec![0.0, 0.10];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(
             result.is_none(),
@@ -2008,7 +1999,7 @@ mod tests {
         }
         let weekend = weekday.clone();
         let rates = vec![0.0, 0.10, 0.0, 0.25];
-        let result = detect_summer_months(&weekday, &weekend, &root, &rates);
+        let result = detect_summer_months(&weekday, &weekend, &root, &rates, &mut Vec::new());
 
         assert!(result.is_some());
         let det = result.unwrap();
@@ -2163,6 +2154,49 @@ mod tests {
             err.message.contains("non-contiguous"),
             "error should mention non-contiguous: {}",
             err.message
+        );
+    }
+
+    /// A URDB document whose geographic metadata contradicts its
+    /// schedule-based hemisphere detection reports one parse warning on the
+    /// tariff, so every run the tariff is attached to reports it.
+    #[test]
+    fn contradicting_hemisphere_is_a_tariff_parse_warning() {
+        // The schedule implies a southern-hemisphere summer (October through
+        // March on the higher-rate period); the latitude declares the
+        // northern one.
+        let mut weekday: Vec<Vec<u64>> = Vec::with_capacity(12);
+        for m in 1..=12u8 {
+            if (10..=12).contains(&m) || (1..=3).contains(&m) {
+                weekday.push(vec![3; 24]);
+            } else {
+                weekday.push(vec![1; 24]);
+            }
+        }
+        let json = serde_json::json!({
+            "latitude": 40.0,
+            "energyweekdayschedule": weekday,
+            "energyweekendschedule": weekday,
+            "energyratestructure": [
+                [{"rate": 0.0}],
+                [{"rate": 0.10}],
+                [],
+                [{"rate": 0.25}]
+            ]
+        })
+        .to_string();
+
+        let tariff = parse(&json).expect("the contradicting document parses");
+        assert_eq!(
+            tariff.parse_warnings.len(),
+            1,
+            "one parse warning for the contradiction, got {:?}",
+            tariff.parse_warnings
+        );
+        assert!(
+            tariff.parse_warnings[0].contains("contradicts"),
+            "the warning names the contradiction: {}",
+            tariff.parse_warnings[0]
         );
     }
 }

@@ -13,12 +13,14 @@
 
 use hares_physics::film_coefficients::tarp_h_natural;
 use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_position};
-use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlots, ZoneId};
+use hares_types::{
+    DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, HaresError, PortSlots, ZoneId,
+};
 use nalgebra::DVector;
 
 use super::CoupledState;
 use super::ThermalSolver;
-use super::config::{FilmCoefficientModel, StateSpaceWiring};
+use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
 
 impl ThermalSolver {
@@ -190,6 +192,10 @@ impl ThermalSolver {
     /// or `last_coupled_state`).
     ///
     /// * `site_elevation_m` — site elevation in meters
+    ///
+    /// The input screen is unconditional: `internal_gains_w` must be
+    /// non-negative and plausible for a single-family residence (< 5 kW
+    /// sensible); a violation is a typed error in every build profile.
     #[allow(clippy::too_many_arguments)]
     pub fn autosize_capacity_cooling(
         &self,
@@ -200,14 +206,14 @@ impl ThermalSolver {
         site_lon_deg: f64,
         site_elevation_m: f64,
         internal_gains_w: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
         use chrono::{Datelike, FixedOffset, TimeZone};
 
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
         let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
 
         // ── Build design-condition input vector ────────────────────────────
@@ -320,32 +326,30 @@ impl ThermalSolver {
 
         // ── Invariant: cooling internal gains must be non-negative and
         //    plausible for a single-family residence (< 5 kW sensible) ──
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                internal_gains_w >= 0.0,
-                "autosize_capacity_cooling: internal_gains_w ({}) must be non-negative",
-                internal_gains_w
-            );
-            assert!(
-                internal_gains_w < 5_000.0,
-                "autosize_capacity_cooling: internal_gains_w ({}) implausibly large \
-                 for a single-family residence (≥ 5 kW)",
-                internal_gains_w
-            );
+        // Unconditional in every build profile: the gains are caller input.
+        if internal_gains_w < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "autosize_capacity_cooling: internal_gains_w ({internal_gains_w}) must be non-negative"
+            )));
+        }
+        if internal_gains_w >= 5_000.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "autosize_capacity_cooling: internal_gains_w ({internal_gains_w}) implausibly large \
+                 for a single-family residence (>= 5 kW)"
+            )));
         }
 
         // ── Steady-state capacity via DC gain ─────────────────────────────
         // Compute the zone temperature at steady state with zero HVAC input
         // but all other design inputs (outdoor temp, solar gains) present.
-        self.dc_gain_autosize(
+        Ok(self.dc_gain_autosize(
             &mut u_design,
             target_c,
             zone,
             input_idx,
             output_idx,
             "autosize_capacity_cooling",
-        )
+        ))
     }
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
@@ -605,18 +609,6 @@ impl ThermalSolver {
             let above_hotter = t_surface > t_zone;
             let h_tarp = tarp_h_natural(inj.tilt_deg, delta_t_k, above_hotter);
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if !(0.5..=10.0).contains(&h_tarp) {
-                    tracing::warn!(
-                        h_tarp,
-                        delta_t_k,
-                        tilt_deg = inj.tilt_deg,
-                        "interior h_conv outside physically plausible range [0.5, 10.0] W/(m²·K)"
-                    );
-                }
-            }
-
             let static_r_film = self.per_boundary_static_r_film[i];
             let h_static = if static_r_film > 1e-12 {
                 1.0 / static_r_film
@@ -665,12 +657,16 @@ impl ThermalSolver {
     /// `solve_ideal_capacity_for_target` sees current-step data.
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
-    pub(super) fn prepare_inputs_inner(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+    pub(super) fn prepare_inputs_inner(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+    ) -> Result<(), HaresError> {
         // Clear per-step degradation tracking — a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
         let saved_ext_temps = self.exterior_surface_temps.clone();
-        let (u, _latent) = self.build_input_vector(ports, env);
+        let (u, _latent) = self.build_input_vector(ports, env)?;
         self.exterior_surface_temps = saved_ext_temps;
 
         self.build_coupling();
@@ -691,6 +687,7 @@ impl ThermalSolver {
         self.last_u.clone_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
+        Ok(())
     }
 
     /// Phase 2: rebuild u from post-dispatch ports, rebuild coupling, run ZOH integration.
@@ -699,8 +696,8 @@ impl ThermalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
         out: &mut DomainUpdate,
-    ) {
-        let (u, latent_by_zone) = self.build_input_vector(ports, env);
+    ) -> Result<(), HaresError> {
+        let (u, latent_by_zone) = self.build_input_vector(ports, env)?;
 
         self.build_coupling();
 
@@ -1014,7 +1011,7 @@ impl ThermalSolver {
         // balance exact.
         //
         // Computed in every build profile: the dwelling's
-        // check_invariants runs unconditionally.
+        // check_step_invariants consumes the terms unconditionally.
         {
             self.thermal_balance_q_gains.clear();
             self.thermal_balance_q_loss = 0.0;
@@ -1210,6 +1207,7 @@ impl ThermalSolver {
         self.u_buf = u;
 
         self.format_domain_update(&y_next, latent_by_zone, out);
+        Ok(())
     }
 
     /// Convenience: calls both phases with the same ports/env.
@@ -1219,9 +1217,9 @@ impl ThermalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
         out: &mut DomainUpdate,
-    ) {
-        self.prepare_inputs_inner(ports, env);
-        self.integrate_inner(ports, env, out);
+    ) -> Result<(), HaresError> {
+        self.prepare_inputs_inner(ports, env)?;
+        self.integrate_inner(ports, env, out)
     }
 
     // ── Design-day autosizing (T-0192) ──────────────────────────────────────────
@@ -1253,7 +1251,7 @@ impl ThermalSolver {
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
         self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0, 0.0)
     }
 
@@ -1286,7 +1284,7 @@ impl ThermalSolver {
         site_lon_deg: f64,
         site_elevation_m: f64,
         internal_gains_w: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
         let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
         self.run_design_day(
             zone,
@@ -1320,12 +1318,12 @@ impl ThermalSolver {
         solar_data: Option<&[Option<HourlySolar>]>,
         internal_gains_w: f64,
         site_elevation_m: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
         let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
 
         let dt_s = self.dt_s;
@@ -1494,25 +1492,24 @@ impl ThermalSolver {
             }
         }
 
-        // ── Invariant: peak load must be non-negative and finite ───────────
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                peak_load.is_finite() && peak_load >= 0.0,
-                "design-day autosizing: peak_load ({}) must be non-negative and finite",
-                peak_load
-            );
-            assert!(
-                internal_gains_w >= 0.0,
-                "design-day autosizing: internal_gains_w ({}) must be non-negative",
-                internal_gains_w
-            );
-            assert!(
-                internal_gains_w < 5_000.0,
-                "design-day autosizing: internal_gains_w ({}) implausibly large \
-                 for a single-family residence (≥ 5 kW)",
-                internal_gains_w
-            );
+        // ── Invariant: peak load must be non-negative and finite; the gains
+        //    input must be in range. Unconditional in every build profile:
+        //    the peak is a solver product and the gains are caller input. ──
+        if !peak_load.is_finite() || peak_load < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: peak_load ({peak_load}) must be non-negative and finite"
+            )));
+        }
+        if internal_gains_w < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: internal_gains_w ({internal_gains_w}) must be non-negative"
+            )));
+        }
+        if internal_gains_w >= 5_000.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: internal_gains_w ({internal_gains_w}) implausibly large \
+                 for a single-family residence (>= 5 kW)"
+            )));
         }
 
         // ── Telemetry ──────────────────────────────────────────────────────
@@ -1541,7 +1538,7 @@ impl ThermalSolver {
             );
         }
 
-        peak_load
+        Ok(peak_load)
     }
 }
 

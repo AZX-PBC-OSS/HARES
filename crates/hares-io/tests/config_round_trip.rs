@@ -555,7 +555,18 @@ fn sample_generator_config() -> GeneratorConfig {
         eta_jacket_water: None,
         eta_lube_oil: None,
         eta_exhaust: None,
-        efficiency_curve_points: None,
+        // A curve config without points is a typed error (the hardcoded
+        // fallback curve is gone), so the sample carries explicit points.
+        efficiency_curve_points: Some(vec![
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ]),
         efficiency_type: None,
         delta_kw_per_s: Some(1.0),
         capacity_min_kw: Some(2.0),

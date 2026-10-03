@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
@@ -10,7 +9,7 @@ use hares_physics::infiltration::{
 };
 #[cfg(feature = "observe")]
 use hares_physics::infiltration::{compute_natural_ventilation_cw, wind_incidence_angle_deg};
-use hares_types::{EnvironmentState, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ZoneId};
 
 use super::H_FG_J_PER_KG;
 use super::config::{InfiltrationMethod, ThermalSolverConfig};
@@ -99,13 +98,15 @@ pub(crate) struct InfiltrationCoupling {
 /// infiltration rate is adjusted per ASHRAE 152 §9.3.
 ///
 /// Returns per-zone `InfiltrationCoupling` structs for semi-implicit treatment.
+/// The air density screen is unconditional: non-finite density from bad weather
+/// pressure or temperature is a typed error in every build profile.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
     env: &EnvironmentState,
     hvac_active: bool,
     latent_out: &mut HashMap<ZoneId, f64>,
     couplings: &mut Vec<InfiltrationCoupling>,
-) {
+) -> Result<(), HaresError> {
     couplings.clear();
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
@@ -113,8 +114,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
     // moist_air_density_kg_m3 inverts ASHRAE HOF 2021 Ch.1 Eq.28 specific volume
     // (v = R_da·T·(1+W/ε)/p [m³/kg_da]), so it already yields kg_da/m³.
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    check_air_density_plausible(rho, "infiltration mass flow");
+    check_air_density_plausible(rho, "infiltration mass flow")?;
 
     for zone in &env.zones {
         // Look up per-zone infiltration; default to zero ACH if not configured.
@@ -327,6 +327,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,7 +445,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let coupling = &couplings[0];
@@ -495,7 +497,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let flow = couplings[0].raw_inf_m3_s;
@@ -541,7 +544,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let flow = couplings[0].raw_inf_m3_s;
@@ -589,7 +593,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let flow = couplings[0].raw_inf_m3_s;
         let ela_cm2 = ela_m2 * 10_000.0;
@@ -629,7 +634,8 @@ mod tests {
 
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
-        apply_infiltration_and_ventilation(&config, &env, true, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, true, &mut latent, &mut couplings)
+            .unwrap();
         let adjusted_flow = couplings[0].raw_inf_m3_s;
 
         // Hand-calculated expected value from ASHRAE 152 §9.3 pressurisation formula.
@@ -663,7 +669,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let flow = couplings[0].raw_inf_m3_s;
         let expected = ach * volume_m3 / 3600.0;
@@ -717,7 +724,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let nat_flow = couplings[0].nat_flow_m3_s;
 
@@ -763,7 +771,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let nat_flow = couplings[0].nat_flow_m3_s;
         assert!(
@@ -801,7 +810,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 2);
         assert!(
@@ -854,7 +864,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let q_latent = latent.get(&ZoneId(1)).copied().unwrap_or(0.0);
         assert!(
@@ -908,7 +919,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let c = &couplings[0];
@@ -984,7 +996,8 @@ mod tests {
             false,
             &mut latent,
             &mut couplings,
-        );
+        )
+        .unwrap();
 
         assert_eq!(couplings.len(), 1, "expected one zone coupling");
         let c = &couplings[0];
@@ -1041,7 +1054,8 @@ mod tests {
             false,
             &mut lat_bypass,
             &mut coup_bypass,
-        );
+        )
+        .unwrap();
 
         let mut lat_rated: HashMap<ZoneId, f64> = HashMap::new();
         let mut coup_rated: Vec<InfiltrationCoupling> = Vec::new();
@@ -1051,7 +1065,8 @@ mod tests {
             false,
             &mut lat_rated,
             &mut coup_rated,
-        );
+        )
+        .unwrap();
 
         let h_bypass = coup_bypass[0].h_inf_w_k;
         let h_rated = coup_rated[0].h_inf_w_k;
@@ -1099,7 +1114,8 @@ mod tests {
 
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
-        apply_infiltration_and_ventilation(&config, &env_sea, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env_sea, false, &mut latent, &mut couplings)
+            .unwrap();
         let h_inf_sea = couplings[0].h_inf_w_k;
 
         // Denver case
@@ -1114,7 +1130,8 @@ mod tests {
             false,
             &mut latent,
             &mut couplings,
-        );
+        )
+        .unwrap();
         let h_inf_denver = couplings[0].h_inf_w_k;
 
         let reduction_pct = (1.0 - h_inf_denver / h_inf_sea) * 100.0;

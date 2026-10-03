@@ -256,7 +256,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn manifest_invariant_fixtures_match_hashes() {
         let fixtures_root = project_root().join("tests/fixtures/resstock");
         let manifest_path = fixtures_root.join("manifest.sha256");

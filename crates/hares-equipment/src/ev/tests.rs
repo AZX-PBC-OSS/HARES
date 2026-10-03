@@ -9003,3 +9003,64 @@ fn commanded_vars_served_at_a_bound_binding_checkpoint_survive_restore() {
     let q_restored = restored.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
     approx_eq(q_restored, q_saved);
 }
+
+/// The Ready-By + over-rated PowerSetpoint divergence reaches the warning
+/// channel once per run: one drained warning over three violating steps, and
+/// the warn-once flag resets on init.
+#[test]
+fn ev_setpoint_above_rated_warns_once_per_run() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 12.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    let mut drained: Vec<hares_types::Warning> = Vec::new();
+    for _ in 0..3 {
+        ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+            active_power_kw: 20.0,
+            reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+        ev.drain_warnings(&mut drained);
+    }
+    assert_eq!(drained.len(), 1, "warn once per run, got {drained:?}");
+    assert!(
+        drained[0].message.contains("rated power"),
+        "the warning names the divergence: {}",
+        drained[0].message
+    );
+
+    // Re-init resets the warn-once flag: the next violating step warns again.
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 12.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_kw: 20.0,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let mut again: Vec<hares_types::Warning> = Vec::new();
+    ev.drain_warnings(&mut again);
+    assert_eq!(
+        again.len(),
+        1,
+        "a re-initialized EV warns once per run again"
+    );
+}

@@ -8,11 +8,11 @@ reject non-finite floats at. The actor-param copy has no non-finite
 guard: a NaN parameter is stored, arms the actor at seed time
 (`actor_registry.rs` reads `heating_c`/`cooling_c`/`deadband_c`/
 `hysteresis_c` with no finite check), and the failure surfaces only
-mid-simulation — a telemetry panic in debug builds (`Telemetry::set
-called with non-finite value NaN for key 'heating_setpoint_c'`), and,
-with that panic cfg-gated to debug/check_invariants builds, a silent
-never-heating actor behind a `tracing::error!` log line in release
-builds. The loud rejection must happen at the boundary that received
+mid-simulation: a telemetry write rejection (`Telemetry::set
+called with non-finite value NaN for key 'heating_setpoint_c'`,
+surfaced as a step failure), and, behind that unconditional
+step-failure screen, an actor armed with a NaN parameter that never
+heats. The loud rejection must happen at the boundary that received
 the value, with the config field named — the same contract the two
 fixed boundaries already meet.
 """

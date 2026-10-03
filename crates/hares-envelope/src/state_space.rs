@@ -208,14 +208,6 @@ impl StateSpaceModel {
                 "Gershgorin discrete spectral bound exceeds unity; system may be unstable"
             );
         }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let eye_check = DMatrix::<f64>::identity(n, n);
-            debug_assert!(
-                eye.relative_eq(&eye_check, 1e-12, 1e-12),
-                "from_discrete: M matrix must be identity"
-            );
-        }
         Ok(Self {
             a_c: None,
             b_c: None,
@@ -403,15 +395,6 @@ impl StateSpaceModel {
         // when Gershgorin flags instability — the common stable path does not need it.
 
         let m_lu = eye.clone().lu();
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let eye_check = DMatrix::<f64>::identity(n, n);
-            debug_assert!(
-                eye.relative_eq(&eye_check, 1e-12, 1e-12),
-                "from_continuous: M matrix must be identity"
-            );
-        }
 
         Ok(Self {
             a_c: Some(a_c.clone()),
@@ -629,7 +612,6 @@ impl StateSpaceModel {
         couplings: &[(usize, f64, f64)],
         d_agg: &mut [f64],
     ) {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         debug_assert!(
             self.m_is_identity,
             "step_with_identity_coupling_into: M must be identity"
@@ -786,7 +768,6 @@ impl StateSpaceModel {
         input_index: usize,
         couplings: &[(usize, f64, f64)],
     ) -> Result<f64> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         debug_assert!(
             self.m_is_identity,
             "solve_for_scalar_input_identity_coupled: M must be identity"

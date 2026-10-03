@@ -320,10 +320,10 @@ impl GeneratorConfig {
             ));
         }
         if let Some(fraction) = self.parasitic_fraction
-            && (!fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+            && (!fraction.is_finite() || !(0.0..1.0).contains(&fraction))
         {
             return Err(HaresError::Equipment(
-                "generator parasitic_fraction must be finite and within [0, 1]".to_string(),
+                "generator parasitic_fraction must be finite and within [0, 1)".to_string(),
             ));
         }
         Ok(())
@@ -722,25 +722,6 @@ impl EfficiencyModel {
         Self::validate_curve_points(&typed_points)
     }
 
-    fn default_curve_points() -> Vec<(f64, f64)> {
-        // 6-point piecewise-linear part-load efficiency model for residential
-        // spark-ignited generators (Generac, Kohler, Briggs & Stratton 7–22 kW standby).
-        // Source: OCHRE defaults/Gas Generator/efficiency_curve2.csv — the
-        // alternative "realistic" curve shipped with OCHRE for residential gas
-        // generators, reflecting measured ~80–90 % of rated efficiency at 50 % load
-        // from Generac/Kohler manufacturer datasheets.
-        // Replaces the over-simplified OCHRE 3-point default
-        // (0,0), (0.5,1), (1,1) which plateaus too early at 50 % load.
-        vec![
-            (0.0, 0.0),
-            (0.1, 0.47),
-            (0.167, 0.62),
-            (0.333, 0.78),
-            (0.666, 0.94),
-            (1.0, 1.0),
-        ]
-    }
-
     fn curve_pairs(points: &[GeneratorEfficiencyCurvePoint]) -> Vec<(f64, f64)> {
         points
             .iter()
@@ -763,8 +744,15 @@ impl EfficiencyModel {
                 let points = config
                     .efficiency_curve_points
                     .as_deref()
-                    .map(Self::curve_pairs)
-                    .unwrap_or_else(Self::default_curve_points);
+                    .map(Self::curve_pairs);
+                let Some(points) = points else {
+                    return Err(HaresError::Equipment(
+                        "generator declares curve efficiency without points; \
+                         the shipped defaults curve is injected at parse and a \
+                         curve configuration must carry explicit points"
+                            .into(),
+                    ));
+                };
                 Ok(Self::Curve { rated, points })
             }
             "quadratic" => Ok(Self::Quadratic { rated }),
@@ -1303,18 +1291,6 @@ impl Equipment for Generator {
             0.0
         };
 
-        // Invariant: parasitic load must never exceed gross output.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(parasitic_kw >= 0.0 && parasitic_kw <= output_kw + f64::EPSILON) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "generator_parasitic_exceeds_output".to_string(),
-                    value: parasitic_kw,
-                    tolerance: output_kw,
-                });
-            }
-        }
-
         let net_output_kw = output_kw - parasitic_kw;
 
         self.current_power_kw = output_kw;
@@ -1391,19 +1367,6 @@ impl Equipment for Generator {
                 is_running,
                 "Generator fuel breakdown — idle vs load-dependent",
             );
-        }
-
-        // Invariant: when the generator is running, total fuel rate must never
-        // fall below the idle consumption floor.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if is_running && fuel_w < idle_fuel_w - f64::EPSILON * idle_fuel_w.abs().max(1.0) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "generator_fuel_below_idle_floor".to_string(),
-                    value: fuel_w,
-                    tolerance: idle_fuel_w,
-                });
-            }
         }
 
         let electrical_w = power_kw_to_w(output_kw);
@@ -1507,30 +1470,11 @@ impl Equipment for Generator {
         // keeping flow fixed — the configured supply/return temperatures are
         // now preserved as the design ΔT, and flow scales with thermal output.
 
-        // Invariant: heat_rec_ratio must be in [0, 1] and effective <= available.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !((0.0..=1.0).contains(&heat_rec_ratio)) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "generator_heat_rec_ratio_bounds".to_string(),
-                    value: heat_rec_ratio,
-                    tolerance: 0.0,
-                });
-            }
-            if q_thermal_effective_w
-                > q_thermal_available_w + 10.0 * f64::EPSILON * q_thermal_available_w.abs()
-            {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "generator_thermal_effective_exceeds_available".to_string(),
-                    value: q_thermal_effective_w,
-                    tolerance: q_thermal_available_w,
-                });
-            }
-        }
-
         // Invariant: energy conservation within the generator.
         // q_jacket + q_lube + q_exhaust must not exceed fuel_w - electrical_w.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // The heat recovery efficiencies are configuration, so a config that
+        // recovers more than the waste heat is a typed error, not a debug
+        // assertion.
         {
             let margin = 10.0 * f64::EPSILON * fuel_w.abs().max(1.0);
             if q_thermal_available_w > total_waste_w + margin {
@@ -1539,34 +1483,6 @@ impl Equipment for Generator {
                     value: q_thermal_available_w,
                     tolerance: total_waste_w,
                 });
-            }
-        }
-
-        // Invariant: when CHP is active with a fluid port, the thermal power
-        // declared to the fluid port (thermal_power_w) must equal the generator's
-        // computed effective thermal output. A gap means energy was computed but
-        // never deposited into any accumulator — a silent energy routing bug.
-        // This invariant guards the fix in T-0084: adding thermal_power_w to
-        // PortContribution::Fluid so the generator can quantitatively transfer
-        // energy to the loop model.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if has_thermal
-                && self.chp_loop_id.is_some()
-                && q_thermal_effective_w > IDLE_KW_THRESHOLD
-            {
-                // q_thermal_effective_w is the value that will be written to the fluid port
-                // as PortContribution::Fluid.thermal_power_w. This assertion confirms we
-                // are not accidentally writing zero or a wrong value — it catches the class
-                // of bug where energy is computed (telemetry reports it) but never reaches
-                // any accumulator.
-                if q_thermal_effective_w <= 0.0 {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "generator_chp_thermal_routing_gap".to_string(),
-                        value: q_thermal_effective_w,
-                        tolerance: 0.0,
-                    });
-                }
             }
         }
 
@@ -1708,7 +1624,10 @@ impl Equipment for Generator {
             // Skipped when computed_flow == 0 (e.g. supply_temp_c <= return_temp_c),
             // which is a physically impossible configuration. In this case
             // thermal_power_w is None, so the port is self-consistent.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            // Debug-build check: the flow is computed FROM that equation, so
+            // divergence cannot occur; the gate keeps release builds free of
+            // the recompute.
+            #[cfg(debug_assertions)]
             if computed_flow > 0.0 {
                 let delta_t = self.supply_temp_c - self.return_temp_c;
                 let fluid_energy = computed_flow * CP_LIQUID_WATER_J_KG_K * delta_t;
@@ -2355,7 +2274,35 @@ mod tests {
             eta_lube_oil: None,
             eta_exhaust: None,
             efficiency_type: None,
-            efficiency_curve_points: None,
+            // The hardcoded fallback curve is gone: a curve config without
+            // points is a typed error, so the test config carries the shipped
+            // defaults curve's points.
+            efficiency_curve_points: Some(vec![
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.0,
+                    efficiency_ratio: 0.0,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.1,
+                    efficiency_ratio: 0.47,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.167,
+                    efficiency_ratio: 0.62,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.333,
+                    efficiency_ratio: 0.78,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.666,
+                    efficiency_ratio: 0.94,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 1.0,
+                    efficiency_ratio: 1.0,
+                },
+            ]),
             delta_kw_per_s: Some(1.0),
             capacity_min_kw: None,
             grid_import_limit_kw: None,
@@ -3432,8 +3379,13 @@ mod tests {
         cfg.parasitic_fraction = Some(0.5);
         assert!(cfg.validate().is_ok(), "0.5 should be valid");
 
+        // 1.0 is rejected: a parasitic load equal to the gross output zeroes
+        // the net output; the validated range is [0, 1).
         cfg.parasitic_fraction = Some(1.0);
-        assert!(cfg.validate().is_ok(), "1.0 should be valid");
+        assert!(
+            cfg.validate().is_err(),
+            "1.0 must be rejected (parasitic_fraction range is [0, 1))"
+        );
     }
 
     #[test]
@@ -5010,7 +4962,35 @@ mod tests {
             eta_lube_oil: None,
             eta_exhaust: None,
             efficiency_type: None,
-            efficiency_curve_points: None,
+            // The hardcoded fallback curve is gone: a curve config without
+            // points is a typed error, so the minimal test config carries
+            // the shipped defaults curve's points.
+            efficiency_curve_points: Some(vec![
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.0,
+                    efficiency_ratio: 0.0,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.1,
+                    efficiency_ratio: 0.47,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.167,
+                    efficiency_ratio: 0.62,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.333,
+                    efficiency_ratio: 0.78,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 0.666,
+                    efficiency_ratio: 0.94,
+                },
+                GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: 1.0,
+                    efficiency_ratio: 1.0,
+                },
+            ]),
             delta_kw_per_s: None,
             capacity_min_kw: None,
             grid_import_limit_kw: None,

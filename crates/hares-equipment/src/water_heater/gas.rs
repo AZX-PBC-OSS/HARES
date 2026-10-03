@@ -15,7 +15,7 @@ use hares_types::{
     TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
+#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -299,7 +299,7 @@ impl GasWH {
         let c = config.require_typed::<GasWaterHeaterConfig>("Gas Water Heater")?;
         c.validate()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         if c.zone_id.is_none() && c.zone_type.is_some() {
             warn!(
                 water_heater = %config.name,
@@ -582,8 +582,9 @@ impl Equipment for GasWH {
             injections
         };
 
-        // Conservation invariant: pilot thermal power must equal sum of routed components.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Conservation invariant: pilot thermal power must equal sum of routed
+        // components. Debug-build check: the split is `p f + p (1 - f)`.
+        #[cfg(debug_assertions)]
         {
             let expected = pilot_heat_to_water_w + pilot_heat_to_ambient_w;
             let actual = self.pilot_power_w;

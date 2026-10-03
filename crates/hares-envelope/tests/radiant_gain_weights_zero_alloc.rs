@@ -247,14 +247,18 @@ fn radiant_gain_weight_distribution_zero_allocations() {
     };
 
     // Warm-up: let any lazy initialization in the solver fire.
-    solver.resolve(&ports, &env, Duration::from_secs(60), &mut out);
+    solver
+        .resolve(&ports, &env, Duration::from_secs(60), &mut out)
+        .unwrap();
 
     // The per-thread counter cannot be reset, so the hot loop is counted as
     // a delta between two reads on this thread.
     let before = thread_allocations().expect("the test installs the counting allocator");
 
     for _ in 0..100 {
-        solver.resolve(&ports, &env, Duration::from_secs(60), &mut out);
+        solver
+            .resolve(&ports, &env, Duration::from_secs(60), &mut out)
+            .unwrap();
     }
 
     let after = thread_allocations().expect("the test installs the counting allocator");

@@ -195,10 +195,9 @@ fn build_control_signal(
         }
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert_no_nan_inf_in_signal(&signal);
-    }
+    // A NaN or infinite action value survives clipping: reject it at the
+    // boundary with a value error, in every build profile.
+    assert_no_nan_inf_in_signal(&signal);
 
     Ok(signal)
 }
@@ -308,8 +307,8 @@ fn map_action_to_signals(
     Ok(signals)
 }
 
-/// Assert that no NaN or infinite values are present in a [`ControlSignal`].
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Reject a signal holding a NaN or infinite value: a NaN action survives
+/// clipping, so the finiteness screen is a typed error in every build.
 fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
     let check = |name: &str, v: f64| {
         assert!(
@@ -439,7 +438,7 @@ pub fn batch_step_py(
     // Release GIL -- Rayon threads run step_core()/observation() without
     // touching Python. Both methods use only Mutex<Dwelling> internally.
     let _guard = PanicHookGuard::new();
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         assert!(
             panic_hook::is_installed(),

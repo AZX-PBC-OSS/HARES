@@ -14,7 +14,8 @@ use hares_equipment::{
 };
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_types::{
-    BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64,
+    BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
+    parse_trimmed_f64,
 };
 use serde_json::{Map, Value};
 use tracing::warn;
@@ -23,7 +24,7 @@ use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::normalize_draw_profile;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
-use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
+use crate::schedule::{ColumnAggregation, ScheduleTimeSeries, resolve_occupancy_column};
 
 // HERS Reference Home default thermostat setpoints (ASHRAE 90.2).
 pub(super) const HERS_HEATING_SETPOINT_C: f64 = 20.0;
@@ -41,7 +42,15 @@ enum ScheduleCategory {
     EventWindow,
     Setpoint,
     Occupancy,
-    Ignore,
+    /// Read by `inject_water_heater_schedule_columns` (the DHW draw and the
+    /// mains temperature), never through `mapping_by_equipment`.
+    WaterHeater,
+    /// A column no code reads; the reason states why the engine does not
+    /// consume it, so a column the mapping table should know about is never
+    /// silently ignored.
+    NotUsed {
+        reason: &'static str,
+    },
 }
 
 struct ColumnMapping {
@@ -192,52 +201,128 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
     ColumnMapping {
         csv_column: "extra_refrigerator",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "HARES models one refrigerator, the `refrigerator` column; \
+                     a second unit's load is not modelled separately",
+        },
     },
     ColumnMapping {
         csv_column: "clothes_dryer_exhaust",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the clothes dryer's exhaust air heat is not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "lighting_exterior_holiday",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "holiday lighting is not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "plug_loads_vehicle",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "vehicle charging is modelled by the EV equipment, whose \
+                     schedule comes from the ev_driver actor's trip model",
+        },
     },
     ColumnMapping {
         csv_column: "battery",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the battery follows its own control strategy, not a schedule",
+        },
     },
     ColumnMapping {
         csv_column: "vacancy",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "water_heater_operating_mode",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the water heater's operating mode follows its own controller",
+        },
     },
     ColumnMapping {
         csv_column: "power_outage",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "no_space_heating",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "no_space_cooling",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
+    },
+    // Water heater: read by inject_water_heater_schedule_columns, which no
+    // table entry declared before.
+    ColumnMapping {
+        csv_column: "hot_water_fixtures",
+        equipment_name: "Water Heating",
+        category: ScheduleCategory::WaterHeater,
+    },
+    ColumnMapping {
+        csv_column: "hot_water_mains_temperature",
+        equipment_name: "Water Heating",
+        category: ScheduleCategory::WaterHeater,
+    },
+    // Wet appliances draw their own hot water on the DHW demand loop during
+    // the water-draw phases of the cycles the dishwasher and clothes_washer
+    // event-window columns schedule; consuming the hot-water column as well
+    // would count the draw twice.
+    ColumnMapping {
+        csv_column: "hot_water_dishwasher",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "the dishwasher draws its own hot water on the DHW demand \
+                     loop during the draw phases of the `dishwasher` column's \
+                     cycles; consuming this column as well would count the \
+                     draw twice",
+        },
+    },
+    ColumnMapping {
+        csv_column: "hot_water_clothes_washer",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "the clothes washer draws its own hot water on the DHW \
+                     demand loop during the draw phases of the \
+                     `clothes_washer` column's cycles; consuming this column \
+                     as well would count the draw twice",
+        },
+    },
+    // Charging and driving times come from the ev_driver actor's trip model,
+    // not an OpenStudio-HPXML schedule.
+    ColumnMapping {
+        csv_column: "electric_vehicle_charging",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "EV charging times come from the ev_driver actor's trip \
+                     model, not an OpenStudio-HPXML schedule",
+        },
+    },
+    ColumnMapping {
+        csv_column: "electric_vehicle_discharging",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "EV discharging (driving) times come from the ev_driver \
+                     actor's trip model, not an OpenStudio-HPXML schedule",
+        },
     },
 ];
 
@@ -345,20 +430,9 @@ pub(crate) fn load_default_profiles(
 
     // Invariant: at least the 'Occupancy' schedule must have non-identical
     // weekday and weekend fraction arrays. Identical arrays mean the data
-    // was imported verbatim from the ANSI 301 source without weekend derivation.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        if let Some(occ) = profiles.get("Occupancy")
-            && occ.weekday_fractions == occ.weekend_fractions
-        {
-            tracing::error!(
-                "Occupancy weekday and weekend schedule fractions are identical; \
-                     the default CSV has not been updated with distinct weekend patterns. \
-                     ASHRAE 90.2/HERS Reference Home requires distinct weekday/weekend occupancy."
-            );
-        }
-    }
-
+    // was imported verbatim from the ANSI 301 source without weekend
+    // derivation; the shipped default schedule CSV is pinned by the unit
+    // test `shipped_default_occupancy_has_distinct_weekend`.
     profiles
 }
 
@@ -415,6 +489,7 @@ pub fn inject_schedule_into_specs(
     defaults_path: Option<&Path>,
     defaults: &DefaultsStore,
     foundation_name: Option<&str>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let mut csv_col_map: HashMap<String, usize> = schedule
         .column_names
@@ -455,16 +530,20 @@ pub fn inject_schedule_into_specs(
         }
     }
 
-    // Invariant: check for unmapped CSV columns before any processing.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Invariant: check for unknown CSV columns before any processing. A
+    // column neither the mapping table nor the environment reads is reported
+    // once per column as a `Warning`, so a column the mapping table should
+    // know about is never silently ignored.
     {
-        let unmapped = find_unmapped_csv_columns(&csv_col_map);
-        for col_name in &unmapped {
-            warn!(
-                csv_column = %col_name,
-                "schedule CSV column has no entry in COLUMN_MAPPINGS; \
-                 this column will be silently ignored during schedule resolution"
-            );
+        let unknown = find_unknown_schedule_columns(&csv_col_map);
+        for col_name in &unknown {
+            warnings.push(Warning::new(
+                "schedule",
+                format!(
+                    "schedule CSV column '{col_name}' has no entry in COLUMN_MAPPINGS \
+                     and the environment does not read it; HARES does not read it"
+                ),
+            ));
         }
     }
 
@@ -490,40 +569,7 @@ pub fn inject_schedule_into_specs(
     // Invariant: if HPXML-derived pool/spa specs have annual energy but the
     // schedule CSV also has pool/spa columns, the CSV fractions will override
     // the HPXML extension fractions (while HPXML annual energy is used for
-    // max_kW scaling). This is an intentional precedence, but the combination
-    // may produce unexpected results. Warn when both sources are present.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let pool_source = ["Pool Pump", "Pool Heater", "Spa Pump", "Spa Heater"];
-        let csv_to_eq: [(&str, &str); 4] = [
-            ("pool_pump", "Pool Pump"),
-            ("pool_heater", "Pool Heater"),
-            ("permanent_spa_pump", "Spa Pump"),
-            ("permanent_spa_heater", "Spa Heater"),
-        ];
-        for spec in specs.iter() {
-            if !pool_source.contains(&spec.name.as_str()) {
-                continue;
-            }
-            for (csv_col, eq_name) in &csv_to_eq {
-                if eq_name != &spec.name.as_str() {
-                    continue;
-                }
-                let csv_key = normalize_schedule_col_name(csv_col);
-                if csv_col_map.contains_key(&csv_key) {
-                    tracing::warn!(
-                        equipment = %spec.name,
-                        csv_column = csv_col,
-                        "HPXML provides '{eq_name}' equipment AND schedule CSV defines \
-                         column '{csv_col}': CSV schedule fractions will override \
-                         HPXML <extension> fractions while HPXML annual energy drives \
-                         max kW. Verify this combination is intentional to avoid \
-                         unexpected load profiles."
-                    );
-                }
-            }
-        }
-    }
+    // max_kW scaling). This is the documented precedence; no warning.
 
     for spec in specs.iter_mut() {
         // Ventilation Fan: constant power from equipment properties, not schedule CSV.
@@ -547,7 +593,8 @@ pub fn inject_schedule_into_specs(
             ScheduleCategory::Occupancy => {
                 inject_occupancy_schedule(spec, schedule, &profiles);
             }
-            ScheduleCategory::Setpoint | ScheduleCategory::Ignore => {}
+            ScheduleCategory::Setpoint | ScheduleCategory::WaterHeater => {}
+            ScheduleCategory::NotUsed { .. } => {}
         }
     }
 
@@ -1381,7 +1428,10 @@ fn ensure_specs_for_csv_columns(
     for mapping in COLUMN_MAPPINGS {
         if matches!(
             mapping.category,
-            ScheduleCategory::Ignore | ScheduleCategory::Occupancy | ScheduleCategory::Setpoint
+            ScheduleCategory::NotUsed { .. }
+                | ScheduleCategory::Occupancy
+                | ScheduleCategory::Setpoint
+                | ScheduleCategory::WaterHeater
         ) {
             continue;
         }
@@ -1427,23 +1477,26 @@ fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
     }
 }
 
-/// Return the set of CSV column names that have no entry in COLUMN_MAPPINGS.
+/// Return the set of CSV column names that are neither in `COLUMN_MAPPINGS`
+/// (any category, so `NotUsed` entries keep their columns known) nor the
+/// occupancy column the environment resolves.
 ///
-/// Only active under `#[cfg(any(debug_assertions, feature = "check_invariants"))]`.
-/// The caller is responsible for logging a warning for each unmapped column.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub(crate) fn find_unmapped_csv_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
-    let mut unmapped = Vec::new();
-    for col_name in csv_col_map.keys() {
-        let normalized = normalize_schedule_col_name(col_name);
-        let is_mapped = COLUMN_MAPPINGS
-            .iter()
-            .any(|m| normalize_schedule_col_name(m.csv_column) == normalized);
-        if !is_mapped {
-            unmapped.push(col_name.clone());
-        }
-    }
-    unmapped
+/// The caller reports one `Warning` per returned column.
+pub(crate) fn find_unknown_schedule_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
+    let occupancy_column = resolve_occupancy_column(csv_col_map).map(|(name, _)| name);
+    let mut unknown: Vec<String> = csv_col_map
+        .keys()
+        .filter(|col_name| {
+            let normalized = normalize_schedule_col_name(col_name);
+            let is_mapped = COLUMN_MAPPINGS
+                .iter()
+                .any(|m| normalize_schedule_col_name(m.csv_column) == normalized);
+            !is_mapped && occupancy_column.as_deref() != Some(col_name.as_str())
+        })
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
 }
 
 /// Gated invariant: every HVAC equipment spec must have a setpoint source.
@@ -1495,9 +1548,11 @@ mod tests {
         ConfigPayload, ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
         HeatPumpWaterHeaterConfig, HvacSetpointConfig, TanklessWaterHeaterConfig,
     };
-    use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
+    use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig, Warning};
     use serde_json::{Map, Value};
     use tempfile::tempdir;
+
+    use super::find_unknown_schedule_columns;
 
     fn find_setpoint_in_json<'a>(
         data: &'a serde_json::Map<String, Value>,
@@ -1725,6 +1780,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1749,6 +1805,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1777,6 +1834,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1803,6 +1861,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1845,6 +1904,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1863,6 +1923,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
@@ -1889,6 +1950,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1934,6 +1996,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1963,6 +2026,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1987,6 +2051,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2101,6 +2166,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2348,6 +2414,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2438,6 +2505,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2487,6 +2555,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
@@ -2565,6 +2634,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
@@ -2620,6 +2690,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2829,6 +2900,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2992,6 +3064,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3021,7 +3094,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn invariant_detects_missing_heating_setpoint_source() {
         use hares_equipment::hvac::heat_pump_config::{HeatPumpCommonConfig, HeatPumpHeaterConfig};
 
@@ -3215,6 +3287,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3277,6 +3350,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3336,6 +3410,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3380,6 +3455,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3414,6 +3490,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3474,6 +3551,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3541,6 +3619,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3634,6 +3713,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject should succeed");
 
@@ -3702,13 +3782,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_detects_unknown_column() {
         let mut column_index = HashMap::new();
         column_index.insert("unknown_column".to_string(), 0);
         column_index.insert("microwave".to_string(), 1);
 
-        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        let unmapped = super::find_unknown_schedule_columns(&column_index);
         assert!(
             unmapped.contains(&"unknown_column".to_string()),
             "unknown_column should be flagged as unmapped; got {unmapped:?}"
@@ -3720,13 +3799,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_returns_empty_when_all_mapped() {
         let mut column_index = HashMap::new();
         column_index.insert("cooking_range".to_string(), 0);
         column_index.insert("refrigerator".to_string(), 1);
 
-        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        let unmapped = super::find_unknown_schedule_columns(&column_index);
         assert!(unmapped.is_empty(), "all columns mapped; got {unmapped:?}");
     }
 
@@ -3774,6 +3852,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3844,6 +3923,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3864,6 +3944,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Unfinished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3884,6 +3965,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3907,6 +3989,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Crawlspace"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3931,6 +4014,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3970,6 +4054,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -4014,6 +4099,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -4029,6 +4115,127 @@ mod tests {
                 .count(),
             1,
             "lighting_basement must not be duplicated by the interior copy"
+        );
+    }
+
+    /// Builds the CSV column map from a schedule file's header line.
+    fn header_map(path: &std::path::Path) -> HashMap<String, usize> {
+        let header = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let line = header
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("{} has a header line", path.display()));
+        line.split(',')
+            .enumerate()
+            .map(|(i, name)| (name.trim().trim_matches('"').to_string(), i))
+            .collect()
+    }
+
+    /// Every schedule column in the fixture tree (ResStock, parity and the
+    /// BEopt example) is read by the engine or stated as not used: the
+    /// unknown-column check returns nothing for all of them.
+    #[test]
+    fn fixture_schedule_columns_are_all_known() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let mut schedule_files: Vec<std::path::PathBuf> = Vec::new();
+        let resstock = root.join("tests/fixtures/resstock");
+        if resstock.is_dir() {
+            for year in std::fs::read_dir(&resstock).expect("resstock years") {
+                let year = year.expect("year entry").path();
+                if !year.is_dir() {
+                    continue;
+                }
+                for bldg in std::fs::read_dir(&year).expect("resstock buildings") {
+                    let bldg = bldg.expect("bldg entry").path();
+                    let schedules = bldg.join("in.schedules.csv");
+                    if schedules.is_file() {
+                        schedule_files.push(schedules);
+                    }
+                }
+            }
+        }
+        let parity = root.join("tests/fixtures/parity");
+        if parity.is_dir() {
+            for case in std::fs::read_dir(&parity).expect("parity cases") {
+                let case = case.expect("case entry").path();
+                let schedule = case.join("schedule.csv");
+                if schedule.is_file() {
+                    schedule_files.push(schedule);
+                }
+            }
+        }
+        let beopt = root.join("data/examples/BEopt_example_schedule.csv");
+        if beopt.is_file() {
+            schedule_files.push(beopt);
+        }
+        assert!(
+            schedule_files.len() >= 40,
+            "the fixture census must find the schedule files, found {}",
+            schedule_files.len()
+        );
+
+        for file in &schedule_files {
+            let map = header_map(file);
+            let unknown = find_unknown_schedule_columns(&map);
+            assert!(
+                unknown.is_empty(),
+                "{} carries unknown schedule columns {unknown:?}",
+                file.display()
+            );
+        }
+    }
+
+    /// An unknown column warns through the collector, naming the column, and
+    /// does not fail the injection.
+    #[test]
+    fn unknown_schedule_column_warns_naming_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv");
+        let csv = std::fs::read_to_string(&fixture).expect("read the parity schedule");
+        let rows: Vec<String> = csv
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 0 {
+                    format!("{line},lighting_interor")
+                } else {
+                    format!("{line},0.0")
+                }
+            })
+            .collect();
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("schedule.csv");
+        std::fs::write(&path, rows.join("\n")).expect("write modified schedule");
+
+        let mut schedule = crate::parse_schedule_csv(&path, &[], None, None)
+            .expect("the modified parity schedule parses");
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+        let mut warnings: Vec<Warning> = Vec::new();
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut warnings,
+        )
+        .expect("an unknown column is a warning, not an error");
+
+        let schedule_warnings: Vec<&Warning> = warnings
+            .iter()
+            .filter(|w| w.source.as_ref() == "schedule")
+            .collect();
+        assert_eq!(
+            schedule_warnings.len(),
+            1,
+            "one schedule warning for the one unknown column, got {warnings:?}"
+        );
+        assert!(
+            schedule_warnings[0].message.contains("lighting_interor"),
+            "the warning names the column: {}",
+            schedule_warnings[0].message
         );
     }
 }

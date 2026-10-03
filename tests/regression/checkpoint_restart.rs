@@ -398,7 +398,9 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         ))
         .unwrap();
     let mut reference_thermostat = actors::IdealThermostat::new("HVAC");
-    reference_thermostat.set_override(actors::OverrideState::heating(22.0));
+    reference_thermostat
+        .set_override(actors::OverrideState::heating(22.0))
+        .expect("valid override");
     dwelling_ref
         .add_actor(Box::new(reference_thermostat))
         .unwrap();
@@ -467,7 +469,9 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         ))
         .unwrap();
     let mut checkpoint_thermostat = actors::IdealThermostat::new("HVAC");
-    checkpoint_thermostat.set_override(actors::OverrideState::heating(22.0));
+    checkpoint_thermostat
+        .set_override(actors::OverrideState::heating(22.0))
+        .expect("valid override");
     dwelling_a
         .add_actor(Box::new(checkpoint_thermostat))
         .unwrap();

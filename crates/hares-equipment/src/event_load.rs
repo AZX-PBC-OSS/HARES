@@ -450,9 +450,6 @@ impl EventBasedLoad {
         voltage_pu: f64,
         bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        crate::config::debug_assert_zip_sums(&self.zip, "EventBasedLoad", &self.descriptor.name);
-
         let active_now = self.phase == EventPhase::Active && bus_energized;
         // PowerSetpoint overrides the configured active_power_kw for this step,
         // but only when the equipment is actually in an active event phase.
@@ -1086,9 +1083,6 @@ impl WetAppliance {
         voltage_pu: f64,
         bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        crate::config::debug_assert_zip_sums(&self.zip, "WetAppliance", &self.descriptor.name);
-
         let active_power_kw = if self.active && bus_energized {
             // In deterministic mode, use extracted event power directly.
             // In stochastic mode, use configured phase power × n_units.

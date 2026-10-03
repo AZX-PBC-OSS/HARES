@@ -5,7 +5,6 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::check_specific_heat_plausible;
 use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
 use hares_types::HaresError;
@@ -590,9 +589,8 @@ pub(crate) fn build_synthetic_building(
                 // Plausibility check for non-zero specific heat values.
                 // Catches unit mismatches (kJ vs J) that pass the non-negative gate
                 // but produce physically impossible values for building materials.
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 if ml.specific_heat_j_kg_k > 0.0 {
-                    check_specific_heat_plausible(ml.specific_heat_j_kg_k, &bc.id);
+                    check_specific_heat_plausible(ml.specific_heat_j_kg_k, &bc.id)?;
                 }
                 // Warn on zero density or specific_heat for layers with positive thickness
                 if ml.thickness_m > 0.0 && ml.density_kg_m3 == 0.0 {
@@ -840,22 +838,24 @@ pub(crate) fn build_synthetic_building(
         // With FractionLost = 0 for internal gains, the full accounting is:
         //   radiant + convective + latent = 1.0
         // where convective = sensible - radiant and latent = 1 - sensible.
-        // Assert this at startup so a misconfigured fixture fails immediately
-        // rather than producing silently wrong heat splits at runtime.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Fixture-config input: a fraction split that does not account to 1.0
+        // or a radiant fraction outside [0, sensible] produces silently wrong
+        // heat splits; an unconditional typed error at build.
         if let Some(sf) = sensible_frac {
             let rf = radiant_frac_toplevel_or_infilt.unwrap_or(0.0);
             let cf = sf - rf;
             let lf = (1.0 - sf).max(0.0);
-            debug_assert!(
-                (rf + cf + lf - 1.0).abs() <= 1e-6,
-                "internal gains fraction accounting: radiant ({rf}) + convective ({cf}) + latent ({lf}) = {} (expected 1.0 ± 1e-6)",
-                rf + cf + lf,
-            );
-            debug_assert!(
-                rf >= 0.0 && rf <= sf,
-                "internal gains radiant_fraction ({rf}) must be in [0, sensible_fraction ({sf})]"
-            );
+            if (rf + cf + lf - 1.0).abs() > 1e-6 {
+                return Err(HaresError::Dwelling(format!(
+                    "internal gains fraction accounting: radiant ({rf}) + convective ({cf}) + latent ({lf}) = {} (expected 1.0 ± 1e-6)",
+                    rf + cf + lf,
+                )));
+            }
+            if !(rf >= 0.0 && rf <= sf) {
+                return Err(HaresError::Dwelling(format!(
+                    "internal gains radiant_fraction ({rf}) must be in [0, sensible_fraction ({sf})]"
+                )));
+            }
         }
         if is_constant || sensible_frac.is_some() || radiant_frac_toplevel_or_infilt.is_some() {
             let mut ext_children = Vec::new();
@@ -1317,60 +1317,66 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for boundary in &boundaries {
-            assert!(
-                boundary.area_m2 >= 0.0,
+    // Boundary area >= 0 is physics (a negative area is invalid input):
+    // a typed error. The wall + window reconstruction is an assembler
+    // identity: a debug-build check.
+    for boundary in &boundaries {
+        if boundary.area_m2 < 0.0 {
+            return Err(HaresError::Dwelling(format!(
                 "boundary {} has negative area_m2 = {}",
-                boundary.id,
-                boundary.area_m2
-            );
+                boundary.id, boundary.area_m2
+            )));
         }
-        for boundary in &boundaries {
-            if matches!(
-                boundary.boundary_type,
-                BoundaryType::Window | BoundaryType::Skylight
-            ) {
-                continue;
-            }
-            let attached_window_area: f64 = windows
-                .iter()
-                .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
-                .map(|w| w.area_m2)
-                .sum();
-            if attached_window_area > 0.0 {
-                let reconstructed_original = boundary.area_m2 + attached_window_area;
-                if let Some(&stored_original) = wall_original_area.get(&boundary.id) {
-                    if boundary.area_m2 > 0.0 {
-                        // Normal case: opaque area remaining, so reconstructed
-                        // should equal stored original.
-                        assert!(
-                            (reconstructed_original - stored_original).abs() < 1e-9,
-                            "boundary {}: reconstructed original {reconstructed_original} != stored original {stored_original}",
-                            boundary.id
-                        );
-                    } else {
-                        // Clamped case: reconstructed will be >= stored original
-                        // because window area exceeded wall area.
-                        assert!(
-                            reconstructed_original >= stored_original - 1e-9,
-                            "boundary {}: reconstructed original {reconstructed_original} < stored original {stored_original}",
-                            boundary.id
-                        );
-                    }
+    }
+    #[cfg(debug_assertions)]
+    for boundary in &boundaries {
+        if matches!(
+            boundary.boundary_type,
+            BoundaryType::Window | BoundaryType::Skylight
+        ) {
+            continue;
+        }
+        let attached_window_area: f64 = windows
+            .iter()
+            .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
+            .map(|w| w.area_m2)
+            .sum();
+        if attached_window_area > 0.0 {
+            let reconstructed_original = boundary.area_m2 + attached_window_area;
+            if let Some(&stored_original) = wall_original_area.get(&boundary.id) {
+                if boundary.area_m2 > 0.0 {
+                    // Normal case: opaque area remaining, so reconstructed
+                    // should equal stored original.
+                    assert!(
+                        (reconstructed_original - stored_original).abs() < 1e-9,
+                        "boundary {}: reconstructed original {reconstructed_original} != stored original {stored_original}",
+                        boundary.id
+                    );
+                } else {
+                    // Clamped case: reconstructed will be >= stored original
+                    // because window area exceeded wall area.
+                    assert!(
+                        reconstructed_original >= stored_original - 1e-9,
+                        "boundary {}: reconstructed original {reconstructed_original} < stored original {stored_original}",
+                        boundary.id
+                    );
                 }
             }
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         // Verify the synthetic building has a closed thermal envelope.
         // A single-boundary envelope (the pre-T-0226 default) is an open,
-        // non-physical geometry.  We require at minimum two of the three
+        // non-physical geometry. We require at minimum two of the three
         // structural face categories (Wall, Roof, Floor) when the zone
         // volume is non-zero.
+        //
+        // STOPPED ROW: dispositioned as an unconditional typed error, but it
+        // fires on existing unit-test fixtures whose minimal one-wall
+        // geometry is scaffolding for other behaviors; the row stays a
+        // diagnostic log pending the operator's decision on those fixtures.
         if config.geometry.zone_volume_m3 > 0.0 {
             let non_window: Vec<&Boundary> = boundaries
                 .iter()
@@ -1445,28 +1451,29 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
         // Verify that explicit HVAC capacity is positive and finite relative
         // to floor area. The ratio is not clamped to a tight residential band
         // because synthetic test fixtures use deliberately extreme values
         // (e.g. 500 kBTU/h for stress testing). Autosized capacity
         // (hvac_capacity_w = None) is validated by the autosizer's internal
-        // invariants instead.
+        // invariants instead. Fixture-config input: a typed error.
         if let Some(capacity_w) = heating_capacity_btu_h.map(conv::power_btu_h_to_w)
             && capacity_w > 0.0
         {
-            assert!(
-                capacity_w.is_finite(),
-                "synthetic building explicit hvac_capacity_w is NaN or infinite"
-            );
+            if !capacity_w.is_finite() {
+                return Err(HaresError::Dwelling(
+                    "synthetic building explicit hvac_capacity_w is NaN or infinite".to_string(),
+                ));
+            }
             let w_per_m2 = capacity_w / floor_area;
-            assert!(
-                w_per_m2 > 0.0 && w_per_m2.is_finite(),
-                "synthetic building with floor_area_m2 = {floor_area} has explicit \
-                 hvac_capacity_w = {capacity_w:.0} W → {w_per_m2:.1} W/m², which is \
-                 non-positive or non-finite"
-            );
+            if !(w_per_m2 > 0.0 && w_per_m2.is_finite()) {
+                return Err(HaresError::Dwelling(format!(
+                    "synthetic building with floor_area_m2 = {floor_area} has explicit \
+                     hvac_capacity_w = {capacity_w:.0} W → {w_per_m2:.1} W/m², which is \
+                     non-positive or non-finite"
+                )));
+            }
         }
     }
 
@@ -1549,6 +1556,7 @@ pub(crate) fn build_synthetic_building(
         mass_multiplier_override: config.geometry.mass_multiplier,
         hvac_deadband_c: config.hvac.deadband_c,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     // Post-construction debug assertions: verify ranges hold in the built object
@@ -1784,7 +1792,10 @@ pub(crate) fn build_synthetic_weather(
         (vec![0.0; n], vec![0.0; n], vec![0.0; n])
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Debug-build checks of the closed-form generator's identities: the
+    // GHI decomposition (GHI = DNI·cos(zenith) + DHI) and the all-zero-GHI
+    // clear-sky guard are properties of the generator, not of any input.
+    #[cfg(debug_assertions)]
     {
         // Invariant: if GHI[t] > 0, then DNI[t] ≥ 0, DHI[t] ≥ 0, and
         // GHI ≈ DNI × cos(zenith) + DHI within tolerance.
@@ -1888,46 +1899,10 @@ pub(crate) fn build_synthetic_weather(
         vec![outdoor_temp_c; n]
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Invariant: if diurnal amplitude > 0, the output must have non-zero
-        // variance (the diurnal model produced actual variation).
-        if diurnal_amp > 0.0 {
-            let min = dry_bulb_c.iter().copied().fold(f64::INFINITY, f64::min);
-            let max = dry_bulb_c.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let range = max - min;
-            assert!(
-                range > 0.01,
-                "diurnal_amplitude_c ({diurnal_amp}) > 0 but dry_bulb_c range ({range:.6}) ≈ 0 — \
-                 diurnal model produced degenerate flat output"
-            );
-            // Invariant: the daily peak temperature should occur during
-            // afternoon hours (13–17 local time at timezone offset 0), not
-            // at midnight or dawn.
-            //
-            // Check day 180 (June 29): summer, peak should be well into
-            // afternoon. Day index 179 (0-based, hour 4296..4319).
-            let day_start = 179 * 24;
-            let day_end = day_start + 24;
-            if day_end <= n {
-                let mut peak_hour = 0;
-                let mut peak_val = f64::NEG_INFINITY;
-                for (h, &val) in dry_bulb_c.iter().enumerate().take(day_end).skip(day_start) {
-                    if val > peak_val {
-                        peak_val = val;
-                        peak_hour = h % 24;
-                    }
-                }
-                assert!(
-                    (13..=17).contains(&peak_hour),
-                    "day 180 (June 29) peak dry-bulb hour ({peak_hour}) should be in 13–17 \
-                     (afternoon local time); diurnal_amplitude_c = {diurnal_amp}, \
-                     thermal_lag_h = {thermal_lag_h}",
-                );
-            }
-        }
-    }
-
+    // Invariant: if diurnal amplitude > 0, the output must have non-zero
+    // variance (the diurnal model produced actual variation) and the daily
+    // peak must fall in the afternoon. Properties of the closed-form
+    // generator: unit tests (`synthetic_weather_*`), not a per-build check.
     #[cfg(feature = "observe")]
     {
         let mut daily_ranges: Vec<f64> = Vec::with_capacity(365);
@@ -2156,8 +2131,87 @@ mod tests {
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use std::collections::HashSet;
 
-    fn find_xml_child<'a>(children: &'a [XmlNode], name: &str) -> Option<&'a XmlNode> {
+    fn find_xml_child<'a>(children: &'a [XmlNode], name: &'a str) -> Option<&'a XmlNode> {
         children.iter().find(|n| n.name == name)
+    }
+
+    // -------------------------------------------------------------------------
+    // Diurnal dry-bulb generator properties (replaced the gated per-build
+    // checks: the generator is closed-form, so the properties are unit tests)
+    // -------------------------------------------------------------------------
+
+    fn diurnal_config() -> SyntheticTomlConfig {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+diurnal_amplitude_c = 10.0
+"#;
+        toml::from_str(toml).expect("parse")
+    }
+
+    /// With diurnal amplitude > 0 the dry-bulb series must have non-zero
+    /// variance, and the June 29 daily peak must fall in the afternoon
+    /// (hours 13 to 17 local).
+    #[test]
+    fn synthetic_diurnal_has_variance_and_afternoon_peak() {
+        let config = diurnal_config();
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+
+        let min = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max - min > 0.01,
+            "diurnal amplitude configured but the dry-bulb range ({:.6}) is degenerate",
+            max - min
+        );
+
+        // Day 180 = June 29: day index 179 (0-based).
+        let day_start = 179 * 24;
+        let day_end = day_start + 24;
+        assert!(day_end <= weather.dry_bulb_c.len(), "fixture too short");
+        let mut peak_hour = 0;
+        let mut peak_val = f64::NEG_INFINITY;
+        for (h, &val) in weather
+            .dry_bulb_c
+            .iter()
+            .enumerate()
+            .take(day_end)
+            .skip(day_start)
+        {
+            if val > peak_val {
+                peak_val = val;
+                peak_hour = h % 24;
+            }
+        }
+        assert!(
+            (13..=17).contains(&peak_hour),
+            "day 180 (June 29) peak dry-bulb hour ({peak_hour}) should be in 13-17"
+        );
     }
 
     // -------------------------------------------------------------------------

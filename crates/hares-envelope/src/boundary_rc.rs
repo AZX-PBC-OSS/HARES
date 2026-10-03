@@ -12,7 +12,7 @@ use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::units::length_m_to_mm;
 
 use crate::NodeId;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(debug_assertions)]
 use crate::rc_network::sorted_internal_nodes;
 use crate::rc_network::{RCNetwork, parallel_resistance};
 
@@ -561,57 +561,40 @@ pub fn derive_zone_uas(boundaries: &[BoundaryInput], n_zones: usize) -> Vec<f64>
 /// Validate that every `SurfaceLayerInfo` entry's `inner_node` and `outer_node`
 /// are present in both the capacitance map and the node index.
 ///
-/// In debug/check_invariants builds the checks are `debug_assert!` that panic
-/// on first violation.  In all builds a `tracing::warn!` is emitted for any
-/// missing node so production deployments don't silently lose surface wiring.
+/// Unconditional in every build profile: a missing node is a wiring error, so
+/// the first violation is a typed error naming the boundary and the node.
 fn validate_surface_layer_info(
     layer_info: &HashMap<usize, SurfaceLayerInfo>,
     capacitances: &HashMap<NodeId, f64>,
     node_index: &HashMap<NodeId, usize>,
-) {
+) -> Result<(), String> {
     for (bd_idx, info) in layer_info {
-        let inner_has_cap = capacitances.contains_key(&info.inner_node);
-        let outer_has_cap = capacitances.contains_key(&info.outer_node);
-        let inner_in_index = node_index.contains_key(&info.inner_node);
-        let outer_in_index = node_index.contains_key(&info.outer_node);
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                inner_has_cap,
+        if !capacitances.contains_key(&info.inner_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from capacitances",
                 info.inner_node
-            );
-            debug_assert!(
-                outer_has_cap,
+            ));
+        }
+        if !capacitances.contains_key(&info.outer_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from capacitances",
                 info.outer_node
-            );
-            debug_assert!(
-                inner_in_index,
+            ));
+        }
+        if !node_index.contains_key(&info.inner_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from node_index",
                 info.inner_node
-            );
-            debug_assert!(
-                outer_in_index,
+            ));
+        }
+        if !node_index.contains_key(&info.outer_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from node_index",
                 info.outer_node
-            );
-        }
-
-        if !inner_has_cap {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from capacitances");
-        }
-        if !outer_has_cap {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from capacitances");
-        }
-        if !inner_in_index {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from node_index");
-        }
-        if !outer_in_index {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from node_index");
+            ));
         }
     }
+    Ok(())
 }
 
 /// Assemble the multi-layer RC network from pre-resolved boundary data.
@@ -1281,19 +1264,21 @@ pub fn assemble_building_rc(
         .map(|(idx, &nid)| (nid, idx))
         .collect();
 
-    // Invariant check: cardinality of node_index must match A_c nrows.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        debug_assert_eq!(
+    // Invariant: cardinality of node_index must match A_c nrows. A mismatch
+    // is a wiring error, so it is a typed error in every build profile.
+    if node_index.len() != a_c.nrows() {
+        return Err(format!(
+            "node_index cardinality {} != A_c nrows {}",
             node_index.len(),
-            a_c.nrows(),
-            "node_index cardinality {node_index_len} != A_c nrows {a_c_nrows}",
-            node_index_len = node_index.len(),
-            a_c_nrows = a_c.nrows()
-        );
+            a_c.nrows()
+        ));
+    }
 
-        // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
-        // must agree element-for-element with the node_index keys in order.
+    // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
+    // must agree element-for-element with the node_index keys in order. This
+    // re-sorts the node set, so it is a debug-only assertion.
+    #[cfg(debug_assertions)]
+    {
         let cross: Vec<NodeId> = sorted_internal_nodes(&rc.capacitances, rc.external_nodes());
         let node_index_sorted: Vec<NodeId> = {
             let mut keys: Vec<_> = node_index.keys().copied().collect();
@@ -1306,7 +1291,7 @@ pub fn assemble_building_rc(
         );
     }
 
-    validate_surface_layer_info(&layer_info, &rc.capacitances, &node_index);
+    validate_surface_layer_info(&layer_info, &rc.capacitances, &node_index)?;
 
     // Observer capture: record SurfaceLayerInfo wiring completeness per boundary.
     #[cfg(feature = "observe")]
@@ -1336,19 +1321,6 @@ pub fn assemble_building_rc(
         "RC assembly internal node mapping"
     );
 
-    // Emit error on cardinality mismatch in release-with-checks builds
-    // where debug_assert_eq is a no-op. No check in pure release builds.
-    #[cfg(feature = "check_invariants")]
-    {
-        if node_index.len() != a_c.nrows() {
-            tracing::error!(
-                node_index_len = node_index.len(),
-                a_c_nrows = a_c.nrows(),
-                "node_index cardinality does not match A_c nrows"
-            );
-        }
-    }
-
     // Zone air node → state-vector row.
     let mut zone_state_rows = Vec::with_capacity(n_zones);
     for zone_idx in 0..n_zones {
@@ -1366,98 +1338,103 @@ pub fn assemble_building_rc(
 
     let node_capacitances = rc.capacitances.clone();
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Only check when boundaries carry explicit material-layer definitions.
-        // Fallback-R-only networks (no material layers, empty precomputed_rc)
-        // legitimately produce zero boundary capacitance nodes — the single
-        // resistance path is intentional.
-        let has_material_layers = boundaries.iter().any(|b| !b.material_layers.is_empty());
-        if has_material_layers {
-            let has_cap_node = boundary_diagnostics.iter().any(|d| d.n_rc_nodes > 0);
-            assert!(
-                has_cap_node,
+    // Only check when boundaries carry explicit material-layer definitions.
+    // Fallback-R-only networks (no material layers, empty precomputed_rc)
+    // legitimately produce zero boundary capacitance nodes (the single
+    // resistance path is intentional. Zero density or specific_heat layers
+    // are reachable user input, so the violation is a typed error in every
+    // build profile.
+    let has_material_layers = boundaries.iter().any(|b| !b.material_layers.is_empty());
+    if has_material_layers {
+        let has_cap_node = boundary_diagnostics.iter().any(|d| d.n_rc_nodes > 0);
+        if !has_cap_node {
+            return Err(
                 "RC network has no capacitance-bearing boundary nodes despite \
                  material-layer definitions on at least one boundary. \
                  Verify that material layers have non-zero density \
                  (> 0 kg/m³) and specific_heat (> 0 J/(kg·K))."
+                    .to_string(),
             );
         }
+    }
 
-        // Verify same-zone precomputed boundaries have correct RC chain topology:
-        // the outermost (cut-surface) node must NOT connect directly to zone air
-        // (it is the dead end of the fin), and the innermost node must connect to
-        // zone air through a single path. This guards against wiring bugs that
-        // would short-circuit the fin or leave it disconnected.
-        for diag in &boundary_diagnostics {
-            if diag.path == RCPath::Precomputed
-                && diag.n_rc_nodes > 0
-                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
-                && let Some(info) = layer_info.get(&diag.boundary_idx)
-            {
-                let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                // Innermost node must connect to zone air.
+    // Verify same-zone precomputed boundaries have correct RC chain topology:
+    // the outermost (cut-surface) node must NOT connect directly to zone air
+    // (it is the dead end of the fin), and the innermost node must connect to
+    // zone air through a single path. This guards against wiring bugs that
+    // would short-circuit the fin or leave it disconnected. Assembler
+    // topology no input reaches, so the checks are debug-only assertions.
+    #[cfg(debug_assertions)]
+    for diag in &boundary_diagnostics {
+        if diag.path == RCPath::Precomputed
+            && diag.n_rc_nodes > 0
+            && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            && let Some(info) = layer_info.get(&diag.boundary_idx)
+        {
+            let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+            // Innermost node must connect to zone air.
+            assert!(
+                rc.resistances.contains_key(&(info.inner_node, zone_node))
+                    || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                "same-zone precomputed boundary {}: inner node {:?} \
+                     not connected to zone {:?}",
+                diag.boundary_idx,
+                info.inner_node,
+                zone_node
+            );
+            // Outermost (cut-surface) node must NOT connect directly to
+            // zone air; the fin dead-ends there.
+            if info.outer_node != info.inner_node {
                 assert!(
-                    rc.resistances.contains_key(&(info.inner_node, zone_node))
-                        || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                    "same-zone precomputed boundary {}: inner node {:?} \
-                         not connected to zone {:?}",
+                    !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                        && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                    "same-zone precomputed boundary {}: outer (cut-surface) node \
+                         {:?} incorrectly connected directly to zone {:?}",
                     diag.boundary_idx,
-                    info.inner_node,
+                    info.outer_node,
                     zone_node
                 );
-                // Outermost (cut-surface) node must NOT connect directly to
-                // zone air; the fin dead-ends there.
-                if info.outer_node != info.inner_node {
-                    assert!(
-                        !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                            && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                        "same-zone precomputed boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?}",
-                        diag.boundary_idx,
-                        info.outer_node,
-                        zone_node
-                    );
-                }
             }
         }
+    }
 
-        // Verify same-zone material-layer boundaries have correct RC chain topology:
-        // mirrors the precomputed check above — the cut-surface (outer) node must
-        // NOT connect directly to zone air, and the innermost node must connect to
-        // zone air via the interior film resistance.
-        for diag in &boundary_diagnostics {
-            if diag.path == RCPath::MaterialLayer
-                && diag.n_rc_nodes > 0
-                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
-                && let Some(info) = layer_info.get(&diag.boundary_idx)
-            {
-                let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                // Innermost (interior-facing) node must connect to zone air via
-                // the interior film resistance.
+    // Verify same-zone material-layer boundaries have correct RC chain topology:
+    // mirrors the precomputed check above (the cut-surface (outer) node must
+    // NOT connect directly to zone air, and the innermost node must connect to
+    // zone air via the interior film resistance. Assembler topology, so the
+    // checks are debug-only assertions.
+    #[cfg(debug_assertions)]
+    for diag in &boundary_diagnostics {
+        if diag.path == RCPath::MaterialLayer
+            && diag.n_rc_nodes > 0
+            && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            && let Some(info) = layer_info.get(&diag.boundary_idx)
+        {
+            let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+            // Innermost (interior-facing) node must connect to zone air via
+            // the interior film resistance.
+            assert!(
+                rc.resistances.contains_key(&(info.inner_node, zone_node))
+                    || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                "same-zone material-layer boundary {}: inner node {:?} \
+                     not connected to zone {:?}: interior wiring must fire for same-zone",
+                diag.boundary_idx,
+                info.inner_node,
+                zone_node
+            );
+            // Outermost (cut-surface) node must NOT connect directly to
+            // zone air; the exterior-side wiring must be skipped for same-zone.
+            if info.outer_node != info.inner_node {
                 assert!(
-                    rc.resistances.contains_key(&(info.inner_node, zone_node))
-                        || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                    "same-zone material-layer boundary {}: inner node {:?} \
-                         not connected to zone {:?} — interior wiring must fire for same-zone",
+                    !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                        && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                    "same-zone material-layer boundary {}: outer (cut-surface) node \
+                         {:?} incorrectly connected directly to zone {:?}: \
+                         exterior wiring must be skipped for same-zone",
                     diag.boundary_idx,
-                    info.inner_node,
+                    info.outer_node,
                     zone_node
                 );
-                // Outermost (cut-surface) node must NOT connect directly to
-                // zone air; the exterior-side wiring must be skipped for same-zone.
-                if info.outer_node != info.inner_node {
-                    assert!(
-                        !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                            && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                        "same-zone material-layer boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?}: \
-                             exterior wiring must be skipped for same-zone",
-                        diag.boundary_idx,
-                        info.outer_node,
-                        zone_node
-                    );
-                }
             }
         }
     }
@@ -4700,6 +4677,6 @@ mod tests {
         let capacitances: HashMap<NodeId, f64> = HashMap::new();
         let node_index: HashMap<NodeId, usize> = HashMap::new();
 
-        validate_surface_layer_info(&layer_info, &capacitances, &node_index);
+        validate_surface_layer_info(&layer_info, &capacitances, &node_index).unwrap();
     }
 }

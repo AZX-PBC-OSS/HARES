@@ -34,6 +34,8 @@ pub enum OutputError {
     ColumnMismatch { expected: usize, got: usize },
     #[error("chunk_size must be > 0")]
     InvalidChunkSize,
+    #[error("metrics error: {0}")]
+    Metrics(#[from] MetricsError),
 }
 
 /// Inner writer abstraction over Parquet and CSV backends.
@@ -315,7 +317,7 @@ impl StreamingRecorder {
         let batch = self.build_batch()?;
 
         if let Some(calculator) = self.metrics_calculator.as_mut() {
-            calculator.accumulate(&batch);
+            calculator.accumulate(&batch)?;
         }
 
         match self.backend.as_mut() {
@@ -465,7 +467,7 @@ impl StreamingRecorder {
     /// calculator. `None` when metrics were never enabled (or already
     /// taken). Only meaningful after `flush_and_close` — the final partial
     /// batch is fed at close.
-    pub fn take_metrics(&mut self) -> Option<FullSimulationMetrics> {
+    pub fn take_metrics(&mut self) -> Option<Result<FullSimulationMetrics, MetricsError>> {
         self.metrics_calculator
             .take()
             .map(MetricsCalculator::finish)

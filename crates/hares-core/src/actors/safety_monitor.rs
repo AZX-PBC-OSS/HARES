@@ -209,7 +209,7 @@ impl Actor for SafetyMonitor {
             self.telemetry.set("min_zone_temp_c", min_temp);
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // Invariant: no Safety-tier signal is emitted without an actual
             // threshold breach detected during this step.

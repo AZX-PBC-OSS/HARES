@@ -287,17 +287,22 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment =
-            match resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None) {
-                Ok(specs) => specs,
-                Err(err) => {
-                    failures.push(format!(
-                        "fixture={} equipment resolution failed: {err}",
-                        fixture_id
-                    ));
-                    continue;
-                }
-            };
+        let equipment = match resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        ) {
+            Ok(specs) => specs,
+            Err(err) => {
+                failures.push(format!(
+                    "fixture={} equipment resolution failed: {err}",
+                    fixture_id
+                ));
+                continue;
+            }
+        };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
         let conditioned = building
             .zones

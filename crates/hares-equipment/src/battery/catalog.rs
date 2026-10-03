@@ -4,7 +4,7 @@ use std::fmt;
 
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(debug_assertions)]
 use tracing;
 
 use crate::EquipmentConfig;
@@ -180,28 +180,6 @@ impl BatterySpec {
                     "Battery round_trip_efficiency outside expected range for chemistry"
                 );
             }
-        }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            use std::sync::Once;
-            static CHECK_CATALOG_THERMAL: Once = Once::new();
-            CHECK_CATALOG_THERMAL.call_once(|| {
-                let masses: Vec<f64> = CATALOG.iter().map(|s| s.thermal_mass_j_per_k).collect();
-                let uas: Vec<f64> = CATALOG.iter().map(|s| s.ua_w_per_k).collect();
-                let all_same_mass = masses
-                    .windows(2)
-                    .all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
-                let all_same_ua = uas.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
-                if all_same_mass && all_same_ua {
-                    tracing::warn!(
-                        n = CATALOG.len(),
-                        thermal_mass = CATALOG[0].thermal_mass_j_per_k,
-                        ua = CATALOG[0].ua_w_per_k,
-                        "Battery catalog: all products have identical thermal_mass_j_per_k \
-                         and ua_w_per_k. Catalog thermal properties are not differentiated.",
-                    );
-                }
-            });
         }
         let eta = self.round_trip_efficiency.sqrt();
         EquipmentConfig::from_typed(
@@ -614,6 +592,24 @@ static CATALOG: &[BatterySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The catalog's thermal properties must be differentiated (not one
+    /// shared constant across every product). Replaced the gated runtime
+    /// warn: the catalog is static, so the property is a unit test.
+    #[test]
+    fn catalog_thermal_properties_are_differentiated() {
+        let all_same_mass = CATALOG
+            .iter()
+            .all(|s| s.thermal_mass_j_per_k == CATALOG[0].thermal_mass_j_per_k);
+        let all_same_ua = CATALOG
+            .iter()
+            .all(|s| s.ua_w_per_k == CATALOG[0].ua_w_per_k);
+        assert!(
+            !(all_same_mass && all_same_ua),
+            "Battery catalog: all products have identical thermal_mass_j_per_k \
+             and ua_w_per_k; catalog thermal properties are not differentiated"
+        );
+    }
 
     #[test]
     fn all_catalog_specs_valid() {

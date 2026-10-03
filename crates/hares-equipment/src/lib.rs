@@ -25,7 +25,7 @@ use std::time::Duration;
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
     EquipmentDescriptor, EquipmentHealthCounts, EquipmentId, GridExportRule, HaresError,
-    OperatingMode, PlugInPolicy, PortDeclaration, PortSlots, ensure_signal_supported,
+    OperatingMode, PlugInPolicy, PortDeclaration, PortSlots, Warning, ensure_signal_supported,
 };
 
 /// Configuration seed for auto-registering an actor for this equipment.
@@ -231,19 +231,6 @@ pub trait Equipment: Send + Sync {
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
         signal.validate_numeric_bounds()?;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            // Belt-and-suspenders: re-verify that numeric bounds pass before
-            // dispatching to equipment-specific logic.  A fire here means
-            // validate_numeric_bounds is non-deterministic (should never happen).
-            if signal.validate_numeric_bounds().is_err() {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "equipment_revalidate_numeric_bounds".to_string(),
-                    value: 0.0,
-                    tolerance: 0.0,
-                });
-            }
-        }
         self.apply_signal(signal)
     }
 
@@ -281,6 +268,19 @@ pub trait Equipment: Send + Sync {
     /// no counters; equipment with health counters overrides it.
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts::default()
+    }
+
+    /// Moves this equipment's pending [`Warning`]s into `out`.
+    ///
+    /// An equipment that raises one keeps it in a `Vec<Warning>` field and
+    /// moves it here; the default implementation raises no warnings. The
+    /// dwelling drains each equipment after its `init` at assembly, after
+    /// `add_equipment` and `replace_equipment`, and in the per-step equipment
+    /// loop beside [`Self::take_health_counts`], so a warning raised through
+    /// this channel reaches the run's log instead of living only as a
+    /// `tracing` line.
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        let _ = out;
     }
 
     /// Returns whether the equipment's `zone_id` was explicitly set in its config

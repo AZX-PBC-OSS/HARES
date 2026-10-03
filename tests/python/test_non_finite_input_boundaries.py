@@ -3,10 +3,10 @@ still lack the non-finite guard.
 
 The same-shape sweep of `py_dwelling.rs`'s external-input surface (the
 class the landed `set_solar_override` walk belongs to): values cross
-pyo3 `f64` extraction with no `is_finite` guard, the dwelling's
-downstream finiteness screens are cfg-gated to debug/
-`check_invariants` builds, and a NaN's comparisons are always false, so
-a crossed value silently stops the consuming conditionals from firing.
+pyo3 `f64` extraction with no `is_finite` guard, and a NaN's comparisons
+are always false, so a crossed value silently stops the consuming
+conditionals from firing (the dwelling's own run-path non-finite screens
+catch a NaN only once it has reached physics, several layers later).
 The fixed-and-gated members of the class: `set_solar_override` (the
 post-parse walk), `add_actor_by_name` params (`py_to_config_value`),
 the tariff objects (guarded at construction, `python_to_json_value`),

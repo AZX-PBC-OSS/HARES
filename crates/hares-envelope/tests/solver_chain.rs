@@ -136,7 +136,7 @@ fn electrical_solver_net_with_load_and_pv() {
     let ports = ports_with_electrical(2.0, -1.5);
     let dt = Duration::from_secs(60);
 
-    let update = solver.resolve_new(&ports, &env, dt);
+    let update = solver.resolve_new(&ports, &env, dt).unwrap();
 
     let payload = update
         .custom_payload
@@ -171,7 +171,9 @@ fn electrical_solver_generation_only_produces_negative_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = ports_with_electrical(0.0, -3.0);
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload must be Some")[0];
 
     assert!(
@@ -189,7 +191,9 @@ fn electrical_solver_zero_load_zero_generation_is_zero_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = PortSlots::default();
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload")[0];
 
     assert_eq!(
@@ -225,7 +229,9 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
             .expect("gen");
     }
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload")[0];
     let expected = ports.electrical.net_active_w() / 1_000.0; // 2.5 + (-2.8) = -0.3
 
@@ -381,7 +387,7 @@ fn electrical_and_humidity_resolvers_are_independent() {
         })
         .expect("thermal accumulate");
 
-    let elec_update = elec_solver.resolve_new(&ports, &env, dt);
+    let elec_update = elec_solver.resolve_new(&ports, &env, dt).unwrap();
     let _hum_update = hum_solver.resolve_new(&ports, &env, dt);
 
     // Electrical result must still be correct after humidity resolved.

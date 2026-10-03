@@ -479,27 +479,13 @@ impl EnvironmentManager {
     ///
     /// The returned index can be used to look up the occupancy value from the
     /// schedule payload in [`EnvironmentState::custom_domains`] at domain id
-    /// [`hares_types::SCHEDULE_DOMAIN_ID`].
+    /// [`hares_types::SCHEDULE_DOMAIN_ID`]. Resolution lives in
+    /// `hares_io::resolve_occupancy_column`, shared with the
+    /// unknown-schedule-column check, so the check treats the column the
+    /// environment reads as read.
     #[must_use]
     pub fn occupancy_column_idx(&self) -> Option<usize> {
-        // Exact-match fast path for common lowercase keys.
-        if let Some(&idx) = self
-            .schedule
-            .column_index
-            .get("occupants")
-            .or_else(|| self.schedule.column_index.get("occupancy"))
-        {
-            return Some(idx);
-        }
-        // Case-insensitive fallback: matches "Occupancy (Persons)" and similar variants.
-        self.schedule
-            .column_index
-            .iter()
-            .find(|(key, _)| {
-                let lower = key.to_lowercase();
-                lower.starts_with("occupan")
-            })
-            .map(|(_, &idx)| idx)
+        hares_io::resolve_occupancy_column(&self.schedule.column_index).map(|(_, idx)| idx)
     }
 
     /// Feed zone-state feedback into the internal zone buffer.
@@ -578,23 +564,13 @@ impl EnvironmentManager {
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
         let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
 
-        #[cfg(all(feature = "dst", any(debug_assertions, feature = "check_invariants")))]
+        #[cfg(all(feature = "dst", debug_assertions))]
         if let Some(ref tz) = self.civil_tz {
             let civil_ordinal = now.with_timezone(tz).ordinal();
             debug_assert!(
                 civil_ordinal == day_of_year,
                 "DST-aware civil day-of-year ({civil_ordinal}) does not match computed day_of_year ({day_of_year})"
             );
-            let raw_ordinal = now.ordinal();
-            if raw_ordinal != civil_ordinal {
-                let month = now.month();
-                tracing::warn!(
-                    raw_day_of_year = raw_ordinal,
-                    civil_day_of_year = civil_ordinal,
-                    month,
-                    "DST transition boundary: raw fixed-offset day_of_year ({raw_ordinal}) differs from civil day_of_year ({civil_ordinal})"
-                );
-            }
         }
 
         // day_of_year is computed once (above) and passed unchanged to solar_position(),
@@ -609,11 +585,8 @@ impl EnvironmentManager {
             self.mains_hemisphere,
         )?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            mains_temp_c >= 0.0,
-            "water mains temperature ({mains_temp_c:.2} °C) must be ≥ 0 °C (32 °F minimum clamp)"
-        );
+        // `water_mains_temperature_c` clamps to the 32 F minimum, so the
+        // former re-check of non-negativity is deleted.
 
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
 
@@ -875,9 +848,9 @@ fn compute_schedule_offset(
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
     // Derive year length from the actual schedule array size so wrapping is
     // correct regardless of whether the schedule is hourly, sub-hourly, etc.
+    // An empty schedule is rejected at load (`EmptySchedule`), so the length
+    // here is positive and the former debug re-check is deleted.
     let year_secs = schedule.len() as u64 * step_secs as u64;
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert!(year_secs > 0, "schedule has zero length or step");
     (seconds_into_year % year_secs / step_secs as u64) as usize
 }
 
@@ -1102,7 +1075,7 @@ fn initial_zones(
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         // Free-float invariant: when no HVAC setpoints exist, conditioned-zone
         // initial temperature must match outdoor ambient within ±5 °C. Starting at
@@ -1442,6 +1415,7 @@ mod tests {
             mass_multiplier_override: None,
             hvac_deadband_c: None,
             details_xml,
+            parse_warnings: Vec::new(),
         }
     }
 

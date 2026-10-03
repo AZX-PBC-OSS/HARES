@@ -1099,6 +1099,7 @@ mod tests {
             mass_multiplier_override: None,
             hvac_deadband_c: None,
             details_xml: details,
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -2420,6 +2421,7 @@ mod tests {
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // Conditioned zone is at index 0 → zone_id 1

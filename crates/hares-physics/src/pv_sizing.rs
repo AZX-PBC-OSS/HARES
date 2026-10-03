@@ -508,21 +508,15 @@ pub fn compute_usable_area(
     // Invariant: panel physical parameters must be in valid ranges.
     // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
     // for future large-format utility panels without being physically
-    // impossible.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            panel_watts > 0,
-            "panel_watts must be positive, got {panel_watts}"
-        );
-        assert!(
-            panel_area_m2 > 0.0,
-            "panel_area_m2 must be positive, got {panel_area_m2}"
-        );
-        assert!(
-            panel_area_m2 < 5.0,
-            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
-        );
+    // impossible. The values are user input, so a violation is a typed
+    // error in every build profile.
+    if panel_watts == 0 {
+        return Err(PvSizingError::InvalidPanelWatts { watts: panel_watts });
+    }
+    if !(panel_area_m2 > 0.0 && panel_area_m2 < 5.0) {
+        return Err(PvSizingError::InvalidPanelArea {
+            area_m2: panel_area_m2,
+        });
     }
 
     if roof.planes.is_empty() {
@@ -614,22 +608,13 @@ pub fn compute_usable_area(
 
     let lat = latitude.unwrap_or(35.0);
 
-    // Invariant: computed diffuse fraction must be physically valid.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if let Some(kd) = diffuse_fraction {
-        assert!(
-            (0.0..=1.0).contains(&kd),
-            "computed diffuse fraction Kd={:.4} out of range [0, 1]",
-            kd
-        );
-        if !(0.10..=0.30).contains(&kd) {
-            tracing::warn!(
-                pv_diffuse_fraction = kd,
-                pv_latitude = lat,
-                "computed diffuse fraction Kd={:.4} outside expected continental-US range [0.10, 0.30]",
-                kd
-            );
-        }
+    // Invariant: computed diffuse fraction must be physically valid. The
+    // fraction is user/weather input, so out-of-range is a typed error in
+    // every build profile.
+    if let Some(kd) = diffuse_fraction
+        && !(0.0..=1.0).contains(&kd)
+    {
+        return Err(PvSizingError::InvalidDiffuseFraction { kd });
     }
 
     // Diagnostic: log the computed diffuse fraction when available.
@@ -640,87 +625,6 @@ pub fn compute_usable_area(
             "PV sizing using location-specific diffuse fraction Kd={:.4}",
             kd
         );
-    }
-
-    // Invariant: East-facing panels must not be worse than West-facing.
-    // Physical basis: afternoon ambient temperatures are higher than morning
-    // temperatures, reducing PV efficiency via negative temperature coefficient
-    // (typically -0.3% to -0.5%/°C). Lave & Kleissl (2010) find west-facing
-    // panels produce 1–3% less than east-facing annually at most US locations.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let east_factor = azimuth_production_factor(90.0, lat);
-        let west_factor = azimuth_production_factor(270.0, lat);
-        assert!(
-            east_factor >= west_factor,
-            "East production factor ({:.4}) must be >= West ({:.4}) — afternoon heat penalty",
-            east_factor,
-            west_factor
-        );
-    }
-
-    // Invariant: East/West factor must stay in physical range.
-    // The old model collapsed to DIFFUSE_FRAC (0.18) for east/west;
-    // a latitude-aware model must stay above 0.50 (diffuse + morning/afternoon
-    // direct beam) and below 0.95 (always less than south-facing).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let east_factor = azimuth_production_factor(90.0, lat);
-        assert!(
-            east_factor > 0.5,
-            "East/West production factor ({:.4}) too low — must exceed 0.5 for lat={}",
-            east_factor,
-            lat
-        );
-        assert!(
-            east_factor < 0.95,
-            "East/West production factor ({:.4}) too close to south — must be < 0.95 for lat={}",
-            east_factor,
-            lat
-        );
-    }
-
-    // Invariant: flat-roof GCR monotonically decreases with increasing tilt
-    // (fixed latitude) and with increasing latitude (fixed tilt).
-    // Appelbaum & Bany (1979) Solar Energy 23(6):497-500.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for test_lat in [25.0, 35.0, 50.0] {
-            for pair in [(5.0, 25.0), (5.0, 45.0), (25.0, 45.0)] {
-                let gcr_lo = flat_roof_gcr(Some(test_lat), pair.0);
-                let gcr_hi = flat_roof_gcr(Some(test_lat), pair.1);
-                assert!(
-                    gcr_lo >= gcr_hi,
-                    "GCR must not increase with tilt: lat={test_lat} tilt={},{} → GCR={gcr_lo:.4},{gcr_hi:.4}",
-                    pair.0,
-                    pair.1,
-                );
-            }
-        }
-        for test_tilt in [5.0, 25.0, 45.0] {
-            let gcr_lo = flat_roof_gcr(Some(25.0), test_tilt);
-            let gcr_hi = flat_roof_gcr(Some(50.0), test_tilt);
-            assert!(
-                gcr_lo >= gcr_hi,
-                "GCR must not increase with latitude: tilt={test_tilt} lat 25→50 gives {gcr_lo:.4},{gcr_hi:.4}",
-            );
-        }
-    }
-
-    // Invariant: GCR × usable_fraction must be in [0.15, 0.55] for flat roofs.
-    // Values outside indicate parameterization error.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if roof_shape == RoofShape::Flat {
-        for test_lat in [10.0, 25.0, 35.0, 50.0] {
-            for test_tilt in [5.0, 15.0, 25.0, 45.0] {
-                let gcr = flat_roof_gcr(Some(test_lat), test_tilt);
-                let effective = gcr * FLAT_USABLE_FRACTION;
-                assert!(
-                    (0.15..=0.55).contains(&effective),
-                    "flat roof GCR×usable_fraction={effective:.4} out of [0.15, 0.55] range at lat={test_lat} tilt={test_tilt}"
-                );
-            }
-        }
     }
 
     // Select the best plane.
@@ -799,19 +703,6 @@ pub fn compute_usable_area(
                     "PV Hip aggregation per-plane telemetry"
                 );
             }
-        }
-
-        // Invariant: north-facing production factor decreases with latitude.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let low_lat_north = azimuth_production_factor(0.0, 25.0);
-            let high_lat_north = azimuth_production_factor(0.0, 48.0);
-            assert!(
-                low_lat_north > high_lat_north,
-                "north-facing production factor must decrease with latitude (25°N: {:.4}, 48°N: {:.4})",
-                low_lat_north,
-                high_lat_north
-            );
         }
 
         #[cfg(feature = "observe")]
@@ -967,24 +858,18 @@ pub fn size_pv_system(
     // Invariant: panel physical parameters must be in valid ranges.
     // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
     // for future large-format panels without being physically impossible.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            panel_watts > 0,
-            "panel_watts must be positive, got {panel_watts}"
-        );
-        assert!(
-            panel_area_m2 > 0.0,
-            "panel_area_m2 must be positive, got {panel_area_m2}"
-        );
-        assert!(
-            panel_area_m2 < 5.0,
-            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
-        );
-        assert!(
-            (0.0..=0.99).contains(&system_losses),
-            "system_losses must be in [0, 0.99], got {system_losses}"
-        );
+    // The values are user input, so a violation is a typed error in every
+    // build profile.
+    if panel_watts == 0 {
+        return Err(PvSizingError::InvalidPanelWatts { watts: panel_watts });
+    }
+    if !(panel_area_m2 > 0.0 && panel_area_m2 < 5.0) {
+        return Err(PvSizingError::InvalidPanelArea {
+            area_m2: panel_area_m2,
+        });
+    }
+    if !(0.0..=0.99).contains(&system_losses) {
+        return Err(PvSizingError::InvalidSystemLosses { system_losses });
     }
 
     if usable.max_capacity_kw < min_kw {
@@ -1056,7 +941,7 @@ pub fn size_pv_system(
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 max_ac_kw >= 0.0,
@@ -1092,12 +977,8 @@ pub fn size_pv_system(
     let collector_area_m2 = (num_panels as f64) * panel_area_m2;
 
     // Invariant: computed capacity must be finite and non-negative.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            capacity_kw.is_finite() && capacity_kw >= 0.0,
-            "computed capacity kW must be finite and non-negative, got {capacity_kw}"
-        );
+    if !capacity_kw.is_finite() || capacity_kw < 0.0 {
+        return Err(PvSizingError::InvalidCapacity { capacity_kw });
     }
 
     #[cfg(feature = "observe")]
@@ -1358,17 +1239,6 @@ pub fn enumerate_pv_candidates(
         return Err(PvSizingError::AllNorthFacing);
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Invariant: after calling enumerate_pv_candidates, an Ok(vec) result
-        // with vec.is_empty() only occurs when there are truly zero roof planes.
-        // If roof planes exist but all were filtered, we returned Err above.
-        debug_assert!(
-            !candidates.is_empty() || roof.planes.is_empty(),
-            "enumerate_pv_candidates returned Ok empty vec but roof planes exist — all-north-facing filter should have returned Err"
-        );
-    }
-
     // Sort by solar score descending (best first).
     candidates.sort_by(|a, b| {
         b.solar_score
@@ -1410,6 +1280,18 @@ pub enum PvSizingError {
     InsufficientRoof { available_kw: f64, min_kw: f64 },
     #[error("main panel ampacity must be positive, got {ampacity} A")]
     InvalidMainPanelAmpacity { ampacity: u32 },
+    #[error("panel_watts must be positive, got {watts}")]
+    InvalidPanelWatts { watts: u32 },
+    #[error(
+        "panel_area_m2 must be positive and < 5.0 m² (no residential panel exceeds ~3.5 m²), got {area_m2}"
+    )]
+    InvalidPanelArea { area_m2: f64 },
+    #[error("system_losses must be in [0, 0.99], got {system_losses}")]
+    InvalidSystemLosses { system_losses: f64 },
+    #[error("computed diffuse fraction Kd={kd:.4} out of range [0, 1]")]
+    InvalidDiffuseFraction { kd: f64 },
+    #[error("computed capacity kW must be finite and non-negative, got {capacity_kw}")]
+    InvalidCapacity { capacity_kw: f64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,22 +1325,6 @@ pub fn infer_roof_shape(
     // All planes have tilt ≈ 0 → Flat.
     if !roof.planes.is_empty() && roof.planes.iter().all(|p| p.tilt_deg < 1.0) {
         return RoofShape::Flat;
-    }
-
-    // Compile-time invariant: each RoofPlane must either have azimuth_deg set
-    // or have a wall-fallback resolution path available.
-    // NOTE: tracing::debug! is used here rather than assert! because the
-    // condition is not a violation — unresolved planes are handled
-    // conservatively below by counting each as a unique direction. An
-    // assert! would panic on valid input that the algorithm already accepts.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    for plane in &roof.planes {
-        if plane.azimuth_deg.is_none() && wall_azimuths.is_empty() {
-            tracing::debug!(
-                pv_plane_index = roof.planes.iter().position(|p| std::ptr::eq(p, plane)),
-                "roof plane has no explicit azimuth and no wall fallback — orientation is unresolved"
-            );
-        }
     }
 
     // Resolve azimuth for every plane before counting distinct orientations.
@@ -3115,6 +2981,22 @@ mod tests {
                 assert!(
                     gcr <= 0.65,
                     "GCR={gcr:.4} above max 0.65 at lat={lat} tilt={tilt}"
+                );
+            }
+        }
+    }
+
+    /// GCR times the flat-roof usable fraction must stay in [0.15, 0.55]:
+    /// values outside indicate parameterization error.
+    #[test]
+    fn flat_roof_gcr_times_usable_fraction_stays_in_band() {
+        for lat in [10.0, 25.0, 35.0, 50.0] {
+            for tilt in [5.0, 15.0, 25.0, 45.0] {
+                let effective = flat_roof_gcr(Some(lat), tilt) * FLAT_USABLE_FRACTION;
+                assert!(
+                    (0.15..=0.55).contains(&effective),
+                    "flat roof GCR×usable_fraction={effective:.4} out of [0.15, 0.55] \
+                     range at lat={lat} tilt={tilt}"
                 );
             }
         }

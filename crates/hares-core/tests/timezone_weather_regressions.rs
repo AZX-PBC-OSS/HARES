@@ -101,6 +101,7 @@ fn minimal_building() -> hares_io::Building {
         mass_multiplier_override: None,
         hvac_deadband_c: None,
         details_xml,
+        parse_warnings: Vec::new(),
     }
 }
 

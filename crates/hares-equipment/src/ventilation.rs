@@ -657,7 +657,7 @@ impl Equipment for Ventilation {
                 performance: CorePerformance::default(),
             };
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(debug_assertions)]
             {
                 if self.effective_sensible_effectiveness != 0.0 {
                     return Err(HaresError::InvariantViolation {
@@ -847,7 +847,6 @@ impl Equipment for Ventilation {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             if !(0.0..=1.0).contains(&defrost_fraction) {
                 return Err(HaresError::InvariantViolation {

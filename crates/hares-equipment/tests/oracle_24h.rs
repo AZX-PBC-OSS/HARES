@@ -121,7 +121,7 @@ fn oracle_gas_furnace_24h_constant_heating() {
         "Gas Furnace".to_string(),
         GasFurnaceConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             capacity_w,
             afue,
             fan_power_w: Some(0.0),
@@ -189,7 +189,7 @@ fn oracle_electric_baseboard_24h_cop1() {
         "Electric Baseboard".to_string(),
         ElectricBaseboardConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             capacity_w,
             eir: 1.0,
             setpoint: HvacSetpointConfig::default(),
@@ -254,7 +254,7 @@ fn oracle_ideal_hvac_24h_50pct_load() {
         "Ideal HVAC".to_string(),
         IdealHvacConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             setpoint: HvacSetpointConfig {
                 heating_setpoint_c: Some(22.0),
                 cooling_setpoint_c: Some(28.0),
@@ -707,7 +707,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
         GasWaterHeaterConfig {
             fan_power_w: None,
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             loop_id: None,
             fuel_type: FuelType::Gas,
             tank_volume_m3: Some(tank_volume_m3),
@@ -792,7 +792,7 @@ fn oracle_tankless_wh_24h_constant_draw() {
         "Tankless Water Heater".to_string(),
         TanklessWaterHeaterConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             loop_id: None,
             fuel_type: FuelType::Gas,
             energy_factor: Some(efficiency),

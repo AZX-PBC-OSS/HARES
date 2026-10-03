@@ -226,21 +226,18 @@ impl GasBoilerConfig {
         // Condensing boilers operate with return temperature below the ~55 °C
         // flue-gas dewpoint. A contradictory (condensing, return_temp_c) pair is a
         // configuration error — the mismatch would produce physically invalid
-        // results during simulation.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !self.condensing && self.return_temp_c < 55.0 {
-                return Err(HaresError::Equipment(format!(
-                    "GasBoilerConfig: condensing=false requires return_temp_c >= 55 °C, got {} °C",
-                    self.return_temp_c
-                )));
-            }
-            if self.condensing && self.return_temp_c >= 70.0 {
-                return Err(HaresError::Equipment(format!(
-                    "GasBoilerConfig: condensing=true expects return_temp_c < 70 °C, got {} °C",
-                    self.return_temp_c
-                )));
-            }
+        // results during simulation. Config validation runs in every build.
+        if !self.condensing && self.return_temp_c < 55.0 {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: condensing=false requires return_temp_c >= 55 °C, got {} °C",
+                self.return_temp_c
+            )));
+        }
+        if self.condensing && self.return_temp_c >= 70.0 {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: condensing=true expects return_temp_c < 70 °C, got {} °C",
+                self.return_temp_c
+            )));
         }
         Ok(())
     }
@@ -689,7 +686,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn gas_boiler_validate_rejects_contradictory_condensing_return_temp() {
         let base = GasBoilerConfig {
             capacity_w: 10_000.0,
