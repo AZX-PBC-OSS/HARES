@@ -23,7 +23,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId, ZoneRole,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -176,8 +176,8 @@ impl VentilationConfig {
     }
 }
 
-use crate::config::KEY_ZONE_ID;
 use crate::config::constructor_equipment_id;
+use crate::hvac::helpers::{resolve_served_zone, served_zone_ports, zone_id_from_config};
 
 /// Default rated fan power [W].
 ///
@@ -322,7 +322,8 @@ pub struct Ventilation {
     zip: ResolvedZip,
 
     ventilation_type: VentilationType,
-    zone_id: ZoneId,
+    /// The zone the unit exchanges air with; `None` until `init` resolves it.
+    zone_id: Option<ZoneId>,
     /// Rated supply fan power [W] for balanced systems; 0 for exhaust-only.
     supply_fan_power_w: f64,
     /// Rated exhaust fan power [W].
@@ -359,19 +360,9 @@ impl Ventilation {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let equipment_id = constructor_equipment_id(&config);
-        // Resolve zone: explicit config value first, then ZoneMap, then
-        // ZoneId(1) as last-resort default (overridden by init_typed() when
-        // ZoneMap is available after dwelling construction).
-        let zone_id = config
-            .get_f64(KEY_ZONE_ID)
-            .map(|v| ZoneId(v as u16))
-            .or_else(|| {
-                config
-                    .zone_map
-                    .as_ref()
-                    .and_then(|zm| zm.get(ZoneRole::Indoor))
-            })
-            .unwrap_or(ZoneId(1));
+        // The zone resolves at init, where the dwelling's zone map is
+        // available; the constructor knows only an explicit zone_id.
+        let zone_id = zone_id_from_config(&config);
 
         let ventilation_type = match parse_ventilation_type(config.get_str("ventilation_type")) {
             Ok(vt) => vt,
@@ -392,7 +383,7 @@ impl Ventilation {
                 VentilationType::Hrv => "HRV",
                 VentilationType::Erv => "ERV",
             }),
-            zone: Some(zone_id),
+            zone: zone_id,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::MODE_OVERRIDE
@@ -405,10 +396,7 @@ impl Ventilation {
             zone_type: None,
         };
 
-        let ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::thermal(zone_id),
-        ];
+        let ports = served_zone_ports(&[PortDeclaration::electrical()], zone_id, false);
 
         Self {
             descriptor,
@@ -552,20 +540,11 @@ impl Ventilation {
         self.effective_sensible_effectiveness = self.sensible_effectiveness;
         self.effective_latent_effectiveness = self.latent_effectiveness;
 
-        // Resolve zone from ZoneMap when available. Ventilation equipment
-        // routes thermal contributions to the indoor conditioned zone. The
-        // ZoneMap provides the correct ZoneId from the building envelope
-        // configuration, replacing the hardcoded ZoneId(1) default set in new().
-        if let Some(zone_map) = &config.zone_map
-            && let Some(resolved_id) = zone_map.get(ZoneRole::Indoor)
-        {
-            self.zone_id = resolved_id;
-            self.descriptor.zone = Some(resolved_id);
-            self.ports = vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(resolved_id),
-            ];
-        }
+        // Ventilation exchanges the conditioned zone's air with outdoors.
+        let zone = resolve_served_zone(config, self.zone_id)?;
+        self.zone_id = Some(zone);
+        self.descriptor.zone = Some(zone);
+        self.ports = served_zone_ports(&[PortDeclaration::electrical()], Some(zone), false);
 
         Ok(())
     }
@@ -609,6 +588,18 @@ impl Equipment for Ventilation {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let zone_id = self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: zone not resolved; init must run before stepping",
+                self.descriptor.name
+            ))
+        })?;
+        let zone = env.zones.iter().find(|z| z.id == zone_id).ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: zone {} is not in this step's environment",
+                self.descriptor.name, zone_id.0
+            ))
+        })?;
         // Grid outage: a de-energized bus removes the fan supply, so the unit
         // cannot run (no airflow, no recovery, no draw) — gated at the root
         // of the on/off decision (WH precedent). Islanded homes keep an
@@ -727,9 +718,8 @@ impl Equipment for Ventilation {
         }
 
         let t_outdoor_c = env.weather.outdoor_temp_c;
-        let zone = env.zones.iter().find(|z| z.id == self.zone_id);
-        let t_indoor_c = zone.map(|z| z.temperature_c).unwrap_or(20.0);
-        let w_indoor = zone.map(|z| z.humidity_ratio).unwrap_or(0.008);
+        let t_indoor_c = zone.temperature_c;
+        let w_indoor = zone.humidity_ratio;
         let w_outdoor = env.weather.outdoor_humidity_ratio;
 
         let eff_s = self.compute_effective_sensible_effectiveness(t_outdoor_c);
@@ -1638,7 +1628,7 @@ mod tests {
     fn minimal_ventilation_config() -> VentilationConfig {
         VentilationConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             flow_rate_m3_s: 0.035,
             fan_power_w: None,
             supply_fan_power_w: None,
@@ -2225,7 +2215,7 @@ mod tests {
         // conditioned zone rather than hardcoding ZoneId(1). This test uses
         // ZoneId(5) for the conditioned zone to prove the mapping works
         // independent of zone sort order.
-        let mut cfg = hrv_config();
+        let mut cfg = hrv_config_without_zone();
         let mut zone_map = ZoneMap::new();
         zone_map.insert(ZoneRole::Indoor, ZoneId(5));
         cfg.zone_map = Some(zone_map);
@@ -2244,6 +2234,48 @@ mod tests {
             has_thermal_port_for_zone_5,
             "ventilation ports should include thermal port for resolved ZoneId(5)"
         );
+    }
+
+    fn hrv_config_without_zone() -> EquipmentConfig {
+        let mut cfg = hrv_config();
+        if let crate::ConfigPayload::Typed { data, .. } = &mut cfg.payload {
+            data["zone_id"] = serde_json::Value::Null;
+        }
+        cfg
+    }
+
+    /// With neither a zone_id nor a zone map the unit has no zone to
+    /// exchange air with: init must fail naming it.
+    #[test]
+    fn ventilation_init_errors_without_a_zone() {
+        let cfg = hrv_config_without_zone();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let err = hrv
+            .init(&cfg, &env(0.0, 20.0))
+            .expect_err("no zone_id and no zone map must fail init");
+        assert!(
+            err.to_string().contains("HRV"),
+            "the error must name the unit, got: {err}"
+        );
+    }
+
+    /// A step whose environment does not carry the unit's zone must fail
+    /// instead of exchanging air with an assumed 20 °C indoor state.
+    #[test]
+    fn ventilation_step_errors_when_its_zone_is_missing() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+        let mut missing = e.clone();
+        missing.zones.clear();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.update_control(&missing);
+        hrv.step(&missing, Duration::from_secs(300), &mut ports)
+            .expect_err("a missing zone must fail the step");
     }
 
     #[test]

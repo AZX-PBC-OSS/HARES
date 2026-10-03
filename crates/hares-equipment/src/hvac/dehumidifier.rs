@@ -11,7 +11,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, PortType, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
     DEFAULT_ENERGY_FACTOR_CURVE, DEFAULT_WATER_REMOVAL_CURVE, RATED_DB_C, RATED_RH,
 };
-use super::helpers::zone_id_from_config;
+use super::helpers::{resolve_served_zone, served_zone_ports, zone_id_from_config};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
 // Water density assumed as 1.0 kg/L (constant approximation).
@@ -139,8 +139,6 @@ pub struct Dehumidifier {
     part_load_curve_coeffs: [f64; 4],
     /// Lower clamp for PLF (part-load factor).
     plf_min: f64,
-    /// Whether zone_id was explicitly set in the config.
-    zone_id_explicit: bool,
     /// Off-cycle parasitic electric load [W].
     ///
     /// When the unit is off, this constant load (standby electronics, controls,
@@ -190,19 +188,7 @@ impl Dehumidifier {
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone,
-                    ..PortDeclaration::electrical()
-                },
-                PortDeclaration {
-                    port_type: PortType::Humidity,
-                    zone,
-                    ..PortDeclaration::electrical()
-                },
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, true),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             zone_id: zone,
@@ -236,7 +222,6 @@ impl Dehumidifier {
             accumulated_water_removal_l: 0.0,
             part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
             plf_min: DEFAULT_PLF_MIN,
-            zone_id_explicit: zone.is_some(),
             off_cycle_parasitic_load_w: None,
             min_operating_temp_c: Some(DEFAULT_MIN_OPERATING_TEMP_C),
             max_operating_temp_c: Some(DEFAULT_MAX_OPERATING_TEMP_C),
@@ -535,10 +520,6 @@ impl Equipment for Dehumidifier {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -551,24 +532,13 @@ impl Equipment for Dehumidifier {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        // A dehumidifier without a resolved zone has no air to dehumidify:
-        // HPXML parsing injects the conditioned zone's id, so a missing
-        // zone_id is broken wiring, not a defaulting opportunity. `init`
-        // always runs before the first step, so this gates every step.
-        let new_zone = zone_id_from_config(config).ok_or_else(|| {
-            HaresError::Equipment(format!(
-                "{}: zone_id not resolved; HPXML parsing did not inject the conditioned zone",
-                self.descriptor.name
-            ))
-        })?;
-        self.zone_id_explicit = true;
-        self.zone_id = Some(new_zone);
-        self.descriptor.zone = Some(new_zone);
-        self.ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::thermal(new_zone),
-            PortDeclaration::humidity(new_zone),
-        ];
+        // A dehumidifier conditions the dwelling's conditioned zone; one
+        // with no zone has no air to dehumidify. `init` always runs before
+        // the first step, so this gates every step.
+        let zone = resolve_served_zone(config, self.zone_id)?;
+        self.zone_id = Some(zone);
+        self.descriptor.zone = Some(zone);
+        self.ports = served_zone_ports(&[PortDeclaration::electrical()], Some(zone), true);
 
         self.init_from_typed(config)?;
 
@@ -1986,13 +1956,9 @@ mod tests {
     }
 
     #[test]
-    fn new_sets_zone_id_explicit_only_when_config_carries_zone_id() {
+    fn new_carries_the_config_zone_and_declares_no_zone_port_without_one() {
         let cfg_with_zone = config();
         let dehu = Dehumidifier::new(cfg_with_zone);
-        assert!(
-            dehu.zone_id_explicit(),
-            "new() with explicit zone_id must set zone_id_explicit = true"
-        );
         assert_eq!(dehu.descriptor().zone, Some(ZoneId(1)));
 
         let cfg_without_zone = EquipmentConfig::from_typed(
@@ -2015,14 +1981,14 @@ mod tests {
         )
         .unwrap();
         let dehu = Dehumidifier::new(cfg_without_zone);
-        assert!(
-            !dehu.zone_id_explicit(),
-            "new() with absent zone_id must set zone_id_explicit = false"
-        );
         assert_eq!(
             dehu.descriptor().zone,
             None,
             "new() must not fall back to a guessed zone; init() enforces the real check"
+        );
+        assert!(
+            dehu.ports().iter().all(|p| p.zone.is_none()),
+            "an unresolved dehumidifier declares no zone port"
         );
     }
 

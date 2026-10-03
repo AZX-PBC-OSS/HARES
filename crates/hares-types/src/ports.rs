@@ -144,7 +144,7 @@ pub struct PortDeclaration {
 }
 
 impl PortDeclaration {
-    pub fn electrical() -> Self {
+    pub const fn electrical() -> Self {
         Self {
             port_type: PortType::Electrical,
             zone: None,
@@ -155,7 +155,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn thermal(zone: ZoneId) -> Self {
+    pub const fn thermal(zone: ZoneId) -> Self {
         Self {
             port_type: PortType::Thermal,
             zone: Some(zone),
@@ -166,7 +166,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn fuel() -> Self {
+    pub const fn fuel() -> Self {
         Self {
             port_type: PortType::Fuel,
             zone: None,
@@ -213,7 +213,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn humidity(zone: ZoneId) -> Self {
+    pub const fn humidity(zone: ZoneId) -> Self {
         Self {
             port_type: PortType::Humidity,
             zone: Some(zone),

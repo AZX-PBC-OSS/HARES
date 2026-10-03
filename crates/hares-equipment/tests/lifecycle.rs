@@ -429,7 +429,7 @@ fn lifecycle_gas_furnace() {
         "Gas Furnace".to_string(),
         GasFurnaceConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             afue: 0.80,
             capacity_w: 10_000.0,
             number_of_speeds: 1,
@@ -599,7 +599,18 @@ fn env_with_pv_surface() -> EnvironmentState {
     env
 }
 
+/// The class's config as the dwelling hands it to `init`: carrying the zone
+/// map whose indoor (conditioned) role is zone 1, the zone every unit that
+/// conditions the dwelling's air serves.
 fn config_for_class(class: &str) -> EquipmentConfig {
+    let mut cfg = typed_config_for_class(class);
+    let mut zone_map = hares_types::ZoneMap::new();
+    zone_map.insert(hares_types::ZoneRole::Indoor, hares_types::ZoneId(1));
+    cfg.zone_map = Some(zone_map);
+    cfg
+}
+
+fn typed_config_for_class(class: &str) -> EquipmentConfig {
     match class {
         "Gas Furnace" => typed_alias_config(
             class,
@@ -868,7 +879,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             GasWaterHeaterConfig {
                 fan_power_w: None,
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 fuel_type: FuelType::Gas,
                 tank_volume_m3: None,
@@ -904,7 +915,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -937,7 +948,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             TanklessWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 fuel_type: FuelType::Electric,
                 energy_factor: Some(0.95),
@@ -960,7 +971,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             TanklessWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 fuel_type: FuelType::Gas,
                 energy_factor: Some(0.82),
@@ -983,7 +994,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -1028,7 +1039,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             IndirectTankConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 boiler_loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -1615,7 +1626,7 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpHeaterConfig {
         common: HeatPumpCommonConfig {
-            zone_id: None,
+            zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
             heating_eir: Some(3.412_141_633 / 9.0),
             cooling_capacity_w: Some(8_000.0),
@@ -1691,7 +1702,7 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpCoolerConfig {
         common: HeatPumpCommonConfig {
-            zone_id: None,
+            zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
             heating_eir: Some(3.412_141_633 / 9.0),
             cooling_capacity_w: Some(8_000.0),

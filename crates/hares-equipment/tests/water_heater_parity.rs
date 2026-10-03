@@ -94,7 +94,7 @@ fn resistance_cfg(
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -169,7 +169,7 @@ fn hpwh_cfg_with(
         "Heat Pump Water Heater".to_string(),
         HeatPumpWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -305,7 +305,7 @@ fn element_cycling_deadband_matches_ochre_default() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -401,7 +401,7 @@ fn gas_wh_fuel_not_electricity() {
         GasWaterHeaterConfig {
             fan_power_w: None,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type: FuelType::Gas,
             tank_volume_m3: None,
@@ -524,7 +524,7 @@ fn standby_loss_ua_magnitude() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -613,7 +613,7 @@ fn hpwh_cop_at_multiple_ambient_temps() {
             "Heat Pump Water Heater".to_string(),
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -715,7 +715,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                 GasWaterHeaterConfig {
                     fan_power_w: None,
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id: Some(1),
                     loop_id: None,
                     fuel_type: FuelType::Gas,
                     tank_volume_m3: None,
@@ -781,7 +781,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                 GasWaterHeaterConfig {
                     fan_power_w: None,
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id: Some(1),
                     loop_id: None,
                     fuel_type: FuelType::Gas,
                     tank_volume_m3: None,
@@ -996,7 +996,7 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
     let env = make_env(24.0);
     let base = HeatPumpWaterHeaterConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id: Some(1),
         loop_id: None,
         tank_volume_m3: None,
         tank_height_m: None,

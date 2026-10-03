@@ -9,7 +9,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType,
     HaresError, HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,8 @@ use super::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         compute_and_write_ebm_telemetry, lookup_zone, loop_id_from_config, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config,
+        register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -95,8 +96,6 @@ pub struct ElectricBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -133,8 +132,6 @@ pub struct GasBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -165,9 +162,7 @@ struct BoilerState {
 impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
@@ -175,7 +170,7 @@ impl ElectricBoiler {
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Boiler"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -211,7 +206,6 @@ impl ElectricBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -235,22 +229,18 @@ impl Equipment for ElectricBoiler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         // The circulation pump is a secondary motor component (pf 0.84); the
         // unit ZIP describes the primary component (resistive element, pf 1.0).
         self.pump_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::LOOP_PUMP_ZIP);
-        let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
@@ -268,8 +258,9 @@ impl Equipment for ElectricBoiler {
         }
         self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         // The fluid port's declared loop id and fluid type follow the
         // configuration: rebuild_thermal_ports pushes the thermal ports to
         // the end of the vector, so the fluid port is located by type, not
@@ -397,9 +388,7 @@ impl Equipment for ElectricBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -542,16 +531,14 @@ impl Equipment for ElectricBoiler {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
 impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
@@ -559,7 +546,7 @@ impl GasBoiler {
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Boiler"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -579,12 +566,14 @@ impl GasBoiler {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::fuel(),
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-            ],
+            ports: served_zone_ports(
+                &[PortDeclaration::fuel(), PortDeclaration::electrical()],
+                zone,
+                false,
+            )
+            .into_iter()
+            .chain([PortDeclaration::fluid(loop_id, FluidType::Water)])
+            .collect(),
             telemetry: gas_boiler_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
@@ -603,7 +592,6 @@ impl GasBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -655,18 +643,14 @@ impl Equipment for GasBoiler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
-        let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         if let Some(lid) = typed.loop_id {
@@ -692,8 +676,9 @@ impl Equipment for GasBoiler {
         self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
         self.hvac.config.eir_by_stage = vec![self.eir_max];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         // The fluid port's declared loop id and fluid type follow the
         // configuration: rebuild_thermal_ports pushes the thermal ports to
         // the end of the vector, so the fluid port is located by type, not
@@ -751,12 +736,7 @@ impl Equipment for GasBoiler {
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
-        let zone_temp_c = env
-            .zones
-            .iter()
-            .find(|z| z.id == self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         let eir = if thermal_output_w > 0.0 {
             self.current_eir(plr, zone_temp_c)?
         } else {
@@ -848,9 +828,7 @@ impl Equipment for GasBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -999,7 +977,7 @@ impl Equipment for GasBoiler {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 

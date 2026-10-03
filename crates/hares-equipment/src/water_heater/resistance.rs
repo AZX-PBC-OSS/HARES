@@ -11,20 +11,20 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
+use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::loop_id_from_config;
 
 /// Element priority control mode for dual-element electric resistance water heaters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -37,7 +37,7 @@ pub enum ElementPriorityMode {
     Simultaneous,
 }
 
-use super::wh_config::{AmbientLocation, ElectricResistanceWaterHeaterConfig};
+use super::wh_config::ElectricResistanceWaterHeaterConfig;
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -116,11 +116,8 @@ pub struct ResistanceWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
-    /// When the HPXML `Location` names space with no modeled zone, the
-    /// ambient placement the equipment runs against instead of a zone id.
-    ambient_location: Option<AmbientLocation>,
+    /// The zone or no-zone location the tank sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -147,9 +144,7 @@ fn parse_element_priority_mode(mode: Option<&str>) -> Result<ElementPriorityMode
 impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let siting = Siting::from_constructor_config(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -180,7 +175,7 @@ impl ResistanceWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Resistance Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -195,12 +190,7 @@ impl ResistanceWH {
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
-            ],
+            ports: siting::storage_ports(&[PortDeclaration::electrical()], &siting, loop_id),
             telemetry: {
                 let mut t = default_telemetry();
                 tank.register_node_telemetry(&mut t);
@@ -239,8 +229,7 @@ impl ResistanceWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
-            ambient_location: None,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -283,22 +272,6 @@ impl ResistanceWH {
             temps[self.lower_node]
         }
     }
-
-    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        match self.ambient_location {
-            Some(location) => super::ambient_source_temp_c(env, location),
-            None => self
-                .descriptor
-                .zone
-                .and_then(|zone| {
-                    env.zones
-                        .iter()
-                        .find(|z| z.id == zone)
-                        .map(|z| z.temperature_c)
-                })
-                .unwrap_or(env.weather.outdoor_temp_c),
-        }
-    }
 }
 
 impl ResistanceWH {
@@ -319,26 +292,12 @@ impl ResistanceWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        // Zone resolution: an HPXML `Location` that names space with no
-        // modeled zone ("other ...") runs against the matching ambient
-        // series instead of a zone; a location that classifies as neither a
-        // modeled zone nor a known ambient placement is unresolved wiring.
-        let ambient = super::resolve_ambient_location(
-            config.name.as_str(),
-            c.zone_id,
-            c.zone_type.as_deref(),
-        )?;
-        self.ambient_location = ambient;
-        let zone = if ambient.is_some() {
-            None
-        } else {
-            c.zone_id.map(ZoneId).or(self.descriptor.zone)
-        };
-        self.descriptor.zone = zone;
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.ports[1].zone = zone;
         self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
-        self.ports[2].loop_id = Some(self.loop_id);
+        self.ports =
+            siting::storage_ports(&[PortDeclaration::electrical()], &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
@@ -463,8 +422,8 @@ impl Equipment for ResistanceWH {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        self.siting.ambient_location()
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -560,6 +519,7 @@ impl Equipment for ResistanceWH {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let ambient_c = self.siting.dry_bulb_c(env, &self.descriptor.name)?;
         let mode = self.update_control(env);
         let ctrl_duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
@@ -571,7 +531,6 @@ impl Equipment for ResistanceWH {
         let use_ideal = env.time_res.num_seconds() >= 300;
         let (upper_power_w, mut lower_power_w) = if use_ideal && mode == OperatingMode::Heating {
             let dt_s = dt.as_secs_f64();
-            let ambient_c = self.ambient_temp_c(env);
             let up = if self.upper_element_on && self.upper_element_power_w > 0.0 {
                 let ideal_w = self.tank.ideal_capacity_for_node(
                     self.upper_node,
@@ -663,7 +622,7 @@ impl Equipment for ResistanceWH {
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            self.ambient_temp_c(env),
+            ambient_c,
             tempered_flow_m3_s,
             hot_flow_m3_s,
             mains_temp_c,
@@ -709,7 +668,8 @@ impl Equipment for ResistanceWH {
             })?;
         }
 
-        // Jacket loss: tank skin heat flows into the conditioned zone.
+        // Jacket loss: tank skin heat flows into the heater's zone; a heater
+        // in a location with no modeled zone loses it to that ambient.
         let skin_loss_w = self.tank.skin_loss_w();
         if let Some(zone) = self.descriptor.zone
             && skin_loss_w.abs() > 1e-3
@@ -1082,7 +1042,8 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     fields.push(TelemetryField {
         name: tk::SKIN_LOSS_W.to_string(),
         unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to zone".to_string(),
+        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
+            .to_string(),
     });
     fields
 }
@@ -2682,9 +2643,9 @@ mod ambient_tests {
     use chrono::TimeZone;
     use hares_types::{EnvironmentState, ZoneId};
 
-    use super::super::wh_config::AmbientLocation;
     use super::ResistanceWH;
     use crate::{ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig};
+    use hares_types::AmbientLocation;
 
     /// `ElectricResistanceWaterHeaterConfig` with the shared test defaults
     /// and the given zone wiring.
@@ -2727,13 +2688,7 @@ mod ambient_tests {
     /// non-freezing max(2.0, 4.44) = 4.44.
     fn ambient_test_env(conditioned_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
-            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps {
-                // Hand-computed per the table for conditioned 22.0, outdoor 2.0.
-                other_heated_space_c: 20.0,
-                other_multifamily_buffer_space_c: 12.0,
-                other_non_freezing_space_c: 4.44,
-                conditioned_zone_c: conditioned_temp_c,
-            },
+            ambient_other_space_c: super::super::siting::test_ambient_air(),
             zones: vec![hares_types::ZoneState {
                 id: ZoneId(1),
                 temperature_c: conditioned_temp_c,
@@ -2784,12 +2739,12 @@ mod ambient_tests {
         let e = ambient_test_env(22.0, 2.0);
         eq.init(&cfg, &e).unwrap();
         assert_eq!(
-            eq.ambient_location,
+            eq.ambient_location(),
             Some(AmbientLocation::OtherHousingUnit),
-            "construction must carry the classified ambient placement"
+            "init must resolve the classified ambient placement"
         );
         assert_eq!(eq.descriptor().zone, None);
-        assert!((eq.ambient_temp_c(&e) - 22.0).abs() < 1e-9);
+        assert!((eq.siting.dry_bulb_c(&e, "WH").unwrap() - 22.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2817,6 +2772,88 @@ mod ambient_tests {
         assert!(
             message.contains("in between somewhere"),
             "the error must name the unresolved zone_type, got: {message}"
+        );
+    }
+
+    fn resistance_config(zone_id: Option<u16>, zone_type: Option<&str>) -> EquipmentConfig {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id,
+            zone_type: zone_type.map(str::to_string),
+            ..typed_config()
+        };
+        EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap()
+    }
+
+    /// A water heater whose config names neither a zone nor an HPXML
+    /// location has no placement: init must fail naming the equipment
+    /// instead of running in whichever zone happens to be first.
+    #[test]
+    fn resistance_errors_when_neither_zone_nor_location_resolves() {
+        let cfg = resistance_config(None, None);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &ambient_test_env(21.0, 10.0))
+            .expect_err("no zone_id and no location must fail init");
+        assert!(
+            err.to_string().contains("WH"),
+            "the error must name the water heater, got: {err}"
+        );
+    }
+
+    /// "Other housing unit" reads the conditioned zone's air; when that air
+    /// is not available for the step the heater must fail the step rather
+    /// than substitute the outdoor temperature.
+    #[test]
+    fn resistance_other_housing_unit_errors_when_conditioned_air_is_unavailable() {
+        let cfg = resistance_config(None, Some("other housing unit"));
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let mut e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        e.ambient_other_space_c.other_housing_unit = None;
+        let mut ports = hares_types::PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        eq.step(&e, std::time::Duration::from_secs(60), &mut ports)
+            .expect_err("missing conditioned-zone air must fail the step");
+    }
+
+    /// A tank in a location with no modeled zone loses its standing heat to
+    /// that location's ambient, never into a modeled zone.
+    #[test]
+    fn ambient_placed_resistance_heater_contributes_nothing_to_any_zone() {
+        let cfg = resistance_config(None, Some("other heated space"));
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        let mut ports = hares_types::PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            eq.step(&e, std::time::Duration::from_secs(60), &mut ports)
+                .unwrap();
+        }
+        let zone = &ports.thermal[0];
+        assert_eq!(
+            (
+                zone.sensible_gain_w,
+                zone.radiant_gain_w,
+                zone.latent_gain_w
+            ),
+            (0.0, 0.0, 0.0),
+            "an ambient-placed tank must not add heat to zone 1"
+        );
+        assert!(
+            eq.ports()
+                .iter()
+                .all(|p| p.port_type != hares_types::PortType::Thermal),
+            "an ambient-placed tank declares no thermal port"
         );
     }
 }

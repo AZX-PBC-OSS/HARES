@@ -1373,15 +1373,23 @@ pub(crate) fn build_synthetic_building(
     // synthetic-TOML dwelling, so an open envelope is a Dwelling error, not
     // a diagnostic.
     if config.geometry.zone_volume_m3 > 0.0 {
-        let has_wall = boundaries
-            .iter()
-            .any(|b| b.boundary_type == BoundaryType::Wall);
-        let has_roof = boundaries
-            .iter()
-            .any(|b| b.boundary_type == BoundaryType::Roof);
-        let has_floor = boundaries
-            .iter()
-            .any(|b| b.boundary_type == BoundaryType::Floor);
+        // Only the zone's own faces with area close it. A foundation wall
+        // or rim joist is a wall and a slab is a floor; a door or window is
+        // an opening in a face, not a face.
+        let closes_with = |categories: &[BoundaryType]| {
+            boundaries.iter().any(|b| {
+                b.interior_zone == Some(ZoneType::Conditioned)
+                    && b.area_m2 > 0.0
+                    && categories.contains(&b.boundary_type)
+            })
+        };
+        let has_wall = closes_with(&[
+            BoundaryType::Wall,
+            BoundaryType::FoundationWall,
+            BoundaryType::RimJoist,
+        ]);
+        let has_roof = closes_with(&[BoundaryType::Roof]);
+        let has_floor = closes_with(&[BoundaryType::Floor, BoundaryType::Slab]);
         let face_categories =
             usize::from(has_wall) + usize::from(has_roof) + usize::from(has_floor);
         if face_categories < 2 {
@@ -3386,6 +3394,88 @@ specific_heat_j_kg_k = 900.0
                 .any(|b| b.boundary_type == BoundaryType::Floor),
             "the Wall+Floor envelope must build with its floor present"
         );
+    }
+
+    /// A synthetic TOML whose `[[boundaries]]` are the given
+    /// `(boundary_type, area_m2, interior_zone, exterior_zone)` faces.
+    fn closure_test_config(faces: &[(&str, f64, &str, &str)]) -> SyntheticTomlConfig {
+        let mut toml = String::from(
+            r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+"#,
+        );
+        for (idx, (boundary_type, area_m2, interior, exterior)) in faces.iter().enumerate() {
+            toml.push_str(&format!(
+                r#"
+[[boundaries]]
+id = "face-{idx}"
+boundary_type = "{boundary_type}"
+area_m2 = {area_m2:.1}
+interior_zone = "{interior}"
+exterior_zone = "{exterior}"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#
+            ));
+        }
+        toml::from_str(&toml).expect("parse")
+    }
+
+    /// A slab is the zone's floor and a foundation wall is a wall: a
+    /// slab-on-grade box and a walled foundation under a roof are closed.
+    #[test]
+    fn synthetic_closure_counts_slab_as_floor_and_foundation_wall_as_wall() {
+        for faces in [
+            vec![
+                ("Wall", 10.0, "Conditioned", "Outdoor"),
+                ("Slab", 10.0, "Conditioned", "Ground"),
+            ],
+            vec![
+                ("FoundationWall", 10.0, "Conditioned", "Ground"),
+                ("Slab", 10.0, "Conditioned", "Ground"),
+                ("Roof", 10.0, "Conditioned", "Outdoor"),
+            ],
+        ] {
+            build_synthetic_building(&closure_test_config(&faces), None, None)
+                .unwrap_or_else(|err| panic!("{faces:?} is a closed envelope: {err}"));
+        }
+    }
+
+    /// A face with no area closes nothing.
+    #[test]
+    fn synthetic_closure_rejects_a_zero_area_face() {
+        let faces = [
+            ("Wall", 10.0, "Conditioned", "Outdoor"),
+            ("Roof", 0.0, "Conditioned", "Outdoor"),
+        ];
+        build_synthetic_building(&closure_test_config(&faces), None, None)
+            .expect_err("a zero-area roof must not close the envelope");
+    }
+
+    /// Only the conditioned zone's own boundaries close it: an attic's roof
+    /// is not the conditioned zone's roof.
+    #[test]
+    fn synthetic_closure_counts_only_the_zones_own_boundaries() {
+        let faces = [
+            ("Wall", 10.0, "Conditioned", "Outdoor"),
+            ("Roof", 10.0, "Attic", "Outdoor"),
+        ];
+        build_synthetic_building(&closure_test_config(&faces), None, None)
+            .expect_err("another zone's roof must not close the conditioned zone");
     }
 
     // -------------------------------------------------------------------------

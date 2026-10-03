@@ -8,12 +8,9 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
-    telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions
-use tracing::warn;
 
 use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
@@ -24,9 +21,9 @@ use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
-use super::wh_config::{AmbientLocation, TanklessWaterHeaterConfig};
+use super::siting::Siting;
+use super::wh_config::TanklessWaterHeaterConfig;
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::zone_id_from_config;
 
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
@@ -91,11 +88,8 @@ pub struct TanklessWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
-    /// When the HPXML `Location` names space with no modeled zone, the
-    /// ambient placement the equipment runs against instead of a zone id.
-    ambient_location: Option<AmbientLocation>,
+    /// The zone or no-zone location the unit sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -103,9 +97,7 @@ pub struct TanklessWH {
 impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let siting = Siting::from_constructor_config(&config);
         let typed = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
             .expect("Tankless Water Heater requires typed FuelType");
@@ -119,7 +111,7 @@ impl TanklessWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Tankless Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: fuel_type,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -156,8 +148,7 @@ impl TanklessWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
-            ambient_location: None,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -217,21 +208,10 @@ impl TanklessWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        // Zone resolution: an HPXML `Location` that names space with no
-        // modeled zone ("other ...") carries the matching ambient placement
-        // instead of a zone id; a location that classifies as neither a
-        // modeled zone nor a known ambient placement is unresolved wiring.
-        let ambient = super::resolve_ambient_location(
-            config.name.as_str(),
-            c.zone_id,
-            c.zone_type.as_deref(),
-        )?;
-        self.ambient_location = ambient;
-        self.descriptor.zone = if ambient.is_some() {
-            None
-        } else {
-            c.zone_id.map(ZoneId).or(self.descriptor.zone)
-        };
+        // A tankless unit stores no water, so it has no standing loss and
+        // reads no ambient air; its placement still must resolve.
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
@@ -329,10 +309,6 @@ impl Equipment for TanklessWH {
 
     fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
-    }
-
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -797,10 +773,10 @@ mod tests {
 
     use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
-    use super::super::wh_config::AmbientLocation;
     use super::TanklessWH;
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
+    use hares_types::AmbientLocation;
 
     fn env() -> EnvironmentState {
         EnvironmentState {
@@ -2167,11 +2143,16 @@ mod tests {
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
         assert_eq!(
-            eq.ambient_location,
+            eq.siting.ambient_location(),
             Some(AmbientLocation::OtherExterior),
-            "construction must carry the classified ambient placement"
+            "init must resolve the classified ambient placement"
         );
         assert_eq!(eq.descriptor().zone, None);
+        assert_eq!(
+            eq.ambient_location(),
+            None,
+            "a tankless unit reads no ambient air, so it asks for none"
+        );
     }
 
     /// The "outside" spelling classifies the same as "other exterior",
@@ -2184,7 +2165,10 @@ mod tests {
         let cfg = config_from_typed(typed);
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
-        assert_eq!(eq.ambient_location, Some(AmbientLocation::OtherExterior));
+        assert_eq!(
+            eq.siting.ambient_location(),
+            Some(AmbientLocation::OtherExterior)
+        );
         assert_eq!(eq.descriptor().zone, None);
     }
 

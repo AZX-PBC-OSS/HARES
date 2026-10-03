@@ -28,7 +28,9 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{register_ebm_telemetry_keys, zone_id_from_config},
+    helpers::{
+        register_ebm_telemetry_keys, resolve_served_zone, served_zone_ports, zone_id_from_config,
+    },
 };
 use crate::config::constructor_equipment_id;
 
@@ -93,7 +95,8 @@ pub struct IdealHvac {
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
     core_output: CoreOutput,
-    zone_id: ZoneId,
+    /// The zone the unit conditions; `None` until `init` resolves it.
+    zone_id: Option<ZoneId>,
     thermostat_fsm: ThermostatFsm,
     ideal_capacity_w: f64,
     ideal_capacity_degraded: bool,
@@ -126,8 +129,6 @@ pub struct IdealHvac {
     /// Biquadratic temperature-correction curves for the non-ideal fallback path.
     /// Default identity coefficients produce no correction (cap_ratio = eir_ratio = 1.0).
     curves: BiquadraticCurveSet,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly zero, real power
     /// stays bit-identical. Wired uniformly with the rest of the fleet so the
@@ -156,15 +157,13 @@ struct IdealHvacState {
 impl IdealHvac {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Ideal HVAC"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::IDEAL_CAPACITY
@@ -183,11 +182,7 @@ impl IdealHvac {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::thermal(zone),
-                PortDeclaration::electrical(),
-                PortDeclaration::humidity(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, true),
             telemetry: ideal_hvac_default_telemetry(),
             core_output: CoreOutput::default(),
             zone_id: zone,
@@ -212,7 +207,6 @@ impl IdealHvac {
             fan_power_ratio: 0.0,
             capacity_min_w: 0.0,
             curves: BiquadraticCurveSet::identity(),
-            zone_id_explicit,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -303,8 +297,30 @@ impl IdealHvac {
         }
     }
 
+    /// Label the unit for end-use routing (`ByEndUse` dispatch, the per-zone
+    /// HVAC grouping) by its thermostat call before it steps; `step` then
+    /// labels it by the sign of the capacity it actually delivered.
+    /// Deadband keeps the previous label: the unit did not switch modes.
+    fn route_end_use_by_mode(&mut self, mode: ThermostatMode) {
+        match mode {
+            ThermostatMode::Heating => self.descriptor.end_use = EndUse::HVAC_HEATING,
+            ThermostatMode::Cooling => self.descriptor.end_use = EndUse::HVAC_COOLING,
+            ThermostatMode::Deadband => {}
+        }
+    }
+
+    fn served_zone(&self) -> crate::Result<ZoneId> {
+        self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: served zone not resolved; init must run before stepping",
+                self.descriptor.name
+            ))
+        })
+    }
+
     fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
-        let mode = self.thermostat_fsm.update_mode(env, self.zone_id)?;
+        let zone = self.served_zone()?;
+        let mode = self.thermostat_fsm.update_mode(env, zone)?;
 
         let setpoints = self.thermostat_fsm.effective_setpoints();
         match self.thermostat_fsm.mode {
@@ -316,7 +332,7 @@ impl IdealHvac {
                 // The FSM Deadband is correct for physical-equipment cycling
                 // observability; the solver needs the setpoint when active.
                 if self.use_ideal_cached {
-                    let zone_temp = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
+                    let zone_temp = lookup_zone_temp(env, zone)?;
                     self.current_target_c = if zone_temp < setpoints.heating_c {
                         setpoints.heating_c
                     } else if zone_temp > setpoints.cooling_c {
@@ -345,10 +361,6 @@ impl Equipment for IdealHvac {
 
     fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
-    }
-
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -427,14 +439,10 @@ impl Equipment for IdealHvac {
             }
         }
 
-        if let Some(zone) = extract_numeric(config, "zone_id") {
-            let zone = ZoneId(zone as u16);
-            self.zone_id = zone;
-            self.descriptor.zone = Some(zone);
-            if let Some(thermal_port) = self.ports.first_mut() {
-                thermal_port.zone = Some(zone);
-            }
-        }
+        let zone = resolve_served_zone(config, self.zone_id)?;
+        self.zone_id = Some(zone);
+        self.descriptor.zone = Some(zone);
+        self.ports = served_zone_ports(&[PortDeclaration::electrical()], Some(zone), true);
         if let Some(heating_sp) = extract_numeric(config, "heating_setpoint_c") {
             self.thermostat_fsm.static_setpoints.heating_c = heating_sp;
         }
@@ -519,6 +527,16 @@ impl Equipment for IdealHvac {
             .effective_setpoints()
             .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
         self.thermostat_fsm.thermostat.validate(env)?;
+        // End-use routing reads the descriptor before the first step: label
+        // the unit by the comfort bound its zone starts beyond.
+        if let Ok(zone_temp_c) = lookup_zone_temp(env, zone) {
+            let setpoints = self.thermostat_fsm.effective_setpoints();
+            if zone_temp_c > setpoints.cooling_c {
+                self.route_end_use_by_mode(ThermostatMode::Cooling);
+            } else if zone_temp_c < setpoints.heating_c {
+                self.route_end_use_by_mode(ThermostatMode::Heating);
+            }
+        }
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.telemetry = ideal_hvac_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
@@ -544,24 +562,30 @@ impl Equipment for IdealHvac {
         }
 
         let mode = self.update_mode(env).unwrap_or(ThermostatMode::Deadband);
+        self.route_end_use_by_mode(mode);
 
         // Compute the ideal solver target independently of FSM hysteresis.
         // The FSM deadband is correct for physical equipment cycling; in ideal
         // capacity mode the solver needs whichever comfort setpoint bounds the
         // zone temperature (heating if below heating_c, cooling if above
-        // cooling_c, none if within the comfort band).
-        let zone_temp = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
+        // cooling_c, none if within the comfort band). A zone the
+        // environment does not carry sets no target; `step` reads the same
+        // zone and fails with the reason.
         let setpoints = self.thermostat_fsm.effective_setpoints();
-        self.cached_ideal_target = if self.use_ideal_cached {
-            if zone_temp < setpoints.heating_c {
-                Some((self.zone_id, setpoints.heating_c))
-            } else if zone_temp > setpoints.cooling_c {
-                Some((self.zone_id, setpoints.cooling_c))
-            } else {
-                None
+        let zone_temp = self
+            .zone_id
+            .and_then(|zone| Some((zone, lookup_zone_temp(env, zone).ok()?)));
+        self.cached_ideal_target = match zone_temp {
+            Some((zone, temp_c)) if self.use_ideal_cached => {
+                if temp_c < setpoints.heating_c {
+                    Some((zone, setpoints.heating_c))
+                } else if temp_c > setpoints.cooling_c {
+                    Some((zone, setpoints.cooling_c))
+                } else {
+                    None
+                }
             }
-        } else {
-            None
+            _ => None,
         };
 
         // When the ideal target is None (zone within comfort band), clear any
@@ -594,13 +618,9 @@ impl Equipment for IdealHvac {
             );
         }
 
+        let zone = self.served_zone()?;
         let (t_indoor_c, t_outdoor_c) = if !self.use_ideal_cached {
-            let t_out = env.weather.outdoor_temp_c;
-            // zone_id is validated at init so this always finds the zone in
-            // production; 21.0 °C (≈70 °F) is a safe fallback for unit tests
-            // that construct minimal environment state without zone entries.
-            let t_in = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
-            (t_in, t_out)
+            (lookup_zone_temp(env, zone)?, env.weather.outdoor_temp_c)
         } else {
             (0.0, 0.0)
         };
@@ -716,7 +736,7 @@ impl Equipment for IdealHvac {
             // Fan motor heat always enters the zone as sensible gain (positive
             // in both heating and cooling modes).
             ports.accumulate(&PortContribution::Thermal {
-                zone: self.zone_id,
+                zone,
                 sensible_gain_w: sensible_w + fan_power_w,
                 radiant_gain_w: 0.0,
                 latent_gain_w: latent_w,
@@ -728,7 +748,7 @@ impl Equipment for IdealHvac {
             if capacity_w < 0.0 && self.shr < 1.0 && latent_w != 0.0 {
                 let moisture_mass_flow_kg_s = latent_w / LATENT_HEAT_VAPORISATION_0C_J_KG;
                 ports.accumulate(&PortContribution::Humidity {
-                    zone: self.zone_id,
+                    zone,
                     moisture_mass_flow_kg_s,
                 })?;
             }
@@ -3619,6 +3639,44 @@ mod tests {
             eq.descriptor().end_use,
             EndUse::HVAC_HEATING,
             "end_use must still be HVAC_HEATING after deadband step following heating"
+        );
+    }
+
+    /// End-use routing (`ByEndUse` dispatch, the per-zone HVAC grouping)
+    /// reads the descriptor before the unit's first step, so a unit whose
+    /// first mode is cooling must already report cooling once its control
+    /// has resolved, not the heating label it was constructed with.
+    #[test]
+    fn end_use_reports_cooling_before_the_first_cooling_step() {
+        let cfg = ideal_config("IH-first-cool", 20.0, 26.0);
+        let env_hot = env(28.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_hot).unwrap();
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "a unit initialised in a zone above its cooling setpoint routes as cooling"
+        );
+        eq.update_control(&env_hot);
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "a unit whose control resolved to cooling routes as cooling before stepping"
+        );
+    }
+
+    /// An ideal unit with no zone_id and no dwelling zone map has no zone
+    /// to condition: init must fail naming the unit.
+    #[test]
+    fn ideal_hvac_init_errors_without_a_zone() {
+        let cfg = config("IH-no-zone");
+        let mut eq = IdealHvac::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(21.0, 300, 0))
+            .expect_err("no zone_id and no zone map must fail init");
+        assert!(
+            err.to_string().contains("IH-no-zone"),
+            "the error must name the unit, got: {err}"
         );
     }
 

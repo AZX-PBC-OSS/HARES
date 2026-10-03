@@ -122,7 +122,7 @@ fn build_solver_boundaries(
         .map(|d| (d.boundary_idx, d))
         .collect();
 
-    let indoor_zone_id = env.zones.first().map(|z| z.id).unwrap_or(ZoneId(1));
+    let indoor_zone_id = indoor_zone(building, env)?.id;
 
     // Pre-count exterior surface columns so inner column offsets can be computed in one pass.
     let n_ext_surface_inputs: usize = building
@@ -756,6 +756,34 @@ pub(crate) struct SolverBundle {
     pub envelope_diagnostics: EnvelopeDiagnostics,
 }
 
+/// The conditioned zone's state: the thermal solver's indoor zone, which
+/// receives infiltration, natural ventilation and window gains.
+fn indoor_zone<'a>(
+    building: &Building,
+    env: &'a EnvironmentState,
+) -> Result<&'a hares_types::ZoneState> {
+    let idx = building
+        .conditioned_zone_index()
+        .map_err(|err| HaresError::Dwelling(err.to_string()))?
+        .ok_or_else(|| {
+            HaresError::Dwelling(
+                "the building has no conditioned zone to serve as the thermal solver's indoor zone"
+                    .to_string(),
+            )
+        })?;
+    let id = ZoneId(u16::try_from(idx + 1).map_err(|_| {
+        HaresError::Dwelling(format!(
+            "conditioned zone index {idx} exceeds the zone id range"
+        ))
+    })?);
+    env.zones.iter().find(|z| z.id == id).ok_or_else(|| {
+        HaresError::Dwelling(format!(
+            "conditioned zone {} is missing from the environment's zone state",
+            id.0
+        ))
+    })
+}
+
 pub(crate) fn build_default_solvers(
     env: &EnvironmentState,
     sim_config: &SimulationConfig,
@@ -891,12 +919,9 @@ pub(crate) fn build_default_solvers(
 
     // --- ThermalSolverConfig ---
     let mut wiring = StateSpaceWiring::default();
+    let indoor = indoor_zone(building, env)?;
     let mut thermal_cfg = ThermalSolverConfig {
-        indoor_zone_id: env
-            .zones
-            .first()
-            .map(|z| z.id)
-            .unwrap_or(hares_types::ZoneId(1)),
+        indoor_zone_id: indoor.id,
         interior_lwr_method,
         ..ThermalSolverConfig::default()
     };
@@ -1569,7 +1594,7 @@ pub(crate) fn build_default_solvers(
         }
     }
 
-    let initial_temp = env.zones.first().map(|z| z.temperature_c).unwrap_or(21.0);
+    let initial_temp = indoor.temperature_c;
     let thermal_solver = ThermalSolver::new(model, wiring, thermal_cfg, dt_s, env, initial_temp)
         .map_err(|err| HaresError::Envelope(format!("thermal solver init failed: {err}")))?;
 
@@ -1831,6 +1856,112 @@ mod tests {
         garage_ela_coefficients,
     };
     use hares_types::ZoneId;
+
+    fn zone_of_type(zone_type: ZoneType) -> Zone {
+        Zone {
+            zone_type,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }
+    }
+
+    fn building_with_zones(zones: Vec<Zone>) -> hares_io::Building {
+        hares_io::Building {
+            site: hares_io::hpxml::Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones,
+            boundaries: vec![],
+            windows: vec![],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: "root".into(),
+                attrs: Default::default(),
+                text: String::new(),
+                children: vec![],
+            },
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    fn env_with_zone_temps(temps_c: &[f64]) -> hares_types::EnvironmentState {
+        let mut env = crate::actor::testing::TestEnvBuilder::new().build();
+        env.zones = temps_c
+            .iter()
+            .enumerate()
+            .map(|(idx, &temperature_c)| hares_types::ZoneState {
+                id: ZoneId(u16::try_from(idx + 1).unwrap()),
+                temperature_c,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            })
+            .collect();
+        env
+    }
+
+    /// The thermal solver's indoor zone is the conditioned zone, found by
+    /// type wherever it sits in the zone list, not the first zone.
+    #[test]
+    fn indoor_zone_is_the_conditioned_zone_not_the_first_zone() {
+        let building = building_with_zones(vec![
+            zone_of_type(ZoneType::Foundation),
+            zone_of_type(ZoneType::Conditioned),
+        ]);
+        let env = env_with_zone_temps(&[12.0, 21.5]);
+        let indoor = super::indoor_zone(&building, &env).unwrap();
+        assert_eq!((indoor.id, indoor.temperature_c), (ZoneId(2), 21.5));
+    }
+
+    /// No conditioned zone, or two, leaves no single indoor zone.
+    #[test]
+    fn indoor_zone_errors_without_exactly_one_conditioned_zone() {
+        let env = env_with_zone_temps(&[12.0, 21.5]);
+        for zones in [
+            vec![zone_of_type(ZoneType::Foundation)],
+            vec![
+                zone_of_type(ZoneType::Conditioned),
+                zone_of_type(ZoneType::Conditioned),
+            ],
+        ] {
+            super::indoor_zone(&building_with_zones(zones), &env)
+                .expect_err("the indoor zone must be the one conditioned zone");
+        }
+    }
 
     /// The eliminated-skin radiative resistance must be the PARALLEL
     /// combination of film and material half-layer resistances, not the bare

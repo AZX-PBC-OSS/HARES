@@ -88,7 +88,7 @@ def test_swap_wh_to_hpwh_does_not_panic():
     bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
 
     hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
-                       backup_capacity_w=4500.0,
+                       backup_capacity_w=4500.0, zone_id=1,
                        avg_water_draw_l_per_day=200.0)
     bp.add_equipment(hpwh)
 
@@ -129,7 +129,7 @@ def test_swap_wh_to_electric_resistance_does_not_panic():
 
     erwh = ElectricResistanceWH("ERWH", tank_volume_m3=0.19,
                                 uniform_energy_factor=0.95,
-                                heating_capacity_w=4500.0,
+                                heating_capacity_w=4500.0, zone_id=1,
                                 avg_water_draw_l_per_day=200.0)
     bp.add_equipment(erwh)
 
@@ -199,7 +199,7 @@ def test_full_swap_gas_to_electric_does_not_panic():
     bp.add_equipment(ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000))
     bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
     bp.add_equipment(HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
-                                 backup_capacity_w=4500.0,
+                                 backup_capacity_w=4500.0, zone_id=1,
                                  avg_water_draw_l_per_day=200.0))
 
     dw = bp.build()
@@ -284,7 +284,7 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
     bp_gas.remove_equipment_by_end_use([EndUse.HVAC_COOLING, EndUse.WATER_HEATING])
     bp_gas.add_equipment(GasWaterHeater("GasWH", tank_volume_m3=0.19,
                                          uniform_energy_factor=0.62,
-                                         heating_capacity_w=4500,
+                                         heating_capacity_w=4500, zone_id=1,
                                          avg_water_draw_l_per_day=200.0))
     gas_steps = _collect_step_powers(bp_gas)
 
@@ -295,6 +295,7 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
         "ERWH", tank_volume_m3=0.19,
         uniform_energy_factor=0.95,
         heating_capacity_w=4500.0,
+        zone_id=1,
         avg_water_draw_l_per_day=200.0,
     ))
     elec_steps = _collect_step_powers(bp_elec)

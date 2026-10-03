@@ -9,7 +9,8 @@
 
 use hares_types::normalize_ascii;
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, Telemetry, ZoneId,
+    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, PortDeclaration,
+    Telemetry, ZoneId,
 };
 
 use crate::{ConfigPayload, EquipmentConfig};
@@ -49,6 +50,45 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
         return None;
     }
     Some(ZoneId(raw as u16))
+}
+
+/// The zone a unit that conditions the dwelling's own air serves: the
+/// config's zone_id, else the zone the unit already carries, else the
+/// dwelling zone map's indoor (conditioned) zone. A unit with none of these
+/// has no zone to condition: a typed error naming it.
+pub(crate) fn resolve_served_zone(
+    config: &EquipmentConfig,
+    current: Option<ZoneId>,
+) -> crate::Result<ZoneId> {
+    zone_id_from_config(config)
+        .or(current)
+        .or_else(|| {
+            config
+                .zone_map
+                .as_ref()
+                .and_then(|map| map.get(hares_types::ZoneRole::Indoor))
+        })
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: no zone_id and no conditioned zone in the dwelling zone map; \
+                 the unit has no zone to serve",
+                config.name
+            ))
+        })
+}
+
+/// `leading` followed by the served zone's thermal (and, for units that
+/// move moisture, humidity) port; no zone port while the zone is unresolved.
+pub(crate) fn served_zone_ports(
+    leading: &[PortDeclaration],
+    zone: Option<ZoneId>,
+    humidity: bool,
+) -> Vec<PortDeclaration> {
+    let zone_ports = zone.into_iter().flat_map(|zone| {
+        std::iter::once(PortDeclaration::thermal(zone))
+            .chain(humidity.then(|| PortDeclaration::humidity(zone)))
+    });
+    leading.iter().copied().chain(zone_ports).collect()
 }
 
 /// Parse an optional `ZoneId` from a named config key.
@@ -141,13 +181,14 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     // Only the served (conditioned) zone is checked; duct zones in attics
     // or garages are not subject to this limit because they can legitimately
     // reach high temperatures without heating equipment running.
-    if let Ok(zone) = lookup_zone(env, hvac.config.zone_id)
+    if let Some(zone_id) = hvac.config.zone_id
+        && let Ok(zone) = lookup_zone(env, zone_id)
         && zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C
     {
         tracing::warn!(
             zone_temp_c = zone.temperature_c,
             equipment_type = ?hvac.config.equipment_type,
-            zone_id = hvac.config.zone_id.0,
+            zone_id = zone_id.0,
             max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
             "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
         );

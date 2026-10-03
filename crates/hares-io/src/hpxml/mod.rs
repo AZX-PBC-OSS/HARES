@@ -23,8 +23,8 @@ use hares_types::Warning;
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
 pub use building::{
-    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer, Site,
-    SiteType, Window, Zone, ZoneType,
+    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer,
+    MultipleConditionedZones, Site, SiteType, Window, Zone, ZoneType,
 };
 pub use data_patches::HpxmlDataPatches;
 pub(crate) use equipment::build_spec;
@@ -162,6 +162,8 @@ pub enum HpxmlError {
         /// Name of the equipment that needs the conditioned zone.
         equipment: String,
     },
+    #[error(transparent)]
+    MultipleConditionedZones(#[from] MultipleConditionedZones),
     /// Equipment configuration error propagated from hares-equipment.
     #[error(transparent)]
     Equipment(#[from] hares_types::HaresError),

@@ -8,7 +8,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,8 @@ use super::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config,
+        register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -43,8 +44,6 @@ pub struct ElectricBaseboard {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -71,15 +70,13 @@ struct BaseboardState {
 impl ElectricBaseboard {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Baseboard"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -98,10 +95,7 @@ impl ElectricBaseboard {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, false),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Baseboard, zone),
@@ -110,7 +104,6 @@ impl ElectricBaseboard {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -133,23 +126,21 @@ impl Equipment for ElectricBaseboard {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.hvac.config.duct_dse = 1.0;
         self.hvac.config.duct_zone_id = None;
         self.hvac.config.basement_heat_frac = 0.0;
         self.hvac.config.basement_zone_id = None;
-        self.hvac.update_zone_heat_fractions();
-        let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
+        self.hvac.update_zone_heat_fractions()?;
+        self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         if self.eir <= 0.0 || !self.eir.is_finite() {
@@ -234,9 +225,7 @@ impl Equipment for ElectricBaseboard {
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -366,7 +355,7 @@ impl Equipment for ElectricBaseboard {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
@@ -523,6 +512,56 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn config_without_zone() -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "Baseboard".to_string(),
+            "Electric Baseboard".to_string(),
+            ElectricBaseboardConfig {
+                zone_id: None,
+                capacity_w: 3_000.0,
+                ..ElectricBaseboardConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// HVAC conditions the dwelling's conditioned zone: with no zone_id the
+    /// unit resolves the zone map's indoor role, wherever that zone sits in
+    /// the zone list.
+    #[test]
+    fn baseboard_without_zone_id_serves_the_zone_map_indoor_zone() {
+        let mut cfg = config_without_zone();
+        let mut zone_map = hares_types::ZoneMap::new();
+        zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(3));
+        cfg.zone_map = Some(zone_map);
+        let mut e = env(18.0);
+        e.zones[0].id = ZoneId(3);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(eq.descriptor().zone, Some(ZoneId(3)));
+        assert!(
+            eq.ports()
+                .iter()
+                .filter(|p| p.port_type == hares_types::PortType::Thermal)
+                .all(|p| p.zone == Some(ZoneId(3))),
+            "the thermal port must target the resolved indoor zone"
+        );
+    }
+
+    /// With neither a zone_id nor a zone map there is no zone to condition.
+    #[test]
+    fn baseboard_init_errors_without_a_zone() {
+        let cfg = config_without_zone();
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(18.0))
+            .expect_err("no zone_id and no zone map must fail init");
+        assert!(
+            err.to_string().contains("Baseboard"),
+            "the error must name the unit, got: {err}"
+        );
     }
 
     #[test]

@@ -25,7 +25,8 @@ use super::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config,
+        register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -47,8 +48,6 @@ pub struct ElectricFurnace {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -77,8 +76,6 @@ pub struct GasFurnace {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -110,15 +107,13 @@ struct FurnaceState {
 impl ElectricFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Furnace"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -137,10 +132,7 @@ impl ElectricFurnace {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, false),
             telemetry: electric_furnace_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::ElectricFurnace, zone),
@@ -150,7 +142,6 @@ impl ElectricFurnace {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -174,20 +165,16 @@ impl Equipment for ElectricFurnace {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fan_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
-        let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         let airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * self.rated_capacity_w;
@@ -202,8 +189,9 @@ impl Equipment for ElectricFurnace {
                 self.eir
             )));
         }
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.runtime.startup.c_d = 0.0;
@@ -363,9 +351,7 @@ impl Equipment for ElectricFurnace {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -514,22 +500,20 @@ impl Equipment for ElectricFurnace {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
 impl GasFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Furnace"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -550,11 +534,11 @@ impl GasFurnace {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::fuel(),
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(
+                &[PortDeclaration::fuel(), PortDeclaration::electrical()],
+                zone,
+                false,
+            ),
             telemetry: gas_furnace_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::GasFurnace, zone),
@@ -565,7 +549,6 @@ impl GasFurnace {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -588,18 +571,14 @@ impl Equipment for GasFurnace {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
-        let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.fuel_efficiency = typed.afue;
@@ -609,8 +588,9 @@ impl Equipment for GasFurnace {
             .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
         self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
         self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.heating_capacities_w =
             if let Some(stages) = &typed.stage_heating_capacities_w {
                 stages.clone()
@@ -790,9 +770,7 @@ impl Equipment for GasFurnace {
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -948,7 +926,7 @@ impl Equipment for GasFurnace {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 

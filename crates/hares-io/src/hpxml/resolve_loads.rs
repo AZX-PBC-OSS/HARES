@@ -647,12 +647,7 @@ pub(super) fn resolve_scheduled_loads(
                     // one conditioned zone. A building with no conditioned
                     // zone cannot host one, so the spec is rejected instead of
                     // silently landing on a guessed zone.
-                    let zone_id =
-                        super::resolve_hvac::conditioned_zone_id(building).ok_or_else(|| {
-                            HpxmlError::NoConditionedZone {
-                                equipment: name.to_string(),
-                            }
-                        })?;
+                    let zone_id = super::resolve_hvac::conditioned_zone_id(building, name)?;
                     let cfg = DehumidifierConfig {
                         equipment_id: None,
                         zone_id: Some(zone_id),
@@ -1079,10 +1074,46 @@ pub(super) fn resolve_ventilation(
 /// suitable for internal heat gains. Follows the same substring-keyword matching
 /// pattern as `parse_zone_label` and `parse_duct_location` in `building.rs`.
 ///
-/// The classifier lives in `hares_types` so equipment layers (the HPWH
-/// wall-heat default) share one definition with the parse layer.
+/// HPXML 4.2 RefrigeratorLocation enumeration defines the valid location
+/// values; common non-standard field strings ("Indoor", "finished
+/// basement") are handled too. Diverges from OCHRE's `parse_zone_name`
+/// (ochre/utils/hpxml.py), which classifies `"basement - conditioned"` as
+/// `Foundation` and so zeroes refrigerator gains in conditioned basements.
 fn is_conditioned_location(location: &str) -> bool {
-    hares_types::is_conditioned_location(location)
+    let s = location.to_ascii_lowercase();
+    let s = s.trim();
+    // Explicitly unconditioned or unvented spaces are never conditioned.
+    if s.contains("uncondition") || s.contains("unvent") {
+        return false;
+    }
+    // Bare garages (but not "garage - conditioned": the "condition" check
+    // below catches those).
+    if s.contains("garage") && !s.contains("condition") {
+        return false;
+    }
+    // Attics are unconditioned buffer zones.
+    if s.contains("attic") {
+        return false;
+    }
+    // Conditioned-space keywords. HPXML 4.2 data dictionary
+    // §RefrigeratorLocation_simple: "conditioned space", "living space",
+    // "kitchen", "other heated space", "other housing unit", "other
+    // non-freezing space", "basement - conditioned", "garage - conditioned".
+    if s.contains("condition")
+        || s == "living space"
+        || s == "kitchen"
+        || s == "indoor"
+        || s.contains("heated")
+        || s.contains("housing unit")
+        || s.contains("non-freezing")
+    {
+        return true;
+    }
+    // Finished basements, foundations, and crawlspaces: "finished" implies
+    // conditioned in residential building practice.
+    (s.contains("basement") || s.contains("foundation") || s.contains("crawl"))
+        && s.contains("finished")
+        && !s.contains("unfinished")
 }
 
 /// Default sensible and latent gain fractions per equipment name.

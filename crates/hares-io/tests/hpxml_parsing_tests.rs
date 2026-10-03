@@ -24,6 +24,7 @@ use hares_io::hpxml::validation::{
     validate_schedule_required_columns,
 };
 use hares_io::weather::{WeatherMeta, WeatherTimeSeries};
+use hares_types::AmbientLocation;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2194,6 +2195,21 @@ fn missing_fuel_on_heating_system_returns_error() {
 fn wh_zone_params_from_vendored_sample(
     sample: &str,
 ) -> (Option<String>, Option<serde_json::Value>) {
+    let spec = wh_spec_from_vendored_sample(sample, |xml| xml);
+    (
+        spec.parameters
+            .get("zone_type")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        spec.parameters.get("zone_id").cloned(),
+    )
+}
+
+/// Parse a vendored OS-HPXML sample, after `edit` rewrites its XML, and
+/// return the resolved water heater spec.
+fn wh_spec_from_vendored_sample(
+    sample: &str,
+    edit: impl FnOnce(String) -> String,
+) -> hares_io::EquipmentSpec {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -2201,14 +2217,14 @@ fn wh_zone_params_from_vendored_sample(
         .unwrap()
         .join("vendors/OCHRE/test/OS-HPXML Sample Files")
         .join(sample);
-    let mut xml = std::fs::read_to_string(&fixture_path)
+    let xml = std::fs::read_to_string(&fixture_path)
         .unwrap_or_else(|e| panic!("{sample} fixture should be readable: {e}"));
     // The sample lacks <Latitude>/<Longitude>, required for duct DSE in the
     // HVAC resolution path; inject them as the pool test does.
-    xml = xml.replace(
+    let xml = edit(xml.replace(
         "<StateCode>CO</StateCode>",
         "<StateCode>CO</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
-    );
+    ));
     let building = parse_building(&xml).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"));
     let specs = resolve_equipment(
         &building,
@@ -2218,19 +2234,48 @@ fn wh_zone_params_from_vendored_sample(
         &mut Vec::new(),
     )
     .unwrap_or_else(|e| panic!("{sample} equipment should resolve: {e:?}"));
-    let spec = specs
-        .iter()
+    specs
+        .into_iter()
         .find(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
-        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"));
-    (
-        spec.parameters
-            .get("zone_type")
-            .and_then(|v| v.as_str().map(str::to_string)),
-        spec.parameters.get("zone_id").cloned(),
-    )
+        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"))
 }
 
-fn assert_wh_parses_to_ambient_location(sample: &str, expected: hares_equipment::AmbientLocation) {
+/// The HPWH wall share is OCHRE's partition-wall split, which exists only
+/// in the living zone; OS-HPXML puts every HPWH gain convectively into the
+/// zone air. Parsing makes the value explicit per location: 0.5 for the
+/// living zone, 0.0 for a conditioned basement or any other zone.
+#[test]
+fn parse_hpwh_wall_heat_fraction_is_explicit_per_location() {
+    for (location, expected) in [("living space", 0.5), ("basement - conditioned", 0.0)] {
+        let spec = wh_spec_from_vendored_sample("base-dhw-tank-heat-pump.xml", |xml| {
+            xml.replacen(
+                "<WaterHeaterType>heat pump water heater</WaterHeaterType>\n            <Location>living space</Location>",
+                &format!(
+                    "<WaterHeaterType>heat pump water heater</WaterHeaterType>\n            <Location>{location}</Location>"
+                ),
+                1,
+            )
+        });
+        let typed: hares_equipment::HeatPumpWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("HPWH spec carries a typed config")
+            .typed()
+            .expect("HPWH typed config");
+        assert_eq!(
+            typed.zone_type.as_deref(),
+            Some(location),
+            "the location edit must reach the parsed water heater"
+        );
+        assert_eq!(
+            typed.wall_heat_fraction,
+            Some(expected),
+            "{location}: wall_heat_fraction must be explicit"
+        );
+    }
+}
+
+fn assert_wh_parses_to_ambient_location(sample: &str, expected: AmbientLocation) {
     let (zone_type, zone_id) = wh_zone_params_from_vendored_sample(sample);
     // The config serializes an absent zone_id as `null`; the assert accepts
     // an absent key or a null and rejects any real zone number.
@@ -2240,7 +2285,7 @@ fn assert_wh_parses_to_ambient_location(sample: &str, expected: hares_equipment:
     );
     let zone_type = zone_type.unwrap_or_else(|| panic!("{sample}: zone_type must be present"));
     assert_eq!(
-        hares_equipment::ambient_location_from_zone_type(&zone_type),
+        AmbientLocation::from_location(&zone_type),
         Some(expected),
         "{sample}: location '{zone_type}' must classify as {expected:?}"
     );
@@ -2250,7 +2295,7 @@ fn assert_wh_parses_to_ambient_location(sample: &str, expected: hares_equipment:
 fn parse_other_heated_space_wh_carries_ambient_location() {
     assert_wh_parses_to_ambient_location(
         "base-bldgtype-multifamily-adjacent-to-other-heated-space.xml",
-        hares_equipment::AmbientLocation::OtherHeatedSpace,
+        AmbientLocation::OtherHeatedSpace,
     );
 }
 
@@ -2258,7 +2303,7 @@ fn parse_other_heated_space_wh_carries_ambient_location() {
 fn parse_multifamily_buffer_space_wh_carries_ambient_location() {
     assert_wh_parses_to_ambient_location(
         "base-bldgtype-multifamily-adjacent-to-multifamily-buffer-space.xml",
-        hares_equipment::AmbientLocation::OtherMultifamilyBufferSpace,
+        AmbientLocation::OtherMultifamilyBufferSpace,
     );
 }
 
@@ -2266,7 +2311,7 @@ fn parse_multifamily_buffer_space_wh_carries_ambient_location() {
 fn parse_non_freezing_space_wh_carries_ambient_location() {
     assert_wh_parses_to_ambient_location(
         "base-bldgtype-multifamily-adjacent-to-non-freezing-space.xml",
-        hares_equipment::AmbientLocation::OtherNonFreezingSpace,
+        AmbientLocation::OtherNonFreezingSpace,
     );
 }
 
@@ -2274,7 +2319,7 @@ fn parse_non_freezing_space_wh_carries_ambient_location() {
 fn parse_other_housing_unit_wh_carries_ambient_location() {
     assert_wh_parses_to_ambient_location(
         "base-bldgtype-multifamily-adjacent-to-other-housing-unit.xml",
-        hares_equipment::AmbientLocation::OtherHousingUnit,
+        AmbientLocation::OtherHousingUnit,
     );
 }
 
@@ -2282,6 +2327,6 @@ fn parse_other_housing_unit_wh_carries_ambient_location() {
 fn parse_other_exterior_wh_carries_ambient_location() {
     assert_wh_parses_to_ambient_location(
         "base-dhw-tank-gas-outside.xml",
-        hares_equipment::AmbientLocation::OtherExterior,
+        AmbientLocation::OtherExterior,
     );
 }

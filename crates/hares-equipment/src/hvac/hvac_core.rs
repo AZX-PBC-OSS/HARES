@@ -15,7 +15,7 @@ use super::core_config::{
     parse_speed_control_mode,
 };
 use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
-use super::helpers::validate_zone_id;
+use super::helpers::{resolve_served_zone, validate_zone_id};
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{
     DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD,
@@ -352,7 +352,9 @@ impl PartialEq for ClampState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HvacConfig {
     pub equipment_type: HvacEquipmentType,
-    pub zone_id: ZoneId,
+    /// The zone the unit conditions; `None` until `HvacEquipment::init`
+    /// resolves it.
+    pub zone_id: Option<ZoneId>,
     pub shr: f64,
     pub fan_power_w_per_m3_s: f64,
     pub duct_dse: f64,
@@ -474,8 +476,21 @@ pub struct HvacEquipment {
     pub control: HvacControlState,
 }
 
+impl HvacConfig {
+    /// The zone the unit conditions; an error before `init` has resolved it.
+    pub fn served_zone(&self) -> crate::Result<ZoneId> {
+        self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{:?}: served zone not resolved; init must run before stepping",
+                self.equipment_type
+            ))
+        })
+    }
+}
+
 impl HvacEquipment {
-    pub fn new(equipment_type: HvacEquipmentType, zone_id: ZoneId) -> Self {
+    pub fn new(equipment_type: HvacEquipmentType, zone_id: impl Into<Option<ZoneId>>) -> Self {
+        let zone_id = zone_id.into();
         let default_cd = match equipment_type {
             HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool => 0.0,
             _ => DEFAULT_PLF_DEGRADATION_COEFF,
@@ -508,7 +523,7 @@ impl HvacEquipment {
                     | HvacEquipmentType::Baseboard
                     | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
                 },
-                zone_heat_fractions: vec![(zone_id, 1.0)],
+                zone_heat_fractions: zone_id.map(|zone| (zone, 1.0)).into_iter().collect(),
                 biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
                 biquadratic_x1_bounds: DEFAULT_BIQUADRATIC_X1_BOUNDS,
                 biquadratic_x2_bounds: DEFAULT_BIQUADRATIC_X2_BOUNDS,
@@ -556,6 +571,8 @@ impl HvacEquipment {
     }
 
     pub fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.config.zone_id = Some(resolve_served_zone(config, self.config.zone_id)?);
+        self.update_zone_heat_fractions()?;
         self.thermostat_fsm.thermostat = ThermostatConfig {
             hysteresis_c: extract_numeric(config, "hysteresis_c").unwrap_or(1.0),
             cutout_ratio: extract_numeric(config, "cutout_ratio").unwrap_or(DEFAULT_CUTOUT_RATIO),
@@ -838,7 +855,7 @@ impl HvacEquipment {
         // Evaluate initial thermostat mode from zone temperature so the
         // FSM doesn't start stuck in Deadband when the zone is already
         // outside the comfort band (cold-start fix).
-        if let Ok(zone_temp) = lookup_zone_temp(env, self.config.zone_id) {
+        if let Ok(zone_temp) = lookup_zone_temp(env, self.config.served_zone()?) {
             let sp = self.thermostat_fsm.effective_setpoints();
             let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
             let offset = self
@@ -891,7 +908,8 @@ impl HvacEquipment {
     }
 
     pub fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
-        self.thermostat_fsm.update_mode(env, self.config.zone_id)
+        let zone = self.config.served_zone()?;
+        self.thermostat_fsm.update_mode(env, zone)
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
@@ -2342,7 +2360,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 1.0;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 1.0)]);
     }
 
@@ -2353,7 +2371,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 0.7)]);
     }
 
@@ -2364,7 +2382,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions.len(), 2);
         assert!((hvac.config.zone_heat_fractions[0].1 - 0.7).abs() < 1e-12);
         assert!((hvac.config.zone_heat_fractions[1].1 - 0.3).abs() < 1e-12);
@@ -2379,7 +2397,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![
@@ -2435,7 +2453,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2463,7 +2481,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(1)); // same as conditioned zone
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         // Only one entry since duct_zone == zone_id.
         assert_eq!(hvac.config.zone_heat_fractions.len(), 1);
         assert!(
@@ -2485,7 +2503,7 @@ mod tests {
         hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.config.basement_heat_frac = 0.2;
         hvac.config.basement_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         assert_eq!(hvac.config.zone_heat_fractions.len(), 3);
         let fracs: std::collections::HashMap<ZoneId, f64> =

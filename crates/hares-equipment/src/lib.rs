@@ -82,9 +82,8 @@ pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistr
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
 pub use water_heater::wh_config::{
-    AmbientLocation, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
-    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
-    ambient_location_from_zone_type,
+    ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
+    IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 
 /// Equipment-layer result type.
@@ -284,10 +283,11 @@ pub trait Equipment: Send + Sync {
         let _ = out;
     }
 
-    /// Returns whether the equipment's `zone_id` was explicitly set in its config
-    /// (true) or silently fell back to the default `ZoneId(1)` (false).
-    fn zone_id_explicit(&self) -> bool {
-        true
+    /// The HPXML location with no modeled zone this equipment sits in, if
+    /// any. The dwelling asks the environment to compute that location's
+    /// ambient air each step while such equipment is present.
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        None
     }
 
     /// Declares the core output capabilities this equipment type supports.

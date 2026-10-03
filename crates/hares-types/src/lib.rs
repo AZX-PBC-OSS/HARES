@@ -44,7 +44,7 @@ pub type Result<T> = std::result::Result<T, HaresError>;
 pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
-pub use text::{is_conditioned_location, normalize_ascii, parse_trimmed_f64};
+pub use text::{normalize_ascii, parse_trimmed_f64};
 pub use zone_map::{ZoneMap, ZoneRole};
 
 #[cfg(test)]

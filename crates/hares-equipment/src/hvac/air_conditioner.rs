@@ -11,7 +11,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +37,7 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
         compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, zone_id_from_config,
+        register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -123,8 +123,6 @@ pub(super) struct CoolingCore {
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
     dr_level: DRLevel,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// applies to the compressor component only (class default pf 0.96, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
@@ -297,10 +295,6 @@ impl Equipment for AirConditioner {
         crate::apply_identity_write(self.is_initialized(), &mut self.core.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.core.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.core.ports
     }
@@ -374,10 +368,6 @@ impl Equipment for RoomAC {
 
     fn set_equipment_id(&mut self, id: EquipmentId) -> crate::Result<()> {
         crate::apply_identity_write(self.is_initialized(), &mut self.core.descriptor, id)
-    }
-
-    fn zone_id_explicit(&self) -> bool {
-        self.core.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -513,9 +503,7 @@ impl CoolingCore {
     }
 
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let equipment_type = if is_room_ac {
             "Room AC"
         } else {
@@ -528,7 +516,7 @@ impl CoolingCore {
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
-                zone: Some(zone),
+                zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -550,11 +538,7 @@ impl CoolingCore {
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::humidity(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, true),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::AcCooler, zone),
@@ -591,7 +575,6 @@ impl CoolingCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
-            zone_id_explicit,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -827,8 +810,9 @@ impl CoolingCore {
             };
         }
 
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, true);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         self.compute_coil_ao(self.rated_shr)?;
 
@@ -1025,16 +1009,20 @@ impl CoolingCore {
             return OperatingMode::Off;
         }
 
-        let mode = self
-            .hvac
-            .update_mode(env)
-            .unwrap_or(ThermostatMode::Deadband);
-        if mode == ThermostatMode::Cooling {
+        // A Cooling mode means the thermostat read the served zone, so the
+        // zone temperature is available whenever cooling is called for.
+        let cooling_zone_temp_c = match self.hvac.update_mode(env) {
+            Ok(ThermostatMode::Cooling) => self
+                .hvac
+                .config
+                .zone_id
+                .and_then(|zone| lookup_zone(env, zone).ok())
+                .map(|zone| zone.temperature_c),
+            _ => None,
+        };
+        if let Some(zone_temp) = cooling_zone_temp_c {
             let base_setpoint = self.hvac.effective_setpoints().cooling_c;
             let setpoint = base_setpoint + self.dr_setpoint_offset_c;
-            let zone_temp = lookup_zone(env, self.hvac.config.zone_id)
-                .map(|z| z.temperature_c)
-                .unwrap_or(setpoint);
 
             // When DR raises the effective setpoint above the zone temperature, suppress cooling
             // even though the base thermostat is calling for it. This only applies when the DR
@@ -1383,9 +1371,7 @@ impl CoolingCore {
             .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
         self.telemetry
             .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         let capacity_ideal_w = post_dse_sensible_w + post_dse_latent_w;
         compute_and_write_ebm_telemetry(
             &self.hvac,
@@ -1470,13 +1456,13 @@ impl CoolingCore {
         env: &EnvironmentState,
         dt_min: f64,
     ) -> crate::Result<PerformanceResult> {
-        let zone = lookup_zone(env, self.hvac.config.zone_id)?;
+        let zone_id = self.hvac.config.served_zone()?;
+        let zone = lookup_zone(env, zone_id)?;
         let pressure_pa = env.weather.pressure_pa();
         let zone_wb_c = hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa);
         if !zone_wb_c.is_finite() {
             return Err(HaresError::Equipment(format!(
-                "zone {:?} wet_bulb_c must be finite before HVAC cooling step",
-                self.hvac.config.zone_id
+                "zone {zone_id:?} wet_bulb_c must be finite before HVAC cooling step"
             )));
         }
         self.telemetry
@@ -2001,7 +1987,7 @@ impl CoolingCore {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 
     fn apply_dr_level(&mut self, level: DRLevel) {

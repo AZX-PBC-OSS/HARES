@@ -445,25 +445,83 @@ impl GridState {
     }
 }
 
-/// Per-step ambient temperature series for HPXML water-heater locations that
-/// name space with no modeled thermal zone, computed once per step by the
-/// environment manager from the conditioned zone's temperature and the
-/// outdoor dry-bulb temperature, following the OS-HPXML scheduled-space
-/// averaging rule for each placement (an indoor/outdoor blend clamped to a
-/// location-specific floor).
+/// An HPXML equipment `Location` that names space with no modeled thermal
+/// zone. OS-HPXML runs equipment there against an ambient air series instead
+/// of a zone's state (`geometry.rb`, `get_space_or_schedule_from_location`
+/// and `get_temperature_scheduled_space_values`, v1.12.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AmbientLocation {
+    OtherHeatedSpace,
+    OtherMultifamilyBufferSpace,
+    OtherNonFreezingSpace,
+    OtherHousingUnit,
+    /// "other exterior" and "outside": outdoor air, no space and no schedule.
+    OtherExterior,
+}
+
+impl AmbientLocation {
+    /// Classify an HPXML `Location` string (trimmed, case-insensitive).
+    /// `None` for every location that is not one of these placements: a
+    /// location naming a modeled zone resolves through that zone's id.
+    #[must_use]
+    pub fn from_location(location: &str) -> Option<Self> {
+        match location.trim().to_ascii_lowercase().as_str() {
+            "other heated space" => Some(Self::OtherHeatedSpace),
+            "other multifamily buffer space" => Some(Self::OtherMultifamilyBufferSpace),
+            "other non-freezing space" => Some(Self::OtherNonFreezingSpace),
+            "other housing unit" => Some(Self::OtherHousingUnit),
+            "other exterior" | "outside" => Some(Self::OtherExterior),
+            _ => None,
+        }
+    }
+
+    /// Whether the placement's air is defined relative to the dwelling's
+    /// conditioned zone (a non-zero indoor weight in OS-HPXML's
+    /// scheduled-space table, or an indoor humidity source).
+    #[must_use]
+    pub fn needs_conditioned_zone(self) -> bool {
+        matches!(
+            self,
+            Self::OtherHeatedSpace | Self::OtherMultifamilyBufferSpace | Self::OtherHousingUnit
+        )
+    }
+}
+
+/// Dry-bulb and thermodynamic wet-bulb temperature of one ambient air
+/// source, the evaporator-inlet state a heat pump water heater's
+/// performance curves take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmbientAirTemps {
+    pub dry_bulb_c: f64,
+    pub wet_bulb_c: f64,
+}
+
+/// Per-step air states for the scheduled-space placements, computed once
+/// per step by the environment manager and only for the placements some
+/// equipment occupies (`None` otherwise). "Other exterior" reads the
+/// weather's outdoor state and has no entry here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AmbientOtherSpaceTemps {
-    /// "other heated space": max(0.5 x conditioned + 0.5 x outdoor, 20.0 °C).
-    pub other_heated_space_c: f64,
-    /// "other multifamily buffer space": max(0.5 x conditioned + 0.5 x outdoor, 10.0 °C).
-    pub other_multifamily_buffer_space_c: f64,
-    /// "other non-freezing space": max(outdoor, 4.44 °C).
-    pub other_non_freezing_space_c: f64,
-    /// The conditioned zone's own temperature, resolved by zone type (not by
-    /// list position): the "other housing unit" placement (indoor weight 1.0)
-    /// reads it. Falls back to the outdoor temperature when the environment
-    /// has no conditioned zone.
-    pub conditioned_zone_c: f64,
+    pub other_heated_space: Option<AmbientAirTemps>,
+    pub other_multifamily_buffer_space: Option<AmbientAirTemps>,
+    pub other_non_freezing_space: Option<AmbientAirTemps>,
+    pub other_housing_unit: Option<AmbientAirTemps>,
+}
+
+impl AmbientOtherSpaceTemps {
+    /// The slot holding `location`'s air; `None` for "other exterior".
+    #[must_use]
+    pub fn slot_mut(&mut self, location: AmbientLocation) -> Option<&mut Option<AmbientAirTemps>> {
+        match location {
+            AmbientLocation::OtherHeatedSpace => Some(&mut self.other_heated_space),
+            AmbientLocation::OtherMultifamilyBufferSpace => {
+                Some(&mut self.other_multifamily_buffer_space)
+            }
+            AmbientLocation::OtherNonFreezingSpace => Some(&mut self.other_non_freezing_space),
+            AmbientLocation::OtherHousingUnit => Some(&mut self.other_housing_unit),
+            AmbientLocation::OtherExterior => None,
+        }
+    }
 }
 
 /// Complete runtime environment state fed into physics calls.
@@ -473,9 +531,9 @@ pub struct EnvironmentState {
     pub weather: WeatherState,
     pub grid: GridState,
     pub custom_domains: Vec<DomainUpdate>,
-    /// Ambient series for water-heater locations with no modeled zone.
-    /// Computed once per step; equipment in an "other ..." HPXML location
-    /// reads these instead of a zone's RC temperature.
+    /// Air states for the scheduled-space placements in use, computed once
+    /// per step; equipment in an "other ..." HPXML location reads these
+    /// instead of a zone's state.
     #[serde(default)]
     pub ambient_other_space_c: AmbientOtherSpaceTemps,
     /// Equipment telemetry snapshots from the previous timestep, keyed by
@@ -507,6 +565,24 @@ pub struct EnvironmentState {
 }
 
 impl EnvironmentState {
+    /// The air an equipment placed at `location` draws this step: the
+    /// outdoor state for "other exterior", the precomputed scheduled-space
+    /// air otherwise (`None` when no equipment occupies that placement).
+    #[must_use]
+    pub fn ambient_air(&self, location: AmbientLocation) -> Option<AmbientAirTemps> {
+        let spaces = &self.ambient_other_space_c;
+        match location {
+            AmbientLocation::OtherHeatedSpace => spaces.other_heated_space,
+            AmbientLocation::OtherMultifamilyBufferSpace => spaces.other_multifamily_buffer_space,
+            AmbientLocation::OtherNonFreezingSpace => spaces.other_non_freezing_space,
+            AmbientLocation::OtherHousingUnit => spaces.other_housing_unit,
+            AmbientLocation::OtherExterior => Some(AmbientAirTemps {
+                dry_bulb_c: self.weather.outdoor_temp_c,
+                wet_bulb_c: self.weather.outdoor_wet_bulb_c,
+            }),
+        }
+    }
+
     /// Timestep duration in seconds as a float.
     ///
     /// Equivalent to `time_res.num_milliseconds() as f64 / 1000.0`. Prefer this over

@@ -1864,14 +1864,19 @@ fn compute_basement_params(building: &Building) -> Map<String, Value> {
     params
 }
 
-/// Id (1-indexed) of the building's one conditioned zone, shared with
-/// `resolve_loads` for equipment that always lives there (the dehumidifier).
-pub(super) fn conditioned_zone_id(building: &Building) -> Option<u16> {
+/// Id (1-indexed) of the building's one conditioned zone, for `equipment`
+/// that conditions it (HVAC here, the dehumidifier in `resolve_loads`). A
+/// building with none cannot host the equipment: a typed error naming it.
+pub(super) fn conditioned_zone_id(
+    building: &Building,
+    equipment: &str,
+) -> std::result::Result<u16, HpxmlError> {
     let idx = building
-        .zones
-        .iter()
-        .position(|z| matches!(z.zone_type, ZoneType::Conditioned))?;
-    Some((idx as u16) + 1)
+        .conditioned_zone_index()?
+        .ok_or_else(|| HpxmlError::NoConditionedZone {
+            equipment: equipment.to_string(),
+        })?;
+    Ok((idx as u16) + 1)
 }
 
 /// Check that the primary designation for heating/cooling is valid.
@@ -2085,9 +2090,10 @@ pub(super) fn resolve_hvac(
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, &name)?),
+        );
         if name == "Gas Furnace" {
             apply_multispeed_furnace_parameters(&mut params, defaults, &name);
         }
@@ -2226,9 +2232,10 @@ pub(super) fn resolve_hvac(
         if name != "Room AC" && name != "MSHP Cooler" {
             duct_params.insert_into_map(&mut params);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, &name)?),
+        );
         let typed_config = match name.as_str() {
             "Air Conditioner" => match try_build_central_ac_config(&name, &params, &duct_params) {
                 Ok(config) => config,
@@ -2521,9 +2528,10 @@ pub(super) fn resolve_hvac(
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, cooler_name)?),
+        );
 
         let is_mini_split = heat_pump_type == "mini-split";
         let mut heater_params = params.clone();
@@ -5619,24 +5627,38 @@ mod tests {
     fn conditioned_zone_id_returns_correct_zone_id() {
         let b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
         assert_eq!(
-            conditioned_zone_id(&b),
-            Some(1),
+            conditioned_zone_id(&b, "Unit").unwrap(),
+            1,
             "Conditioned zone at index 0 → ZoneId 1"
         );
     }
 
     #[test]
-    fn conditioned_zone_id_returns_none_when_no_conditioned_zone() {
+    fn conditioned_zone_id_errors_when_no_conditioned_zone() {
         let b = empty_building(vec![foundation_zone(false)]);
-        assert_eq!(conditioned_zone_id(&b), None);
+        assert!(matches!(
+            conditioned_zone_id(&b, "Unit"),
+            Err(HpxmlError::NoConditionedZone { ref equipment }) if equipment == "Unit"
+        ));
+    }
+
+    /// One conditioned zone per dwelling unit: a second is rejected, not
+    /// resolved to whichever comes first.
+    #[test]
+    fn conditioned_zone_id_errors_when_two_conditioned_zones_exist() {
+        let b = empty_building(vec![conditioned_zone(), conditioned_zone()]);
+        assert!(matches!(
+            conditioned_zone_id(&b, "Unit"),
+            Err(HpxmlError::MultipleConditionedZones(ref err)) if err.count == 2
+        ));
     }
 
     #[test]
     fn conditioned_zone_id_returns_correct_id_when_not_first_zone() {
         let b = empty_building(vec![foundation_zone(false), conditioned_zone()]);
         assert_eq!(
-            conditioned_zone_id(&b),
-            Some(2),
+            conditioned_zone_id(&b, "Unit").unwrap(),
+            2,
             "Conditioned zone at index 1 → ZoneId 2"
         );
     }
@@ -5848,6 +5870,41 @@ mod tests {
             cfg.zone_id,
             Some(2),
             "resolve_hvac must propagate conditioned_zone_id when conditione zone is at index 1"
+        );
+    }
+
+    /// HVAC conditions the conditioned zone: a heating system in a building
+    /// that has none is a typed error naming the equipment, not a spec
+    /// with no zone that the equipment would later place on its own.
+    #[test]
+    fn resolve_hvac_errors_when_no_conditioned_zone_exists() {
+        let mut building = empty_building(vec![foundation_zone(false)]);
+        building.details_xml = XmlNode {
+            name: String::new(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Systems".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![XmlNode {
+                    name: "HVAC".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![furnace_xml("36000", "0.80")],
+                }],
+            }],
+        };
+        let err = resolve_hvac(
+            &building,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .expect_err("a furnace with no conditioned zone must fail resolution");
+        assert!(
+            matches!(err, HpxmlError::NoConditionedZone { ref equipment } if equipment == "Gas Furnace"),
+            "expected NoConditionedZone naming the furnace, got: {err:?}"
         );
     }
 
@@ -6139,6 +6196,7 @@ mod tests {
         let mut params = Map::new();
         params.insert("efficiency_afue".to_string(), json!(0.96));
         params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("zone_id".to_string(), json!(1));
         // Zero fan power so the fuel/thermal ratio equals exactly 1/AFUE.
         params.insert("fan_power_w".to_string(), json!(0.0));
 
@@ -6196,6 +6254,7 @@ mod tests {
         let mut params = Map::new();
         params.insert("efficiency_seer".to_string(), json!(16.0));
         params.insert("cooling_capacity_w".to_string(), json!(10_000.0));
+        params.insert("zone_id".to_string(), json!(1));
 
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
             .expect("try_build_central_ac_config must succeed with SEER and capacity")

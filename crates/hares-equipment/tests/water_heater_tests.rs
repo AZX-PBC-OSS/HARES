@@ -82,7 +82,7 @@ fn resistance_config(
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -126,7 +126,7 @@ fn gas_config(
         GasWaterHeaterConfig {
             fan_power_w: None,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type: FuelType::Gas,
             tank_volume_m3: None,
@@ -174,7 +174,7 @@ fn tankless_config(
         "Tankless Water Heater".to_string(),
         TanklessWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type,
             energy_factor: Some(1.0),
@@ -529,7 +529,7 @@ fn energy_conservation_over_draw_cycle() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -690,7 +690,7 @@ fn max_tank_temp_safety_limit() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -913,7 +913,7 @@ fn resistance_config_with_ramp(
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1175,7 +1175,7 @@ fn tmv_reduces_draw_volume_for_hot_tank() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1240,7 +1240,7 @@ fn tmv_unmet_load_when_tank_cold() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,

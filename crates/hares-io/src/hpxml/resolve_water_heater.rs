@@ -10,7 +10,7 @@ use hares_equipment::{
 };
 use hares_types::{FuelType, parse_trimmed_f64};
 
-use super::building::{Building, XmlNode};
+use super::building::{Building, XmlNode, ZoneType};
 use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
@@ -58,6 +58,22 @@ fn zone_id_for_location(building: &Building, location_text: &str) -> Option<u16>
         .iter()
         .position(|z| super::building::zone_key(&z.zone_type) == key)
         .map(|idx| (idx as u16) + 1)
+}
+
+/// Share of a heat pump water heater's sensible gain that lands on interior
+/// partition walls instead of the zone air, by HPXML `Location`. OCHRE
+/// splits 0.5 to the "Interior Wall" surface it builds only in the living
+/// zone (WaterHeater.py "HPWH Wall Interaction Factor", hpxml.py
+/// "Interior Wall"); every other zone has no such wall and OS-HPXML adds all
+/// HPWH gains convectively to the zone air (waterheater.rb,
+/// apply_hpwh_zone_heat_gain_program, frac_radiant 0), so the share there is
+/// 0.0, including a conditioned basement or crawlspace.
+fn hpwh_wall_heat_fraction(location: &str) -> f64 {
+    if super::building::parse_zone_label(location) == ZoneType::Conditioned {
+        0.5
+    } else {
+        0.0
+    }
 }
 
 pub(super) fn resolve_water_heaters(
@@ -311,7 +327,7 @@ pub(super) fn resolve_water_heaters(
                     backup_efficiency: None,
                     shr: None,
                     lost_heat_fraction: None,
-                    wall_heat_fraction: None,
+                    wall_heat_fraction: location.as_deref().map(hpwh_wall_heat_fraction),
                     capacity_biquadratic_coeffs: None,
                     cop_biquadratic_coeffs: None,
                     cop_curve_is_normalized: None,

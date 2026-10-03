@@ -2680,6 +2680,7 @@ fn build_from_blueprint_inner(
 
     let env_zone_ids: HashSet<ZoneId> = initial_env.zones.iter().map(|z| z.id).collect();
     validate_equipment_zones(&declarations, &env_zone_ids)?;
+    environment.set_ambient_locations(equipment.iter().filter_map(|eq| eq.ambient_location()))?;
 
     let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs);
     // Sentinel loop IDs always valid — well-known addresses used by
@@ -3729,6 +3730,9 @@ impl Dwelling {
         self.assign_equipment_identity(eq, &name, None)?;
         let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
         validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        if let Some(location) = eq.ambient_location() {
+            self.environment.check_ambient_location(location)?;
+        }
         if self.clock.current_step > 0 {
             self.ensure_ports_satisfied(eq.as_ref())?;
         }
@@ -3771,6 +3775,9 @@ impl Dwelling {
         self.assign_equipment_identity(eq, &new_name, Some(replaced_name))?;
         let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
         validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        if let Some(location) = eq.ambient_location() {
+            self.environment.check_ambient_location(location)?;
+        }
         if self.clock.current_step > 0 {
             self.ensure_ports_satisfied(eq.as_ref())?;
         }
@@ -4198,6 +4205,8 @@ impl Dwelling {
         }
         self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
         self.equipment_ids = self.equipment.iter().map(|eq| eq.descriptor().id).collect();
+        self.environment
+            .set_ambient_locations(self.equipment.iter().filter_map(|eq| eq.ambient_location()))?;
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
 

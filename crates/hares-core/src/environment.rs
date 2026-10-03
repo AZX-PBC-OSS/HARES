@@ -19,14 +19,15 @@ use hares_physics::{
 #[cfg(feature = "observe")]
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
-    AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID,
-    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    AmbientLocation, AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError,
+    SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use thiserror::Error;
 
 use crate::SimClock;
+use crate::ambient_air::{MoistAir, scheduled_space_air};
 
 const DEFAULT_ZONE_VOLUME_M3: f64 = 200.0;
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
@@ -76,6 +77,8 @@ pub enum EnvironmentManagerError {
         boundary_idx: usize,
         surface_type: String,
     },
+    #[error(transparent)]
+    MultipleConditionedZones(#[from] hares_io::hpxml::MultipleConditionedZones),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +96,11 @@ pub struct EnvironmentManager {
     schedule: ScheduleTimeSeries,
     pub(crate) weather_meta: WeatherMeta,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
+    /// The building's one conditioned zone, if it has one.
+    conditioned_zone: Option<ZoneId>,
+    /// Scheduled-space placements some equipment occupies: their air is
+    /// computed each step, and only theirs.
+    ambient_locations: Vec<AmbientLocation>,
     surfaces: Vec<SurfaceGeometry>,
     grid_override: Option<GridState>,
     zones: Vec<ZoneState>,
@@ -259,6 +267,9 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
+        let conditioned_zone = building
+            .conditioned_zone_index()?
+            .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
         let surfaces = build_surface_geometry(building)?;
         // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
         // to match OCHRE's behavior of reading weather at the period midpoint.
@@ -292,6 +303,8 @@ impl EnvironmentManager {
             schedule,
             weather_meta,
             zone_types,
+            conditioned_zone,
+            ambient_locations: Vec::new(),
             surfaces,
             grid_override: None,
             zones,
@@ -488,6 +501,102 @@ impl EnvironmentManager {
         hares_io::resolve_occupancy_column(&self.schedule.column_index).map(|(_, idx)| idx)
     }
 
+    /// Whether this building can supply `location`'s air: every placement
+    /// defined relative to the conditioned zone needs the building's
+    /// conditioned zone.
+    pub fn check_ambient_location(&self, location: AmbientLocation) -> Result<(), HaresError> {
+        if location.needs_conditioned_zone() && self.conditioned_zone.is_none() {
+            return Err(HaresError::Dwelling(format!(
+                "{location:?} air is defined relative to the conditioned zone, but the \
+                 building has none"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Compute the air of exactly these scheduled-space placements each step
+    /// from now on.
+    pub fn set_ambient_locations(
+        &mut self,
+        locations: impl IntoIterator<Item = AmbientLocation>,
+    ) -> Result<(), HaresError> {
+        let mut wanted: Vec<AmbientLocation> = Vec::new();
+        for location in locations {
+            self.check_ambient_location(location)?;
+            if location != AmbientLocation::OtherExterior && !wanted.contains(&location) {
+                wanted.push(location);
+            }
+        }
+        self.ambient_locations = wanted;
+        Ok(())
+    }
+
+    /// The conditioned zone's air this step, for the placements that read
+    /// it. A missing or non-finite zone state is a broken invariant, not a
+    /// value to substitute.
+    fn conditioned_air(&self, clock: &SimClock) -> Result<MoistAir, HaresError> {
+        let zone_id = self.conditioned_zone.ok_or_else(|| {
+            HaresError::InvalidState(
+                "scheduled-space air needs the conditioned zone, but the building has none"
+                    .to_string(),
+            )
+        })?;
+        let zone = self.zones.iter().find(|z| z.id == zone_id).ok_or_else(|| {
+            HaresError::InvalidState(format!(
+                "conditioned zone {} is missing from the environment's zone state",
+                zone_id.0
+            ))
+        })?;
+        for (value_name, value) in [
+            ("conditioned zone temperature", zone.temperature_c),
+            ("conditioned zone humidity ratio", zone.humidity_ratio),
+        ] {
+            if !value.is_finite() {
+                return Err(HaresError::NanDetected {
+                    step_index: clock.current_step(),
+                    zone_id: Some(zone_id),
+                    value_name: value_name.to_string(),
+                });
+            }
+        }
+        Ok(MoistAir {
+            temperature_c: zone.temperature_c,
+            humidity_ratio: zone.humidity_ratio,
+        })
+    }
+
+    fn ambient_other_space_air(
+        &self,
+        clock: &SimClock,
+        outdoor_temp_c: f64,
+        outdoor_humidity_ratio: f64,
+        pressure_pa: f64,
+    ) -> Result<AmbientOtherSpaceTemps, HaresError> {
+        let mut air = AmbientOtherSpaceTemps::default();
+        if self.ambient_locations.is_empty() {
+            return Ok(air);
+        }
+        let outdoor = MoistAir {
+            temperature_c: outdoor_temp_c,
+            humidity_ratio: outdoor_humidity_ratio,
+        };
+        let conditioned = if self
+            .ambient_locations
+            .iter()
+            .any(|location| location.needs_conditioned_zone())
+        {
+            Some(self.conditioned_air(clock)?)
+        } else {
+            None
+        };
+        for &location in &self.ambient_locations {
+            if let Some(slot) = air.slot_mut(location) {
+                *slot = scheduled_space_air(location, conditioned, outdoor, pressure_pa);
+            }
+        }
+        Ok(air)
+    }
+
     /// Feed zone-state feedback into the internal zone buffer.
     ///
     /// Call this before [`update_in_place`] when the caller holds a borrow on
@@ -664,37 +773,23 @@ impl EnvironmentManager {
         state.zones.clear();
         state.zones.extend_from_slice(&self.zones);
 
-        // Step 4b: ambient series for HPXML water-heater locations that name
-        // space with no modeled thermal zone ("other heated space", "other
-        // multifamily buffer space", "other non-freezing space"). Computed
-        // once per step from the conditioned zone's temperature and the
-        // outdoor dry-bulb following the OS-HPXML scheduled-space rule: an
-        // indoor/outdoor blend clamped to a location-specific floor. "Other
-        // housing unit" (indoor weight 1.0, no floor) and "other exterior"/
-        // "outside" (outdoor weight 1.0, no floor) are pure identity reads of
-        // values already computed per step, so they carry no field here.
-        // When the building has no conditioned zone the indoor share reads
-        // the outdoor temperature.
-        let conditioned_temp_c = self
-            .zones
-            .iter()
-            .zip(&self.zone_types)
-            .find(|(_, zone_type)| matches!(zone_type, ZoneType::Conditioned))
-            .map(|(zone, _)| zone.temperature_c)
-            .unwrap_or(outdoor_temp_c);
-        // Shared indoor/outdoor blend for the two 0.5/0.5-weighted placements.
-        let other_space_avg_c = 0.5 * conditioned_temp_c + 0.5 * outdoor_temp_c;
-        state.ambient_other_space_c = AmbientOtherSpaceTemps {
-            // Floor 20.0 °C (68 °F).
-            other_heated_space_c: other_space_avg_c.max(20.0),
-            // Floor 10.0 °C (50 °F).
-            other_multifamily_buffer_space_c: other_space_avg_c.max(10.0),
-            // Indoor weight 0.0: pure outdoor with a 4.44 °C (40 °F) floor.
-            other_non_freezing_space_c: outdoor_temp_c.max(4.44),
-            // The conditioned zone's own temperature, resolved by type:
-            // the "other housing unit" placement reads it.
-            conditioned_zone_c: conditioned_temp_c,
-        };
+        // Step 4b: air of the scheduled-space placements equipment occupies,
+        // once per step (see `ambient_air`). Outdoor air enters every
+        // placement and every envelope boundary, so a non-finite outdoor
+        // dry-bulb fails the step instead of hiding behind a floor.
+        if !outdoor_temp_c.is_finite() {
+            return Err(HaresError::NanDetected {
+                step_index: clock.current_step(),
+                zone_id: None,
+                value_name: "outdoor dry-bulb".to_string(),
+            });
+        }
+        state.ambient_other_space_c = self.ambient_other_space_air(
+            clock,
+            outdoor_temp_c,
+            outdoor_humidity_ratio,
+            pressure_pa,
+        )?;
 
         // Step 5: grid defaults / overrides
         state.grid = self.grid_override.clone().unwrap_or(GridState {
@@ -1261,6 +1356,7 @@ mod tests {
     use chrono::{DateTime, FixedOffset, TimeZone};
     use hares_io::hpxml::building::XmlNode;
     use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+    use hares_physics::psychrometrics::wet_bulb_from_humidity_ratio;
     use std::collections::HashMap;
 
     fn utc_offset() -> FixedOffset {
@@ -1527,15 +1623,129 @@ mod tests {
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
     }
 
-    /// The ambient series for water-heater locations with no modeled zone
-    /// follows the scheduled-space table once per step: an indoor/outdoor
-    /// blend clamped to the location's floor, computed from the conditioned
-    /// zone's temperature and the outdoor dry-bulb.
-    #[test]
-    fn ambient_other_space_series_follows_the_scheduled_space_table() {
+    fn ambient_test_manager(b: &Building) -> (EnvironmentManager, SimClock) {
         let mut weather = weather_series();
         weather.dry_bulb_c = vec![2.0, 30.0];
         weather.dew_point_c = vec![0.0, 20.0];
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let manager = EnvironmentManager::new(
+            weather,
+            schedule_series(),
+            b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect("manager");
+        let sim_clock = SimClock::new(start, Duration::seconds(3600), Duration::hours(2));
+        (manager, sim_clock)
+    }
+
+    fn conditioned_zone_state(temperature_c: f64) -> Vec<ZoneState> {
+        vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c,
+            humidity_ratio: 0.008,
+            volume_m3: 200.0,
+        }]
+    }
+
+    /// Each occupied scheduled-space placement gets its air once per step:
+    /// the OS-HPXML dry-bulb blend and floor, and the wet-bulb of the
+    /// blended humidity ratio at that dry-bulb. Unoccupied placements are
+    /// not computed.
+    #[test]
+    fn ambient_air_follows_the_scheduled_space_table_for_occupied_placements() {
+        let (mut manager, mut sim_clock) = ambient_test_manager(&building(Some(21.0)));
+        manager
+            .set_ambient_locations([
+                AmbientLocation::OtherHeatedSpace,
+                AmbientLocation::OtherNonFreezingSpace,
+                AmbientLocation::OtherHousingUnit,
+            ])
+            .expect("the building has a conditioned zone");
+        let zones = conditioned_zone_state(22.0);
+
+        // Step 0, outdoor 2.0 °C: heated max(0.5 x 22.0 + 0.5 x 2.0, 20.0)
+        // = 20.0, non-freezing max(2.0, 40 °F) = 4.444, housing unit 22.0.
+        let env0 = manager.update(&sim_clock, &zones).unwrap();
+        let p = env0.weather.pressure_pa();
+        let w_out = env0.weather.outdoor_humidity_ratio;
+        let heated = env0.ambient_other_space_c.other_heated_space.unwrap();
+        assert!((heated.dry_bulb_c - 20.0).abs() < 1e-12);
+        assert_eq!(
+            heated.wet_bulb_c,
+            wet_bulb_from_humidity_ratio(20.0, 0.5 * 0.008 + 0.5 * w_out, p)
+        );
+        let non_freezing = env0.ambient_other_space_c.other_non_freezing_space.unwrap();
+        assert!((non_freezing.dry_bulb_c - 40.0 / 9.0).abs() < 1e-12);
+        let housing = env0.ambient_other_space_c.other_housing_unit.unwrap();
+        assert_eq!(
+            (housing.dry_bulb_c, housing.wet_bulb_c),
+            (22.0, wet_bulb_from_humidity_ratio(22.0, 0.008, p))
+        );
+        assert_eq!(
+            env0.ambient_other_space_c.other_multifamily_buffer_space, None,
+            "an unoccupied placement is not computed"
+        );
+
+        // Step 1, outdoor 30.0 °C: heated max(26.0, 20.0) = 26.0.
+        assert_eq!(sim_clock.next(), Some(0));
+        let env1 = manager.update(&sim_clock, &zones).unwrap();
+        let heated = env1.ambient_other_space_c.other_heated_space.unwrap();
+        assert!((heated.dry_bulb_c - 26.0).abs() < 1e-12);
+        assert!(heated.wet_bulb_c < heated.dry_bulb_c);
+    }
+
+    /// A placement defined relative to the conditioned zone cannot be
+    /// occupied in a building without one; an outdoor-only placement can.
+    #[test]
+    fn ambient_placements_needing_the_conditioned_zone_are_rejected_without_one() {
+        let mut b = building_with_conditioned_foundation_and_garage();
+        b.zones
+            .retain(|zone| zone.zone_type != ZoneType::Conditioned);
+        let (mut manager, _) = ambient_test_manager(&b);
+        for location in [
+            AmbientLocation::OtherHeatedSpace,
+            AmbientLocation::OtherMultifamilyBufferSpace,
+            AmbientLocation::OtherHousingUnit,
+        ] {
+            manager
+                .set_ambient_locations([location])
+                .expect_err("no conditioned zone to blend with");
+        }
+        manager
+            .set_ambient_locations([
+                AmbientLocation::OtherNonFreezingSpace,
+                AmbientLocation::OtherExterior,
+            ])
+            .expect("outdoor-only placements need no conditioned zone");
+    }
+
+    /// A non-finite conditioned-zone state fails the step for a placement
+    /// that reads it, instead of substituting the outdoor air.
+    #[test]
+    fn ambient_air_rejects_a_non_finite_conditioned_zone() {
+        let (mut manager, sim_clock) = ambient_test_manager(&building(Some(21.0)));
+        manager
+            .set_ambient_locations([AmbientLocation::OtherHousingUnit])
+            .unwrap();
+        let err = manager
+            .update(&sim_clock, &conditioned_zone_state(f64::NAN))
+            .expect_err("a NaN conditioned zone must fail the step");
+        assert!(
+            err.to_string().contains("conditioned zone temperature"),
+            "the error must name the quantity, got: {err}"
+        );
+    }
+
+    /// A non-finite outdoor dry-bulb is invalid weather: the step fails
+    /// instead of every floored ambient series silently reading its floor.
+    #[test]
+    fn update_rejects_a_non_finite_outdoor_dry_bulb() {
+        let mut weather = weather_series();
+        weather.dry_bulb_c = vec![2.0, f64::NAN];
+        weather.dew_point_c = vec![0.0, 0.0];
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather,
@@ -1547,33 +1757,47 @@ mod tests {
         )
         .expect("manager");
         let mut sim_clock = SimClock::new(start, Duration::seconds(3600), Duration::hours(2));
-
-        // The test building has one conditioned zone; hold it at 22.0 °C.
         let zones = vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 22.0,
             humidity_ratio: 0.008,
             volume_m3: 200.0,
         }];
-
-        // Step 0, outdoor 2.0 °C: heated max(0.5 x 22.0 + 0.5 x 2.0, 20.0)
-        // = 20.0, buffer max(12.0, 10.0) = 12.0, non-freezing
-        // max(2.0, 4.44) = 4.44.
-        let env0 = manager.update(&sim_clock, &zones).unwrap();
-        assert!((env0.weather.outdoor_temp_c - 2.0).abs() < 1e-9);
-        assert!((env0.ambient_other_space_c.other_heated_space_c - 20.0).abs() < 1e-9);
-        assert!((env0.ambient_other_space_c.other_multifamily_buffer_space_c - 12.0).abs() < 1e-9);
-        assert!((env0.ambient_other_space_c.other_non_freezing_space_c - 4.44).abs() < 1e-9);
-
-        // Advance the clock to step 1, outdoor 30.0 °C: heated
-        // max(26.0, 20.0) = 26.0, buffer max(26.0, 10.0) = 26.0,
-        // non-freezing max(30.0, 4.44) = 30.0.
+        manager
+            .update(&sim_clock, &zones)
+            .expect("step 0 is finite");
         assert_eq!(sim_clock.next(), Some(0));
-        let env1 = manager.update(&sim_clock, &zones).unwrap();
-        assert!((env1.weather.outdoor_temp_c - 30.0).abs() < 1e-9);
-        assert!((env1.ambient_other_space_c.other_heated_space_c - 26.0).abs() < 1e-9);
-        assert!((env1.ambient_other_space_c.other_multifamily_buffer_space_c - 26.0).abs() < 1e-9);
-        assert!((env1.ambient_other_space_c.other_non_freezing_space_c - 30.0).abs() < 1e-9);
+        let err = manager
+            .update(&sim_clock, &zones)
+            .expect_err("a NaN outdoor dry-bulb must fail the step");
+        assert!(
+            err.to_string().contains("dry-bulb"),
+            "the error must name the quantity, got: {err}"
+        );
+    }
+
+    /// HARES models one conditioned zone per dwelling unit (as OS-HPXML
+    /// does); a building declaring two is rejected rather than resolving
+    /// the conditioned zone to whichever comes first.
+    #[test]
+    fn manager_rejects_more_than_one_conditioned_zone() {
+        let mut b = building(Some(21.0));
+        let second = b.zones[0].clone();
+        b.zones.push(second);
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let err = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect_err("two conditioned zones must fail construction");
+        assert!(
+            err.to_string().contains("conditioned"),
+            "the error must say why, got: {err}"
+        );
     }
 
     #[test]

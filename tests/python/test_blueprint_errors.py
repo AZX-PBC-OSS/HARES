@@ -197,6 +197,7 @@ def test_autosize_water_heater():
     wh = GasWaterHeater(
         "AutoWH",
         autosize=True,
+        zone_id=1,
         uniform_energy_factor=0.65,
         avg_water_draw_l_per_day=200.0,
     )
@@ -212,7 +213,7 @@ def test_autosize_hpwh():
     bp = _make_blueprint()
     bp.remove_equipment_by_end_use([EndUse.WATER_HEATING])
     hpwh = HeatPumpWH(
-        "AutoHPWH", autosize=True, cop=3.5, avg_water_draw_l_per_day=200.0
+        "AutoHPWH", autosize=True, cop=3.5, zone_id=1, avg_water_draw_l_per_day=200.0
     )
     bp.add_equipment(hpwh)
     dw = bp.build()
@@ -361,6 +362,7 @@ def test_tankless_water_heater_autosize():
     twh = TanklessWaterHeater(
         "AutoTankless",
         autosize=True,
+        zone_id=1,
         uniform_energy_factor=0.85,
         avg_water_draw_l_per_day=200.0,
     )
@@ -379,6 +381,7 @@ def test_indirect_tank_autosize():
     it = IndirectTank(
         "AutoIndirect",
         autosize=True,
+        zone_id=1,
         hx_ua_w_per_k=150.0,
         avg_water_draw_l_per_day=200.0,
     )

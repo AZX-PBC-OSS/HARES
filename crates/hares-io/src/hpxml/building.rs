@@ -294,6 +294,36 @@ pub struct Building {
     pub parse_warnings: Vec<Warning>,
 }
 
+/// A building declares more than one conditioned zone. HARES models one
+/// conditioned zone per dwelling unit, as OS-HPXML does, and resolves
+/// everything defined relative to "the conditioned zone" (HVAC, the
+/// dehumidifier, ventilation, the thermal solver's indoor zone, the
+/// scheduled-space ambient air) through it; with several there is no single
+/// answer, so the building is rejected rather than resolved to whichever
+/// comes first.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the building declares {count} conditioned zones; HARES models one per dwelling unit")]
+pub struct MultipleConditionedZones {
+    pub count: usize,
+}
+
+impl Building {
+    /// Index into `zones` of the building's conditioned zone (its 1-indexed
+    /// `ZoneId` is the index plus one); `None` when there is none.
+    pub fn conditioned_zone_index(&self) -> Result<Option<usize>, MultipleConditionedZones> {
+        let mut conditioned = self
+            .zones
+            .iter()
+            .enumerate()
+            .filter(|(_, zone)| zone.zone_type == ZoneType::Conditioned)
+            .map(|(idx, _)| idx);
+        match (conditioned.next(), conditioned.count()) {
+            (first, 0) => Ok(first),
+            (_, others) => Err(MultipleConditionedZones { count: others + 1 }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct XmlNode {
     pub name: String,

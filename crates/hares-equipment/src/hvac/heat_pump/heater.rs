@@ -9,7 +9,6 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
-    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +21,7 @@ use super::super::{
     ac_config::HeatPumpHeaterConfig,
     helpers::{
         apply_heating_control_unchecked, compute_and_write_ebm_telemetry, lookup_zone,
-        outage_forces_off, register_ebm_telemetry_keys, zone_id_from_config,
+        outage_forces_off, register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -191,8 +190,6 @@ struct HeatPumpHeaterCore {
     dr_duration_remaining_s: Option<f64>,
     /// Current DR level (for telemetry).
     dr_level: DRLevel,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// applies to the compressor component only (class default pf 0.84, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
@@ -408,10 +405,6 @@ impl Equipment for HeatPumpHeaterCore {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -474,9 +467,7 @@ delegate_equipment!(WshpHeater, core);
 
 impl HeatPumpHeaterCore {
     fn new(config: EquipmentConfig, variant: HeaterVariant) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let zone = zone_id_from_config(&config);
         let equipment_type = match variant {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
@@ -522,7 +513,7 @@ impl HeatPumpHeaterCore {
                 name: config.name,
                 end_use: EndUse::HVAC_HEATING,
                 equipment_type: Cow::Borrowed(equipment_type),
-                zone: Some(zone),
+                zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -544,10 +535,7 @@ impl HeatPumpHeaterCore {
                 telemetry_fields: heater_telemetry_fields(),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, false),
             telemetry: default_heater_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(hvac_type, zone),
@@ -677,7 +665,6 @@ impl HeatPumpHeaterCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
-            zone_id_explicit,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -947,8 +934,9 @@ impl HeatPumpHeaterCore {
             };
         }
 
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
 
         // Backup heating from typed config.
         // For ASHP, backup capacity is required — either explicit in HPXML
@@ -1250,34 +1238,28 @@ impl HeatPumpHeaterCore {
             OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER
         );
         let defrost_conditions = if hp_on_control_pre {
-            let zone = lookup_zone(env, self.hvac.config.zone_id);
+            let zone = lookup_zone(env, self.hvac.config.served_zone()?)?;
             let pressure_pa = env.weather.pressure_pa();
-            let zone_ok = zone.is_ok();
-            if zone_ok {
-                let zone = zone.unwrap();
-                let max_capacity_w = self
-                    .hvac
-                    .config
-                    .heating_capacities_w
-                    .last()
-                    .copied()
-                    .unwrap_or(0.0);
-                let current_cap = max_capacity_w;
-                let rtf = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
-                let defrost = evaluate_defrost(
-                    &self.defrost_config,
-                    env.weather.outdoor_temp_c,
-                    env.weather.outdoor_humidity_ratio,
-                    pressure_pa,
-                    hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
-                    max_capacity_w,
-                    current_cap,
-                    rtf,
-                );
-                (defrost.active, defrost.time_fraction)
-            } else {
-                (false, 0.0)
-            }
+            let max_capacity_w = self
+                .hvac
+                .config
+                .heating_capacities_w
+                .last()
+                .copied()
+                .unwrap_or(0.0);
+            let current_cap = max_capacity_w;
+            let rtf = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+            let defrost = evaluate_defrost(
+                &self.defrost_config,
+                env.weather.outdoor_temp_c,
+                env.weather.outdoor_humidity_ratio,
+                pressure_pa,
+                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
+                max_capacity_w,
+                current_cap,
+                rtf,
+            );
+            (defrost.active, defrost.time_fraction)
         } else {
             (false, 0.0)
         };
@@ -1563,9 +1545,7 @@ impl HeatPumpHeaterCore {
             OperatingMode::Cooling => sp.cooling_c,
             _ => sp.heating_c + self.dr_setpoint_offset_c,
         };
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         compute_and_write_ebm_telemetry(
             &self.hvac,
             zone_temp_c,
@@ -1616,7 +1596,7 @@ impl HeatPumpHeaterCore {
     }
 
     fn compute_step(&mut self, env: &EnvironmentState, dt_min: f64) -> crate::Result<HeaterStep> {
-        let zone = lookup_zone(env, self.hvac.config.zone_id)?;
+        let zone = lookup_zone(env, self.hvac.config.served_zone()?)?;
         let pressure_pa = env.weather.pressure_pa();
 
         let speed_index = self.hvac.runtime.last_speed_index;
@@ -2225,7 +2205,7 @@ impl HeatPumpHeaterCore {
         // user/thermostat setpoint raises).
         let base_setpoint = self.hvac.effective_setpoints().heating_c;
         let setpoint = base_setpoint + self.dr_setpoint_offset_c;
-        let zone = lookup_zone(env, self.hvac.config.zone_id)?;
+        let zone = lookup_zone(env, self.hvac.config.served_zone()?)?;
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
 
         // OCHRE HVAC.py: ER hard lockout after setpoint increase prevents expensive
@@ -2714,7 +2694,7 @@ impl HeatPumpHeaterCore {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c + self.dr_setpoint_offset_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 

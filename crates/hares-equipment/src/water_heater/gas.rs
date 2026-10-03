@@ -12,22 +12,26 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError, HeatTransferDirection,
     LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions
-use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
+use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::loop_id_from_config;
 
-use super::wh_config::{AmbientLocation, GasWaterHeaterConfig};
+use super::wh_config::GasWaterHeaterConfig;
+
+/// Ports a gas tank declares ahead of its zone and loop ports: the burner's
+/// fuel and the controls' and vent fan's electricity.
+const GAS_LEADING_PORTS: [PortDeclaration; 2] =
+    [PortDeclaration::fuel(), PortDeclaration::electrical()];
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -141,11 +145,8 @@ pub struct GasWH {
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
-    /// When the HPXML `Location` names space with no modeled zone, the
-    /// ambient placement the equipment runs against instead of a zone id.
-    ambient_location: Option<AmbientLocation>,
+    /// The zone or no-zone location the tank sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -153,9 +154,7 @@ pub struct GasWH {
 impl GasWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let siting = Siting::from_constructor_config(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -183,7 +182,7 @@ impl GasWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Gas Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: FuelType::Gas,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -199,13 +198,7 @@ impl GasWH {
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::fuel(),
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
-            ],
+            ports: siting::storage_ports(&GAS_LEADING_PORTS, &siting, loop_id),
             telemetry: {
                 let mut t = default_telemetry();
                 tank.register_node_telemetry(&mut t);
@@ -246,8 +239,7 @@ impl GasWH {
             ),
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
-            zone_id_explicit,
-            ambient_location: None,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -282,22 +274,6 @@ impl GasWH {
             self.burner_on,
         )
     }
-
-    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        match self.ambient_location {
-            Some(location) => super::ambient_source_temp_c(env, location),
-            None => self
-                .descriptor
-                .zone
-                .and_then(|zone| {
-                    env.zones
-                        .iter()
-                        .find(|z| z.id == zone)
-                        .map(|z| z.temperature_c)
-                })
-                .unwrap_or(env.weather.outdoor_temp_c),
-        }
-    }
 }
 
 impl GasWH {
@@ -316,26 +292,11 @@ impl GasWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        // Zone resolution: an HPXML `Location` that names space with no
-        // modeled zone ("other ...") runs against the matching ambient
-        // series instead of a zone; a location that classifies as neither a
-        // modeled zone nor a known ambient placement is unresolved wiring.
-        let ambient = super::resolve_ambient_location(
-            config.name.as_str(),
-            c.zone_id,
-            c.zone_type.as_deref(),
-        )?;
-        self.ambient_location = ambient;
-        let zone = if ambient.is_some() {
-            None
-        } else {
-            c.zone_id.map(ZoneId).or(self.descriptor.zone)
-        };
-        self.descriptor.zone = zone;
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.ports[2].zone = zone;
         self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
-        self.ports[3].loop_id = Some(self.loop_id);
+        self.ports = siting::storage_ports(&GAS_LEADING_PORTS, &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
@@ -483,8 +444,8 @@ impl Equipment for GasWH {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        self.siting.ambient_location()
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -535,7 +496,7 @@ impl Equipment for GasWH {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let ambient_c = self.ambient_temp_c(env);
+        let ambient_c = self.siting.dry_bulb_c(env, &self.descriptor.name)?;
         let mode = self.update_control(env);
         let ctrl_duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
@@ -609,12 +570,13 @@ impl Equipment for GasWH {
             );
         }
 
-        // Compute standby skin loss to zone before tank.step() updates temperatures.
-        // OCHRE WaterHeater.py:712-723: fraction of tank UA losses that enter the zone.
+        // Standby skin loss to the tank's surroundings, computed before
+        // tank.step() updates temperatures. OCHRE WaterHeater.py:712-723:
+        // fraction of tank UA losses that reach the surrounding air.
         let avg_temp_before =
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
         let standby_loss_w = self.tank.ua_w_per_k() * (avg_temp_before - ambient_c).max(0.0);
-        let skin_loss_to_zone_w =
+        let skin_loss_to_surroundings_w =
             standby_loss_w * self.skin_loss_fraction + pilot_heat_to_ambient_w;
 
         let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
@@ -703,14 +665,15 @@ impl Equipment for GasWH {
             })?;
         }
 
-        // Skin losses (jacket losses that enter the conditioned space) go to the
-        // zone thermal port. Flue losses exit the building and are not reported here.
+        // Skin losses go to the heater's zone thermal port; a heater in a
+        // location with no modeled zone loses them to that ambient. Flue
+        // losses exit the building and are not reported here.
         if let Some(zone) = self.descriptor.zone
-            && skin_loss_to_zone_w > 0.0
+            && skin_loss_to_surroundings_w > 0.0
         {
             ports.accumulate(&PortContribution::Thermal {
                 zone,
-                sensible_gain_w: skin_loss_to_zone_w,
+                sensible_gain_w: skin_loss_to_surroundings_w,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::JacketLoss,
@@ -732,7 +695,8 @@ impl Equipment for GasWH {
         self.telemetry
             .set(tk::FUEL_INPUT_KW, power_w_to_kw(fuel_input_w));
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
-        self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
+        self.telemetry
+            .set(tk::SKIN_LOSS_W, skin_loss_to_surroundings_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, fan_reactive_kvar);
@@ -1107,7 +1071,9 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     fields.push(TelemetryField {
         name: tk::SKIN_LOSS_W.to_string(),
         unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to zone".to_string(),
+        description:
+            "Tank jacket (skin) and pilot heat loss to the surrounding zone or ambient location"
+                .to_string(),
     });
     fields.push(TelemetryField {
         name: tk::PILOT_HEAT_TO_WATER_W.to_string(),
@@ -1146,9 +1112,9 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
-    use super::super::wh_config::AmbientLocation;
     use super::GasWH;
     use crate::{Equipment, EquipmentConfig};
+    use hares_types::AmbientLocation;
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -2548,13 +2514,13 @@ mod tests {
         let e = ambient_test_env(22.0, 2.0);
         eq.init(&cfg, &e).unwrap();
         assert_eq!(
-            eq.ambient_location,
+            eq.ambient_location(),
             Some(AmbientLocation::OtherHeatedSpace),
-            "construction must carry the classified ambient placement"
+            "init must resolve the classified ambient placement"
         );
         assert_eq!(eq.descriptor().zone, None);
         // max(0.5 x 22.0 + 0.5 x 2.0, 20.0) = 20.0.
-        assert!((eq.ambient_temp_c(&e) - 20.0).abs() < 1e-9);
+        assert!((eq.siting.dry_bulb_c(&e, "GWH Ambient").unwrap() - 20.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2572,6 +2538,39 @@ mod tests {
         assert!(
             message.contains("in between somewhere"),
             "the error must name the unresolved zone_type, got: {message}"
+        );
+    }
+
+    /// Standing loss, pilot heat and flue loss of a tank in a location with
+    /// no modeled zone leave through that location's ambient, never into a
+    /// modeled zone.
+    #[test]
+    fn ambient_placed_gas_heater_contributes_nothing_to_any_zone() {
+        let cfg = ambient_test_config("other multifamily buffer space");
+        let mut eq = GasWH::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        let mut p = ports();
+        for _ in 0..10 {
+            eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        }
+        for zone in &p.thermal {
+            assert_eq!(
+                (
+                    zone.sensible_gain_w,
+                    zone.radiant_gain_w,
+                    zone.latent_gain_w
+                ),
+                (0.0, 0.0, 0.0),
+                "an ambient-placed gas tank must not add heat to {:?}",
+                zone.zone
+            );
+        }
+        assert!(
+            eq.ports()
+                .iter()
+                .all(|port| port.port_type != hares_types::PortType::Thermal),
+            "an ambient-placed tank declares no thermal port"
         );
     }
 
@@ -2619,18 +2618,13 @@ mod tests {
         .unwrap()
     }
 
-    /// Environment with a known conditioned-zone temperature and outdoor
-    /// temperature, and the precomputed ambient series for that pair per the
-    /// table: heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
-    /// non-freezing max(2.0, 4.44) = 4.44.
+    /// Environment with a known conditioned-zone and outdoor temperature and
+    /// the scheduled-space air the manager computes for conditioned 22.0 °C
+    /// and outdoor 2.0 °C.
     fn ambient_test_env(conditioned_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
         let mut e = env(conditioned_temp_c);
         e.weather.outdoor_temp_c = outdoor_temp_c;
-        e.ambient_other_space_c.other_heated_space_c =
-            (0.5 * conditioned_temp_c + 0.5 * outdoor_temp_c).max(20.0);
-        e.ambient_other_space_c.other_multifamily_buffer_space_c =
-            (0.5 * conditioned_temp_c + 0.5 * outdoor_temp_c).max(10.0);
-        e.ambient_other_space_c.other_non_freezing_space_c = outdoor_temp_c.max(4.44);
+        e.ambient_other_space_c = super::super::siting::test_ambient_air();
         e
     }
 }

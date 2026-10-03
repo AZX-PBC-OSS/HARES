@@ -19,22 +19,20 @@ use hares_types::{
     CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
     FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId, telemetry_keys as tk,
+    ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions
-use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
+use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::zone_id_from_config;
 
-use super::wh_config::{AmbientLocation, IndirectTankConfig};
+use super::wh_config::IndirectTankConfig;
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -100,11 +98,8 @@ pub struct IndirectTank {
     dr_level: DRLevel,
     boiler_loop_flow_rate_kg_s: f64,
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
-    /// When the HPXML `Location` names space with no modeled zone, the
-    /// ambient placement the equipment runs against instead of a zone id.
-    ambient_location: Option<AmbientLocation>,
+    /// The zone or no-zone location the tank sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -112,9 +107,7 @@ pub struct IndirectTank {
 impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone_from_config = zone_id_from_config(&config);
-        let zone = zone_from_config.unwrap_or(ZoneId(1));
-        let zone_id_explicit = zone_from_config.is_some();
+        let siting = Siting::from_constructor_config(&config);
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();
@@ -145,7 +138,7 @@ impl IndirectTank {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Indirect Tank"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -157,11 +150,7 @@ impl IndirectTank {
                 telemetry_fields: fields,
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::fluid(boiler_loop_id, FluidType::Water),
-                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: siting::storage_ports(&[], &siting, boiler_loop_id),
             telemetry,
             core_output: CoreOutput::default(),
             tank,
@@ -187,8 +176,7 @@ impl IndirectTank {
             dr_level: DRLevel::Normal,
             boiler_loop_flow_rate_kg_s: DEFAULT_BOILER_LOOP_FLOW_RATE_KG_S,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
-            ambient_location: None,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -204,22 +192,6 @@ impl IndirectTank {
             (temps[n - 1] + temps[n - 2]) * 0.5
         } else {
             temps[0]
-        }
-    }
-
-    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        match self.ambient_location {
-            Some(location) => super::ambient_source_temp_c(env, location),
-            None => self
-                .descriptor
-                .zone
-                .and_then(|zone| {
-                    env.zones
-                        .iter()
-                        .find(|z| z.id == zone)
-                        .map(|z| z.temperature_c)
-                })
-                .unwrap_or(env.weather.outdoor_temp_c),
         }
     }
 
@@ -250,28 +222,11 @@ impl IndirectTank {
             self.descriptor.id = EquipmentId(id);
         }
 
-        // Zone resolution: an HPXML `Location` that names space with no
-        // modeled zone ("other ...") runs against the matching ambient
-        // series instead of a zone; a location that classifies as neither a
-        // modeled zone nor a known ambient placement is unresolved wiring.
-        let ambient = super::resolve_ambient_location(
-            config.name.as_str(),
-            c.zone_id,
-            c.zone_type.as_deref(),
-        )?;
-        self.ambient_location = ambient;
-        let zone = if ambient.is_some() {
-            None
-        } else {
-            c.zone_id.map(ZoneId).or(self.descriptor.zone)
-        };
-        self.descriptor.zone = zone;
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.ports[2].zone = zone;
-
-        let boiler_loop_id = c.boiler_loop_id.map(LoopId).unwrap_or(self.boiler_loop_id);
-        self.boiler_loop_id = boiler_loop_id;
-        self.ports[0].loop_id = Some(boiler_loop_id);
+        self.boiler_loop_id = c.boiler_loop_id.map(LoopId).unwrap_or(self.boiler_loop_id);
+        self.ports = siting::storage_ports(&[], &self.siting, self.boiler_loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
@@ -377,8 +332,8 @@ impl Equipment for IndirectTank {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        self.siting.ambient_location()
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -440,6 +395,7 @@ impl Equipment for IndirectTank {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let ambient_c = self.siting.dry_bulb_c(env, &self.descriptor.name)?;
         let mode = self.update_control(env);
         let dt_s = dt.as_secs_f64();
 
@@ -486,7 +442,7 @@ impl Equipment for IndirectTank {
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            self.ambient_temp_c(env),
+            ambient_c,
             tempered_flow_m3_s,
             hot_flow_m3_s,
             mains_temp_c,
@@ -779,7 +735,8 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::SKIN_LOSS_W.to_string(),
             unit: "W".to_string(),
-            description: "Tank jacket thermal loss to zone".to_string(),
+            description: "Tank jacket thermal loss to the surrounding zone or ambient location"
+                .to_string(),
         },
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
@@ -824,7 +781,7 @@ mod control_domain_tests {
         EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
-                id: hares_types::ZoneId(1),
+                id: hares_types::ZoneId(2),
                 temperature_c: 21.0,
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
@@ -990,9 +947,9 @@ mod tests {
     use chrono::TimeZone;
     use hares_types::{EnvironmentState, ZoneId};
 
-    use super::super::wh_config::AmbientLocation;
     use super::IndirectTank;
     use crate::{Equipment, EquipmentConfig};
+    use hares_types::AmbientLocation;
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1064,12 +1021,7 @@ mod tests {
         let mut e = env(21.0);
         e.zones[0].temperature_c = conditioned_temp_c;
         e.weather.outdoor_temp_c = outdoor_temp_c;
-        // Hand-computed per the table for conditioned 22.0, outdoor 2.0:
-        // heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
-        // non-freezing max(2.0, 4.44) = 4.44.
-        e.ambient_other_space_c.other_heated_space_c = 20.0;
-        e.ambient_other_space_c.other_multifamily_buffer_space_c = 12.0;
-        e.ambient_other_space_c.other_non_freezing_space_c = 4.44;
+        e.ambient_other_space_c = super::super::siting::test_ambient_air();
         e
     }
 
@@ -1083,12 +1035,54 @@ mod tests {
         let e = ambient_test_env(22.0, 2.0);
         eq.init(&cfg, &e).unwrap();
         assert_eq!(
-            eq.ambient_location,
+            eq.ambient_location(),
             Some(AmbientLocation::OtherNonFreezingSpace),
-            "construction must carry the classified ambient placement"
+            "init must resolve the classified ambient placement"
         );
         assert_eq!(eq.descriptor().zone, None);
-        assert!((eq.ambient_temp_c(&e) - 4.44).abs() < 1e-9);
+        assert!((eq.siting.dry_bulb_c(&e, "IT Ambient").unwrap() - 4.44).abs() < 1e-9);
+    }
+
+    /// The standing loss of an indirect tank in a location with no modeled
+    /// zone leaves through that location's ambient, never into a zone.
+    #[test]
+    fn ambient_placed_indirect_tank_contributes_nothing_to_any_zone() {
+        let cfg = ambient_test_config("other non-freezing space");
+        let mut eq = IndirectTank::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        let mut p = hares_types::PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: eq
+                .ports()
+                .iter()
+                .filter_map(|port| Some((port.loop_id?, port.fluid_type?)))
+                .map(|(loop_id, fluid)| hares_types::FluidAccumulator::new(loop_id, fluid))
+                .collect(),
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            eq.step(&e, std::time::Duration::from_secs(60), &mut p)
+                .unwrap();
+        }
+        for zone in &p.thermal {
+            assert_eq!(
+                (
+                    zone.sensible_gain_w,
+                    zone.radiant_gain_w,
+                    zone.latent_gain_w
+                ),
+                (0.0, 0.0, 0.0),
+                "an ambient-placed indirect tank must not add heat to {:?}",
+                zone.zone
+            );
+        }
+        assert!(
+            eq.ports()
+                .iter()
+                .all(|port| port.port_type != hares_types::PortType::Thermal),
+            "an ambient-placed tank declares no thermal port"
+        );
     }
 
     #[test]

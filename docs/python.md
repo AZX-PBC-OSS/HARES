@@ -133,18 +133,21 @@ for ts in dw.timesteps():
     obs = dw.step()
 ```
 
-## Numeric changes
+## Equipment zones
 
-Physics-affecting changes are recorded with their deltas in the
-initiative ledger's measurement log (`.shipwright/initiatives/I-08/ledger/02-measurement.md`)
-and the affected golden fixtures are re-captured in the same commit:
+Every HVAC unit, water heater and ventilation unit runs in a zone it can
+name; a unit that names none fails when the dwelling is built.
 
-- 2026-10-02: water heaters in HPXML locations with no modeled thermal
-  zone ("other heated space" and friends) read the OS-HPXML ambient
-  series instead of the conditioned zone's temperature. Fleet fixture
-  home 1 (ResStock bldg0000004, "other heated space"): gross
-  consumption 201.99 to 204.91 kWh, water heating 25.11 to 25.33 kWh,
-  HVAC heating 87.25 to 89.96 kWh over the fixture's period.
+- HVAC equipment (furnaces, boilers, baseboards, air conditioners, heat
+  pumps, ideal HVAC), dehumidifiers and ventilation serve the zone given by
+  `zone_id`, or the dwelling's conditioned zone when `zone_id` is omitted.
+- Water heaters need a `zone_id` (or, from HPXML, a `Location`). HPXML
+  locations with no modeled zone ("other heated space", "other
+  multifamily buffer space", "other non-freezing space", "other housing
+  unit", "other exterior", "outside") run against that location's ambient
+  air: the OS-HPXML indoor/outdoor blend with its temperature floor, and a
+  wet-bulb from the blended humidity ratio for heat pump water heaters.
+  Their standing losses leave the model there instead of heating a zone.
 
 ## Troubleshooting
 

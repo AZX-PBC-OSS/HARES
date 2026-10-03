@@ -1047,6 +1047,7 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
             <WaterHeatingSystem>
                 <FuelType>propane</FuelType>
                 <WaterHeaterType>storage water heater</WaterHeaterType>
+                <Location>conditioned space</Location>
                 <HotWaterTemperature>125.0</HotWaterTemperature>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
@@ -1086,6 +1087,7 @@ fn natural_gas_tankless_water_heater_resolves_and_inits_as_gas() {
             <WaterHeatingSystem>
                 <FuelType>natural gas</FuelType>
                 <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                <Location>conditioned space</Location>
                 <HeatingCapacity>20000</HeatingCapacity>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,

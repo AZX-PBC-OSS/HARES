@@ -44,7 +44,7 @@ def test_swap_gas_wh_to_hpwh():
     assert all("Water Heater" not in n for n in bp.equipment_names())
 
     hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
-                       backup_capacity_w=4500.0,
+                       backup_capacity_w=4500.0, zone_id=1,
                        avg_water_draw_l_per_day=200.0)
     bp.add_equipment(hpwh)
     dw = bp.build()
@@ -60,7 +60,7 @@ def test_swap_gas_wh_to_electric_resistance():
     bp.remove_equipment_by_end_use([EndUse.WATER_HEATING])
     erwh = ElectricResistanceWH("ERWH", tank_volume_m3=0.19,
                                  heating_capacity_w=4500.0,
-                                 uniform_energy_factor=0.95,
+                                 uniform_energy_factor=0.95, zone_id=1,
                                  avg_water_draw_l_per_day=200.0)
     bp.add_equipment(erwh)
     dw = bp.build()
