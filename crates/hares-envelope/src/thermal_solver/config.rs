@@ -810,6 +810,40 @@ pub enum ThermalSolverError {
         zone_id: ZoneId,
         capacitance_j_k: f64,
     },
+    /// A coupling site's B_eff coefficient does not keep the coupled solve's
+    /// divisor finite and positive. The identity-coupled solve divides a
+    /// coupled state's update by `1 + d_i` where `d_i = h·b` with a
+    /// non-negative per-step conductance `h` (infiltration, linearised
+    /// exterior LWR) and the model's coefficient `b` at that site, so `b`
+    /// must be finite and non-negative; anything else lets `1 + d_i` reach
+    /// zero, go negative or become non-finite. Checked once at construction.
+    #[error(
+        "{site}: the coupled solve divides state {state_index}'s update by 1 + d_i \
+         where d_i = h·b with a non-negative per-step conductance h and this site's \
+         B_eff coefficient b = {coefficient}, which is not finite and non-negative, \
+         so the divisor is not guaranteed finite and positive"
+    )]
+    CouplingCoefficientInvalid {
+        site: String,
+        state_index: usize,
+        coefficient: f64,
+    },
+    /// An interior-convection (TARP) injection's divisor inputs are invalid.
+    /// The injection's coupling diagonal is `dt·Δh·A/C`, applied only when
+    /// `Δh > 0`, with the capacitances clamped positive at the use site, so a
+    /// negative or non-finite area or static film resistance is what can
+    /// still make the divisor zero, negative or non-finite. Checked once at
+    /// construction.
+    #[error(
+        "interior-convection injection (surface state {surface_state_index}, zone state \
+         {zone_state_index}): {detail}; the coupled solve's divisor 1 + d_i is not \
+         guaranteed finite and positive"
+    )]
+    ConvectionInjectionInvalid {
+        surface_state_index: usize,
+        zone_state_index: usize,
+        detail: String,
+    },
     #[error("{0}")]
     Configuration(String),
 }

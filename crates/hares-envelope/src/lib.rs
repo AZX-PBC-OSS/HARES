@@ -31,8 +31,9 @@ pub use rc_network::{NodeId, RCNetwork, RCNetworkError, parallel_resistance};
 #[cfg(feature = "observe_detailed")]
 pub use state_space::gershgorin_false_positive_count;
 pub use state_space::{
-    OutputMapping, StabilityResult, StateSpaceError, StateSpaceModel, ZERO_GAIN_EPSILON,
-    discretize_auto, discretize_zoh, eigenvalue_check, matrix_exp, van_loan_discretize,
+    OutputMapping, SolveScratch, StabilityResult, StateSpaceError, StateSpaceModel,
+    ZERO_GAIN_EPSILON, discretize_auto, discretize_zoh, eigenvalue_check, matrix_exp,
+    van_loan_discretize,
 };
 pub use thermal_solver::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,

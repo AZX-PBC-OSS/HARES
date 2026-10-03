@@ -113,6 +113,44 @@ impl std::fmt::Debug for StateSpaceModel {
     }
 }
 
+/// Persistent scratch for the scalar ideal-input solves
+/// ([`StateSpaceModel::solve_for_output_input`],
+/// [`StateSpaceModel::solve_for_input`],
+/// [`StateSpaceModel::solve_for_scalar_input_identity_coupled`]).
+///
+/// Sized once to the state dimension and reused across calls so a hot loop
+/// that solves every step performs no heap allocation. The solver's owned
+/// scratch must not be shared across threads; each concurrent caller passes
+/// its own.
+#[derive(Debug, Clone)]
+pub struct SolveScratch {
+    /// Receives `N·x`.
+    n_x: DVector<f64>,
+    /// Receives `B_eff·u`.
+    b_u: DVector<f64>,
+    /// Receives the fixed-input RHS `N·x + B_eff·u − b_col·u_i` (couplings
+    /// applied on top by the identity-coupled solve).
+    rhs: DVector<f64>,
+    /// Receives the effective-gain column of the identity-coupled solve.
+    gain: DVector<f64>,
+    /// Receives the aggregated diagonal damping per state index.
+    d_agg: DVector<f64>,
+}
+
+impl SolveScratch {
+    /// Scratch sized for a model with `state_dim` state variables.
+    #[must_use]
+    pub fn new(state_dim: usize) -> Self {
+        Self {
+            n_x: DVector::zeros(state_dim),
+            b_u: DVector::zeros(state_dim),
+            rhs: DVector::zeros(state_dim),
+            gain: DVector::zeros(state_dim),
+            d_agg: DVector::zeros(state_dim),
+        }
+    }
+}
+
 /// Stability diagnostic payload returned by eigenvalue checks.
 #[derive(Debug, Clone)]
 pub struct StabilityResult {
@@ -267,8 +305,11 @@ impl StateSpaceModel {
         //
         // Tiered approach:
         //   1. Fast Gershgorin pass (O(n²)) for the common stable case.
-        //   2. Singular A_c exemption: ZOH discretization produces pole at |λ|=1,
-        //      but CN implicit path remains well-behaved.
+        //   2. Singular A_c exemption: ZOH maps a singular A_c's zero pole
+        //      to a discrete eigenvalue at exactly |λ|=1; the explicit step
+        //      x[k+1] = N·x[k] + B_eff·u[k] amplifies each mode by its
+        //      eigenvalue magnitude in N, so a pole at unity is bounded
+        //      (non-amplifying), not divergent.
         //   3. Full eigenvalue fallback: Gershgorin is sufficient but not
         //      necessary — strong off-diagonal coupling (e.g. multi-zone RC
         //      networks) can overestimate the spectral radius above 1.0 even
@@ -281,8 +322,12 @@ impl StateSpaceModel {
             let a_c_singular = is_singular(a_c);
             if a_c_singular && gershgorin_bound <= 1.0 + 1e-10 {
                 // Existing exemption: singular A_c within Gershgorin tolerance.
-                // ZOH discretization produces a pole at |λ| = 1, but the CN
-                // implicit path stays well-behaved and stable.
+                // ZOH maps the zero pole to a discrete eigenvalue at exactly
+                // |λ| = 1: the explicit step's amplification for that mode is
+                // 1 (bounded, neither growing nor decaying), and the
+                // Gershgorin bound upper-bounds every eigenvalue magnitude of
+                // N by unity, so the explicit discrete step that remains is
+                // bounded by construction and needs no implicit solve.
             } else {
                 // Gershgorin flagged potential instability — attempt full
                 // eigenvalue decomposition before rejecting.
@@ -356,7 +401,33 @@ impl StateSpaceModel {
 
     /// Computes output from current state/input: y[k] = C * x[k] + D * u[k].
     pub fn output(&self, x: &DVector<f64>, u: &DVector<f64>) -> DVector<f64> {
-        &self.c * x + &self.d * u
+        let mut y = DVector::zeros(self.c.nrows());
+        let mut du = DVector::zeros(self.c.nrows());
+        self.output_into(x, u, &mut y, &mut du);
+        y
+    }
+
+    /// Zero-allocation output: writes `y = C·x + D·u` into `y`, using
+    /// `du_scratch` for the `D·u` half.
+    ///
+    /// Both buffers must have shape (`output_dim()`); they are persistent
+    /// buffers on hot-path callers. The products are the same `mul_to` calls
+    /// the owned form `&c * x + &d * u` makes (same `gemm` kernel, same
+    /// accumulation order), and the scratch is added elementwise into `y` as
+    /// `y[i] + du[i]`, the same operations in the same order as the
+    /// allocating form, so the result is bitwise equal.
+    pub fn output_into(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y: &mut DVector<f64>,
+        du_scratch: &mut DVector<f64>,
+    ) {
+        self.c.mul_to(x, y);
+        self.d.mul_to(u, du_scratch);
+        for i in 0..y.len() {
+            y[i] += du_scratch[i];
+        }
     }
 
     /// Full eigenvalue stability check on the discrete state matrix N.
@@ -376,6 +447,9 @@ impl StateSpaceModel {
 
     /// Solves for a scalar input that drives a specific output row to `y_target`
     /// after one coupled step.
+    ///
+    /// Writes intermediates into `scratch` (sized to the state dimension)
+    /// so a hot loop that solves every step performs no heap allocation.
     pub fn solve_for_output_input(
         &self,
         x: &DVector<f64>,
@@ -383,22 +457,27 @@ impl StateSpaceModel {
         y_target: f64,
         output_index: usize,
         input_index: usize,
+        scratch: &mut SolveScratch,
     ) -> Result<f64> {
-        self.solve_for_scalar_input(x, u, y_target, output_index, input_index)
+        self.solve_for_scalar_input(x, u, y_target, output_index, input_index, scratch)
     }
 
     /// Solves for one scalar input value to hit a scalar output target after one step.
+    ///
+    /// Writes intermediates into `scratch` (sized to the state dimension)
+    /// so a hot loop that solves every step performs no heap allocation.
     pub fn solve_for_input(
         &self,
         x: &DVector<f64>,
         u: &DVector<f64>,
         y_target: f64,
         input_index: usize,
+        scratch: &mut SolveScratch,
     ) -> Result<f64> {
         if self.c.nrows() != 1 {
             return Err(StateSpaceError::UnsupportedOutputCount(self.c.nrows()));
         }
-        self.solve_for_scalar_input(x, u, y_target, 0, input_index)
+        self.solve_for_scalar_input(x, u, y_target, 0, input_index, scratch)
     }
 
     /// Builds the coupled RHS into `buf`: `(N - D)·x + B_eff·u + f`.
@@ -429,8 +508,9 @@ impl StateSpaceModel {
     /// `x[i] = b[i] / (1 + d_i)` for coupled rows. Builds the RHS via
     /// [`build_coupled_rhs`] then applies diagonal scaling.
     ///
-    /// Zero allocations: `gemv` uses pre-allocated buffers and the scaling
-    /// loop is O(k) over coupled rows.
+    /// Allocates the aggregated-damping vector per call; the hot path uses
+    /// [`step_with_identity_coupling_into_scratch`], which receives it as a
+    /// persistent buffer.
     ///
     /// Vendor alignment: OCHRE StateSpaceModel.py `update_model()` (line 318)
     /// uses `A·x + B·u` forward multiplication with no per-step factorization.
@@ -499,6 +579,19 @@ impl StateSpaceModel {
     ///
     /// `couplings` entries are `(state_idx, d_diag, forcing)` -- same format as
     /// `step_with_identity_coupling_into`.
+    ///
+    /// Zero allocation: every intermediate (`N·x`, `B_eff·u`, the RHS, the
+    /// gain column and the aggregated damping) lives in `scratch` (sized to
+    /// the state dimension and reused across calls). The computation is the
+    /// same operations in the same order as the allocating form
+    /// (`&n_mat * x + &b_eff * u - b_col * u_i` with an owned gain column), so
+    /// the result is bitwise equal.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the solve takes x, u, the target, the two indices, the \
+                  couplings and the scratch; bundling them would obscure \
+                  every call site"
+    )]
     pub fn solve_for_scalar_input_identity_coupled(
         &self,
         x: &DVector<f64>,
@@ -507,6 +600,7 @@ impl StateSpaceModel {
         output_index: usize,
         input_index: usize,
         couplings: &[(usize, f64, f64)],
+        scratch: &mut SolveScratch,
     ) -> Result<f64> {
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
@@ -522,44 +616,60 @@ impl StateSpaceModel {
         }
 
         let u_i_original = u[input_index];
+        let n = self.state_dim();
 
-        // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f
-        let mut rhs_fixed =
-            &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
+        // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f.
+        // The `mul_to` calls are the same gemm kernels the owned products
+        // `&self.n_mat * x` and `&self.b_eff * u` make; the elementwise adds
+        // reproduce `left + right - b_col·u_i` operand for operand.
+        self.n_mat.mul_to(x, &mut scratch.n_x);
+        self.b_eff.mul_to(u, &mut scratch.b_u);
+        {
+            let rhs = &mut scratch.rhs;
+            rhs.copy_from(&scratch.n_x);
+            for i in 0..n {
+                rhs[i] += scratch.b_u[i];
+            }
+            let b_col = self.b_eff.column(input_index);
+            for i in 0..n {
+                rhs[i] -= b_col[i] * u_i_original;
+            }
+        }
         for &(idx, d_diag, forcing) in couplings {
-            rhs_fixed[idx] -= d_diag * x[idx];
-            rhs_fixed[idx] += forcing;
+            debug_assert!(idx < n, "coupling index {idx} out of bounds");
+            scratch.rhs[idx] -= d_diag * x[idx];
+            scratch.rhs[idx] += forcing;
         }
 
         // Aggregate diagonal damping per state index before dividing.
         // See `step_with_identity_coupling_into_scratch` for derivation.
-        let n = self.state_dim();
-        let mut d_agg = vec![0.0f64; n];
+        scratch.d_agg.fill(0.0);
         for &(idx, d_diag, _) in couplings {
             debug_assert!(idx < n, "coupling index {idx} out of bounds");
-            d_agg[idx] += d_diag;
+            scratch.d_agg[idx] += d_diag;
         }
 
         // Closed-form solve: (I + D)⁻¹ · rhs_fixed
         for i in 0..n {
-            if d_agg[i] != 0.0 {
-                rhs_fixed[i] /= 1.0 + d_agg[i];
+            if scratch.d_agg[i] != 0.0 {
+                scratch.rhs[i] /= 1.0 + scratch.d_agg[i];
             }
         }
 
         // Gain: g = (I + D)⁻¹ · b_col
-        let mut g = self.b_eff.column(input_index).into_owned();
+        scratch.gain.copy_from(&self.b_eff.column(input_index));
         for i in 0..n {
-            if d_agg[i] != 0.0 {
-                g[i] /= 1.0 + d_agg[i];
+            if scratch.d_agg[i] != 0.0 {
+                scratch.gain[i] /= 1.0 + scratch.d_agg[i];
             }
         }
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &rhs_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+        let y_fixed =
+            (c_row * &scratch.rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
-        let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
+        let effective_gain = (c_row * &scratch.gain)[0] + self.d[(output_index, input_index)];
 
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });
@@ -575,6 +685,7 @@ impl StateSpaceModel {
         y_target: f64,
         output_index: usize,
         input_index: usize,
+        scratch: &mut SolveScratch,
     ) -> Result<f64> {
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
@@ -590,19 +701,38 @@ impl StateSpaceModel {
         }
 
         let u_i_original = u[input_index];
+        let n = self.state_dim();
 
-        // Compute rhs without the variable input contribution
-        let rhs_fixed =
-            &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
+        // Compute rhs without the variable input contribution.
+        // The `mul_to` calls are the same gemm kernels the owned products
+        // `&self.n_mat * x` and `&self.b_eff * u` make; the elementwise adds
+        // reproduce `left + right - b_col·u_i` operand for operand, so the
+        // result is bitwise equal to the allocating form.
+        self.n_mat.mul_to(x, &mut scratch.n_x);
+        self.b_eff.mul_to(u, &mut scratch.b_u);
+        {
+            let rhs = &mut scratch.rhs;
+            rhs.copy_from(&scratch.n_x);
+            for i in 0..n {
+                rhs[i] += scratch.b_u[i];
+            }
+            let b_col = self.b_eff.column(input_index);
+            for i in 0..n {
+                rhs[i] -= b_col[i] * u_i_original;
+            }
+        }
 
         // Gain: how much does x_next change per unit of u[input_index]?
-        let g = self.b_eff.column(input_index).into_owned();
+        // The uncoupled solve divides nothing, so the gain is the column
+        // itself, read directly as a view.
+        let g = self.b_eff.column(input_index);
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &rhs_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+        let y_fixed =
+            (c_row * &scratch.rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
-        let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
+        let effective_gain = (c_row * g)[0] + self.d[(output_index, input_index)];
 
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });
@@ -1224,8 +1354,9 @@ mod tests {
         let y_target = model.output(&model.step(&x, &u), &u)[0];
 
         u[1] = 0.0;
+        let mut scratch = SolveScratch::new(model.state_dim());
         let solved = model
-            .solve_for_input(&x, &u, y_target, 1)
+            .solve_for_input(&x, &u, y_target, 1, &mut scratch)
             .expect("input should be solvable");
 
         assert!((solved - known_u_i).abs() < 1.0e-9);
@@ -1669,8 +1800,17 @@ mod tests {
         let solved_u = reference_coupled_scalar_solve(&model, &x, &u, y_target, 0, 1, &couplings);
 
         // The closed-form coupled solve must match the oracle.
+        let mut scratch = SolveScratch::new(model.state_dim());
         let solved_identity = model
-            .solve_for_scalar_input_identity_coupled(&x, &u, y_target, 0, 1, &couplings)
+            .solve_for_scalar_input_identity_coupled(
+                &x,
+                &u,
+                y_target,
+                0,
+                1,
+                &couplings,
+                &mut scratch,
+            )
             .expect("coupled solve should succeed");
         assert!(
             (solved_identity - solved_u).abs() <= 1.0e-10,
@@ -1968,9 +2108,16 @@ mod tests {
                 }
                 let y_target = 21.0 + output_idx as f64;
 
+                let mut scratch = SolveScratch::new(model.state_dim());
                 let solved_id = model
                     .solve_for_scalar_input_identity_coupled(
-                        &x, &u, y_target, output_idx, input_idx, &couplings,
+                        &x,
+                        &u,
+                        y_target,
+                        output_idx,
+                        input_idx,
+                        &couplings,
+                        &mut scratch,
                     )
                     .expect("identity scalar solve should succeed");
 
@@ -2035,9 +2182,16 @@ mod tests {
             }
             let y_target = 21.0 + output_idx as f64;
 
+            let mut scratch = SolveScratch::new(model.state_dim());
             let solved_id = model
                 .solve_for_scalar_input_identity_coupled(
-                    &x, &u, y_target, output_idx, input_idx, &couplings,
+                    &x,
+                    &u,
+                    y_target,
+                    output_idx,
+                    input_idx,
+                    &couplings,
+                    &mut scratch,
                 )
                 .expect("identity scalar solve should succeed");
 
@@ -2086,8 +2240,17 @@ mod tests {
 
         // Solve for input 2 to hit y_target at output 0
         let y_target = 22.0;
+        let mut scratch = SolveScratch::new(model.state_dim());
         let solved_u2 = model
-            .solve_for_scalar_input_identity_coupled(&x, &u, y_target, 0, 2, &couplings)
+            .solve_for_scalar_input_identity_coupled(
+                &x,
+                &u,
+                y_target,
+                0,
+                2,
+                &couplings,
+                &mut scratch,
+            )
             .expect("solve should succeed");
 
         let mut u_solved = u.clone();

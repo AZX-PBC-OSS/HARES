@@ -56,7 +56,7 @@ use hares_types::{
 };
 use nalgebra::DVector;
 
-use crate::state_space::StateSpaceModel;
+use crate::state_space::{SolveScratch, StateSpaceModel};
 
 use infiltration::{InfiltrationCoupling, apply_infiltration_and_ventilation};
 use initialization::initialize_steady_state;
@@ -90,6 +90,16 @@ pub struct ThermalSolver {
     /// Reusable state-step buffer: receives N·x + B_eff·u (coupling-scaled
     /// when couplings are active).
     rhs_buf: DVector<f64>,
+    /// Reusable output buffer: receives C·x + D·u in `integrate_inner` via
+    /// `StateSpaceModel::output_into` (was an owned per-step `model.output`).
+    /// Swapped out during the step and given back afterwards, `u_buf`-style.
+    y_buf: DVector<f64>,
+    /// Reusable scratch for the D·u half of `StateSpaceModel::output_into`.
+    du_buf: DVector<f64>,
+    /// Reusable scratch for the per-zone ideal-capacity scalar solves
+    /// (`solve_for_scalar_input_identity_coupled` / uncoupled), sized to the
+    /// state dimension at construction.
+    solve_scratch: SolveScratch,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
     /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
@@ -98,6 +108,11 @@ pub struct ThermalSolver {
     /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
     /// Indexed parallel to `config.exterior_surfaces`.
     exterior_surface_temps: Vec<f64>,
+    /// Persistent save buffer for `exterior_surface_temps`:
+    /// `prepare_inputs_inner` copies the temperatures in before
+    /// `build_input_vector` mutates them and copies them back afterwards
+    /// (was a per-step `Vec` clone).
+    ext_temps_save_buf: Vec<f64>,
     /// Last-step component gains for output/diagnostics.
     component_gains: EnvelopeComponentGains,
     /// Reusable buffer for interior surface temperatures in LWR calculation.
@@ -147,14 +162,20 @@ pub struct ThermalSolver {
     /// sinks. Paired with `zone_exchange_row_w`.
     zone_env_col_coeffs: Vec<(usize, f64)>,
     /// Per-step lookup: `surface_id` → slot in `env.weather.solar_irradiance`.
-    /// Rebuilt once per timestep by [`Self::refresh_solar_slot_map`] (called
+    /// Refreshed twice per timestep by [`Self::refresh_solar_slot_map`] (called
     /// from `build_input_vector` and the debug breakdown path) so the solar
     /// and exterior-LWR apply passes index directly instead of rescanning
     /// the irradiance vec per surface — O(S) per step total, not O(S²).
-    /// Capacity is retained across steps: no steady-state allocation.
+    /// The map is rebuilt only when the incoming surface-id sequence changes;
+    /// capacity is retained across steps: no steady-state allocation.
     /// Direct callers of the apply functions (tests, debug paths) must call
     /// `refresh_solar_slot_map` first (or populate the map themselves).
     solar_irr_slot_buf: HashMap<u32, usize>,
+    /// Surface-id sequence the slot map was last built from, parallel to
+    /// `env.weather.solar_irradiance`. `refresh_solar_slot_map` compares the
+    /// incoming sequence id by id (no hashing) and rebuilds the map only when
+    /// it differs, so a fixed environment rebuilds nothing per step.
+    solar_slot_map_keys: Vec<u32>,
     /// Absorbed opaque exterior solar [W] on iterative-path (rad_frac > 0)
     /// surfaces — the full skin-absorbed flux `α·A·POA`, not the
     /// rad_frac-scaled fraction injected into the RC node. Accumulated per
@@ -780,6 +801,91 @@ impl ThermalSolver {
                 }
             }
         }
+        // Coupled-solve divisor invariant, checked once here so nothing is
+        // added to the step. The identity-coupled solve divides a coupled
+        // state's update by `1 + d_i` (the closed-form diagonal solve in
+        // `StateSpaceModel`). Every coupling diagonal this solver can produce
+        // is `h·b`: a non-negative per-step conductance `h` (infiltration and
+        // linearised exterior LWR conductances are non-negative by physics,
+        // and the interior-convection correction applies only when its Δh is
+        // positive) times a model-side factor `b`. Requiring `b` finite and
+        // non-negative at every coupling site (and finite, non-negative
+        // divisor inputs on the convection injections, whose capacitances are
+        // clamped positive at the use site) is exactly the condition that
+        // every divisor `1 + d_i` stays finite and positive on every step; a
+        // violation would divide by zero or flip a state's update sign
+        // mid-simulation.
+        for zone in &env.zones {
+            let (Some(&state_idx), Some(&input_idx)) = (
+                wiring.zone_state_indices.get(&zone.id),
+                wiring.zone_sensible_input_indices.get(&zone.id),
+            ) else {
+                continue;
+            };
+            let b_coeff = model.b_eff()[(state_idx, input_idx)];
+            if !b_coeff.is_finite() || b_coeff < 0.0 {
+                return Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site: format!("zone {:?}", zone.id),
+                    state_index: state_idx,
+                    coefficient: b_coeff,
+                });
+            }
+        }
+        // Exterior LWR coupling sites: the simple (non-iterative) longwave
+        // branch linearises every non-window surface with rad_frac <= 0 and
+        // positive area into a coupling at (state_index, input_index).
+        for info in &config.exterior_surfaces {
+            if info.boundary_category == Some(config::BoundaryCategory::Window)
+                || info.rad_frac > 0.0
+                || info.area_m2 <= 0.0
+            {
+                continue;
+            }
+            let b_coeff = model.b_eff()[(info.state_index, info.input_index)];
+            if !b_coeff.is_finite() || b_coeff < 0.0 {
+                return Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site: format!("exterior surface {}", info.surface_id),
+                    state_index: info.state_index,
+                    coefficient: b_coeff,
+                });
+            }
+        }
+        // Interior-convection (TARP) coupling sites: the diagonal
+        // `dt·Δh·A/C` is finite and positive whenever applied (Δh > 0,
+        // capacitances clamped positive) as long as the area, the static
+        // film resistance and the tilt are finite and non-negative: a NaN
+        // in any of them reaches `delta_h` as NaN (NaN comparisons are
+        // false, so the `Δh > 0` gate passes it) and divides by NaN. The
+        // film resistance is the fail-fast guard for the frozen A-matrix
+        // too; the tilt is the one input `h` recomputes per step.
+        if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
+            for inj in &config.interior_convection_injections {
+                let detail = |value: f64, what: &str| {
+                    format!("{what} {value} must be finite and non-negative")
+                };
+                if !inj.area_m2.is_finite() || inj.area_m2 < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.area_m2, "area"),
+                    });
+                }
+                if !inj.static_r_film_int_m2_k_w.is_finite() || inj.static_r_film_int_m2_k_w < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.static_r_film_int_m2_k_w, "static film resistance"),
+                    });
+                }
+                if !inj.tilt_deg.is_finite() || inj.tilt_deg < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.tilt_deg, "tilt"),
+                    });
+                }
+            }
+        }
         // True double-registration of a DEDICATED injection column: sharing
         // is legitimate only on a zone's sensible-heat column (windows and
         // fallback surfaces sum additively into it); any other shared
@@ -855,6 +961,9 @@ impl ThermalSolver {
         let last_u = DVector::<f64>::zeros(n_inputs);
         let u_buf = DVector::<f64>::zeros(n_inputs);
         let rhs_buf = DVector::<f64>::zeros(n_states);
+        let y_buf = DVector::<f64>::zeros(model.output_dim());
+        let du_buf = DVector::<f64>::zeros(model.output_dim());
+        let solve_scratch = SolveScratch::new(n_states);
         let convection_forcing =
             if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
                 DVector::<f64>::zeros(n_states)
@@ -872,6 +981,7 @@ impl ThermalSolver {
         let latent_buf = HashMap::new();
         let exterior_surface_temps =
             vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
+        let ext_temps_save_buf = vec![0.0; config.exterior_surfaces.len()];
         let n_lwr_zones = config.interior_lwr_zones.len();
         let max_interior_surfaces = config
             .interior_lwr_zones
@@ -984,11 +1094,15 @@ impl ThermalSolver {
             last_u,
             u_buf,
             rhs_buf,
+            y_buf,
+            du_buf,
+            solve_scratch,
             coupling_buf,
             last_coupling,
             last_coupled_state,
             latent_buf,
             exterior_surface_temps,
+            ext_temps_save_buf,
             // Pre-allocate the observe-gated per-zone jacket-loss buffer at
             // init (hot-path discipline: no per-timestep heap allocation).
             // `prepare_inputs` refills it in place each step, reusing the
@@ -1012,6 +1126,7 @@ impl ThermalSolver {
             window_exterior_lwr_w: 0.0,
             opaque_exterior_lwr_w: 0.0,
             solar_irr_slot_buf: HashMap::with_capacity(n_ext_surfaces),
+            solar_slot_map_keys: Vec::with_capacity(env.weather.solar_irradiance.len()),
             zone_exchange_row_w,
             zone_env_col_coeffs,
             opaque_exterior_solar_w: 0.0,
@@ -1371,6 +1486,31 @@ impl ThermalSolver {
             buf
         };
 
+        // Round-trip the reusable Vecs through the struct replacement: move
+        // this step's data into the new `component_gains` and the previous
+        // struct's Vecs (capacity retained) back into the buffers. Swapping
+        // against the freshly constructed struct's `Vec::new()`s (the
+        // previous swap-and-reserve dance) handed the buffers a capacity-0
+        // Vec and re-allocated both every timestep (hot-path discipline: no
+        // per-timestep heap allocation). Same for the diagnostic buffers:
+        // they move into the struct instead of being cloned.
+        let infiltration_by_zone = std::mem::take(&mut self.infiltration_by_zone_buf);
+        let interior_lwr_by_zone = std::mem::take(&mut self.lwr_by_zone_buf);
+        let prev_infiltration_by_zone =
+            std::mem::take(&mut self.component_gains.infiltration_by_zone);
+        let prev_interior_lwr_by_zone =
+            std::mem::take(&mut self.component_gains.interior_lwr_by_zone);
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        let (ext_surface_diag, int_surface_diag, window_solar_diag) = {
+            let ext = std::mem::take(&mut self.component_gains.ext_surface_diag);
+            let int = std::mem::take(&mut self.component_gains.int_surface_diag);
+            let win = std::mem::take(&mut self.component_gains.window_solar_diag);
+            let ext_diag = std::mem::replace(&mut self.ext_surface_diag_buf, ext);
+            let int_diag = std::mem::replace(&mut self.int_surface_diag_buf, int);
+            let win_diag = std::mem::replace(&mut self.window_solar_diag_buf, win);
+            (ext_diag, int_diag, win_diag)
+        };
+
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
             opaque_solar_lwr_w,
@@ -1387,8 +1527,8 @@ impl ThermalSolver {
             jacket_loss_w,
             duct_loss_w,
             hvac_dehumidification_w,
-            infiltration_by_zone: Vec::new(),
-            interior_lwr_by_zone: Vec::new(),
+            infiltration_by_zone,
+            interior_lwr_by_zone,
             wall_heat_gain_w: 0.0,
             floor_heat_gain_w: 0.0,
             roof_heat_gain_w: 0.0,
@@ -1445,33 +1585,17 @@ impl ThermalSolver {
                 )
             },
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            ext_surface_diag: self.ext_surface_diag_buf.clone(),
+            ext_surface_diag,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            int_surface_diag: self.int_surface_diag_buf.clone(),
+            int_surface_diag,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            window_solar_diag: self.window_solar_diag_buf.clone(),
+            window_solar_diag,
             #[cfg(feature = "observe")]
             jacket_loss_by_zone,
         };
 
-        std::mem::swap(
-            &mut self.infiltration_by_zone_buf,
-            &mut self.component_gains.infiltration_by_zone,
-        );
-        std::mem::swap(
-            &mut self.lwr_by_zone_buf,
-            &mut self.component_gains.interior_lwr_by_zone,
-        );
-        // After swap, the buf fields hold the empty Vecs from the freshly
-        // constructed struct. Reserve capacity so the next step avoids realloc.
-        let n_inf = self.component_gains.infiltration_by_zone.len();
-        let n_lwr = self.component_gains.interior_lwr_by_zone.len();
-        if self.infiltration_by_zone_buf.capacity() < n_inf {
-            self.infiltration_by_zone_buf.reserve(n_inf);
-        }
-        if self.lwr_by_zone_buf.capacity() < n_lwr {
-            self.lwr_by_zone_buf.reserve(n_lwr);
-        }
+        self.infiltration_by_zone_buf = prev_infiltration_by_zone;
+        self.lwr_by_zone_buf = prev_interior_lwr_by_zone;
 
         Ok((u, latent_by_zone))
     }
@@ -1547,8 +1671,11 @@ impl ThermalSolver {
 
     /// Rebuilds the per-step `surface_id` → irradiance-slot lookup used by
     /// the solar and exterior-LWR apply passes. Called once per timestep from
-    /// `build_input_vector` before any of those passes run; capacity is
-    /// retained across steps so this performs no steady-state allocation.
+    /// `build_input_vector` before any of those passes run. The rebuild
+    /// happens only when the incoming surface-id sequence differs from the
+    /// one the map was last built from (compared id by id, no hashing), so
+    /// a fixed environment performs no rebuild and no allocation per call;
+    /// capacity is retained across steps.
     ///
     /// Duplicate `surface_id`s in the weather vector resolve FIRST-WINS —
     /// the same resolution the pre-slot-map linear `.find()` gave, so this
@@ -1558,12 +1685,23 @@ impl ThermalSolver {
     /// `exterior_surfaces`; a weather producer emitting duplicates is
     /// malformed input, and first-wins keeps its handling deterministic.
     fn refresh_solar_slot_map(&mut self, env: &EnvironmentState) {
+        if self.solar_slot_map_keys.len() == env.weather.solar_irradiance.len()
+            && self
+                .solar_slot_map_keys
+                .iter()
+                .zip(env.weather.solar_irradiance.iter())
+                .all(|(id, irr)| *id == irr.surface_id)
+        {
+            return;
+        }
         self.solar_irr_slot_buf.clear();
+        self.solar_slot_map_keys.clear();
         for (slot, irr) in env.weather.solar_irradiance.iter().enumerate() {
             // `or_insert` = first-wins: a key already mapped keeps its slot.
             self.solar_irr_slot_buf
                 .entry(irr.surface_id)
                 .or_insert(slot);
+            self.solar_slot_map_keys.push(irr.surface_id);
         }
     }
 
@@ -1679,7 +1817,7 @@ mod tests {
         FilmCoefficientModel, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-        WindowSolarProperties,
+        ThermalSolverError, WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -7162,5 +7300,251 @@ mod tests {
              {:?} (last-wins would be slot 1)",
             solver.solar_irr_slot_buf.get(&7)
         );
+    }
+
+    /// The per-step slot map is rebuilt only when the incoming surface-id
+    /// sequence differs from the one it was built from. Over 100 steps with a
+    /// fixed surface list the map is rebuilt exactly once (its first
+    /// refresh); a changed list rebuilds it again. Detected with a sentinel
+    /// entry a rebuild would clear: `solar_irr_slot_buf` is otherwise only
+    /// mutated inside `refresh_solar_slot_map`.
+    #[test]
+    fn solar_slot_map_rebuilt_only_on_surface_change() {
+        let mut env = env_for_temp(20.0, 10.0);
+        env.weather.solar_irradiance = vec![
+            SurfaceIrradiance {
+                surface_id: 3,
+                direct_w_m2: 100.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+            SurfaceIrradiance {
+                surface_id: 5,
+                direct_w_m2: 200.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+        ];
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).expect("model");
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            ..Default::default()
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
+
+        // The first refresh builds the map once.
+        solver.refresh_solar_slot_map(&env);
+        assert_eq!(solver.solar_irr_slot_buf.get(&3), Some(&0));
+        assert_eq!(solver.solar_irr_slot_buf.get(&5), Some(&1));
+
+        // 100 more refreshes over the SAME surface sequence must not rebuild:
+        // the sentinel survives every one of them.
+        solver.solar_irr_slot_buf.insert(u32::MAX, usize::MAX);
+        for _ in 0..100 {
+            solver.refresh_solar_slot_map(&env);
+            assert_eq!(
+                solver.solar_irr_slot_buf.get(&u32::MAX),
+                Some(&usize::MAX),
+                "slot map was rebuilt although the surface-id sequence did \
+                 not change: refresh_solar_slot_map must compare the \
+                 incoming sequence and rebuild only on difference"
+            );
+        }
+
+        // A changed surface list rebuilds the map: the sentinel is gone and
+        // the new ids are mapped.
+        env.weather.solar_irradiance = vec![SurfaceIrradiance {
+            surface_id: 9,
+            direct_w_m2: 50.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        solver.refresh_solar_slot_map(&env);
+        assert_eq!(
+            solver.solar_irr_slot_buf.get(&u32::MAX),
+            None,
+            "a changed surface-id sequence must rebuild the slot map"
+        );
+        assert_eq!(solver.solar_irr_slot_buf.get(&9), Some(&0));
+    }
+
+    /// The coupled solve divides a coupled state's update by `1 + d_i`. The
+    /// divisor's model-side factor (the B_eff coefficient at every coupling
+    /// site) is checked once at construction: a negative coefficient lets
+    /// `1 + d_i` reach zero or go negative under a physical conductance, and
+    /// a non-finite coefficient makes the divisor non-finite, so construction
+    /// fails with the state named; a healthy model constructs, at the zone
+    /// sensible site and at an exterior surface's LWR site alike.
+    #[test]
+    fn coupled_solve_divisor_checked_at_construction() {
+        // 1-state model: state 0 = zone air; inputs 0 = outdoor temp,
+        // 1 = zone sensible heat. The infiltration coupling site is
+        // (state 0, input 1); `b_coeff` is the B_eff coefficient there.
+        fn one_zone_solver_result(
+            b_coeff: f64,
+        ) -> std::result::Result<ThermalSolver, ThermalSolverError> {
+            let a_d = DMatrix::from_row_slice(1, 1, &[0.99]);
+            let b_d = DMatrix::from_row_slice(1, 2, &[1.0e-4, b_coeff]);
+            let c = DMatrix::from_row_slice(1, 1, &[1.0]);
+            let d = DMatrix::from_row_slice(1, 2, &[0.0, 0.0]);
+            let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).expect("model");
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ..Default::default()
+            };
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                // Non-zero ACH keeps a coupling entry alive on every step, so
+                // the coupled solve runs with the divisor this checks.
+                infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
+                ..Default::default()
+            };
+            let env = env_for_temp(20.0, 10.0);
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
+        }
+
+        // A healthy model constructs.
+        assert!(
+            one_zone_solver_result(1.0 / 50_000.0).is_ok(),
+            "a model whose coupling coefficients are finite and non-negative \
+             must construct"
+        );
+
+        let expect_coefficient_error =
+            |b_coeff: f64, scenario: &str| match one_zone_solver_result(b_coeff) {
+                Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site,
+                    state_index,
+                    coefficient,
+                }) => {
+                    assert_eq!(state_index, 0, "{scenario}: wrong state named");
+                    assert_eq!(
+                        coefficient.to_bits(),
+                        b_coeff.to_bits(),
+                        "{scenario}: wrong coefficient reported"
+                    );
+                    assert_eq!(site, "zone ZoneId(1)", "{scenario}: wrong site named");
+                }
+                Err(other) => panic!(
+                    "{scenario}: expected Err(CouplingCoefficientInvalid) with the \
+                     state named, but got {other:?}"
+                ),
+                Ok(_) => panic!(
+                    "{scenario}: expected construction to fail with \
+                     Err(CouplingCoefficientInvalid); a coupling coefficient of \
+                     {b_coeff} lets the coupled solve's divisor 1 + d_i reach \
+                     zero, go negative or become non-finite"
+                ),
+            };
+
+        // b_coeff = -1: with a physical conductance h = 1 W/K the divisor is
+        // exactly 1 + 1·(-1) = 0.
+        expect_coefficient_error(-1.0, "divisor zero");
+        // b_coeff = -2: with h = 1 W/K the divisor is 1 + 1·(-2) = -1 < 0.
+        expect_coefficient_error(-2.0, "divisor negative");
+        // A non-finite coefficient makes the divisor non-finite.
+        expect_coefficient_error(f64::NAN, "divisor non-finite");
+        expect_coefficient_error(f64::NEG_INFINITY, "divisor non-finite (-inf)");
+
+        // 2-state model: state 0 = zone air, state 1 = surface node; inputs
+        // 0 = outdoor temp, 1 = zone sensible heat, 2 = surface heat. A
+        // rad_frac = 0 wall linearises into an LWR coupling at
+        // (state 1, input 2); `surface_b` is the B_eff coefficient there.
+        fn surface_solver_result(
+            surface_b: f64,
+        ) -> std::result::Result<ThermalSolver, ThermalSolverError> {
+            let a_d = DMatrix::from_row_slice(2, 2, &[0.99, 0.0, 0.0, 0.98]);
+            let b_d = DMatrix::from_row_slice(
+                2,
+                3,
+                &[
+                    1.0e-4,
+                    1.0 / 50_000.0,
+                    0.0, // zone air: outdoor + HVAC sensible drive
+                    0.0,
+                    0.0,
+                    surface_b, // surface node: surface heat input
+                ],
+            );
+            let c = DMatrix::identity(2, 2);
+            let d = DMatrix::zeros(2, 3);
+            let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).expect("model");
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ..Default::default()
+            };
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 11,
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 10.0,
+                    emissivity: 0.9,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    absorptance: 0.7,
+                    boundary_category: Some(BoundaryCategory::Wall),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
+                }],
+                ..Default::default()
+            };
+            let env = env_for_temp(20.0, 10.0);
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
+        }
+
+        // A healthy surface coupling site constructs.
+        assert!(
+            surface_solver_result(1.0 / 30_000.0).is_ok(),
+            "a model whose surface coupling coefficient is finite and \
+             non-negative must construct"
+        );
+        match surface_solver_result(-0.5) {
+            Err(ThermalSolverError::CouplingCoefficientInvalid {
+                site,
+                state_index,
+                coefficient,
+            }) => {
+                assert_eq!(state_index, 1, "wrong state named for the surface site");
+                assert_eq!(coefficient, -0.5);
+                assert_eq!(site, "exterior surface 11", "wrong site named");
+            }
+            Err(other) => panic!(
+                "expected Err(CouplingCoefficientInvalid) naming the exterior \
+                 surface, but got {other:?}"
+            ),
+            Ok(_) => panic!(
+                "expected construction to fail for a negative surface coupling \
+                 coefficient; its divisor 1 + d_i is not guaranteed positive"
+            ),
+        }
     }
 }

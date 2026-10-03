@@ -22,6 +22,7 @@ use super::CoupledState;
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
+use crate::state_space::SolveScratch;
 
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
@@ -356,7 +357,19 @@ impl ThermalSolver {
     ///
     /// Uses `last_u`, `last_coupling`, and `last_coupled_state` as background.
     /// When `prepare_inputs()` has been called first (two-phase path), these
-    /// contain current-step weather/solar/infiltration data. Zero allocation.
+    /// contain current-step weather/solar/infiltration data.
+    ///
+    /// Allocation behaviour: every intermediate of the scalar solve
+    /// (`N·x`, `B_eff·u`, the RHS, the gain column, the aggregated damping)
+    /// lives in the solver-owned [`SolveScratch`], sized at construction, so
+    /// a steady-state call performs no heap allocation. The zero-allocation
+    /// test `thermal_solver_step_allocation_free_after_first_step` proves it:
+    /// its allocation bracket wraps prepare → per-zone ideal-capacity solves
+    /// → integrate and reads zero over 100 steps after the first, with
+    /// couplings active and without. Every factorization in
+    /// `hares-envelope` factors a dynamically sized nalgebra matrix and
+    /// allocates its result, so those zero allocations also prove the step
+    /// performs zero factorizations.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
@@ -382,6 +395,7 @@ impl ThermalSolver {
                 output_idx,
                 input_idx,
                 &self.last_coupling,
+                &mut self.solve_scratch,
             ),
             CoupledState::Uncoupled => self.model.solve_for_output_input(
                 &self.x,
@@ -389,6 +403,7 @@ impl ThermalSolver {
                 target_c,
                 output_idx,
                 input_idx,
+                &mut self.solve_scratch,
             ),
         };
 
@@ -642,6 +657,11 @@ impl ThermalSolver {
     /// `solve_ideal_capacity_for_target` sees current-step data.
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
+    ///
+    /// Zero allocation: the exterior surface temperatures are saved into and
+    /// restored from `ext_temps_save_buf` with `copy_from_slice` (no per-step
+    /// clone), and the latent map returned by `build_input_vector` goes back
+    /// into `latent_buf` so its table is reused, not reallocated, next step.
     pub(super) fn prepare_inputs_inner(
         &mut self,
         ports: &PortSlots,
@@ -650,9 +670,11 @@ impl ThermalSolver {
         // Clear per-step degradation tracking: a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
-        let saved_ext_temps = self.exterior_surface_temps.clone();
-        let (u, _latent) = self.build_input_vector(ports, env)?;
-        self.exterior_surface_temps = saved_ext_temps;
+        self.ext_temps_save_buf
+            .copy_from_slice(&self.exterior_surface_temps);
+        let (u, latent) = self.build_input_vector(ports, env)?;
+        self.exterior_surface_temps
+            .copy_from_slice(&self.ext_temps_save_buf);
 
         self.build_coupling();
 
@@ -662,9 +684,13 @@ impl ThermalSolver {
             self.last_coupled_state = CoupledState::Uncoupled;
         }
 
-        self.last_u.clone_from(&u);
+        self.last_u.copy_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
+        // Return the latent map's table to `latent_buf`: the next
+        // `build_input_vector` call reuses it instead of allocating a fresh
+        // map every step.
+        self.latent_buf = latent;
         Ok(())
     }
 
@@ -701,7 +727,13 @@ impl ThermalSolver {
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
 
-        let y_next = self.model.output(&self.x, &u);
+        // Zero-allocation output: y_next = C·x + D·u into the persistent
+        // `y_buf`, with `du_buf` holding the D·u half. The buffer is swapped
+        // out (`u_buf`-style) so it can be handed back after
+        // `format_domain_update` reads it.
+        let mut y_next = std::mem::replace(&mut self.y_buf, DVector::zeros(0));
+        self.model
+            .output_into(&self.x, &u, &mut y_next, &mut self.du_buf);
 
         // Net interior-face convection per boundary category. This feeds the
         // "Wall/Floor/Roof/Window/Internal Mass Heat Gain - Indoor (W)"
@@ -1101,11 +1133,12 @@ impl ThermalSolver {
             }
         }
 
-        self.last_u.clone_from(&u);
+        self.last_u.copy_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
 
         self.format_domain_update(&y_next, latent_by_zone, out);
+        self.y_buf = y_next;
         Ok(())
     }
 
@@ -1235,6 +1268,9 @@ impl ThermalSolver {
         let mut x = self.x.clone();
         let mut u = DVector::zeros(n_inputs);
         let mut x_next = DVector::zeros(n_states);
+        // Local scratch for the per-timestep ideal-input solves: this
+        // autosizing loop runs on `&self` and is not the hot loop.
+        let mut solve_scratch = SolveScratch::new(n_states);
 
         let mut peak_load: f64 = 0.0;
         #[cfg(feature = "observe")]
@@ -1337,10 +1373,14 @@ impl ThermalSolver {
             }
 
             // ── Solve for ideal HVAC input ─────────────────────────────
-            let hvac_input = match self
-                .model
-                .solve_for_output_input(&x, &u, target_c, output_idx, input_idx)
-            {
+            let hvac_input = match self.model.solve_for_output_input(
+                &x,
+                &u,
+                target_c,
+                output_idx,
+                input_idx,
+                &mut solve_scratch,
+            ) {
                 Ok(val) if val.is_finite() => val,
                 _other => {
                     tracing::debug!(
