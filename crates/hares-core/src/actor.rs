@@ -177,6 +177,17 @@ pub trait Actor: Send + Sync + 'static {
     }
 }
 
+/// Lets a borrowed prospective roster (`&[&dyn Actor]`) satisfy the same
+/// `A: AsRef<dyn Actor>` bound an owned roster (`&[Box<dyn Actor>]`) does,
+/// since `Box<dyn Actor>` already implements `AsRef<dyn Actor>` via the
+/// standard library's blanket `Box` impl, but no such reflexive `AsRef`
+/// impl exists for a bare trait-object reference.
+impl AsRef<dyn Actor> for &dyn Actor {
+    fn as_ref(&self) -> &dyn Actor {
+        *self
+    }
+}
+
 pub mod testing {
     //! Test helpers for actor development.
     //!

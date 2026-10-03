@@ -7187,7 +7187,7 @@ mod tests {
         let rng = seed_from_u64(42);
         let mut actors = crate::dwelling::build_actors_from_seeds(
             std::slice::from_ref(&equipment),
-            &[],
+            &[] as &[Box<dyn crate::Actor>],
             false, // no tariff — none of the strategies under test needs one
             None,
             96,

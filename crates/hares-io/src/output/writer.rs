@@ -504,6 +504,14 @@ impl StreamingRecorder {
         })
     }
 
+    /// The Arrow schema this recorder was constructed with, including any
+    /// field metadata (for example, telemetry-unit provenance) attached
+    /// before construction.
+    #[must_use]
+    pub fn schema(&self) -> &Schema {
+        self.schema.as_ref()
+    }
+
     /// Number of rows currently buffered (not yet flushed).
     #[must_use]
     pub fn buffered_rows(&self) -> usize {
