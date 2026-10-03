@@ -33,7 +33,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -F dst -- -D warnings
+      - run: cargo clippy --workspace --all-targets -F profiling -- -D warnings
+      - run: cargo clippy --workspace --all-targets -F observe -- -D warnings
+      - run: cargo clippy --workspace --all-targets -F observe,profiling -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --release -- -D warnings
 
   advisories:
     name: "cargo deny advisories"
@@ -118,7 +124,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv sync --extra ochre
       - run: bash scripts/check_ashrae_reference.sh
 
   bench-check:

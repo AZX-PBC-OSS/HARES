@@ -434,8 +434,8 @@ fn build_solver_boundaries(
                 let shgc_winter =
                     base_shgc * win.winter_shading_fraction * win.exterior_shading_winter;
                 // Read only by the debug-build identity check and the
-                // `observe` divergence telemetry below, so the binding is
-                // gated to keep plain release builds lint-clean.
+                // `observe` film-model divergence telemetry below, so the
+                // binding is gated to keep plain release builds lint-clean.
                 #[cfg(any(debug_assertions, feature = "observe"))]
                 let r_total = 1.0 / u_factor.max(0.01);
                 // r_glass from the E+ Step 1 polynomial, computed once in

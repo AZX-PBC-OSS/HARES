@@ -69,7 +69,6 @@ check: check-no-magic-config check-si-guard check-ocv check-ashrae-reference
 # Verify that hardcoded ASHRAE RC reference fixture
 # (tests/fixtures/parity/ashrae_rc_reference.json) matches the output of
 # gen_ashrae_reference.py. Run in CI or locally to detect stale fixtures.
-# Requires xmltodict (uv sync --extra ochre if not installed).
 check-ashrae-reference:
 	bash scripts/check_ashrae_reference.sh
 
