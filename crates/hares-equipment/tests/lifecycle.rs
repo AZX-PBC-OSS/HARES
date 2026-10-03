@@ -738,7 +738,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             DehumidifierConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 capacity_liters_per_day: Some(20.0),
                 energy_factor: Some(2.0),
                 integrated_energy_factor: None,

@@ -11,7 +11,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +37,7 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
         compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, zone_id_from_config_or_default,
+        register_ebm_telemetry_keys, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -513,7 +513,9 @@ impl CoolingCore {
     }
 
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let equipment_type = if is_room_ac {
             "Room AC"
         } else {
@@ -2124,6 +2126,7 @@ mod tests {
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -4716,6 +4719,7 @@ mod tests {
 
     fn oat_lockout_env(outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 28.0,
@@ -5114,6 +5118,7 @@ mod dr_tests {
     /// Zone above cooling setpoint, suitable for triggering active cooling.
     fn hot_env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5526,6 +5531,7 @@ mod crankcase_tests {
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5620,6 +5626,7 @@ mod crankcase_tests {
 
     fn cold_env(outdoor_c: f64, zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5961,6 +5968,7 @@ mod ideal_capacity_tests {
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -6414,6 +6422,7 @@ mod defaults_tests {
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -6456,6 +6465,7 @@ mod defaults_tests {
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     fn make_env_coarse(zone_temp_c: f64, time_res_s: i64, humidity_ratio: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -6783,6 +6793,7 @@ mod speed_selection_parity_tests {
     fn minimal_env() -> EnvironmentState {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 26.0,

@@ -51,47 +51,6 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
     Some(ZoneId(raw as u16))
 }
 
-/// Resolve `ZoneId` from config, falling back to `ZoneId(1)` when absent.
-///
-/// Returns `(ZoneId, bool)` where the bool is `true` when `zone_id` was
-/// explicitly present in the config and `false` when the fallback was used.
-///
-/// When `zone_id` is missing from the equipment's typed config, HPXML parsing
-/// did not inject the conditioned-zone identifier. Logging the fallback makes
-/// this gap visible during development and integration testing. The fallback
-/// stays: HPXML locations that map to no modeled zone ("other heated
-/// space", "other housing unit") legitimately leave the equipment zone
-/// unresolved, and the equipment runs on ZoneId(1).
-#[cfg(debug_assertions)]
-pub fn zone_id_from_config_or_default(
-    config: &EquipmentConfig,
-    equipment_name: &str,
-) -> (ZoneId, bool) {
-    match zone_id_from_config(config) {
-        Some(id) => (id, true),
-        None => {
-            tracing::warn!(
-                equipment = %equipment_name,
-                key = crate::config::KEY_ZONE_ID,
-                "zone_id not present in equipment config; falling back to ZoneId(1) — \
-                 HPXML parsing may not have propagated conditioned_zone_id"
-            );
-            (ZoneId(1), false)
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-pub fn zone_id_from_config_or_default(
-    config: &EquipmentConfig,
-    _equipment_name: &str,
-) -> (ZoneId, bool) {
-    match zone_id_from_config(config) {
-        Some(id) => (id, true),
-        None => (ZoneId(1), false),
-    }
-}
-
 /// Parse an optional `ZoneId` from a named config key.
 pub fn parse_zone_id_key(config: &EquipmentConfig, key: &str) -> Option<ZoneId> {
     let raw = config.get_f64(key).or_else(|| typed_f64(config, key))?;
@@ -560,7 +519,6 @@ mod tests {
     use super::{
         DuctDseContext, compute_and_write_ebm_telemetry, loop_id_from_config, parse_fuel_type,
         parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, zone_id_from_config,
-        zone_id_from_config_or_default,
     };
 
     #[test]
@@ -753,56 +711,6 @@ mod tests {
             zone_id_from_config(&config),
             None,
             "zone_id_from_config must return None when zone_id key is absent from the typed config"
-        );
-    }
-
-    #[test]
-    fn zone_id_from_config_or_default_falls_back_to_zone_1_with_explicit_false() {
-        let config = EquipmentConfig::from_typed(
-            "ZN".to_string(),
-            "Gas Furnace".to_string(),
-            GasFurnaceConfig {
-                zone_id: None,
-                capacity_w: 10_000.0,
-                afue: 0.96,
-                ..GasFurnaceConfig::default()
-            },
-        )
-        .unwrap();
-        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
-        assert_eq!(
-            zone_id,
-            hares_types::ZoneId(1),
-            "fallback must be ZoneId(1) when zone_id key is absent"
-        );
-        assert!(
-            !explicit,
-            "zone_id_explicit must be false when fallback is used"
-        );
-    }
-
-    #[test]
-    fn zone_id_from_config_or_default_returns_explicit_true_when_present() {
-        let config = EquipmentConfig::from_typed(
-            "Z5".to_string(),
-            "Gas Furnace".to_string(),
-            GasFurnaceConfig {
-                zone_id: Some(5),
-                capacity_w: 10_000.0,
-                afue: 0.96,
-                ..GasFurnaceConfig::default()
-            },
-        )
-        .unwrap();
-        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
-        assert_eq!(
-            zone_id,
-            hares_types::ZoneId(5),
-            "zone_id must be ZoneId(5) when present in config"
-        );
-        assert!(
-            explicit,
-            "zone_id_explicit must be true when zone_id is present in config"
         );
     }
 

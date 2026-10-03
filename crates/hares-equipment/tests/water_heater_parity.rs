@@ -26,6 +26,7 @@ use hares_types::{
 
 fn make_env(zone_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
@@ -1123,7 +1124,7 @@ fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
         "Heat Pump Water Heater".to_string(),
         HeatPumpWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,

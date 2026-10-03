@@ -32,9 +32,9 @@ use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::zone_id_from_config_or_default;
+use crate::hvac::helpers::zone_id_from_config;
 
-use super::wh_config::IndirectTankConfig;
+use super::wh_config::{AmbientLocation, IndirectTankConfig};
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -102,6 +102,9 @@ pub struct IndirectTank {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// When the HPXML `Location` names space with no modeled zone, the
+    /// ambient placement the equipment runs against instead of a zone id.
+    ambient_location: Option<AmbientLocation>,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -109,7 +112,9 @@ pub struct IndirectTank {
 impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();
@@ -183,6 +188,7 @@ impl IndirectTank {
             boiler_loop_flow_rate_kg_s: DEFAULT_BOILER_LOOP_FLOW_RATE_KG_S,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            ambient_location: None,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -202,15 +208,19 @@ impl IndirectTank {
     }
 
     fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        self.descriptor
-            .zone
-            .and_then(|zone| {
-                env.zones
-                    .iter()
-                    .find(|z| z.id == zone)
-                    .map(|z| z.temperature_c)
-            })
-            .unwrap_or(env.weather.outdoor_temp_c)
+        match self.ambient_location {
+            Some(location) => super::ambient_source_temp_c(env, location),
+            None => self
+                .descriptor
+                .zone
+                .and_then(|zone| {
+                    env.zones
+                        .iter()
+                        .find(|z| z.id == zone)
+                        .map(|z| z.temperature_c)
+                })
+                .unwrap_or(env.weather.outdoor_temp_c),
+        }
     }
 
     fn read_boiler_supply_temp_c(&self, ports: &PortSlots) -> f64 {
@@ -232,15 +242,6 @@ impl IndirectTank {
         let c = config.require_typed::<IndirectTankConfig>("Indirect Tank")?;
         c.validate()?;
 
-        #[cfg(debug_assertions)]
-        if c.zone_id.is_none() && c.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?c.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
-
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it: `None` from the tri-state reader means "not
@@ -249,7 +250,21 @@ impl IndirectTank {
             self.descriptor.id = EquipmentId(id);
         }
 
-        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        // Zone resolution: an HPXML `Location` that names space with no
+        // modeled zone ("other ...") runs against the matching ambient
+        // series instead of a zone; a location that classifies as neither a
+        // modeled zone nor a known ambient placement is unresolved wiring.
+        let ambient = super::resolve_ambient_location(
+            config.name.as_str(),
+            c.zone_id,
+            c.zone_type.as_deref(),
+        )?;
+        self.ambient_location = ambient;
+        let zone = if ambient.is_some() {
+            None
+        } else {
+            c.zone_id.map(ZoneId).or(self.descriptor.zone)
+        };
         self.descriptor.zone = zone;
         self.descriptor.zone_type = c.zone_type.clone();
         self.ports[2].zone = zone;
@@ -807,6 +822,7 @@ mod control_domain_tests {
 
     fn env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(1),
                 temperature_c: 21.0,
@@ -966,5 +982,130 @@ mod control_domain_tests {
             )],
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use hares_types::{EnvironmentState, ZoneId};
+
+    use super::super::wh_config::AmbientLocation;
+    use super::IndirectTank;
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env(zone_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            zones: vec![hares_types::ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: hares_types::WeatherState {
+                outdoor_temp_c: 10.0,
+                mains_temp_c: 10.0,
+                ..Default::default()
+            },
+            grid: hares_types::GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    fn ambient_test_config(zone_type: &str) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "IT Ambient".to_string(),
+            "Indirect Tank".to_string(),
+            crate::IndirectTankConfig {
+                equipment_id: None,
+                zone_id: None,
+                boiler_loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                ua_w_per_k: None,
+                hx_ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: None,
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                performance_adjustment: None,
+                zone_type: Some(zone_type.to_string()),
+                first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
+                boiler_loop_flow_rate_kg_s: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn ambient_test_env(conditioned_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
+        let mut e = env(21.0);
+        e.zones[0].temperature_c = conditioned_temp_c;
+        e.weather.outdoor_temp_c = outdoor_temp_c;
+        // Hand-computed per the table for conditioned 22.0, outdoor 2.0:
+        // heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
+        // non-freezing max(2.0, 4.44) = 4.44.
+        e.ambient_other_space_c.other_heated_space_c = 20.0;
+        e.ambient_other_space_c.other_multifamily_buffer_space_c = 12.0;
+        e.ambient_other_space_c.other_non_freezing_space_c = 4.44;
+        e
+    }
+
+    /// An indirect tank in an HPXML location with no modeled zone runs
+    /// against the "other non-freezing space" ambient series instead of a
+    /// zone id; the read proves which precomputed source the equipment uses.
+    #[test]
+    fn indirect_tank_ambient_source_for_other_non_freezing_space_location() {
+        let cfg = ambient_test_config("other non-freezing space");
+        let mut eq = IndirectTank::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(
+            eq.ambient_location,
+            Some(AmbientLocation::OtherNonFreezingSpace),
+            "construction must carry the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        assert!((eq.ambient_temp_c(&e) - 4.44).abs() < 1e-9);
+    }
+
+    #[test]
+    fn indirect_tank_errors_on_unresolved_zone_and_unclassified_location() {
+        let cfg = ambient_test_config("in between somewhere");
+        let mut eq = IndirectTank::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(21.0))
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("IT Ambient"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
+        );
     }
 }

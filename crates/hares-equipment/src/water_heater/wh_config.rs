@@ -5,6 +5,49 @@ use serde::{Deserialize, Serialize};
 use crate::config::EquipmentTypedConfig;
 use hares_types::{FuelType, HaresError, ScheduleSourceConfig};
 
+/// An HPXML water-heater `Location` that names space with no modeled thermal
+/// zone. OS-HPXML treats these as equipment placements reading an ambient
+/// temperature series instead of a zone's RC state; the per-step series lives
+/// on `hares_types::EnvironmentState::ambient_other_space_c` (and, for the two
+/// pure-identity placements, on values the environment already computes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmbientLocation {
+    OtherHeatedSpace,
+    OtherMultifamilyBufferSpace,
+    OtherNonFreezingSpace,
+    OtherHousingUnit,
+    OtherExterior,
+}
+
+impl AmbientLocation {
+    /// Classify an HPXML `Location` string (case-insensitive) into the
+    /// ambient placements HARES models. `"outside"` and `"other exterior"`
+    /// are the same pure-outdoor placement, matching OS-HPXML's
+    /// `get_space_or_schedule_from_location`, which returns no space and no
+    /// schedule for both. Returns `None` for every other string: a location
+    /// that maps to a modeled zone resolves through `zone_id` instead, and a
+    /// string matching nothing is unresolved wiring the equipment rejects.
+    #[must_use]
+    pub fn from_zone_type(zone_type: &str) -> Option<Self> {
+        let norm = zone_type.trim().to_ascii_lowercase();
+        match norm.as_str() {
+            "other heated space" => Some(Self::OtherHeatedSpace),
+            "other multifamily buffer space" => Some(Self::OtherMultifamilyBufferSpace),
+            "other non-freezing space" => Some(Self::OtherNonFreezingSpace),
+            "other housing unit" => Some(Self::OtherHousingUnit),
+            "other exterior" | "outside" => Some(Self::OtherExterior),
+            _ => None,
+        }
+    }
+}
+
+/// Classify an HPXML water-heater `Location` string into an
+/// [`AmbientLocation`]. See [`AmbientLocation::from_zone_type`].
+#[must_use]
+pub fn ambient_location_from_zone_type(zone_type: &str) -> Option<AmbientLocation> {
+    AmbientLocation::from_zone_type(zone_type)
+}
+
 fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate::Result<()> {
     if let Some(v) = value {
         let valid = v.is_finite() && if strict { v > min } else { v >= min };

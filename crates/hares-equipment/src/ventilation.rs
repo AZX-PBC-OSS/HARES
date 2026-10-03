@@ -1085,6 +1085,7 @@ mod tests {
 
     fn env(outdoor_c: f64, indoor_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: indoor_c,
@@ -2364,6 +2365,7 @@ mod tests {
     #[test]
     fn ventilation_and_scheduled_load_fan_same_reactive_power() {
         let e = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 20.0,

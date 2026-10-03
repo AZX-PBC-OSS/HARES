@@ -257,6 +257,7 @@ fn test_interior_lwr_identical_surfaces_symmetric() {
 /// Build a minimal EnvironmentState for the regression test.
 fn env_20c() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 20.0,

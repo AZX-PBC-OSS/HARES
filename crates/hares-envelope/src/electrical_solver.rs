@@ -235,6 +235,7 @@ mod tests {
 
     fn env_with_voltage(v: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(1),
                 temperature_c: 21.0,

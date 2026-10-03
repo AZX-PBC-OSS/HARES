@@ -92,6 +92,7 @@ fn parity_fixture_xml(fixture_name: &str) -> String {
 
 fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,

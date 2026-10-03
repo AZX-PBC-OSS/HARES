@@ -642,9 +642,20 @@ pub(super) fn resolve_scheduled_loads(
                     spec.instance_name = Some(format!("{name} (Secondary)"));
                 }
                 if tag == "Dehumidifier" {
+                    // HPXML's Dehumidifier schema has no Location element;
+                    // OS-HPXML and HARES both model every dehumidifier in the
+                    // one conditioned zone. A building with no conditioned
+                    // zone cannot host one, so the spec is rejected instead of
+                    // silently landing on a guessed zone.
+                    let zone_id =
+                        super::resolve_hvac::conditioned_zone_id(building).ok_or_else(|| {
+                            HpxmlError::NoConditionedZone {
+                                equipment: name.to_string(),
+                            }
+                        })?;
                     let cfg = DehumidifierConfig {
                         equipment_id: None,
-                        zone_id: None,
+                        zone_id: Some(zone_id),
                         capacity_liters_per_day: spec
                             .parameters
                             .get("capacity_liters_per_day")
@@ -1068,67 +1079,10 @@ pub(super) fn resolve_ventilation(
 /// suitable for internal heat gains. Follows the same substring-keyword matching
 /// pattern as `parse_zone_label` and `parse_duct_location` in `building.rs`.
 ///
-/// HPXML 4.2 RefrigeratorLocation enumeration defines the valid location
-/// values. This function handles standard HPXML values plus common non-standard
-/// strings encountered in field data (e.g. "Indoor", "finished basement").
-///
-/// Diverges from OCHRE's `parse_zone_name` (ochre/utils/hpxml.py) which
-/// classifies `"basement - conditioned"` as `Foundation`, silently zeroing
-/// refrigerator gains for conditioned basements. HARES intentionally classifies
-/// it as conditioned using substring-keyword matching with correct priority
-/// ordering.
+/// The classifier lives in `hares_types` so equipment layers (the HPWH
+/// wall-heat default) share one definition with the parse layer.
 fn is_conditioned_location(location: &str) -> bool {
-    let s = location.to_ascii_lowercase();
-    let s = s.trim();
-    // Explicitly unconditioned or unvented spaces — never conditioned.
-    if s.contains("uncondition") || s.contains("unvent") {
-        return false;
-    }
-    // Bare garages (but not "garage - conditioned" — "condition" check below
-    // catches those).
-    if s.contains("garage") && !s.contains("condition") {
-        return false;
-    }
-    // Attics are unconditioned buffer zones.
-    if s.contains("attic") {
-        return false;
-    }
-    // Conditioned-space keywords. Handles all HPXML RefrigeratorLocation values
-    // that imply a heated/cooled indoor space plus common non-standard strings.
-    // HPXML 4.2 data dictionary §RefrigeratorLocation_simple:
-    //   "conditioned space", "living space", "kitchen", "other heated space",
-    //   "other housing unit", "other non-freezing space", "basement - conditioned",
-    //   "garage - conditioned".
-    if s.contains("condition")
-        || s == "living space"
-        || s == "kitchen"
-        || s == "indoor"
-        || s.contains("heated")
-        || s.contains("housing unit")
-        || s.contains("non-freezing")
-    {
-        return true;
-    }
-    // Finished basements, foundations, and crawlspaces: "finished" implies
-    // conditioned in residential building practice. Guard against "unfinished"
-    // (which would not reach here because the "uncondition"/"unvent" checks
-    // above cover most forms, but bare "unfinished basement" could slip past).
-    if (s.contains("basement") || s.contains("foundation") || s.contains("crawl"))
-        && s.contains("finished")
-        && !s.contains("unfinished")
-    {
-        return true;
-    }
-    // HPXML 4.2 RefrigeratorLocation_simple enumeration values that are not
-    // conditioned.
-    //
-    // "other multifamily buffer space": per HPXML 4.2, a semi-conditioned
-    // corridor or common area — not a fully conditioned dwelling unit.
-    // Treated as non-conditioned (gains zeroed).
-    if s == "other multifamily buffer space" {
-        return false;
-    }
-    false
+    hares_types::is_conditioned_location(location)
 }
 
 /// Default sensible and latent gain fractions per equipment name.
@@ -1286,9 +1240,35 @@ fn has_garage_zone(building: &Building) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::building::{parse_building, parse_xml_document};
+    use super::super::building::{Site, Zone, ZoneType, parse_building, parse_xml_document};
     use super::*;
     use crate::defaults::DefaultsStore;
+
+    fn conditioned_zone() -> Zone {
+        Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }
+    }
+
+    fn foundation_zone() -> Zone {
+        Zone {
+            zone_type: ZoneType::Foundation,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }
+    }
 
     #[test]
     fn is_conditioned_location_classifies_hpxml_and_field_strings() {
@@ -2414,6 +2394,105 @@ mod tests {
         assert!(
             !specs.iter().any(|s| s.name == "Basement Lighting"),
             "Basement Lighting must not be created when no foundation type is specified"
+        );
+    }
+
+    fn dehumidifier_test_building(zones: Vec<Zone>) -> Building {
+        let details = parse_xml_document(
+            r#"<BuildingDetails>
+                <Appliances>
+                  <Dehumidifier>
+                    <SystemIdentifier id="Dehumidifier1"/>
+                    <Capacity>70</Capacity>
+                  </Dehumidifier>
+                </Appliances>
+            </BuildingDetails>"#,
+        )
+        .expect("parse dehumidifier details");
+        Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones,
+            boundaries: vec![],
+            windows: vec![],
+            skylights: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: details,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    fn dehumidifier_zone_id_from_spec(spec: &EquipmentSpec) -> Option<u16> {
+        spec.typed_config
+            .as_ref()
+            .expect("dehumidifier spec carries a typed config")
+            .typed::<DehumidifierConfig>()
+            .expect("typed config deserializes to DehumidifierConfig")
+            .zone_id
+    }
+
+    #[test]
+    fn dehumidifier_zone_id_resolves_to_conditioned_zone_not_first_zone() {
+        let building = dehumidifier_test_building(vec![foundation_zone(), conditioned_zone()]);
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Dehumidifier")
+            .expect("dehumidifier spec resolved");
+        assert_eq!(
+            dehumidifier_zone_id_from_spec(spec),
+            Some(2),
+            "the dehumidifier must be wired to the conditioned zone's id, not the first zone"
+        );
+    }
+
+    #[test]
+    fn dehumidifier_errors_when_no_conditioned_zone_exists() {
+        let building = dehumidifier_test_building(vec![foundation_zone()]);
+        let mut specs = Vec::new();
+        let result = resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs);
+        let err = result.expect_err(
+            "a dehumidifier in a building with no conditioned zone must fail resolution",
+        );
+        assert!(
+            matches!(err, HpxmlError::NoConditionedZone { ref equipment } if equipment == "Dehumidifier"),
+            "expected NoConditionedZone naming the dehumidifier, got: {err:?}"
+        );
+        assert!(
+            specs.iter().all(|s| s.name != "Dehumidifier"),
+            "the rejected dehumidifier spec must not be pushed"
         );
     }
 }

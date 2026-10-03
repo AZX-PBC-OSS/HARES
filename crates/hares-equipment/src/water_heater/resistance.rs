@@ -24,7 +24,7 @@ use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config_or_default};
+use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config};
 
 /// Element priority control mode for dual-element electric resistance water heaters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -37,7 +37,7 @@ pub enum ElementPriorityMode {
     Simultaneous,
 }
 
-use super::wh_config::ElectricResistanceWaterHeaterConfig;
+use super::wh_config::{AmbientLocation, ElectricResistanceWaterHeaterConfig};
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -118,6 +118,9 @@ pub struct ResistanceWH {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// When the HPXML `Location` names space with no modeled zone, the
+    /// ambient placement the equipment runs against instead of a zone id.
+    ambient_location: Option<AmbientLocation>,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -144,7 +147,9 @@ fn parse_element_priority_mode(mode: Option<&str>) -> Result<ElementPriorityMode
 impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -235,6 +240,7 @@ impl ResistanceWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            ambient_location: None,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -279,15 +285,19 @@ impl ResistanceWH {
     }
 
     fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        self.descriptor
-            .zone
-            .and_then(|zone| {
-                env.zones
-                    .iter()
-                    .find(|z| z.id == zone)
-                    .map(|z| z.temperature_c)
-            })
-            .unwrap_or(env.weather.outdoor_temp_c)
+        match self.ambient_location {
+            Some(location) => super::ambient_source_temp_c(env, location),
+            None => self
+                .descriptor
+                .zone
+                .and_then(|zone| {
+                    env.zones
+                        .iter()
+                        .find(|z| z.id == zone)
+                        .map(|z| z.temperature_c)
+                })
+                .unwrap_or(env.weather.outdoor_temp_c),
+        }
     }
 }
 
@@ -302,15 +312,6 @@ impl ResistanceWH {
         )?;
         c.validate()?;
 
-        #[cfg(debug_assertions)]
-        if c.zone_id.is_none() && c.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?c.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
-
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it — `None` from the tri-state reader means "not
@@ -318,7 +319,21 @@ impl ResistanceWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        // Zone resolution: an HPXML `Location` that names space with no
+        // modeled zone ("other ...") runs against the matching ambient
+        // series instead of a zone; a location that classifies as neither a
+        // modeled zone nor a known ambient placement is unresolved wiring.
+        let ambient = super::resolve_ambient_location(
+            config.name.as_str(),
+            c.zone_id,
+            c.zone_type.as_deref(),
+        )?;
+        self.ambient_location = ambient;
+        let zone = if ambient.is_some() {
+            None
+        } else {
+            c.zone_id.map(ZoneId).or(self.descriptor.zone)
+        };
         self.descriptor.zone = zone;
         self.descriptor.zone_type = c.zone_type.clone();
         self.ports[1].zone = zone;
@@ -1089,6 +1104,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -2053,6 +2069,7 @@ mod element_priority_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -2656,6 +2673,150 @@ mod element_priority_tests {
         hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
             "a restored checkpoint must satisfy the core contract (presence rules \
                  and mode/flow guard)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod ambient_tests {
+    use chrono::TimeZone;
+    use hares_types::{EnvironmentState, ZoneId};
+
+    use super::super::wh_config::AmbientLocation;
+    use super::ResistanceWH;
+    use crate::{ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig};
+
+    /// `ElectricResistanceWaterHeaterConfig` with the shared test defaults
+    /// and the given zone wiring.
+    fn typed_config() -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        }
+    }
+
+    /// Environment with a known conditioned-zone temperature and outdoor
+    /// temperature, and the precomputed ambient series for that pair per the
+    /// table: heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
+    /// non-freezing max(2.0, 4.44) = 4.44.
+    fn ambient_test_env(conditioned_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps {
+                // Hand-computed per the table for conditioned 22.0, outdoor 2.0.
+                other_heated_space_c: 20.0,
+                other_multifamily_buffer_space_c: 12.0,
+                other_non_freezing_space_c: 4.44,
+                conditioned_zone_c: conditioned_temp_c,
+            },
+            zones: vec![hares_types::ZoneState {
+                id: ZoneId(1),
+                temperature_c: conditioned_temp_c,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: hares_types::WeatherState {
+                outdoor_temp_c,
+                mains_temp_c: 10.0,
+                ..Default::default()
+            },
+            grid: hares_types::GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// An electric resistance water heater in an HPXML location with no modeled
+    /// zone runs against the "other housing unit" ambient series instead of a
+    /// zone id: the conditioned zone's temperature read directly.
+    #[test]
+    fn resistance_ambient_source_for_other_housing_unit_location() {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id: None,
+            zone_type: Some("other housing unit".to_string()),
+            ..typed_config()
+        };
+        let cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(
+            eq.ambient_location,
+            Some(AmbientLocation::OtherHousingUnit),
+            "construction must carry the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        assert!((eq.ambient_temp_c(&e) - 22.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resistance_errors_on_unresolved_zone_and_unclassified_location() {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id: None,
+            zone_type: Some("in between somewhere".to_string()),
+            ..typed_config()
+        };
+        let cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &ambient_test_env(21.0, 10.0))
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("WH"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
         );
     }
 }

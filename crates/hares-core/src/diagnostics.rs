@@ -876,6 +876,7 @@ mod tests {
     #[test]
     fn capture_and_write_row_produce_valid_csv() {
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState::new(ZoneId(1), 22.5, 0.008, 100.0)],
             weather: WeatherState::default(),
             grid: GridState {
@@ -1030,6 +1031,7 @@ mod tests {
     #[test]
     fn capture_smoke_test() {
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState::new(ZoneId(1), 18.0, 0.006, 80.0)],
             weather: WeatherState {
                 outdoor_temp_c: 12.3,

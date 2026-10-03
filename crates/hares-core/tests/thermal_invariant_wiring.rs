@@ -68,6 +68,17 @@ conductivity_w_m_k = 0.5
 density_kg_m3 = 1000.0
 specific_heat_j_kg_k = 1000.0
 
+[[boundaries]]
+id = "test-floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 0.5
+density_kg_m3 = 1000.0
+specific_heat_j_kg_k = 1000.0
+
 [schedule]
 occupancy = 0.0
 occupants_present = false

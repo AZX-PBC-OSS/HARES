@@ -1005,6 +1005,7 @@ mod tests {
 
     fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZONE,
                 temperature_c: zone_temp_c,

@@ -13431,6 +13431,7 @@ occupancy = 1.0
         config.zone_map = Some(zone_map);
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -13643,6 +13644,7 @@ master_seed = 0
 
         fn env_with_zone(zone_id: ZoneId, temperature_c: f64) -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: zone_id,
                     temperature_c,

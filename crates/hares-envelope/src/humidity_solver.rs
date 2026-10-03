@@ -414,6 +414,7 @@ mod tests {
 
     fn env_with_zone(temp_c: f64, humidity_ratio: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: temp_c,
@@ -989,6 +990,7 @@ mod tests {
 
     fn env_with_two_zones(vol_a: f64, vol_b: f64, w_a: f64, w_b: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![
                 ZoneState {
                     id: ZoneId(1),
@@ -1214,6 +1216,7 @@ mod tests {
         let w_init = 0.008;
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![
                 ZoneState {
                     id: zone_a,

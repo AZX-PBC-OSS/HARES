@@ -353,6 +353,7 @@ mod tests {
             .create("Gas Tankless Water Heater", ec.clone())
             .expect("registry must create Gas Tankless Water Heater");
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 20.0,

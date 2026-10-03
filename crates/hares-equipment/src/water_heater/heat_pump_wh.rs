@@ -32,10 +32,10 @@ use super::hpwh_compressor::{
     DEFAULT_ZONE_TEMP_BOUNDS_C,
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
-use super::wh_config::HeatPumpWaterHeaterConfig;
+use super::wh_config::{AmbientLocation, HeatPumpWaterHeaterConfig};
 use super::{hysteresis_call, parse_usize, weighted_average_tank_temp};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config_or_default};
+use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config};
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
@@ -190,6 +190,9 @@ pub struct HeatPumpWH {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// When the HPXML `Location` names space with no modeled zone, the
+    /// ambient placement the equipment runs against instead of a zone id.
+    ambient_location: Option<AmbientLocation>,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -216,7 +219,9 @@ fn parse_element_hp_control_mode(mode: Option<&str>) -> Result<ElementHpControlM
 impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -343,11 +348,15 @@ impl HeatPumpWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            ambient_location: None,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
 
     fn zone_temp_c(&self, env: &EnvironmentState) -> f64 {
+        if let Some(location) = self.ambient_location {
+            return super::ambient_source_temp_c(env, location);
+        }
         self.descriptor
             .zone
             .and_then(|zone| {
@@ -362,6 +371,12 @@ impl HeatPumpWH {
     /// Wet-bulb temperature of the zone (used for COP/capacity curve input).
     /// Falls back to dry-bulb when the zone is not found.
     fn zone_wet_bulb_c(&self, env: &EnvironmentState) -> f64 {
+        if let Some(location) = self.ambient_location {
+            // A scheduled ambient placement carries no humidity state, so the
+            // wet-bulb input falls back to its dry-bulb series (the same
+            // fallback the zone-not-found branch below uses).
+            return super::ambient_source_temp_c(env, location);
+        }
         self.descriptor
             .zone
             .and_then(|zone| {
@@ -411,15 +426,6 @@ impl HeatPumpWH {
         let c = config.require_typed::<HeatPumpWaterHeaterConfig>("Heat Pump Water Heater")?;
         c.validate()?;
 
-        #[cfg(debug_assertions)]
-        if c.zone_id.is_none() && c.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?c.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
-
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it — `None` from the tri-state reader means "not
@@ -427,7 +433,21 @@ impl HeatPumpWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        // Zone resolution: an HPXML `Location` that names space with no
+        // modeled zone ("other ...") runs against the matching ambient
+        // series instead of a zone; a location that classifies as neither a
+        // modeled zone nor a known ambient placement is unresolved wiring.
+        let ambient = super::resolve_ambient_location(
+            config.name.as_str(),
+            c.zone_id,
+            c.zone_type.as_deref(),
+        )?;
+        self.ambient_location = ambient;
+        let zone = if ambient.is_some() {
+            None
+        } else {
+            c.zone_id.map(ZoneId).or(self.descriptor.zone)
+        };
         self.descriptor.zone = zone;
         self.descriptor.zone_type = c.zone_type.clone();
         self.ports[1].zone = zone;
@@ -678,12 +698,17 @@ impl HeatPumpWH {
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
         self.lost_heat_fraction = c.lost_heat_fraction.unwrap_or(DEFAULT_LOST_HEAT_FRACTION);
-        self.wall_heat_fraction = c
-            .wall_heat_fraction
-            .unwrap_or(match c.zone_type.as_deref() {
-                Some("conditioned") => 0.5,
-                _ => 0.0,
-            });
+        // Default wall share when the HPWH sits in conditioned space. The
+        // config's `zone_type` carries the raw HPXML `Location` text (so the
+        // "other ..." placements stay distinguishable), so the conditioned
+        // test is the shared location classifier, matching the parse layer.
+        self.wall_heat_fraction = c.wall_heat_fraction.unwrap_or({
+            if hares_types::is_conditioned_location(c.zone_type.as_deref().unwrap_or("")) {
+                0.5
+            } else {
+                0.0
+            }
+        });
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
         self.parasitic_power_w = c.parasitic_power_w.unwrap_or(DEFAULT_PARASITIC_POWER_W);
         self.backup_efficiency = c.backup_efficiency.unwrap_or(DEFAULT_BACKUP_EFFICIENCY);
@@ -1632,6 +1657,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -2408,6 +2434,7 @@ mod tests {
             pressure_pa,
         );
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -3440,6 +3467,7 @@ mod mutual_exclusion_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,
@@ -3764,6 +3792,7 @@ mod dr_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,
@@ -4073,12 +4102,14 @@ mod new_feature_tests {
         ThermalAccumulator, ThermalCategory, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
+    use super::super::wh_config::AmbientLocation;
     use super::HeatPumpWH;
     use crate::water_heater::heat_pump_wh::tests::{base_typed_config, equipment_config};
     use crate::{Equipment, EquipmentConfig, HeatPumpWaterHeaterConfig};
 
     fn env_at(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -4543,6 +4574,62 @@ mod new_feature_tests {
             rel_err < 1e-9,
             "compressor_kw {compressor_kw:.6} + element_kw {element_kw:.6} = {sub_sum:.6} \
              must equal electric_kw {electric_kw:.6} (rel_err={rel_err:.2e})"
+        );
+    }
+
+    /// A heat pump water heater in an HPXML location with no modeled zone
+    /// runs against the "other multifamily buffer space" ambient series
+    /// instead of a zone id. The environment's precomputed fields carry the
+    /// hand-computed table values for conditioned 22.0 °C and outdoor
+    /// 2.0 °C, all distinct, so the read proves which source the
+    /// equipment uses.
+    #[test]
+    fn heat_pump_wh_ambient_source_for_other_multifamily_buffer_space_location() {
+        let mut typed = base_typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("other multifamily buffer space".to_string());
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let mut e = env_at(22.0);
+        e.weather.outdoor_temp_c = 2.0;
+        // Hand-computed per the table for conditioned 22.0, outdoor 2.0:
+        // heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
+        // non-freezing max(2.0, 4.44) = 4.44.
+        e.ambient_other_space_c.other_heated_space_c = 20.0;
+        e.ambient_other_space_c.other_multifamily_buffer_space_c = 12.0;
+        e.ambient_other_space_c.other_non_freezing_space_c = 4.44;
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(
+            eq.ambient_location,
+            Some(AmbientLocation::OtherMultifamilyBufferSpace),
+            "construction must carry the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        assert!((eq.zone_temp_c(&e) - 12.0).abs() < 1e-9);
+        assert!((eq.ambient_temp_c(&e) - 12.0).abs() < 1e-9);
+        // The COP-curve input falls back to the ambient dry-bulb (no
+        // humidity state for a scheduled placement).
+        assert!((eq.zone_wet_bulb_c(&e) - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn heat_pump_wh_errors_on_unresolved_zone_and_unclassified_location() {
+        let mut typed = base_typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("in between somewhere".to_string());
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env_at(21.0))
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("HPWH"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
         );
     }
 }

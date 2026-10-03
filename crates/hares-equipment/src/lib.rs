@@ -82,8 +82,9 @@ pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistr
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
 pub use water_heater::wh_config::{
-    ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
-    IndirectTankConfig, TanklessWaterHeaterConfig,
+    AmbientLocation, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
+    ambient_location_from_zone_type,
 };
 
 /// Equipment-layer result type.
@@ -710,6 +711,7 @@ mod tests {
 
     fn sample_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,

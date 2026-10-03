@@ -19,8 +19,8 @@ use hares_physics::{
 #[cfg(feature = "observe")]
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
-    DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID, SurfaceIrradiance,
-    WeatherState, ZoneId, ZoneState,
+    AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID,
+    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -664,6 +664,38 @@ impl EnvironmentManager {
         state.zones.clear();
         state.zones.extend_from_slice(&self.zones);
 
+        // Step 4b: ambient series for HPXML water-heater locations that name
+        // space with no modeled thermal zone ("other heated space", "other
+        // multifamily buffer space", "other non-freezing space"). Computed
+        // once per step from the conditioned zone's temperature and the
+        // outdoor dry-bulb following the OS-HPXML scheduled-space rule: an
+        // indoor/outdoor blend clamped to a location-specific floor. "Other
+        // housing unit" (indoor weight 1.0, no floor) and "other exterior"/
+        // "outside" (outdoor weight 1.0, no floor) are pure identity reads of
+        // values already computed per step, so they carry no field here.
+        // When the building has no conditioned zone the indoor share reads
+        // the outdoor temperature.
+        let conditioned_temp_c = self
+            .zones
+            .iter()
+            .zip(&self.zone_types)
+            .find(|(_, zone_type)| matches!(zone_type, ZoneType::Conditioned))
+            .map(|(zone, _)| zone.temperature_c)
+            .unwrap_or(outdoor_temp_c);
+        // Shared indoor/outdoor blend for the two 0.5/0.5-weighted placements.
+        let other_space_avg_c = 0.5 * conditioned_temp_c + 0.5 * outdoor_temp_c;
+        state.ambient_other_space_c = AmbientOtherSpaceTemps {
+            // Floor 20.0 °C (68 °F).
+            other_heated_space_c: other_space_avg_c.max(20.0),
+            // Floor 10.0 °C (50 °F).
+            other_multifamily_buffer_space_c: other_space_avg_c.max(10.0),
+            // Indoor weight 0.0: pure outdoor with a 4.44 °C (40 °F) floor.
+            other_non_freezing_space_c: outdoor_temp_c.max(4.44),
+            // The conditioned zone's own temperature, resolved by type:
+            // the "other housing unit" placement reads it.
+            conditioned_zone_c: conditioned_temp_c,
+        };
+
         // Step 5: grid defaults / overrides
         state.grid = self.grid_override.clone().unwrap_or(GridState {
             voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
@@ -769,6 +801,7 @@ impl EnvironmentManager {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             custom_domains: Vec::new(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1492,6 +1525,55 @@ mod tests {
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         let env = manager.update(&sim_clock, &[]).unwrap();
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
+    }
+
+    /// The ambient series for water-heater locations with no modeled zone
+    /// follows the scheduled-space table once per step: an indoor/outdoor
+    /// blend clamped to the location's floor, computed from the conditioned
+    /// zone's temperature and the outdoor dry-bulb.
+    #[test]
+    fn ambient_other_space_series_follows_the_scheduled_space_table() {
+        let mut weather = weather_series();
+        weather.dry_bulb_c = vec![2.0, 30.0];
+        weather.dew_point_c = vec![0.0, 20.0];
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let mut manager = EnvironmentManager::new(
+            weather,
+            schedule_series(),
+            &building(Some(21.0)),
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect("manager");
+        let mut sim_clock = SimClock::new(start, Duration::seconds(3600), Duration::hours(2));
+
+        // The test building has one conditioned zone; hold it at 22.0 °C.
+        let zones = vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c: 22.0,
+            humidity_ratio: 0.008,
+            volume_m3: 200.0,
+        }];
+
+        // Step 0, outdoor 2.0 °C: heated max(0.5 x 22.0 + 0.5 x 2.0, 20.0)
+        // = 20.0, buffer max(12.0, 10.0) = 12.0, non-freezing
+        // max(2.0, 4.44) = 4.44.
+        let env0 = manager.update(&sim_clock, &zones).unwrap();
+        assert!((env0.weather.outdoor_temp_c - 2.0).abs() < 1e-9);
+        assert!((env0.ambient_other_space_c.other_heated_space_c - 20.0).abs() < 1e-9);
+        assert!((env0.ambient_other_space_c.other_multifamily_buffer_space_c - 12.0).abs() < 1e-9);
+        assert!((env0.ambient_other_space_c.other_non_freezing_space_c - 4.44).abs() < 1e-9);
+
+        // Advance the clock to step 1, outdoor 30.0 °C: heated
+        // max(26.0, 20.0) = 26.0, buffer max(26.0, 10.0) = 26.0,
+        // non-freezing max(30.0, 4.44) = 30.0.
+        assert_eq!(sim_clock.next(), Some(0));
+        let env1 = manager.update(&sim_clock, &zones).unwrap();
+        assert!((env1.weather.outdoor_temp_c - 30.0).abs() < 1e-9);
+        assert!((env1.ambient_other_space_c.other_heated_space_c - 26.0).abs() < 1e-9);
+        assert!((env1.ambient_other_space_c.other_multifamily_buffer_space_c - 26.0).abs() < 1e-9);
+        assert!((env1.ambient_other_space_c.other_non_freezing_space_c - 30.0).abs() < 1e-9);
     }
 
     #[test]

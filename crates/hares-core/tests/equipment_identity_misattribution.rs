@@ -372,7 +372,7 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
         hares_equipment::ConfigPayload::Typed {
             type_name: "Dehumidifier".to_string(),
             version: 1,
-            data: serde_json::json!({}),
+            data: serde_json::json!({"zone_id": 1}),
         },
     );
     blueprint

@@ -966,6 +966,7 @@ mod tests {
 
     fn sample_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(1),
                 temperature_c: 21.0,

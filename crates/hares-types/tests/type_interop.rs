@@ -9,9 +9,9 @@
 
 use chrono::{FixedOffset, TimeZone};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EnvironmentState, GridState, PortContribution,
-    PortDeclaration, PortSlots, ThermalAccumulator, ThermalCategory, WeatherState, ZoneId,
-    ZoneState,
+    AmbientOtherSpaceTemps, ControlCapabilities, ControlSignal, EnvironmentState, GridState,
+    PortContribution, PortDeclaration, PortSlots, ThermalAccumulator, ThermalCategory,
+    WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,7 @@ fn base_env() -> EnvironmentState {
             humidity_ratio: 0.008,
             volume_m3: 200.0,
         }],
+        ambient_other_space_c: AmbientOtherSpaceTemps::default(),
         weather: WeatherState {
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.005,

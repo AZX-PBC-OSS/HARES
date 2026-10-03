@@ -1023,6 +1023,7 @@ mod tests {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             weather: hares_types::WeatherState {
                 outdoor_temp_c: 15.0,
                 ground_temp_c: ground_t_mean_c,

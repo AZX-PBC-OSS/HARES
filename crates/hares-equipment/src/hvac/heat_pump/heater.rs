@@ -9,6 +9,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,7 @@ use super::super::{
     ac_config::HeatPumpHeaterConfig,
     helpers::{
         apply_heating_control_unchecked, compute_and_write_ebm_telemetry, lookup_zone,
-        outage_forces_off, register_ebm_telemetry_keys, zone_id_from_config_or_default,
+        outage_forces_off, register_ebm_telemetry_keys, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -473,7 +474,9 @@ delegate_equipment!(WshpHeater, core);
 
 impl HeatPumpHeaterCore {
     fn new(config: EquipmentConfig, variant: HeaterVariant) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let equipment_type = match variant {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
@@ -2747,6 +2750,7 @@ mod tests {
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -4426,6 +4430,7 @@ mod tests {
     fn make_env(zone_temp_c: f64, outdoor_c: f64, second: i64) -> EnvironmentState {
         use chrono::{FixedOffset, TimeZone};
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -7766,6 +7771,7 @@ mod ideal_capacity_tests {
     /// (default 4.44°C) so only HP heating is active -- isolating the duty-cycle behaviour.
     fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,

@@ -1,5 +1,7 @@
 //! Water heater equipment models.
 
+use self::wh_config::AmbientLocation;
+
 pub mod gas;
 pub mod heat_pump_wh;
 pub(crate) mod hpwh_compressor;
@@ -10,6 +12,65 @@ pub mod tankless;
 pub mod wh_config;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
+
+/// Per-step ambient temperature for an HPXML water-heater `Location` with no
+/// modeled thermal zone. The three blended placements read the environment's
+/// precomputed series (`EnvironmentState::ambient_other_space_c`, computed
+/// once per step by the environment manager). "Other housing unit" (indoor
+/// weight 1.0, no floor) reads the conditioned zone's temperature resolved
+/// by zone type (`ambient_other_space_c.conditioned_zone_c`, which the
+/// environment manager computes per step; a zone list's first entry is not
+/// guaranteed to be the conditioned zone). "Other exterior"
+/// and "outside" (outdoor weight 1.0, no floor) read the outdoor dry-bulb
+/// directly.
+pub(crate) fn ambient_source_temp_c(env: &EnvironmentState, location: AmbientLocation) -> f64 {
+    match location {
+        AmbientLocation::OtherHeatedSpace => env.ambient_other_space_c.other_heated_space_c,
+        AmbientLocation::OtherMultifamilyBufferSpace => {
+            env.ambient_other_space_c.other_multifamily_buffer_space_c
+        }
+        AmbientLocation::OtherNonFreezingSpace => {
+            env.ambient_other_space_c.other_non_freezing_space_c
+        }
+        AmbientLocation::OtherHousingUnit => {
+            let conditioned = env.ambient_other_space_c.conditioned_zone_c;
+            if conditioned.is_finite() {
+                conditioned
+            } else {
+                env.weather.outdoor_temp_c
+            }
+        }
+        AmbientLocation::OtherExterior => env.weather.outdoor_temp_c,
+    }
+}
+
+/// Zone/ambient resolution shared by every water heater's typed init.
+///
+/// With a `zone_id` the equipment runs in that zone. Without one, an HPXML
+/// `Location` naming space with no modeled zone ("other ...") resolves to
+/// the matching [`AmbientLocation`] ambient placement; a location string
+/// that classifies as neither a modeled zone nor a known ambient placement
+/// is unresolved wiring and a typed error; no location at all (manual or
+/// synthetic configs) leaves the constructor's zone standing.
+pub(super) fn resolve_ambient_location(
+    equipment_name: &str,
+    zone_id: Option<u16>,
+    zone_type: Option<&str>,
+) -> crate::Result<Option<AmbientLocation>> {
+    let Some(zone_type) = zone_type else {
+        return Ok(None);
+    };
+    if zone_id.is_some() {
+        return Ok(None);
+    }
+    match AmbientLocation::from_zone_type(zone_type) {
+        Some(location) => Ok(Some(location)),
+        None => Err(HaresError::Equipment(format!(
+            "{equipment_name}: zone_id not resolved and HPXML Location '{zone_type}' \
+             names no modeled zone or known ambient location"
+        ))),
+    }
+}
 
 /// Tracks hourly draw volumes for observer capture.
 ///
@@ -377,6 +438,7 @@ mod tests {
         };
 
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: Vec::new(),
             weather,
             grid: GridState {
@@ -607,6 +669,7 @@ mod dhw_integration_tests {
 
     fn base_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,

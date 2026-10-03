@@ -133,6 +133,19 @@ for ts in dw.timesteps():
     obs = dw.step()
 ```
 
+## Numeric changes
+
+Physics-affecting changes are recorded with their deltas in the
+initiative ledger's measurement log (`.shipwright/initiatives/I-08/ledger/02-measurement.md`)
+and the affected golden fixtures are re-captured in the same commit:
+
+- 2026-10-02: water heaters in HPXML locations with no modeled thermal
+  zone ("other heated space" and friends) read the OS-HPXML ambient
+  series instead of the conditioned zone's temperature. Fleet fixture
+  home 1 (ResStock bldg0000004, "other heated space"): gross
+  consumption 201.99 to 204.91 kWh, water heating 25.11 to 25.33 kWh,
+  HVAC heating 87.25 to 89.96 kWh over the fixture's period.
+
 ## Troubleshooting
 
 **`maturin develop` fails with linker errors**

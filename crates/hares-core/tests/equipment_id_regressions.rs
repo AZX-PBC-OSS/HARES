@@ -659,11 +659,11 @@ fn add_equipment_rejects_equipment_whose_identity_write_does_not_land() {
     );
 }
 
-/// A hand-built Dehumidifier spec (all-optional typed config, so it inits
-/// cleanly) carrying an explicit id through the blueprint entrance.
+/// A hand-built Dehumidifier spec (minimal typed config carrying the zone
+/// init requires plus an explicit id) going through the blueprint entrance.
 fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSpec {
     let config: hares_equipment::DehumidifierConfig =
-        serde_json::from_value(serde_json::json!({ "equipment_id": equipment_id }))
+        serde_json::from_value(serde_json::json!({ "equipment_id": equipment_id, "zone_id": 1 }))
             .expect("minimal DehumidifierConfig");
     let typed =
         EquipmentConfig::from_typed(instance.to_string(), "Dehumidifier".to_string(), config)

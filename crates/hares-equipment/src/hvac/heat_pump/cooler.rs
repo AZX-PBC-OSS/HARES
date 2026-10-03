@@ -9,7 +9,7 @@ use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ZoneId,
 };
 
 use hares_types::telemetry_keys as tk;
@@ -19,7 +19,7 @@ use crate::{Equipment, EquipmentConfig};
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::heating_config::HvacSetpointConfig;
-use super::super::helpers::zone_id_from_config_or_default;
+use super::super::helpers::zone_id_from_config;
 use crate::config::constructor_equipment_id;
 
 /// MSHP crankcase heater: 15 W rated, activates at or below 0 °C.
@@ -59,7 +59,9 @@ impl HpCooler {
             inner.core.hvac.config.equipment_type = ashp_cool_type;
             inner.core.hvac.config.airflow_m3_s_per_w = ashp_cool_type.default_airflow_m3_s_per_w();
         }
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
@@ -358,7 +360,9 @@ impl GshpCooler {
                 hares_physics::borehole::BoreholeConfig::default(),
             )),
         };
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
@@ -786,7 +790,9 @@ impl WshpCooler {
         inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
         // Source temperature: constant entering water temperature.
         inner.core.source_temp = SourceTemperature::Constant(10.0);
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
@@ -1116,6 +1122,7 @@ mod tests {
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,

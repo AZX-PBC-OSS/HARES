@@ -1012,6 +1012,7 @@ mod tests {
     fn thermostat_test_env() -> hares_types::EnvironmentState {
         use chrono::TimeZone;
         hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![hares_types::ZoneState {
                 id: hares_types::ZoneId(1),
                 temperature_c: 21.0,

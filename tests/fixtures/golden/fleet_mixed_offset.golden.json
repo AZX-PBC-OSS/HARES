@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "226c1fd640695df65c67ccce2d7d18425429e240bc60fdc2eb076f047c4a5383",
-  "git_head": "979b87738682f5164fdbcc60933a5bf13b949ac7",
+  "git_head": "69950a98d843139ff7da1cf07f8b8220cddb8ac3",
   "git_dirty": true,
   "metrics": [
     {
@@ -194,8 +194,8 @@
         "value": 0.0
       },
       "grid_interaction_metrics.peak_import_kw": {
-        "bits": "0x40166c198d1c3b30",
-        "value": 5.605566220138641
+        "bits": "0x40166a5b440eb758",
+        "value": 5.603863776586728
       },
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
@@ -213,8 +213,8 @@
           "value": 0.05
         },
         "hvac_heating": {
-          "bits": "0x4012967e4359c3c5",
-          "value": 4.646966030458263
+          "bits": "0x401294872d21fa93",
+          "value": 4.64504690666094
         },
         "lighting": {
           "bits": "0x3fe50c67f5133cab",
@@ -233,21 +233,21 @@
           "value": 0.05463217443611612
         },
         "water_heating": {
-          "bits": "0x3fe7f72c97e0a309",
-          "value": 0.7489226309163267
+          "bits": "0x3fe7fe0e6039b379",
+          "value": 0.7497627143289797
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x40166c198d1c3b30",
-        "value": 5.605566220138641
+        "bits": "0x40166a5b440eb758",
+        "value": 5.603863776586728
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x40166c198d1c3b30",
-        "value": 5.605566220138641
+        "bits": "0x40166a5b440eb758",
+        "value": 5.603863776586728
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x40166c198d1c3b30",
-        "value": 5.605566220138641
+        "bits": "0x40166a5b440eb758",
+        "value": 5.603863776586728
       },
       "renewable_energy_fraction": {
         "bits": null,
@@ -266,16 +266,16 @@
         "value": 168.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x40693fa9496bed1d",
-        "value": 201.9894148929533
+        "bits": "0x40699d253253d70a",
+        "value": 204.91079059958457
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
         "bits": "0x0000000000000000",
         "value": 0.0
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x40693fa9496bed1d",
-        "value": 201.9894148929533
+        "bits": "0x40699d253253d70a",
+        "value": 204.91079059958457
       },
       "total_energy_kwh.per_end_use": {
         "ceiling_fan": {
@@ -291,8 +291,8 @@
           "value": 7.499999999999981
         },
         "hvac_heating": {
-          "bits": "0x4055d02c60b8cafe",
-          "value": 87.25270860716043
+          "bits": "0x40567d419cfe531f",
+          "value": 89.95712971531292
         },
         "lighting": {
           "bits": "0x4038c844d024a854",
@@ -311,8 +311,8 @@
           "value": 7.6561529254773175
         },
         "water_heating": {
-          "bits": "0x40391bf0112c58aa",
-          "value": 25.10913188297915
+          "bits": "0x4039537a675587a6",
+          "value": 25.326086481458013
         }
       },
       "unmet_load_hours": {
@@ -532,16 +532,16 @@
         },
         {
           "name": "total_energy_kwh",
-          "digest": "31bd51aac2d80d9380c75dddee4d1d6754773145f0df56e87f06eaa2e00f24b0",
+          "digest": "9ee21ce1ccbd682edf635263fdf567518b7f3e1468c16cad31431482d37ae8bc",
           "blocks": [
-            "31bd51aac2d80d9380c75dddee4d1d6754773145f0df56e87f06eaa2e00f24b0"
+            "9ee21ce1ccbd682edf635263fdf567518b7f3e1468c16cad31431482d37ae8bc"
           ]
         },
         {
           "name": "peak_power_kw",
-          "digest": "78ba7c6ca3253077536f5944e8ac9cc926983f45a9aafd797fd7ec15e2eb90c8",
+          "digest": "614b440687729678907df7205f5fdca1457b3b12a16ec47f58a97a1d74af58de",
           "blocks": [
-            "78ba7c6ca3253077536f5944e8ac9cc926983f45a9aafd797fd7ec15e2eb90c8"
+            "614b440687729678907df7205f5fdca1457b3b12a16ec47f58a97a1d74af58de"
           ]
         },
         {

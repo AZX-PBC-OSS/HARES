@@ -346,6 +346,7 @@ mod tests {
 
     fn make_env(t_out_c: f64, wind_m_s: f64, zone_temp_c: f64, volume_m3: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,

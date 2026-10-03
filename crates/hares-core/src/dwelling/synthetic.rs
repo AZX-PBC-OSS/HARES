@@ -1365,61 +1365,32 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    #[cfg(debug_assertions)]
-    {
-        // Verify the synthetic building has a closed thermal envelope.
-        // A single-boundary envelope (the pre-T-0226 default) is an open,
-        // non-physical geometry. We require at minimum two of the three
-        // structural face categories (Wall, Roof, Floor) when the zone
-        // volume is non-zero.
-        //
-        // STOPPED ROW: dispositioned as an unconditional typed error, but it
-        // fires on existing unit-test fixtures whose minimal one-wall
-        // geometry is scaffolding for other behaviors; the row stays a
-        // diagnostic log pending the operator's decision on those fixtures.
-        if config.geometry.zone_volume_m3 > 0.0 {
-            let non_window: Vec<&Boundary> = boundaries
-                .iter()
-                .filter(|b| {
-                    !matches!(
-                        b.boundary_type,
-                        BoundaryType::Window | BoundaryType::Skylight
-                    )
-                })
-                .collect();
-            let has_wall = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Wall);
-            let has_roof = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Roof);
-            let has_floor = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Floor);
-            let face_categories = [has_wall, has_roof, has_floor]
-                .iter()
-                .filter(|&&x| x)
-                .count();
-            if face_categories < 2 {
-                tracing::error!(
-                    zone_volume_m3 = config.geometry.zone_volume_m3,
-                    boundary_count = non_window.len(),
-                    has_wall,
-                    has_roof,
-                    has_floor,
-                    "Synthetic building envelope is incomplete: fewer than 2 of 3 required \
-                     face categories (Wall, Roof, Floor) are present"
-                );
-            }
-            if non_window.len() == 1 {
-                tracing::error!(
-                    zone_volume_m3 = config.geometry.zone_volume_m3,
-                    single_boundary_id = %non_window[0].id,
-                    single_boundary_type = ?non_window[0].boundary_type,
-                    "Synthetic building has only one non-window boundary with non-zero \
-                     zone volume; thermal envelope is open and non-physical"
-                );
-            }
+    // Verify the synthetic building has a closed thermal envelope, in every
+    // build profile. A single-boundary envelope (the old one-boundary
+    // default) is an open, non-physical geometry: a zone with positive
+    // volume must carry at least two of the three structural face categories
+    // (Wall, Roof, Floor). This is the production constructor for every
+    // synthetic-TOML dwelling, so an open envelope is a Dwelling error, not
+    // a diagnostic.
+    if config.geometry.zone_volume_m3 > 0.0 {
+        let has_wall = boundaries
+            .iter()
+            .any(|b| b.boundary_type == BoundaryType::Wall);
+        let has_roof = boundaries
+            .iter()
+            .any(|b| b.boundary_type == BoundaryType::Roof);
+        let has_floor = boundaries
+            .iter()
+            .any(|b| b.boundary_type == BoundaryType::Floor);
+        let face_categories =
+            usize::from(has_wall) + usize::from(has_roof) + usize::from(has_floor);
+        if face_categories < 2 {
+            return Err(HaresError::Dwelling(format!(
+                "synthetic zone 'Conditioned' (zone_volume_m3 = {}) has an open thermal \
+                 envelope: at least two of the three face categories must be present \
+                 (Wall: {}, Roof: {}, Floor: {}); add the missing boundaries",
+                config.geometry.zone_volume_m3, has_wall, has_roof, has_floor
+            )));
         }
     }
 
@@ -3098,13 +3069,24 @@ zone_volume_m3 = 120.0
 wall_r_value_m2_k_w = 2.0
 [hvac]
 equipment_name = "None"
-
 [[boundaries]]
 id = "wall-1"
 boundary_type = "Wall"
 area_m2 = 10.0
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
 [[boundaries.material_layers]]
 thickness_m = 0.01
 conductivity_w_m_k = 0.1
@@ -3145,11 +3127,11 @@ attached_to_wall_id = "wall-1"
             win_boundary.area_m2
         );
 
-        // Total boundary area: 8.0 (wall) + 2.0 (window) = 10.0.
+        // Total boundary area: 8.0 (wall) + 2.0 (window) + 10.0 (floor) = 20.0.
         let total: f64 = building.boundaries.iter().map(|b| b.area_m2).sum();
         assert!(
-            (total - 10.0).abs() < 1e-9,
-            "Total area should be 10.0 m², got {}",
+            (total - 20.0).abs() < 1e-9,
+            "Total area should be 20.0 m², got {}",
             total
         );
     }
@@ -3303,6 +3285,106 @@ attached_to_wall_id = "south-wall"
         assert!(
             (total - expected_total).abs() < 1e-9,
             "Total boundary area should be {expected_total} m² (no double-counting), got {total}"
+        );
+    }
+
+    /// A synthetic zone with positive volume and only one structural face
+    /// category (a single Wall, no Roof, no Floor) is an open, non-physical
+    /// envelope: a typed Dwelling error naming the zone's face categories,
+    /// in every build profile.
+    #[test]
+    fn synthetic_building_rejects_open_envelope() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        let err = result.expect_err("a one-wall zone with positive volume must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Conditioned"),
+            "the error must name the zone, got: {message}"
+        );
+        assert!(
+            message.contains("Wall") && message.contains("Roof") && message.contains("Floor"),
+            "the error must name the three face categories, got: {message}"
+        );
+    }
+
+    /// Two of the three structural face categories (Wall + Floor, no Roof)
+    /// close the envelope: the check is "at least 2 of 3", not "all 3".
+    #[test]
+    fn synthetic_building_accepts_two_of_three_face_categories() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
+        assert!(
+            building
+                .boundaries
+                .iter()
+                .any(|b| b.boundary_type == BoundaryType::Floor),
+            "the Wall+Floor envelope must build with its floor present"
         );
     }
 
@@ -4426,6 +4508,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 0.0
 density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4477,6 +4571,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = 0.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4518,6 +4624,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = 500.0
 specific_heat_j_kg_k = 0.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4558,6 +4676,18 @@ exterior_zone = "Outdoor"
 thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = -500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");

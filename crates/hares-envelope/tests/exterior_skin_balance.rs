@@ -117,6 +117,7 @@ fn layer(thickness_m: f64, k_w_m_k: f64, density: f64, cp: f64) -> LayerInput {
 
 fn base_env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: T_AIR_C,

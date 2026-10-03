@@ -1006,6 +1006,7 @@ mod tests {
         use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
 
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 22.0,

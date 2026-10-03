@@ -34,6 +34,7 @@ const STEPS_24H: usize = 1440; // 24h / 60s
 
 fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64, volume_m3: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: zone_temp_c,

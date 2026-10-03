@@ -434,6 +434,7 @@ mod tests {
 
     fn empty_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: Default::default(),
             grid: hares_types::GridState {

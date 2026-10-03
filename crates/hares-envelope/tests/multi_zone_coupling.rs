@@ -27,6 +27,7 @@ const ZONE2: ZoneId = ZoneId(2);
 
 fn two_zone_env(zone1_temp_c: f64, zone2_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![
             ZoneState {
                 id: ZONE1,

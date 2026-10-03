@@ -1732,6 +1732,7 @@ mod tests {
             ElectricalSummary, GridState, PriceSignal, SurfaceIrradiance, WeatherState, ZoneState,
         };
         hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(zone_id),
                 temperature_c: 22.0,

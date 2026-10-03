@@ -1864,6 +1864,7 @@ mod tests {
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -3605,6 +3606,7 @@ mod tests {
 
         let make_env = |solar_w_m2: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -3768,6 +3770,7 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -3941,6 +3944,7 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
         let make_env = || EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -4303,6 +4307,7 @@ mod tests {
 
         let make_env = |solar_w_m2: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -4790,6 +4795,7 @@ mod tests {
         // 500 W/m² direct irradiance, no diffuse or reflected.
         let make_env = |aoi_rad: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -5706,6 +5712,7 @@ mod tests {
         let make_env = |year_month: (i32, u32)| -> EnvironmentState {
             let (year, month) = year_month;
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,

@@ -35,6 +35,7 @@ fn approx_eq(actual: f64, expected: f64, tol: f64, label: &str) {
 
 fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,

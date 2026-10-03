@@ -1864,7 +1864,9 @@ fn compute_basement_params(building: &Building) -> Map<String, Value> {
     params
 }
 
-fn conditioned_zone_id(building: &Building) -> Option<u16> {
+/// Id (1-indexed) of the building's one conditioned zone, shared with
+/// `resolve_loads` for equipment that always lives there (the dehumidifier).
+pub(super) fn conditioned_zone_id(building: &Building) -> Option<u16> {
     let idx = building
         .zones
         .iter()
@@ -6093,6 +6095,7 @@ mod tests {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
         hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 18.0,
@@ -6215,6 +6218,7 @@ mod tests {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         use hares_types::{GridState, WeatherState, ZoneState};
         let env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 26.67,

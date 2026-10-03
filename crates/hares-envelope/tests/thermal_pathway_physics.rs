@@ -27,6 +27,7 @@ const DT_S: f64 = 300.0;
 
 fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: zone_temp,
@@ -648,6 +649,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
     let ground_temp_c = -5.0; // surface DOE-2 value (wrong, as proven below)
 
     let env = EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: 20.0,

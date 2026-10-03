@@ -77,10 +77,13 @@ pub(super) fn resolve_water_heaters(
         let setpoint_c = child_temperature_c(wh);
         let performance_adjustment = child_f64(wh, "PerformanceAdjustment");
         let location = child_text(wh, "Location");
-        let zone_name = location.as_deref().map(|location| {
-            let zone_type = super::building::parse_zone_label(location);
-            super::building::zone_key(&zone_type)
-        });
+        // The raw HPXML-normalized Location text goes into the typed configs'
+        // `zone_type` verbatim, so the placements that name space with no
+        // modeled zone ("other heated space", "other housing unit", ...) stay
+        // distinguishable downstream instead of collapsing into one
+        // "adjacent" bucket. The zone-id lookup keeps using the collapsed
+        // zone key below.
+        let zone_name = location.clone();
         let zone_id = location
             .as_deref()
             .and_then(|loc| zone_id_for_location(building, loc));

@@ -2184,3 +2184,104 @@ fn missing_fuel_on_heating_system_returns_error() {
         "error message must name the missing field, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Water heaters in HPXML locations with no modeled zone (parse level)
+// ---------------------------------------------------------------------------
+
+/// Parse a vendored OS-HPXML sample and return the water heater spec's
+/// `zone_type` and `zone_id` parameters.
+fn wh_zone_params_from_vendored_sample(
+    sample: &str,
+) -> (Option<String>, Option<serde_json::Value>) {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    let mut xml = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("{sample} fixture should be readable: {e}"));
+    // The sample lacks <Latitude>/<Longitude>, required for duct DSE in the
+    // HVAC resolution path; inject them as the pool test does.
+    xml = xml.replace(
+        "<StateCode>CO</StateCode>",
+        "<StateCode>CO</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+    );
+    let building = parse_building(&xml).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"));
+    let specs = resolve_equipment(
+        &building,
+        &DefaultsStore::empty(),
+        &json!({}),
+        None,
+        &mut Vec::new(),
+    )
+    .unwrap_or_else(|e| panic!("{sample} equipment should resolve: {e:?}"));
+    let spec = specs
+        .iter()
+        .find(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
+        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"));
+    (
+        spec.parameters
+            .get("zone_type")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        spec.parameters.get("zone_id").cloned(),
+    )
+}
+
+fn assert_wh_parses_to_ambient_location(sample: &str, expected: hares_equipment::AmbientLocation) {
+    let (zone_type, zone_id) = wh_zone_params_from_vendored_sample(sample);
+    // The config serializes an absent zone_id as `null`; the assert accepts
+    // an absent key or a null and rejects any real zone number.
+    assert!(
+        zone_id.is_none() || zone_id == Some(serde_json::Value::Null),
+        "{sample}: the water heater must not carry a zone_id, got {zone_id:?}"
+    );
+    let zone_type = zone_type.unwrap_or_else(|| panic!("{sample}: zone_type must be present"));
+    assert_eq!(
+        hares_equipment::ambient_location_from_zone_type(&zone_type),
+        Some(expected),
+        "{sample}: location '{zone_type}' must classify as {expected:?}"
+    );
+}
+
+#[test]
+fn parse_other_heated_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-other-heated-space.xml",
+        hares_equipment::AmbientLocation::OtherHeatedSpace,
+    );
+}
+
+#[test]
+fn parse_multifamily_buffer_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-multifamily-buffer-space.xml",
+        hares_equipment::AmbientLocation::OtherMultifamilyBufferSpace,
+    );
+}
+
+#[test]
+fn parse_non_freezing_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-non-freezing-space.xml",
+        hares_equipment::AmbientLocation::OtherNonFreezingSpace,
+    );
+}
+
+#[test]
+fn parse_other_housing_unit_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-other-housing-unit.xml",
+        hares_equipment::AmbientLocation::OtherHousingUnit,
+    );
+}
+
+#[test]
+fn parse_other_exterior_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-dhw-tank-gas-outside.xml",
+        hares_equipment::AmbientLocation::OtherExterior,
+    );
+}

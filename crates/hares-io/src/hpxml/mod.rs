@@ -155,6 +155,13 @@ pub enum HpxmlError {
         /// The measurement context (e.g. "area", "volume", "length").
         context: String,
     },
+    /// A unit that always lives in the conditioned zone (a dehumidifier) was
+    /// parsed from a building that defines no conditioned zone to host it.
+    #[error("{equipment} requires a conditioned zone, but the building defines none")]
+    NoConditionedZone {
+        /// Name of the equipment that needs the conditioned zone.
+        equipment: String,
+    },
     /// Equipment configuration error propagated from hares-equipment.
     #[error(transparent)]
     Equipment(#[from] hares_types::HaresError),

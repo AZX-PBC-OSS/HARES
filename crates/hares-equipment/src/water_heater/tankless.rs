@@ -24,9 +24,9 @@ use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
-use super::wh_config::TanklessWaterHeaterConfig;
+use super::wh_config::{AmbientLocation, TanklessWaterHeaterConfig};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::zone_id_from_config_or_default;
+use crate::hvac::helpers::zone_id_from_config;
 
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
@@ -93,6 +93,9 @@ pub struct TanklessWH {
     ctrl_load_fraction: f64,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// When the HPXML `Location` names space with no modeled zone, the
+    /// ambient placement the equipment runs against instead of a zone id.
+    ambient_location: Option<AmbientLocation>,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -100,20 +103,13 @@ pub struct TanklessWH {
 impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let typed = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
             .expect("Tankless Water Heater requires typed FuelType");
         let fuel_type = typed.fuel_type;
-
-        #[cfg(debug_assertions)]
-        if typed.zone_id.is_none() && typed.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?typed.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
 
         let ports = build_ports(fuel_type);
 
@@ -161,6 +157,7 @@ impl TanklessWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zone_id_explicit,
+            ambient_location: None,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -220,7 +217,21 @@ impl TanklessWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        self.descriptor.zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        // Zone resolution: an HPXML `Location` that names space with no
+        // modeled zone ("other ...") carries the matching ambient placement
+        // instead of a zone id; a location that classifies as neither a
+        // modeled zone nor a known ambient placement is unresolved wiring.
+        let ambient = super::resolve_ambient_location(
+            config.name.as_str(),
+            c.zone_id,
+            c.zone_type.as_deref(),
+        )?;
+        self.ambient_location = ambient;
+        self.descriptor.zone = if ambient.is_some() {
+            None
+        } else {
+            c.zone_id.map(ZoneId).or(self.descriptor.zone)
+        };
         self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
@@ -786,12 +797,14 @@ mod tests {
 
     use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
+    use super::super::wh_config::AmbientLocation;
     use super::TanklessWH;
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
 
     fn env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -1888,6 +1901,7 @@ mod tests {
     fn tankless_wh_uses_dynamic_mains_temp_from_environment() {
         fn env_with_mains(mains_c: f64) -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: 21.0,
@@ -2137,6 +2151,61 @@ mod tests {
         assert!(
             eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
             "flow 0.02 kg/s must fire when min_flow_kg_s=0.01 takes precedence"
+        );
+    }
+
+    /// A tankless water heater in an HPXML location with no modeled zone
+    /// carries the "other exterior" ambient placement instead of a zone id.
+    /// The unit is on-demand with no tank, so its ambient placement has no
+    /// per-step temperature read; the classification itself is the contract.
+    #[test]
+    fn tankless_ambient_source_for_other_exterior_location() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("other exterior".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        assert_eq!(
+            eq.ambient_location,
+            Some(AmbientLocation::OtherExterior),
+            "construction must carry the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+    }
+
+    /// The "outside" spelling classifies the same as "other exterior",
+    /// case-insensitively.
+    #[test]
+    fn tankless_ambient_source_for_outside_location_spelling() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("Outside".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        assert_eq!(eq.ambient_location, Some(AmbientLocation::OtherExterior));
+        assert_eq!(eq.descriptor().zone, None);
+    }
+
+    #[test]
+    fn tankless_errors_on_unresolved_zone_and_unclassified_location() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("in between somewhere".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env())
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("Tankless"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
         );
     }
 }

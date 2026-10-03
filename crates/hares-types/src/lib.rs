@@ -44,7 +44,7 @@ pub type Result<T> = std::result::Result<T, HaresError>;
 pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
-pub use text::{normalize_ascii, parse_trimmed_f64};
+pub use text::{is_conditioned_location, normalize_ascii, parse_trimmed_f64};
 pub use zone_map::{ZoneMap, ZoneRole};
 
 #[cfg(test)]
@@ -68,6 +68,7 @@ pub mod test_utils {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: crate::AmbientOtherSpaceTemps::default(),
             weather: WeatherState {
                 outdoor_temp_c: 10.0,
                 outdoor_humidity_ratio: 0.005,

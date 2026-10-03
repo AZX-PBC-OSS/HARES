@@ -111,6 +111,7 @@ fn equipment_config_from_spec_with_extras(
 
 fn base_env(payload: Vec<f64>) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 21.0,

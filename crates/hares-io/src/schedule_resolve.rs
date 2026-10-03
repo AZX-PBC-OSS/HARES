@@ -3745,6 +3745,7 @@ mod tests {
         let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config);
 
         let env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,

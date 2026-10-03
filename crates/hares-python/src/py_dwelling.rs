@@ -3090,6 +3090,7 @@ mod tests {
         let surface_id =
             surface_id_for_orientation(tilt_deg, azimuth_deg, 5.0).expect("surface id");
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,

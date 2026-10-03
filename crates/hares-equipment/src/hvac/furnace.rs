@@ -25,7 +25,7 @@ use super::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
+        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -110,7 +110,9 @@ struct FurnaceState {
 impl ElectricFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -519,7 +521,9 @@ impl Equipment for ElectricFurnace {
 impl GasFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -1324,6 +1328,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,

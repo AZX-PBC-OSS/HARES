@@ -445,6 +445,27 @@ impl GridState {
     }
 }
 
+/// Per-step ambient temperature series for HPXML water-heater locations that
+/// name space with no modeled thermal zone, computed once per step by the
+/// environment manager from the conditioned zone's temperature and the
+/// outdoor dry-bulb temperature, following the OS-HPXML scheduled-space
+/// averaging rule for each placement (an indoor/outdoor blend clamped to a
+/// location-specific floor).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmbientOtherSpaceTemps {
+    /// "other heated space": max(0.5 x conditioned + 0.5 x outdoor, 20.0 °C).
+    pub other_heated_space_c: f64,
+    /// "other multifamily buffer space": max(0.5 x conditioned + 0.5 x outdoor, 10.0 °C).
+    pub other_multifamily_buffer_space_c: f64,
+    /// "other non-freezing space": max(outdoor, 4.44 °C).
+    pub other_non_freezing_space_c: f64,
+    /// The conditioned zone's own temperature, resolved by zone type (not by
+    /// list position): the "other housing unit" placement (indoor weight 1.0)
+    /// reads it. Falls back to the outdoor temperature when the environment
+    /// has no conditioned zone.
+    pub conditioned_zone_c: f64,
+}
+
 /// Complete runtime environment state fed into physics calls.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentState {
@@ -452,6 +473,11 @@ pub struct EnvironmentState {
     pub weather: WeatherState,
     pub grid: GridState,
     pub custom_domains: Vec<DomainUpdate>,
+    /// Ambient series for water-heater locations with no modeled zone.
+    /// Computed once per step; equipment in an "other ..." HPXML location
+    /// reads these instead of a zone's RC temperature.
+    #[serde(default)]
+    pub ambient_other_space_c: AmbientOtherSpaceTemps,
     /// Equipment telemetry snapshots from the previous timestep, keyed by
     /// equipment name. Populated by the dwelling before calling actors.
     /// Actors can read equipment state (SOC, power, connection_state, etc.)
@@ -613,6 +639,7 @@ mod tests {
                 humidity_ratio: 0.008,
                 volume_m3: 240.0,
             }],
+            ambient_other_space_c: AmbientOtherSpaceTemps::default(),
             weather: WeatherState {
                 outdoor_temp_c: 5.0,
                 outdoor_humidity_ratio: 0.004,
@@ -680,6 +707,7 @@ mod tests {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: AmbientOtherSpaceTemps::default(),
             weather: WeatherState::default(),
             grid: GridState {
                 voltage_pu: 1.0,

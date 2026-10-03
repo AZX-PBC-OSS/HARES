@@ -28,7 +28,7 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{register_ebm_telemetry_keys, zone_id_from_config_or_default},
+    helpers::{register_ebm_telemetry_keys, zone_id_from_config},
 };
 use crate::config::constructor_equipment_id;
 
@@ -156,7 +156,9 @@ struct IdealHvacState {
 impl IdealHvac {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone_from_config = zone_id_from_config(&config);
+        let zone = zone_from_config.unwrap_or(ZoneId(1));
+        let zone_id_explicit = zone_from_config.is_some();
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -569,14 +571,6 @@ impl Equipment for IdealHvac {
             self.ideal_capacity_w = 0.0;
             self.ideal_capacity_degraded = false;
         }
-        // Set end_use based on FSM mode so that ByEndUse dispatch routing
-        // sees the correct value before step() runs. Deadband mode preserves
-        // the previous end_use — the equipment did not switch modes.
-        self.descriptor.end_use = match mode {
-            ThermostatMode::Heating => EndUse::HVAC_HEATING,
-            ThermostatMode::Cooling => EndUse::HVAC_COOLING,
-            ThermostatMode::Deadband => self.descriptor.end_use.clone(),
-        };
 
         match mode {
             ThermostatMode::Heating => OperatingMode::Heating,
@@ -676,6 +670,22 @@ impl Equipment for IdealHvac {
                 self.set_mode(ThermostatMode::Deadband, env.current_time);
             }
         }
+
+        // The end use follows the delivered capacity's sign now that
+        // capacity_w is final: the FSM's discrete mode can lag a runtime
+        // setpoint override (a Heating unit driven to cooling reports
+        // Deadband for steps while the solver already delivers negative
+        // capacity), and the electric power must land in the end-use bucket
+        // matching what was actually delivered. Capacity exactly 0.0 (the
+        // deadband) preserves the previous end_use: the equipment did not
+        // switch modes.
+        self.descriptor.end_use = if capacity_w > 0.0 {
+            EndUse::HVAC_HEATING
+        } else if capacity_w < 0.0 {
+            EndUse::HVAC_COOLING
+        } else {
+            self.descriptor.end_use.clone()
+        };
 
         // Fan power per OCHRE: fan_power = |capacity| * eir * fan_power_ratio.
         // In non-ideal mode, apply EIR temperature correction so electrical
@@ -836,34 +846,6 @@ impl Equipment for IdealHvac {
                 fsm_mode = ?self.thermostat_fsm.mode,
                 "IdealHvac::step() end-use after step"
             );
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            // Deadband (capacity_w == 0.0) preserves the previous end_use —
-            // the invariant only applies when the equipment is actively
-            // delivering heating or cooling.
-            //
-            // STOPPED ROW: dispositioned as a plain `debug_assert!`, but it
-            // fires on the conditioned-ideal oracle (a thermostat override
-            // drives cooling while the FSM-mode-driven end_use still reads
-            // hvac_heating); the row stays a diagnostic log pending the
-            // operator's decision on that path.
-            if capacity_w != 0.0 {
-                let expected_end_use = if capacity_w > 0.0 {
-                    EndUse::HVAC_HEATING
-                } else {
-                    EndUse::HVAC_COOLING
-                };
-                if self.descriptor.end_use != expected_end_use {
-                    tracing::error!(
-                        actual = self.descriptor.end_use.as_str(),
-                        expected = expected_end_use.as_str(),
-                        capacity_w = capacity_w,
-                        "IdealHvac invariant violated: descriptor.end_use does not match capacity sign"
-                    );
-                }
-            }
         }
 
         Ok(())
@@ -1227,6 +1209,7 @@ mod tests {
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -3629,12 +3612,6 @@ mod tests {
         let mut eq = IdealHvac::new(cfg.clone());
         eq.init(&cfg, &env_hot).unwrap();
         eq.update_control(&env_hot);
-        assert_eq!(
-            eq.descriptor().end_use,
-            EndUse::HVAC_COOLING,
-            "end_use must be HVAC_COOLING after cooling update_control"
-        );
-
         eq.ideal_capacity_w = -5000.0;
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -3643,16 +3620,16 @@ mod tests {
         };
         eq.step(&env_hot, Duration::from_secs(60), &mut ports)
             .unwrap();
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use must be HVAC_COOLING after the cooling step"
+        );
 
         // Zone cools to comfort range → deadband. Previous mode was cooling,
         // so end_use stays HVAC_COOLING (not flipped to heating).
         let env_cool = env(23.0, 300, 60);
         eq.update_control(&env_cool);
-        assert_eq!(
-            eq.descriptor().end_use,
-            EndUse::HVAC_COOLING,
-            "end_use must stay HVAC_COOLING in deadband after cooling"
-        );
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -3800,5 +3777,78 @@ mod tests {
             );
             env.current_time += ChronoDuration::minutes(1);
         }
+    }
+
+    /// The reported end use follows the delivered capacity's sign, not the
+    /// FSM's discrete mode: a runtime setpoint override flips the ideal
+    /// target to cooling while the FSM mode still reads Heating, and the
+    /// very next step must report HVAC_COOLING. The deadband carry-over
+    /// (capacity exactly 0.0) is preserved by the same assignment.
+    #[test]
+    fn ideal_hvac_end_use_tracks_capacity_sign_through_runtime_override() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "on".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 60, 0);
+        eq.init(&cfg, &env).unwrap();
+
+        // Settle in heating: FSM Heating, the solver dispatches positive
+        // capacity, the end use reads hvac_heating.
+        eq.update_control(&env);
+        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
+        eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
+            capacity_w: 5000.0,
+            degraded: false,
+        })
+        .unwrap();
+        assert_eq!(eq.descriptor().end_use, EndUse::HVAC_HEATING);
+
+        // A runtime override that crosses into cooling: the effective
+        // setpoints move below the zone temperature, so the ideal target
+        // flips sign, while the FSM's own mode only reaches Deadband
+        // (Heating exits through Deadband, never straight to Cooling).
+        eq.apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(15.0),
+            cooling_setpoint_c: Some(17.0),
+            deadband_c: None,
+        })
+        .unwrap();
+        eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
+            capacity_w: -3000.0,
+            degraded: false,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        assert_eq!(
+            eq.thermostat_fsm.mode,
+            ThermostatMode::Deadband,
+            "the FSM mode must not have reached Cooling yet"
+        );
+
+        // The very next step delivers cooling capacity and must report the
+        // cooling end use, though the FSM mode never said Cooling.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 0.0,
+            "the step must deliver cooling, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "the end use must follow the delivered capacity's sign, not the stale FSM mode"
+        );
     }
 }

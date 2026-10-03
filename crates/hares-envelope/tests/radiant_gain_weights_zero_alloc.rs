@@ -47,6 +47,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn make_env(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp,

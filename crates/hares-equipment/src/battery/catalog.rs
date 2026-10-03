@@ -759,6 +759,7 @@ mod tests {
                 .unwrap();
         let mut batt = crate::battery::Battery::new(ec.clone());
         let env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: hares_types::WeatherState {
                 outdoor_temp_c: 25.0,
@@ -1221,6 +1222,7 @@ mod tests {
         let config = spec.to_config().unwrap();
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: WeatherState {
                 outdoor_temp_c: -5.0,
@@ -1347,6 +1349,7 @@ mod tests {
         use crate::battery::{Battery, BatteryConfig};
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: WeatherState {
                 outdoor_temp_c: -5.0,
