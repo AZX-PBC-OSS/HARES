@@ -1,8 +1,9 @@
 //! Zero-allocation proof for the thermal solver's hot loop.
 //!
 //! `thermal_solver_step_allocation_free_after_first_step` runs the dwelling's
-//! per-step sequence (`prepare_inputs`, then `solve_ideal_capacity_for_target`
-//! for every zone with a sensible input, then `integrate`) and asserts that
+//! per-step sequence (`prepare_inputs`, then three
+//! `solve_ideal_capacity_for_target` calls for every zone with a sensible
+//! input, then `integrate`) and asserts that
 //! the allocation bracket around the whole sequence reads zero over 100 steps
 //! after the first. It runs twice, once with couplings active (the
 //! identity-coupled scalar solve) and once with none (the uncoupled scalar
@@ -231,20 +232,27 @@ fn make_solver(
     ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
 }
 
+/// Ideal-capacity targets solved per zone per step: several equipment
+/// sharing a zone, as `SolverFeedbackActor::collect_and_solve` runs them.
+/// The first solve of a step fills the shared prefix; the later ones reuse
+/// it and run only the target-dependent tail.
+const ZONE_TARGETS_C: [f64; 3] = [20.0, 21.0, 22.0];
+
 /// One step of the dwelling's sequence: `prepare_inputs`, then
-/// `solve_ideal_capacity_for_target` for every zone with a sensible input,
-/// then `integrate`.
+/// `solve_ideal_capacity_for_target` for every target of every zone with a
+/// sensible input, then `integrate`.
 fn run_dwelling_step(
     solver: &mut ThermalSolver,
     sensible_zones: &[ZoneId],
     ports: &PortSlots,
     env: &EnvironmentState,
     out: &mut DomainUpdate,
-    target_c: f64,
 ) {
     solver.prepare_inputs(ports, env).unwrap();
     for &zone in sensible_zones {
-        let _capacity = solver.solve_ideal_capacity_for_target(zone, target_c);
+        for target_c in ZONE_TARGETS_C {
+            let _capacity = solver.solve_ideal_capacity_for_target(zone, target_c);
+        }
     }
     solver.integrate(ports, env, out).unwrap();
 }
@@ -254,8 +262,8 @@ fn run_dwelling_step(
 // ---------------------------------------------------------------------------
 
 /// The allocation bracket around the dwelling's per-step sequence
-/// (`prepare_inputs` → per-zone `solve_ideal_capacity_for_target` →
-/// `integrate`) reads ZERO over 100 steps after the first, with couplings
+/// (`prepare_inputs` → three `solve_ideal_capacity_for_target` calls per
+/// zone → `integrate`) reads ZERO over 100 steps after the first, with couplings
 /// active (identity-coupled solve) and without (uncoupled solve), and around
 /// 100 calls of `ThermalSolver::resolve`. Zero allocations also prove zero
 /// factorizations: every factorization in `hares-envelope` factors a
@@ -279,7 +287,7 @@ fn thermal_solver_step_allocation_free_after_first_step() {
         let env = make_env(20.0, 0.0);
         let mut solver = make_solver(&env, infiltration);
         let mut out = DomainUpdate::empty(hares_types::THERMAL);
-        // Every zone with a sensible input: the ideal-capacity solve runs
+        // Every zone with a sensible input: the ideal-capacity solves run
         // for each of them, as the dwelling does between its two phases.
         let sensible_zones: Vec<ZoneId> = solver
             .wiring()
@@ -305,20 +313,21 @@ fn thermal_solver_step_allocation_free_after_first_step() {
         // Warm-up step: grows the last one-time buffers (coupling vecs, the
         // latent map's table, the output payload slot) so the bracket below
         // measures steady state.
-        run_dwelling_step(&mut solver, &sensible_zones, &ports, &env, &mut out, 21.0);
+        run_dwelling_step(&mut solver, &sensible_zones, &ports, &env, &mut out);
 
         // The per-thread counter cannot be reset, so the hot loop is counted
         // as a delta between two reads on this thread.
         let before = thread_allocations().expect("the test installs the counting allocator");
         for _ in 0..100 {
-            run_dwelling_step(&mut solver, &sensible_zones, &ports, &env, &mut out, 21.0);
+            run_dwelling_step(&mut solver, &sensible_zones, &ports, &env, &mut out);
         }
         let after = thread_allocations().expect("the test installs the counting allocator");
         let step_allocs = after - before;
         assert_eq!(
             step_allocs, 0,
             "{scenario}: the dwelling's per-step sequence (prepare_inputs, \
-             per-zone solve_ideal_capacity_for_target, integrate) allocated \
+             three solve_ideal_capacity_for_target calls per zone, \
+             integrate) allocated \
              {step_allocs} times over 100 steps after the first; expected \
              zero: a step of the thermal solver's hot loop must not touch \
              the heap (and therefore performs zero factorizations)."

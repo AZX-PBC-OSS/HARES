@@ -55,6 +55,7 @@ use hares_types::{
     ThermalCategory, ZoneId,
 };
 use nalgebra::DVector;
+use serde::{Deserialize, Serialize};
 
 use crate::state_space::{SolveScratch, StateSpaceModel};
 
@@ -66,8 +67,8 @@ const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 /// Per-step coupled-solve state: tracks whether couplings are active, which
 /// selects the solver path for the HVAC capacity solve in
 /// [`ThermalSolver::solve_ideal_capacity_for_target`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CoupledState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoupledState {
     /// No couplings active; use uncoupled solve path.
     Uncoupled,
     /// Couplings active; use closed-form O(n) diagonal-scaling solve.
@@ -396,14 +397,21 @@ impl ZoneSensibleBreakdown {
     }
 }
 
-/// Captured thermal state for checkpoint save/restore.
-#[derive(Clone, Debug)]
+/// Captured thermal state for checkpoint save/restore: every piece of
+/// mutable solver state a step or an ideal-capacity solve reads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalSnapshot {
     pub x: Vec<f64>,
     pub last_u: Vec<f64>,
     pub lwr_t_prev_c: Vec<f64>,
     pub interior_surface_temps: Vec<Vec<f64>>,
     pub interior_surface_prev_temps: Vec<Vec<f64>>,
+    /// Coupling tuples `(state_idx, d_implicit, forcing)` of the last
+    /// prepared or integrated step.
+    pub last_coupling: Vec<(usize, f64, f64)>,
+    /// Solve path selected by `last_coupling`: [`CoupledState::Identity`]
+    /// exactly when it is non-empty.
+    pub last_coupled_state: CoupledState,
 }
 
 impl ThermalSolver {
@@ -432,11 +440,13 @@ impl ThermalSolver {
         &self.config
     }
 
-    /// Mutable access to the solver configuration for per-timestep
-    /// updates (e.g. ventilation recovery effectiveness from equipment
-    /// bypass/defrost state).
-    pub fn config_mut(&mut self) -> &mut ThermalSolverConfig {
-        &mut self.config
+    /// Mutable access to the mechanical ventilation parameters for
+    /// per-timestep updates (recovery effectiveness from equipment
+    /// bypass/defrost state). The rest of the configuration is fixed at
+    /// construction: the scratch buffers are sized from its surface and zone
+    /// lists.
+    pub fn ventilation_mut(&mut self) -> &mut MechanicalVentilationParams {
+        &mut self.config.ventilation
     }
 
     /// Returns true when the zone's most recent `solve_ideal_capacity_for_target`
@@ -1120,7 +1130,7 @@ impl ThermalSolver {
             du_buf,
             solve_scratch,
             shared_prefix_valid: false,
-            shared_prefix_variant: last_coupled_state.clone(),
+            shared_prefix_variant: last_coupled_state,
             #[cfg(test)]
             shared_prefix_fills: 0,
             #[cfg(test)]
@@ -1225,6 +1235,8 @@ impl ThermalSolver {
             lwr_t_prev_c: self.exterior_surface_temps.clone(),
             interior_surface_temps: self.interior_surface_temps.clone(),
             interior_surface_prev_temps: self.interior_surface_prev_temps.clone(),
+            last_coupling: self.last_coupling.clone(),
+            last_coupled_state: self.last_coupled_state,
         }
     }
 
@@ -1248,7 +1260,7 @@ impl ThermalSolver {
                 )));
             }
         }
-        if !snap.last_u.is_empty() && snap.last_u.len() != self.last_u.len() {
+        if snap.last_u.len() != self.last_u.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid last_u length: got {}, expected {}",
                 snap.last_u.len(),
@@ -1327,16 +1339,35 @@ impl ThermalSolver {
             }
         }
 
-        // ── Phase 2: all validation passed — apply mutations ─────────────
-        // x and last_u change here: the shared ideal-capacity prefix (if
-        // any) is stale from this point.
-        self.invalidate_shared_prefix();
-        self.x = DVector::from_column_slice(&snap.x);
-        if snap.last_u.is_empty() {
-            self.last_u.fill(0.0);
-        } else {
-            self.last_u = DVector::from_column_slice(&snap.last_u);
+        // The solve divides by 1 + d per coupled state, so each coupling
+        // must satisfy the same bounds the step's own couplings do.
+        for (i, &(state_idx, d, forcing)) in snap.last_coupling.iter().enumerate() {
+            if state_idx >= self.x.len() || !(d.is_finite() && d >= 0.0) || !forcing.is_finite() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "invalid last_coupling[{i}] = ({state_idx}, {d}, {forcing}): the state \
+                     index must be below {} with a finite non-negative coefficient and a \
+                     finite forcing",
+                    self.x.len()
+                )));
+            }
         }
+        let coupled = !snap.last_coupling.is_empty();
+        if coupled != (snap.last_coupled_state == CoupledState::Identity) {
+            return Err(ThermalSolverError::Initialization(format!(
+                "last_coupled_state {:?} disagrees with {} coupling entries",
+                snap.last_coupled_state,
+                snap.last_coupling.len()
+            )));
+        }
+
+        // ── Phase 2: all validation passed — apply mutations ─────────────
+        // x, last_u and the couplings change here: the shared
+        // ideal-capacity prefix (if any) is stale from this point.
+        self.invalidate_shared_prefix();
+        self.x.copy_from_slice(&snap.x);
+        self.last_u.copy_from_slice(&snap.last_u);
+        self.last_coupling.clone_from(&snap.last_coupling);
+        self.last_coupled_state = snap.last_coupled_state;
         self.exterior_surface_temps
             .copy_from_slice(&snap.lwr_t_prev_c);
         for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
@@ -1855,7 +1886,7 @@ mod tests {
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
+        BoundaryCategory, CoupledState, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
         InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
@@ -7216,78 +7247,163 @@ mod tests {
 
     // ── restore_state atomicity: validation before mutation ──────────────
 
-    /// `restore_state` must validate ALL fields before mutating any state.
-    /// If any field is non-finite, the solver's existing state must be
-    /// left completely unchanged (atomic restore).
+    /// Asserts `restore_state` rejects `bad_snap` with an error naming
+    /// `expected_in_error` and, because it validates every field before
+    /// mutating any, leaves every piece of snapshotted state as it was.
+    fn assert_restore_rejected_atomically(
+        solver: &mut ThermalSolver,
+        bad_snap: &ThermalSnapshot,
+        expected_in_error: &str,
+    ) {
+        let before = solver.snapshot_state();
+        let err = solver
+            .restore_state(bad_snap)
+            .expect_err("an invalid snapshot must be rejected");
+        assert!(
+            err.to_string().contains(expected_in_error),
+            "the rejection must name '{expected_in_error}'; got: {err}"
+        );
+        assert_eq!(
+            solver.snapshot_state(),
+            before,
+            "solver state must be unchanged after a rejected restore (atomicity)"
+        );
+    }
+
     #[test]
     fn restore_state_rejects_non_finite_x_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
         let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
         let bad_snap = ThermalSnapshot {
             x: vec![f64::NAN],
-            last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
+            ..solver.snapshot_state()
         };
-
-        let result = solver.restore_state(&bad_snap);
-        assert!(result.is_err(), "restore with NaN x must return Err");
-
-        assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
-        );
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "non-finite x state");
     }
 
     #[test]
     fn restore_state_rejects_non_finite_last_u_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
         let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
         let bad_snap = ThermalSnapshot {
-            x: vec![25.0],
             last_u: vec![f64::NAN, 0.0],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
+            ..solver.snapshot_state()
         };
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "non-finite last_u");
+    }
 
-        let result = solver.restore_state(&bad_snap);
-        assert!(result.is_err(), "restore with NaN last_u must return Err");
+    #[test]
+    fn restore_state_rejects_a_last_u_of_the_wrong_length() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let bad_snap = ThermalSnapshot {
+            last_u: vec![],
+            ..solver.snapshot_state()
+        };
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "invalid last_u length");
+    }
 
-        assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
+    #[test]
+    fn restore_state_rejects_invalid_coupling_state_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut solver = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
+        solver.prepare_inputs(&ports, &env).unwrap();
+        let valid = solver.snapshot_state();
+        let n_states = valid.x.len();
+
+        for (bad_coupling, expected_in_error) in [
+            ((n_states, 0.1, 1.0), "invalid last_coupling[0]"),
+            ((0, -0.1, 1.0), "invalid last_coupling[0]"),
+            ((0, f64::NAN, 1.0), "invalid last_coupling[0]"),
+            ((0, 0.1, f64::INFINITY), "invalid last_coupling[0]"),
+        ] {
+            let bad_snap = ThermalSnapshot {
+                last_coupling: vec![bad_coupling],
+                ..valid.clone()
+            };
+            assert_restore_rejected_atomically(&mut solver, &bad_snap, expected_in_error);
+        }
+
+        let coupled_marked_uncoupled = ThermalSnapshot {
+            last_coupled_state: CoupledState::Uncoupled,
+            ..valid.clone()
+        };
+        assert_restore_rejected_atomically(
+            &mut solver,
+            &coupled_marked_uncoupled,
+            "disagrees with 1 coupling entries",
         );
+        let uncoupled_marked_coupled = ThermalSnapshot {
+            last_coupling: vec![],
+            ..valid
+        };
+        assert_restore_rejected_atomically(
+            &mut solver,
+            &uncoupled_marked_coupled,
+            "disagrees with 0 coupling entries",
+        );
+    }
+
+    /// The ideal-capacity solve reads the coupling terms of the step as well
+    /// as `x` and `last_u`, so a restored solver must solve exactly as the
+    /// solver the snapshot was taken from. Covered both ways the coupling
+    /// state can differ: a coupled snapshot restored onto a solver holding
+    /// other coupling values, and an uncoupled snapshot restored onto a
+    /// coupled solver.
+    #[test]
+    fn restore_state_restores_coupling_state() {
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mild_env = env_for_temp(20.0, 5.0);
+        let cold_env = env_for_temp(20.0, -15.0);
+        let target_c = 21.0;
+
+        for (scenario, prepare_original) in [
+            ("coupled snapshot onto other couplings", true),
+            ("uncoupled snapshot onto a coupled solver", false),
+        ] {
+            let mut original =
+                solver_with_infiltration(&mild_env, InfiltrationMethod::Ach { ach: 0.5 });
+            if prepare_original {
+                original.prepare_inputs(&ports, &mild_env).unwrap();
+            }
+            let snap = original.snapshot_state();
+
+            let mut restored = original.clone();
+            restored.prepare_inputs(&ports, &cold_env).unwrap();
+            assert_ne!(
+                restored.last_coupling, original.last_coupling,
+                "{scenario}: the solver restored onto must hold different couplings"
+            );
+            restored.restore_state(&snap).unwrap();
+
+            let expected = original.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+            let actual = restored.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the solve after restore_state ({actual} W) is not bitwise \
+                 the snapshot source's ({expected} W)"
+            );
+        }
     }
 
     #[test]
     fn restore_state_rejects_non_finite_interior_surface_temps_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
-        let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
-        let bad_snap = ThermalSnapshot {
-            x: vec![25.0],
-            last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![vec![20.0, f64::NAN]],
-            interior_surface_prev_temps: vec![],
-        };
-
-        let result = solver.restore_state(&bad_snap);
-        assert!(
-            result.is_err(),
-            "restore with NaN interior surface temp must return Err"
-        );
-
-        assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
+        let mut solver = interior_lwr_solver(&env);
+        let mut bad_snap = solver.snapshot_state();
+        bad_snap.interior_surface_temps[0][1] = f64::NAN;
+        assert_restore_rejected_atomically(
+            &mut solver,
+            &bad_snap,
+            "non-finite interior surface temperature at zone 0, surface 1",
         );
     }
 

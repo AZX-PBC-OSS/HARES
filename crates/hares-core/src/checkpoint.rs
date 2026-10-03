@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::checksum;
+use hares_envelope::ThermalSnapshot;
 use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
@@ -20,9 +21,13 @@ use serde::{Deserialize, Serialize};
 /// both against the live equipment — checkpoints written by v7 builds
 /// (positionally-indexed opaque blobs) are rejected by the version gate.
 ///
-/// v9: event-load equipment state records its random stream (key and
-/// stream nonce) instead of the key alone.
-pub const CHECKPOINT_VERSION: u32 = 9;
+/// v9 (the output-results branch): event-load equipment state records its
+/// random stream (key and stream nonce) instead of the key alone.
+/// v9 (the fix-rt9 branch): the thermal solver's state became one
+/// [`ThermalSnapshot`] record, which also carries the last step's coupling
+/// terms the ideal-capacity solve reads. Both schema changes landed as 9
+/// on their own branches; the fold reconciles them as one bump:
+pub const CHECKPOINT_VERSION: u32 = 10;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -84,21 +89,15 @@ pub struct DwellingCheckpoint {
     /// `Equipment::load_state` (see [`EquipmentStateCheckpoint`]).
     pub equipment_states: Vec<EquipmentStateCheckpoint>,
     pub rng_state: [u8; 32],
-    pub envelope_state: Vec<f64>,
+    /// The thermal solver's complete mutable state, as
+    /// [`ThermalSolver::snapshot_state`](hares_envelope::ThermalSolver::snapshot_state)
+    /// captures it.
+    pub thermal: ThermalSnapshot,
     /// Per-zone humidity ratios. Each entry is `(ZoneId, humidity_ratio)`.
     pub humidity_states: Vec<(ZoneId, f64)>,
     pub fluid_states: Vec<f64>,
     pub rng_stream: u64,
     pub rng_word_pos: u128,
-    pub thermal_last_u: Vec<f64>,
-    /// Per-exterior-surface converged LWR surface temperatures [°C].
-    pub lwr_t_prev_c: Vec<f64>,
-    /// Per-zone interior LWR surface temperatures [°C] (ScriptF warm-start).
-    /// Outer vec indexed by zone, inner vec by surface.
-    pub interior_surface_temps: Vec<Vec<f64>>,
-    /// Previous-step per-zone interior LWR surface temperatures [°C]
-    /// (heavy-ball damping warm-start). Same shape as `interior_surface_temps`.
-    pub interior_surface_prev_temps: Vec<Vec<f64>>,
     /// Actor decision-state, one per registered actor. Each entry carries
     /// the actor's name, its snapshot schema version, and its opaque state
     /// blob; the version is validated on restore before the blob is handed
@@ -217,7 +216,20 @@ mod tests {
     use super::{
         ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
     };
+    use hares_envelope::{CoupledState, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
+
+    fn empty_thermal() -> ThermalSnapshot {
+        ThermalSnapshot {
+            x: vec![],
+            last_u: vec![],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
+            last_coupling: vec![],
+            last_coupled_state: CoupledState::Uncoupled,
+        }
+    }
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
         let nanos = std::time::SystemTime::now()
@@ -247,15 +259,19 @@ mod tests {
                 blob: vec![1, 2, 3],
             }],
             rng_state: [42; 32],
-            envelope_state: vec![1.0, 2.0],
+            thermal: ThermalSnapshot {
+                x: vec![1.0, 2.0],
+                last_u: vec![0.1],
+                lwr_t_prev_c: vec![15.0, 18.0],
+                interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
+                interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
+                last_coupling: vec![(0, 0.25, 3.5), (1, 0.0, -1.25)],
+                last_coupled_state: CoupledState::Identity,
+            },
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![1.0, 2.0, 3.0],
             rng_stream: 3,
             rng_word_pos: 8,
-            thermal_last_u: vec![0.1],
-            lwr_t_prev_c: vec![15.0, 18.0],
-            interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
-            interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
             actor_states: vec![ActorStateCheckpoint {
                 name: "test_actor".into(),
                 schema_version: 1,
@@ -286,15 +302,11 @@ mod tests {
             timestep_index: 100,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.008), (ZoneId(2), 0.012), (ZoneId(3), 0.006)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -318,15 +330,11 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -445,15 +453,11 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };
@@ -498,15 +502,11 @@ mod tests {
             timestep_index: 12,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: summary.clone(),
         };
@@ -529,15 +529,11 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
         };

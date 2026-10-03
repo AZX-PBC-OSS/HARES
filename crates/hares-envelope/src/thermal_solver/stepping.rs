@@ -364,8 +364,8 @@ impl ThermalSolver {
     /// lives in the solver-owned [`SolveScratch`], sized at construction, so
     /// a steady-state call performs no heap allocation. The zero-allocation
     /// test `thermal_solver_step_allocation_free_after_first_step` proves it:
-    /// its allocation bracket wraps prepare → per-zone ideal-capacity solves
-    /// → integrate and reads zero over 100 steps after the first, with
+    /// its allocation bracket wraps prepare → three ideal-capacity solves
+    /// per zone → integrate and reads zero over 100 steps after the first, with
     /// couplings active and without. Every factorization in
     /// `hares-envelope` factors a dynamically sized nalgebra matrix and
     /// allocates its result, so those zero allocations also prove the step
@@ -405,7 +405,7 @@ impl ThermalSolver {
         if !self.shared_prefix_valid || self.shared_prefix_variant != self.last_coupled_state {
             self.model
                 .fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
-            self.shared_prefix_variant = self.last_coupled_state.clone();
+            self.shared_prefix_variant = self.last_coupled_state;
             self.shared_prefix_valid = true;
             #[cfg(test)]
             {

@@ -34,8 +34,7 @@ use hares_control::{
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{
-    ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSnapshot,
-    ThermalSolver,
+    ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSolver,
 };
 use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
@@ -4985,7 +4984,6 @@ impl Dwelling {
 
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     pub fn save_checkpoint(&self) -> Result<DwellingCheckpoint> {
-        let snap = self.thermal_solver.snapshot_state();
         // humidity_ratios is a HashMap; sort by zone so serialized checkpoints
         // of identical state are byte-identical (restore is order-insensitive).
         let mut humidity_states: Vec<(ZoneId, f64)> = self
@@ -5029,15 +5027,11 @@ impl Dwelling {
             timestep_index: self.clock.current_step(),
             equipment_states,
             rng_state: self.rng.get_seed(),
-            envelope_state: snap.x,
+            thermal: self.thermal_solver.snapshot_state(),
             humidity_states,
             fluid_states,
             rng_stream: self.rng.get_stream(),
             rng_word_pos: self.rng.get_word_pos(),
-            thermal_last_u: snap.last_u,
-            lwr_t_prev_c: snap.lwr_t_prev_c,
-            interior_surface_temps: snap.interior_surface_temps,
-            interior_surface_prev_temps: snap.interior_surface_prev_temps,
             actor_states: self
                 .actors
                 .iter()
@@ -5109,13 +5103,7 @@ impl Dwelling {
         }
 
         self.thermal_solver
-            .restore_state(&ThermalSnapshot {
-                x: cp.envelope_state.clone(),
-                last_u: cp.thermal_last_u.clone(),
-                lwr_t_prev_c: cp.lwr_t_prev_c.clone(),
-                interior_surface_temps: cp.interior_surface_temps.clone(),
-                interior_surface_prev_temps: cp.interior_surface_prev_temps.clone(),
-            })
+            .restore_state(&cp.thermal)
             .map_err(|err| HaresError::Envelope(format!("restore thermal state failed: {err}")))?;
 
         // Sync zone temperatures in latest_env from the restored thermal state.
@@ -5234,13 +5222,7 @@ impl Dwelling {
         }
 
         self.thermal_solver
-            .restore_state(&ThermalSnapshot {
-                x: cp.envelope_state.clone(),
-                last_u: cp.thermal_last_u.clone(),
-                lwr_t_prev_c: cp.lwr_t_prev_c.clone(),
-                interior_surface_temps: cp.interior_surface_temps.clone(),
-                interior_surface_prev_temps: cp.interior_surface_prev_temps.clone(),
-            })
+            .restore_state(&cp.thermal)
             .map_err(|err| {
                 HaresError::Envelope(format!(
                     "restore_building_state: thermal solver restore failed: {err}"
@@ -6585,7 +6567,7 @@ impl Dwelling {
         // 1 / (1 - rated_eff), e.g. 4× for a 75% effective HRV.
         for eq in &self.equipment {
             if let Some((eff_s, eff_l)) = eq.effective_ventilation_effectiveness() {
-                let vent = &mut self.thermal_solver.config_mut().ventilation;
+                let vent = self.thermal_solver.ventilation_mut();
                 vent.sensible_recovery_efficiency = eff_s;
                 vent.latent_recovery_efficiency = eff_l;
                 #[cfg(feature = "observe")]

@@ -612,15 +612,13 @@ fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
 
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
     // Set mass node temperatures: zone air at 20°C, surface 1 at 25°C, surface 2 at 15°C.
-    solver
-        .restore_state(&ThermalSnapshot {
-            x: vec![20.0, 25.0, 15.0],
-            last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![vec![20.0, 20.0]],
-            interior_surface_prev_temps: vec![vec![20.0, 20.0]],
-        })
-        .unwrap();
+    let mass_temps = ThermalSnapshot {
+        x: vec![20.0, 25.0, 15.0],
+        interior_surface_temps: vec![vec![20.0, 20.0]],
+        interior_surface_prev_temps: vec![vec![20.0, 20.0]],
+        ..solver.snapshot_state()
+    };
+    solver.restore_state(&mass_temps).unwrap();
 
     // Run one full resolve step.  The interior LWR convergence loop uses
     // the flux-residual criterion — if convergence hangs or produces NaN,

@@ -1,16 +1,22 @@
-//! Regression tests for prior_electrical_summary checkpoint fidelity.
+//! Regression tests for checkpoint fidelity: the restored dwelling resumes
+//! with the state the checkpointed one held.
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hares_core::Dwelling;
+use arrow::array::{Array, Float64Array, RecordBatch};
+use arrow::compute::concat_batches;
+use chrono::{Duration, FixedOffset, TimeZone};
+use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+use hares_envelope::CoupledState;
 use hares_equipment::EvConfig;
 use hares_equipment::config::ConfigValue;
 use hares_equipment::ev::Ev;
 use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{Equipment, EquipmentConfig};
+use hares_io::OutputFormat;
 use hares_types::EndUse;
 
 fn nanos_suffix() -> u128 {
@@ -498,4 +504,138 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     }
 
     let _ = fs::remove_file(&toml_path);
+}
+
+const RESUME_TOTAL_STEPS: usize = 96;
+const RESUME_CHECKPOINT_STEP: usize = 37;
+
+fn resumable_dwelling_config(output_dir: &Path, run: &str) -> DwellingConfig {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let home = root.join("tests/fixtures/resstock/2025.1/bldg0176227");
+    DwellingConfig {
+        hpxml_path: home.join("home.xml"),
+        schedule_path: home.join("in.schedules.csv"),
+        weather_path: root.join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
+        defaults_path: Some(root.join("defaults")),
+        sim_config: SimulationConfig {
+            start_time: FixedOffset::west_opt(8 * 3600)
+                .expect("valid offset")
+                .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                .single()
+                .expect("valid start time"),
+            duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
+            time_res: Duration::minutes(15),
+            output_verbosity: 8,
+            output_path: Some(output_dir.join(format!("{run}.parquet"))),
+            write_output: true,
+            output_format: OutputFormat::Parquet,
+            output_chunk_size: 1024,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: true,
+            rotation: hares_io::RotationPolicy::None,
+        },
+        overrides: None,
+        bldg_id: 176_227,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    }
+}
+
+fn recorded_frame(dwelling: &Dwelling) -> RecordBatch {
+    let batches = dwelling.flushed_batches();
+    let schema = batches.first().expect("the run recorded rows").schema();
+    concat_batches(&schema, batches).expect("batches of one run share a schema")
+}
+
+/// Asserts every column of `actual` equals `expected` bitwise; `Float64`
+/// columns compare bit patterns so a `-0.0`/`0.0` or NaN-payload change is a
+/// difference, not an equality.
+fn assert_frames_bitwise_equal(expected: &RecordBatch, actual: &RecordBatch) {
+    assert_eq!(expected.schema(), actual.schema(), "column sets differ");
+    assert_eq!(expected.num_rows(), actual.num_rows(), "row counts differ");
+    for (field, (want, got)) in expected
+        .schema()
+        .fields()
+        .iter()
+        .zip(expected.columns().iter().zip(actual.columns()))
+    {
+        let name = field.name();
+        match (
+            want.as_any().downcast_ref::<Float64Array>(),
+            got.as_any().downcast_ref::<Float64Array>(),
+        ) {
+            (Some(want), Some(got)) => {
+                assert_eq!(
+                    want.nulls(),
+                    got.nulls(),
+                    "column '{name}': null masks differ"
+                );
+                for (row, (w, g)) in want.values().iter().zip(got.values()).enumerate() {
+                    assert_eq!(
+                        w.to_bits(),
+                        g.to_bits(),
+                        "column '{name}' row {row}: continuous {w} vs resumed {g}"
+                    );
+                }
+            }
+            _ => assert_eq!(want.to_data(), got.to_data(), "column '{name}' differs"),
+        }
+    }
+}
+
+/// A run checkpointed at step k and resumed in a freshly built dwelling
+/// produces the same rows for steps k..N as the continuous run, bitwise in
+/// every output column. The building is multi-zone (conditioned space,
+/// attic, vented crawlspace) with couplings active and its HVAC sized by the
+/// ideal-capacity solve, so every piece of thermal solver state a step reads
+/// must travel through the checkpoint.
+#[test]
+fn resumed_run_equals_continuous_run() {
+    let output_dir = tempfile::tempdir().expect("temp dir");
+
+    let mut continuous = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "a"))
+        .expect("build continuous dwelling");
+    assert!(
+        continuous.latest_env().zones.len() > 1,
+        "the fixture must model more than one zone"
+    );
+    let continuous_steps = continuous.simulate().expect("continuous run").steps;
+    assert!(
+        continuous_steps[RESUME_CHECKPOINT_STEP..]
+            .iter()
+            .any(|step| step.hvac_heating_w > 0.0),
+        "the HVAC must run after the checkpoint for the resumed solves to be compared"
+    );
+    let continuous_frame = recorded_frame(&continuous);
+    assert_eq!(continuous_frame.num_rows(), RESUME_TOTAL_STEPS);
+
+    let mut interrupted = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "b"))
+        .expect("build interrupted dwelling");
+    for _ in 0..RESUME_CHECKPOINT_STEP {
+        interrupted.step().expect("step before checkpoint");
+    }
+    let checkpoint = interrupted.save_checkpoint().expect("save checkpoint");
+    assert_eq!(
+        checkpoint.thermal.last_coupled_state,
+        CoupledState::Identity,
+        "couplings must be active at the checkpoint"
+    );
+
+    let mut resumed = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "c"))
+        .expect("build resumed dwelling");
+    resumed
+        .load_checkpoint(checkpoint)
+        .expect("load checkpoint");
+    resumed.simulate().expect("resumed run");
+    let resumed_frame = recorded_frame(&resumed);
+
+    let tail = continuous_frame.slice(
+        RESUME_CHECKPOINT_STEP,
+        RESUME_TOTAL_STEPS - RESUME_CHECKPOINT_STEP,
+    );
+    assert_frames_bitwise_equal(&tail, &resumed_frame);
 }
