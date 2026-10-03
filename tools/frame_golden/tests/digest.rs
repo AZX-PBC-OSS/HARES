@@ -173,3 +173,29 @@ fn arrow_schema_power() -> arrow::datatypes::Schema {
 fn power_frame(values: &[Option<f64>]) -> arrow::record_batch::RecordBatch {
     common::batch(arrow_schema_power(), vec![common::f64_column(values)])
 }
+
+/// A zero-row frame product (num_rows = 0 in a committed golden) is stored
+/// as a schema-only parquet: the reader yields no row groups. The read-back
+/// must carry the schema as one empty batch, so the digest is the empty
+/// input's and a later `delta` can compare the product instead of erroring
+/// on it (the defect the fleet aggregate's zero-row product hit).
+#[test]
+fn zero_row_product_reads_back_as_its_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aggregate.parquet");
+
+    let schema = arrow_schema_power();
+    let empty = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(schema.clone()));
+    frame_golden::frames::write_frame(&path, &[empty]).unwrap();
+
+    let (read_schema, batches) = frame_golden::frames::read_frame(&path).unwrap();
+    assert_eq!(*read_schema, schema);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 0);
+
+    // Zero rows feed the block loop nothing: the column digest is SHA-256
+    // of the empty input, the digest a captured zero-row product records.
+    let digests = digest_of(&batches);
+    let empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert_eq!(digests.columns[0].digest, empty_sha);
+}

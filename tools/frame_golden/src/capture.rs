@@ -125,6 +125,21 @@ pub fn materialize(
 
     let products = adapter_run(&manifest, repo_root, RunOutput::Full, None)?;
     let doc = build_doc(&manifest, &products, repo_root)?;
+    // The digest refusal comes first, before any product comparison and
+    // before any full product is written: materialize exists to obtain
+    // the exact reference frames of the capture, and a run against a
+    // different defaults tree is not that even when every digest matches.
+    if doc.defaults_digest != committed.defaults_digest {
+        return Err(FrameGoldenError::MaterializedFrames(format!(
+            "{}: {}: re-capture instead of materializing a changed run",
+            golden_path.display(),
+            crate::compare::defaults_digest_message(
+                &committed.defaults_dir,
+                &committed.defaults_digest,
+                &doc.defaults_digest
+            )
+        )));
+    }
     if doc.products != committed.products
         || doc.metrics != committed.metrics
         || doc.health != committed.health

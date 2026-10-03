@@ -63,6 +63,14 @@ pub enum Difference {
         expected: String,
         actual: String,
     },
+    /// The defaults tree the fresh run read digests differently from the
+    /// one the committed golden was captured against: `defaults_dir` is
+    /// reported, not compared, the digest carries the content.
+    DefaultsDigest {
+        defaults_dir: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// The first differing row, reported only when full frames whose digests
@@ -123,6 +131,75 @@ impl DeltaReport {
     }
 }
 
+/// The one-line report of a defaults-digest mismatch: the defaults
+/// directory and both digests. Shared by compare's difference rendering
+/// and materialize's refusal so both name the mismatch identically.
+pub fn defaults_digest_message(defaults_dir: &str, expected: &str, actual: &str) -> String {
+    format!("defaults {defaults_dir:?}: digest mismatch: golden {expected}, run {actual}")
+}
+
+/// The command layer's compare of one fresh run against the committed
+/// golden: [`compare_products`] with the defaults-digest check folded in,
+/// so compare, compare-all and the tests compose one comparison. A run
+/// that read a defaults tree the capture did not is a difference, whether
+/// or not any product column changed, and regardless of the column
+/// selection: the digest covers the inputs, not the compared columns. The
+/// defaults directory is reported, not compared, the digest covers the
+/// content.
+pub fn compare_run(
+    name: &str,
+    golden: &GoldenDoc,
+    fresh: &crate::adapter::RunProducts,
+    columns: &ColumnSelection,
+    frames_dir: Option<&Path>,
+) -> FrameGoldenResult<CompareReport> {
+    let mut report = compare_products(
+        name,
+        golden,
+        &fresh.frames,
+        &fresh.metrics_rows,
+        fresh.health.as_ref(),
+        columns,
+        frames_dir,
+    )?;
+    if golden.defaults_digest != fresh.defaults_digest {
+        report.differences.push(Difference::DefaultsDigest {
+            defaults_dir: golden.defaults_dir.clone(),
+            expected: golden.defaults_digest.clone(),
+            actual: fresh.defaults_digest.clone(),
+        });
+    }
+    Ok(report)
+}
+
+/// The command layer's delta of one fresh run against the materialized
+/// capture: [`delta_products`] with a defaults-digest change folded in as
+/// a note, pointed at without failing the delta.
+pub fn delta_run(
+    name: &str,
+    golden: &GoldenDoc,
+    frames_dir: &Path,
+    fresh: &crate::adapter::RunProducts,
+    columns: &ColumnSelection,
+) -> FrameGoldenResult<DeltaReport> {
+    let mut report = delta_products(
+        name,
+        golden,
+        frames_dir,
+        &fresh.frames,
+        &fresh.metrics_rows,
+        columns,
+    )?;
+    if golden.defaults_digest != fresh.defaults_digest {
+        report.notes.push(defaults_digest_message(
+            &golden.defaults_dir,
+            &golden.defaults_digest,
+            &fresh.defaults_digest,
+        ));
+    }
+    Ok(report)
+}
+
 fn schema_detail(expected: &FrameDigests, actual: &FrameDigests) -> Option<String> {
     if expected.schema != actual.schema {
         return Some(format!(
@@ -165,6 +242,10 @@ fn selected_columns(
 }
 
 /// Compares a fresh run against the committed golden document.
+///
+/// The defaults-digest check is not folded in here: it is a separate step
+/// the command layer composes onto the report, where the committed golden
+/// and the run's products are both at hand, see [`compare_run`].
 ///
 /// When `frames_dir` holds full products whose digests equal the committed
 /// golden, the report also carries the first differing row with both
@@ -731,7 +812,9 @@ fn first_row_mismatch(
 
 /// Delta against the materialized full products: verifies the reference
 /// frames against the committed digests first, then reports per-column
-/// statistics. Always succeeds even with differences.
+/// statistics. Always succeeds even with differences. A defaults-digest
+/// change is reported separately by [`delta_run`], without failing the
+/// delta.
 pub fn delta_products(
     name: &str,
     golden: &GoldenDoc,

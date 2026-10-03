@@ -1,13 +1,14 @@
 //! Compare and delta acceptance tests: schema rejection with and without
 //! column selection, first-mismatch-row reporting from materialized
-//! frames, per-column delta statistics, and the materialize pointer in the
-//! missing-frames error.
+//! frames, per-column delta statistics, the materialize pointer in the
+//! missing-frames error, and the defaults-digest difference reported by
+//! compare, materialize and delta.
 
 mod common;
 
 use std::collections::BTreeMap;
 
-use frame_golden::compare::{compare_products, delta_products};
+use frame_golden::compare::{compare_products, compare_run, delta_products, delta_run};
 use frame_golden::digest::digest_frame;
 
 use arrow::datatypes::{DataType, Field, Schema};
@@ -387,5 +388,248 @@ fn metrics_extra_nested_key_is_rejected() {
                 if field.contains("total_energy_kwh.per_end_use.lighting")
         )),
         "the difference must name the nested path: {report:?}"
+    );
+}
+
+/// A one-day, hourly cz4a manifest whose `[defaults_files]` replacement
+/// source is the absolute path of a tempfile copy of a committed defaults
+/// file: `repo_path` joins an absolute path as given, so the manifest
+/// points outside the tree and the test writes nothing into it.
+fn one_day_defaults_replacement_manifest(replacement: &std::path::Path) -> String {
+    let features = frame_golden::manifest::running_features()
+        .into_iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
+kind = "dwelling"
+features = [{features}]
+defaults = "defaults"
+
+[defaults_files]
+"zip_parameters.toml" = "{}"
+
+[simulation]
+start_time = "2023-01-01T00:00:00-07:00"
+duration = 86400
+time_res = 3600
+output_verbosity = 2
+master_seed = 0
+
+[[home]]
+bldg_id = 1
+hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
+schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
+weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
+initialization_duration_s = 0
+overrides = {{}}
+"#,
+        replacement.display()
+    )
+}
+
+/// Sets up the defaults-digest fixture: a tempfile copy of the committed
+/// `defaults/zip_parameters.toml` wired into the manifest's
+/// `[defaults_files]`, captured into the fixture tempdir. The tempdirs are
+/// dropped by the caller when the test ends.
+fn captured_defaults_replacement(
+    fixture_dir: &tempfile::TempDir,
+    replacement_dir: &tempfile::TempDir,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    frame_golden::GoldenDoc,
+) {
+    let manifest_path = fixture_dir.path().join("defaults_replacement.toml");
+    let root = frame_golden::manifest::repo_root(&manifest_path);
+    let replacement = replacement_dir.path().join("zip_parameters.toml");
+    std::fs::copy(
+        root.join("defaults").join("zip_parameters.toml"),
+        &replacement,
+    )
+    .unwrap();
+    std::fs::write(
+        &manifest_path,
+        one_day_defaults_replacement_manifest(&replacement),
+    )
+    .unwrap();
+    let captured = frame_golden::capture::capture(&manifest_path, &root, None).unwrap();
+    (root, manifest_path, replacement, captured.doc)
+}
+
+/// Changes one byte of the replacement file. The file's first line must
+/// be a comment, so the substituted byte sits outside every parsed value
+/// and every product stays identical while the tree digest differs.
+fn change_one_comment_byte(replacement: &std::path::Path) {
+    let mut bytes = std::fs::read(replacement).unwrap();
+    let first_line = bytes
+        .iter()
+        .position(|b| *b == b'\n')
+        .expect("the defaults file has a first line");
+    assert_eq!(
+        bytes[0], b'#',
+        "the first line must stay a comment for the substitution to be inert"
+    );
+    let position = bytes[..first_line]
+        .iter()
+        .position(|b| *b == b'Z')
+        .expect("a comment byte to change");
+    bytes[position] = b'Y';
+    std::fs::write(replacement, &bytes).unwrap();
+}
+
+fn run_manifest_products(manifest_path: &std::path::Path) -> frame_golden::RunProducts {
+    let manifest = frame_golden::manifest::GoldenManifest::load(manifest_path).unwrap();
+    frame_golden::adapter::run(frame_golden::RunRequest {
+        repo_root: &frame_golden::manifest::repo_root(manifest_path),
+        manifest: &manifest,
+        output: frame_golden::RunOutput::Full,
+        duration_override_s: None,
+    })
+    .unwrap()
+}
+
+/// The acceptance case: a defaults edit that leaves every column of the
+/// fixture unchanged must still fail compare, naming both digests.
+#[test]
+fn compare_fails_on_defaults_digest_mismatch() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let (_root, manifest_path, replacement, doc) =
+        captured_defaults_replacement(&fixture_dir, &replacement_dir);
+
+    // Unchanged: the replacement is a byte-identical copy of the
+    // committed file, the fresh run read the same tree the capture did.
+    let products = run_manifest_products(&manifest_path);
+    let report = compare_run("defaults_replacement", &doc, &products, &None, None).unwrap();
+    assert!(
+        report.is_identical(),
+        "an unchanged defaults tree must compare identical: {report:?}"
+    );
+
+    change_one_comment_byte(&replacement);
+    let products = run_manifest_products(&manifest_path);
+    let report = compare_run("defaults_replacement", &doc, &products, &None, None).unwrap();
+    assert!(
+        !report.is_identical(),
+        "a defaults-digest mismatch must fail the compare: {report:?}"
+    );
+    // The substituted byte is inert: the digest difference is the only
+    // one, which is the case nothing else catches.
+    assert_eq!(
+        report.differences.len(),
+        1,
+        "a digest-only change must produce only the digest difference: {report:?}"
+    );
+    assert!(
+        report.row_mismatch.is_none(),
+        "a digest-only change must produce no row-level report: {report:?}"
+    );
+    let (defaults_dir, expected, actual) = report
+        .differences
+        .iter()
+        .find_map(|difference| match difference {
+            frame_golden::Difference::DefaultsDigest {
+                defaults_dir,
+                expected,
+                actual,
+            } => Some((defaults_dir, expected, actual)),
+            _ => None,
+        })
+        .expect("the report must carry the defaults-digest difference");
+    assert_eq!(defaults_dir, "defaults");
+    assert_eq!(expected, &doc.defaults_digest);
+    assert_eq!(actual, &products.defaults_digest);
+    assert_ne!(expected, actual, "the two digests must differ");
+}
+
+/// The same changed replacement makes materialize refuse with the
+/// defaults-digest message and write no full product.
+#[test]
+fn materialize_refuses_defaults_digest_mismatch() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let (root, manifest_path, replacement, doc) =
+        captured_defaults_replacement(&fixture_dir, &replacement_dir);
+    let frames_dir = fixture_dir.path().join("frames");
+
+    // Unchanged: materialize writes the full products.
+    frame_golden::capture::materialize(&manifest_path, &root, &frames_dir)
+        .expect("an unchanged defaults tree must materialize");
+    assert!(
+        frames_dir.exists(),
+        "the unchanged materialize must write the full products"
+    );
+
+    std::fs::remove_dir_all(&frames_dir).unwrap();
+    change_one_comment_byte(&replacement);
+    let materialized = frame_golden::capture::materialize(&manifest_path, &root, &frames_dir);
+    let Err(error) = materialized else {
+        panic!("a defaults-digest mismatch must refuse to materialize");
+    };
+    let message = error.to_string();
+    let fresh = run_manifest_products(&manifest_path);
+    assert!(
+        message.contains("digest mismatch"),
+        "the refusal must be the defaults-digest message: {message}"
+    );
+    assert!(
+        message.contains(&format!("defaults {:?}", doc.defaults_dir)),
+        "the refusal must name the defaults directory: {message}"
+    );
+    assert!(
+        message.contains(&doc.defaults_digest),
+        "the refusal must name the golden's digest: {message}"
+    );
+    assert!(
+        message.contains(&fresh.defaults_digest),
+        "the refusal must name the run's digest: {message}"
+    );
+    assert!(
+        !frames_dir.exists(),
+        "no full product may be written on refusal"
+    );
+}
+
+/// Delta reports a defaults-digest change in its notes and succeeds: the
+/// change is pointed at, not failed on, and an unchanged tree adds no
+/// note.
+#[test]
+fn delta_reports_defaults_digest_change_without_failing() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let (root, manifest_path, replacement, doc) =
+        captured_defaults_replacement(&fixture_dir, &replacement_dir);
+    let frames_dir = fixture_dir.path().join("frames");
+
+    // The capture's full products, for delta to compare against.
+    frame_golden::capture::materialize(&manifest_path, &root, &frames_dir).unwrap();
+
+    // Unchanged: no note.
+    let fresh = run_manifest_products(&manifest_path);
+    let report = delta_run("delta_digest", &doc, &frames_dir, &fresh, &None)
+        .expect("an unchanged defaults tree must not fail the delta");
+    assert!(
+        report.notes.is_empty(),
+        "an unchanged defaults tree must not be reported: {report:?}"
+    );
+
+    change_one_comment_byte(&replacement);
+    let fresh = run_manifest_products(&manifest_path);
+    let report = delta_run("delta_digest", &doc, &frames_dir, &fresh, &None)
+        .expect("a defaults-digest change must not fail the delta");
+    // The substituted byte is inert: the delta's value level is empty and
+    // the change is reported as the digest note only.
+    assert!(
+        report.is_identical(),
+        "a digest-only change must leave every value identical: {report:?}"
+    );
+    assert!(
+        report.notes.iter().any(
+            |note| note.contains(&doc.defaults_digest) && note.contains(&fresh.defaults_digest)
+        ),
+        "the delta must report the defaults-digest change with both digests: {report:?}"
     );
 }

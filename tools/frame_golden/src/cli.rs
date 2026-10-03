@@ -397,12 +397,10 @@ pub fn execute(command: Command) -> FrameGoldenResult<i32> {
             let frames_dir = capture::frames_dir_for(&root, &fixture_name);
             let golden = load_golden_doc(&capture::committed_golden_path(&manifest_path))?;
             let products = run_products(&loaded, &root, RunOutput::Full, None)?;
-            let report = compare::compare_products(
+            let report = compare::compare_run(
                 &fixture_name,
                 &golden,
-                &products.frames,
-                &products.metrics_rows,
-                products.health.as_ref(),
+                &products,
                 &columns,
                 Some(&frames_dir),
             )?;
@@ -452,14 +450,8 @@ pub fn execute(command: Command) -> FrameGoldenResult<i32> {
             let frames_dir = capture::frames_dir_for(&root, &fixture_name);
             let golden = load_golden_doc(&capture::committed_golden_path(&manifest_path))?;
             let products = run_products(&loaded, &root, RunOutput::Full, None)?;
-            let report = compare::delta_products(
-                &fixture_name,
-                &golden,
-                &frames_dir,
-                &products.frames,
-                &products.metrics_rows,
-                &columns,
-            )?;
+            let report =
+                compare::delta_run(&fixture_name, &golden, &frames_dir, &products, &columns)?;
             print_delta_report(&report);
             Ok(0)
         }
@@ -499,15 +491,7 @@ fn compare_all_one(path: &Path, name: &str, root: &Path) -> FrameGoldenResult<Co
     let golden = load_golden_doc(&capture::committed_golden_path(path))?;
     let products = run_products(&loaded, root, RunOutput::Full, None)?;
     let frames_dir = capture::frames_dir_for(root, name);
-    compare::compare_products(
-        name,
-        &golden,
-        &products.frames,
-        &products.metrics_rows,
-        products.health.as_ref(),
-        &None,
-        Some(&frames_dir),
-    )
+    compare::compare_run(name, &golden, &products, &None, Some(&frames_dir))
 }
 
 fn run_products(
@@ -592,6 +576,16 @@ fn print_compare_report(report: &CompareReport) {
             }
             Difference::Health { expected, actual } => {
                 println!("  health: expected {expected}, actual {actual}");
+            }
+            Difference::DefaultsDigest {
+                defaults_dir,
+                expected,
+                actual,
+            } => {
+                println!(
+                    "  {}",
+                    compare::defaults_digest_message(defaults_dir, expected, actual)
+                );
             }
         }
     }

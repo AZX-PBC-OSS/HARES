@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use frame_golden::adapter::{RunOutput, RunRequest};
 use frame_golden::capture;
-use frame_golden::compare::compare_products;
+use frame_golden::compare::{compare_run, delta_run};
 use frame_golden::manifest::{GoldenManifest, repo_root};
 use hares_core::{RunHealth, WarmupOutcome};
 
@@ -104,14 +104,14 @@ fn capture_then_compare_round_trips() {
     )
     .unwrap();
 
-    // A fresh run against the captured golden: identical.
+    // A fresh run against the captured golden: identical, through the
+    // command layer's own composition so the digest check is exercised on
+    // a matching tree too.
     let products = run_products(&manifest_path);
-    let report = compare_products(
+    let report = compare_run(
         "one_day",
         &captured.doc,
-        &products.frames,
-        &products.metrics_rows,
-        products.health.as_ref(),
+        &products,
         &None,
         Some(&frames_dir),
     )
@@ -131,15 +131,7 @@ fn capture_then_compare_round_trips() {
     );
 
     // And the full products are on disk for delta.
-    let delta = frame_golden::compare::delta_products(
-        "one_day",
-        &captured.doc,
-        &frames_dir,
-        &products.frames,
-        &products.metrics_rows,
-        &None,
-    )
-    .unwrap();
+    let delta = delta_run("one_day", &captured.doc, &frames_dir, &products, &None).unwrap();
     assert!(
         delta.is_identical(),
         "delta against itself must be empty: {delta:?}"
