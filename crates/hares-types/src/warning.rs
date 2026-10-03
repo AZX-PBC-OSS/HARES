@@ -6,6 +6,7 @@
 //! signal of a warning: every producer carries the value so the run's caller
 //! sees it.
 
+use std::fmt;
 use std::sync::Arc;
 
 /// One warning a run reports.
@@ -33,5 +34,16 @@ impl Warning {
             source: source.into(),
             message: message.into(),
         }
+    }
+}
+
+/// `"{source}: {message}"`, prefixed `"step {n}: "` when the warning carries
+/// a step index: the form the run's warning log reports.
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(step) = self.step_index {
+            write!(f, "step {step}: ")?;
+        }
+        write!(f, "{}: {}", self.source, self.message)
     }
 }

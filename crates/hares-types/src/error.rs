@@ -54,6 +54,15 @@ pub enum HaresError {
         value: f64,
         step_index: u64,
     },
+    /// Equipment was rejected before joining a dwelling. `warnings` are the
+    /// warnings the equipment raised during its own initialisation, in the
+    /// run warning log's format: the equipment never joined, so they belong
+    /// to the caller rather than to the run.
+    #[error("{reason} (the rejected equipment warned: {})", warnings.join("; "))]
+    RejectedEquipment {
+        reason: Box<HaresError>,
+        warnings: Vec<String>,
+    },
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
@@ -107,6 +116,10 @@ mod tests {
                 step_index: 10,
             },
             HaresError::InvalidState("equipment already initialized".to_string()),
+            HaresError::RejectedEquipment {
+                reason: Box::new(HaresError::Equipment("duplicate name".to_string())),
+                warnings: vec!["Battery: init warning".to_string()],
+            },
         ];
         for err in errors {
             let json = serde_json::to_string(&err).expect("serialize error");

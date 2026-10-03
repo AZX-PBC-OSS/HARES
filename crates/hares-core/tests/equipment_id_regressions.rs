@@ -2153,8 +2153,8 @@ fn replace_equipment_assigns_fresh_identity_and_validates_collisions() {
 }
 
 /// An actor's equipment binding must follow a replacement: eviction is
-/// name-based and only fires on removal, so the actor targeting "Battery"
-/// survives a `replace_equipment` — and the replacement receives a new
+/// name-based, so the actor targeting "Battery" survives a
+/// `replace_equipment` that keeps the name, and the replacement receives a new
 /// never-reused id. Without re-resolving the binding on the identity
 /// refresh, the BMS kept reading the evictee's (now absent) id and its
 /// `soc` channel pinned at the 0.0 no-observation sentinel — the exact
@@ -2272,8 +2272,8 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
 // Identity-refresh observability: seeding and actor-binding resolution
 // ===========================================================================
 //
-// The identity refresh (`refresh_equipment_caches`) is the shared mechanism
-// behind two contracts the rebind test above does not pin:
+// Installing a roster change is the shared mechanism behind two contracts
+// the rebind test above does not pin:
 //
 // - **Seeding**: equipment entering mid-run (add, replace) must be
 //   observable in `equipment_core` *immediately* — before its first step

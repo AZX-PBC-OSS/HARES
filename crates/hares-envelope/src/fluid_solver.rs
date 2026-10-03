@@ -96,12 +96,12 @@ struct PumpFlowCheck {
 }
 
 /// Builds the loop-type map from declared `(loop_id, fluid_type)` pairs,
-/// rejecting two declarations of one loop with different fluid types.
-///
-/// Exposed as [`plan_loop_types`] so a caller (the dwelling's roster
-/// planner) can validate a prospective loop map before committing it,
-/// without touching any live `FluidSolver`.
-fn loop_type_map(
+/// rejecting two declarations of one loop with different fluid types,
+/// without constructing or mutating a `FluidSolver`. A caller that must
+/// validate a candidate roster before committing it (the dwelling's roster
+/// planner) installs the result with [`FluidSolver::install_loop_types`]
+/// once the candidate is accepted.
+pub fn plan_loop_types(
     declared_loops: &[(LoopId, FluidType)],
 ) -> Result<HashMap<LoopId, FluidType>, HaresError> {
     let mut loop_types: HashMap<LoopId, FluidType> = HashMap::new();
@@ -115,18 +115,6 @@ fn loop_type_map(
         }
     }
     Ok(loop_types)
-}
-
-/// Validates a prospective `(loop_id, fluid_type)` declaration set and
-/// returns the loop-type map it resolves to, without constructing or
-/// mutating a `FluidSolver`. Callers that must validate a candidate roster
-/// before committing it (the dwelling's roster planner) call this instead
-/// of `FluidSolver::new` or `rebuild_loop_types`, then install the result
-/// with [`FluidSolver::install_loop_types`] once the candidate is accepted.
-pub fn plan_loop_types(
-    declared_loops: &[(LoopId, FluidType)],
-) -> Result<HashMap<LoopId, FluidType>, HaresError> {
-    loop_type_map(declared_loops)
 }
 
 /// Precomputes the pump flow check wiring per declared loop: the pump node
@@ -175,7 +163,7 @@ impl FluidSolver {
         config: FluidSolverConfig,
         declared_loops: &[(LoopId, FluidType)],
     ) -> Result<Self, HaresError> {
-        let loop_types = loop_type_map(declared_loops)?;
+        let loop_types = plan_loop_types(declared_loops)?;
         // Precompute the pump flow check wiring per loop: the pump node
         // (Source role, zero parents) and the splitter branch node ids.
         let pump_flow_checks = pump_flow_checks(&config, &loop_types);
@@ -208,27 +196,6 @@ impl FluidSolver {
             raw_return_temp_c: HashMap::new(),
             pump_flow_checks,
         })
-    }
-
-    /// Replaces the declared loop-type map from the live fluid port
-    /// declarations of the instantiated equipment.
-    ///
-    /// Called at assembly and again whenever the equipment list changes
-    /// before the first step (the same refresh that rebuilds the port-slot
-    /// table), so the map always covers the loops the equipment's own
-    /// declarations (and the port-slot table rebuilt from them, which
-    /// retains every accumulator the previous table carried) put in the
-    /// solver's path: loops from runtime-added equipment become declared,
-    /// and a loop whose last declarant left stays declared while its
-    /// retained accumulator is still processed. Two ports declaring one
-    /// loop with different fluid types remain a construction error.
-    pub fn rebuild_loop_types(
-        &mut self,
-        declared_loops: &[(LoopId, FluidType)],
-    ) -> Result<(), HaresError> {
-        let loop_types = plan_loop_types(declared_loops)?;
-        self.install_loop_types(loop_types);
-        Ok(())
     }
 
     /// Assigns an already-validated loop-type map (from [`plan_loop_types`])
@@ -360,10 +327,9 @@ impl DomainSolver for FluidSolver {
                 });
             };
 
-            // Construction (`validate_fluid_type_consistency` plus
-            // `FluidSolver::new`) enforces that all entries on a loop agree
-            // on fluid_type; the observe gate counts mismatches per step for
-            // diagnostics.
+            // The loop-type planning (`plan_loop_types`) enforces that all
+            // entries on a loop agree on fluid_type; the observe gate counts
+            // mismatches per step for diagnostics.
             #[cfg(feature = "observe")]
             if !entries
                 .windows(2)

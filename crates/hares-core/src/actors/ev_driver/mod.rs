@@ -7187,12 +7187,16 @@ mod tests {
         let rng = seed_from_u64(42);
         let mut actors = crate::dwelling::build_actors_from_seeds(
             std::slice::from_ref(&equipment),
-            &[] as &[Box<dyn crate::Actor>],
-            false, // no tariff — none of the strategies under test needs one
-            None,
-            96,
+            &[],
+            // No tariff: none of the strategies under test needs one.
+            crate::dwelling::ActorPricing {
+                has_tariff: false,
+                price_schedule: None,
+                steps_per_day: 96,
+            },
             &id_by_name,
             &rng,
+            &mut 0,
         );
         assert_eq!(
             actors.len(),

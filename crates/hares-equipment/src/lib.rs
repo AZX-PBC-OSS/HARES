@@ -546,17 +546,6 @@ pub trait Equipment: Send + Sync {
     }
 }
 
-/// Lets a borrowed prospective roster (`&[&dyn Equipment]`) satisfy the same
-/// `E: AsRef<dyn Equipment>` bound an owned roster (`&[Box<dyn Equipment>]`)
-/// does, since `Box<dyn Equipment>` already implements `AsRef<dyn Equipment>`
-/// via the standard library's blanket `Box` impl, but no such reflexive
-/// `AsRef` impl exists for a bare trait-object reference.
-impl<'a> AsRef<dyn Equipment + 'a> for &'a dyn Equipment {
-    fn as_ref(&self) -> &(dyn Equipment + 'a) {
-        *self
-    }
-}
-
 /// Re-export postcard CRC32 serialisation helpers from the serial module.
 #[allow(deprecated)]
 // Why: re-exporting deprecated save_versioned for backward compatibility while the deprecation warning guides new code to try_save_versioned

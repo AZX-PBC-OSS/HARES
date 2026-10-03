@@ -1230,16 +1230,8 @@ impl PyDwelling {
                 .map_err(to_py_err)?;
         }
 
+        // Joins with the driver actor its seed builds.
         dwelling.add_equipment(eq).map_err(to_py_err)?;
-        // Equipment added after construction never sees the construction-time
-        // actor registration, and registration otherwise only re-runs on
-        // set_tariff — without this call the EV would sit inert unless a
-        // tariff happened to be set later. Battery needs no equivalent: its
-        // python surface always constructs BmsMode::Manual (the deliberate
-        // no-actor mode). add_ev_with_driver must NOT do this: it attaches
-        // its own driver under the canonical EvDriver:<name> the
-        // re-registration dedups against.
-        dwelling.auto_register_actors().map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1317,7 +1309,6 @@ impl PyDwelling {
 
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
-        dwelling.add_equipment(eq).map_err(to_py_err)?;
 
         let fuel_economy = spec.capacity_kwh / spec.range_miles;
         let seed_bytes = {
@@ -1326,10 +1317,9 @@ impl PyDwelling {
             bytes
         };
 
-        // Canonical built-in actor name ("EvDriver:<equipment>") so that a
-        // later auto_register_actors re-run (set_tariff) recognizes this
-        // driver as already attached and does not build a second, competing
-        // one from the equipment's actor seed.
+        // The canonical built-in actor name ("EvDriver:<equipment>") takes
+        // the place of the driver the EV's actor seed would build, now and
+        // on every later rebuild of the built-in actors (set_tariff).
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
@@ -1352,7 +1342,9 @@ impl PyDwelling {
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
-        dwelling.add_actor(Box::new(actor)).map_err(to_py_err)?;
+        dwelling
+            .add_equipment_with_actors(eq, vec![Box::new(actor)])
+            .map_err(to_py_err)?;
         Ok(())
     }
 
@@ -2616,7 +2608,13 @@ fn default_start() -> PyResult<DateTime<FixedOffset>> {
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
     let msg = err.to_string();
-    match err {
+    // A rejected equipment's error carries the warnings it raised; the
+    // exception class follows the reason it was rejected for.
+    let classified = match &err {
+        HaresError::RejectedEquipment { reason, .. } => reason.as_ref(),
+        other => other,
+    };
+    match classified {
         // Io errors are mapped to ConfigError because they predominantly arise during
         // config/file loading (HPXML, weather, schedules). This is a conscious trade-off:
         // a rare runtime Io error will surface as ConfigError rather than adding a
@@ -2635,7 +2633,8 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::InvalidState(_)
         | HaresError::InvariantViolation { .. }
         | HaresError::NanDetected { .. }
-        | HaresError::NegativeDeliveredEnergy { .. } => HaresSimulationError::new_err(msg),
+        | HaresError::NegativeDeliveredEnergy { .. }
+        | HaresError::RejectedEquipment { .. } => HaresSimulationError::new_err(msg),
     }
 }
 

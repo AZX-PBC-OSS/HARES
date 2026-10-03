@@ -47,11 +47,7 @@ impl WarningLog {
     /// Every producer of the run's warnings pushes through this method, so
     /// the Python `take_warnings()` keeps returning `list[str]`.
     pub fn push_warning(&mut self, warning: hares_types::Warning) {
-        let message = match warning.step_index {
-            Some(step) => format!("step {step}: {}: {}", warning.source, warning.message),
-            None => format!("{}: {}", warning.source, warning.message),
-        };
-        self.push(message);
+        self.push(warning.to_string());
     }
 
     /// Number of warnings dropped (counted but not stored) since the last
