@@ -356,8 +356,7 @@ impl ThermalSolver {
     ///
     /// Uses `last_u`, `last_coupling`, and `last_coupled_state` as background.
     /// When `prepare_inputs()` has been called first (two-phase path), these
-    /// contain current-step weather/solar/infiltration data. Zero allocation —
-    /// the coupled LU is cached by `prepare_inputs` or the previous `integrate`.
+    /// contain current-step weather/solar/infiltration data. Zero allocation.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
@@ -376,20 +375,6 @@ impl ThermalSolver {
         };
 
         let total = match &self.last_coupled_state {
-            CoupledState::LU(lu) => {
-                let coupling = crate::CouplingData {
-                    lu,
-                    couplings: &self.last_coupling,
-                };
-                self.model.solve_for_scalar_input_coupled(
-                    &self.x,
-                    &self.last_u,
-                    target_c,
-                    output_idx,
-                    input_idx,
-                    &coupling,
-                )
-            }
             CoupledState::Identity => self.model.solve_for_scalar_input_identity_coupled(
                 &self.x,
                 &self.last_u,
@@ -662,7 +647,7 @@ impl ThermalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
     ) -> Result<(), HaresError> {
-        // Clear per-step degradation tracking — a new step starts fresh.
+        // Clear per-step degradation tracking: a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
         let saved_ext_temps = self.exterior_surface_temps.clone();
@@ -672,14 +657,7 @@ impl ThermalSolver {
         self.build_coupling();
 
         if !self.coupling_buf.is_empty() {
-            if self.model.m_is_identity() {
-                self.last_coupled_state = CoupledState::Identity;
-            } else {
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-                self.last_coupled_state = CoupledState::LU(coupled_lu);
-            }
+            self.last_coupled_state = CoupledState::Identity;
         } else {
             self.last_coupled_state = CoupledState::Uncoupled;
         }
@@ -702,35 +680,20 @@ impl ThermalSolver {
         self.build_coupling();
 
         // Per-step interior convection correction appends entries to coupling_buf
-        // (semi-implicit: diagonal added to M, off-diagonal as explicit forcing).
+        // (semi-implicit: the diagonal coupling is added to the identity,
+        // forming I + D; off-diagonal terms act as explicit forcing).
         self.apply_convection_forcing();
 
         if !self.coupling_buf.is_empty() {
-            if self.model.m_is_identity() {
-                self.model.step_with_identity_coupling_into_scratch(
-                    &self.x,
-                    &u,
-                    &mut self.rhs_buf,
-                    &self.coupling_buf,
-                    &mut self.d_agg_buf,
-                );
+            self.model.step_with_identity_coupling_into_scratch(
+                &self.x,
+                &u,
+                &mut self.rhs_buf,
+                &self.coupling_buf,
+                &mut self.d_agg_buf,
+            );
 
-                self.last_coupled_state = CoupledState::Identity;
-            } else {
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-                self.model.step_with_coupled_lu_into(
-                    &self.x,
-                    &u,
-                    &mut self.rhs_buf,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-
-                self.last_coupled_state = CoupledState::LU(coupled_lu);
-            }
+            self.last_coupled_state = CoupledState::Identity;
         } else {
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
             self.last_coupled_state = CoupledState::Uncoupled;
@@ -1002,7 +965,7 @@ impl ThermalSolver {
         // balance closes to machine precision.
         //
         // Uncoupled:  x_next = A_d·x + B_d·u
-        // Coupled:    x_next = F·x + G·u + h   where h = (M+D)⁻¹·f
+        // Coupled:    x_next = F·x + G·u + h   where h = (I+D)⁻¹·f
         //
         // Partition stored (Σ C_i·ΔT_i/dt) into external (G·u), internal
         // ((F−I)·x), and affine coupling (h) contributions.  Without coupling
@@ -1047,8 +1010,8 @@ impl ThermalSolver {
                     }
                 }
                 self.thermal_balance_q_loss = -internal_w;
-            } else if self.model.m_is_identity() {
-                // Identity-M coupled step: O(n) diagonal solve.
+            } else {
+                // Coupled step: O(n) diagonal solve.
                 // RHS = (N−D)·x + B_eff·u + f
                 // Solve: x_next[i] = RHS[i] / (1 + d_i)  for coupled rows,
                 //        x_next[i] = RHS[i]              for uncoupled rows.
@@ -1116,70 +1079,6 @@ impl ThermalSolver {
                         f_minus_i_x[i] /= 1.0 + d_agg[i];
                     }
                 }
-                for i in 0..n_states {
-                    f_minus_i_x[i] = f_minus_i_x[i] - h[i] - self.rhs_buf[i];
-                }
-
-                let mut external_w = 0.0_f64;
-                let mut internal_w = 0.0_f64;
-                let mut affine_w = 0.0_f64;
-                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id)
-                        && idx < n_states
-                    {
-                        external_w += c_j_k * g_u[idx] / dt_s;
-                        internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                        affine_w += c_j_k * h[idx] / dt_s;
-                    }
-                }
-                self.thermal_balance_q_gains.push(external_w);
-                self.thermal_balance_q_gains.push(affine_w);
-                self.thermal_balance_q_loss = -internal_w;
-            } else {
-                // Coupled step with non-identity M: rebuild the coupled LU
-                // factorization and decompose via three separate solves.
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-                let balance_bufs = (
-                    &mut self.balance_buf_a,
-                    &mut self.balance_buf_b,
-                    &mut self.balance_buf_c,
-                );
-                let h = balance_bufs.0;
-                let g_u = balance_bufs.1;
-                let f_minus_i_x = balance_bufs.2;
-
-                // h = coupled_step(0, 0)
-                self.model.step_with_coupled_lu_into(
-                    x_zero,
-                    u_zero,
-                    h,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-
-                // g_u = coupled_step(0, u) − h
-                self.model.step_with_coupled_lu_into(
-                    x_zero,
-                    &u,
-                    g_u,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-                for i in 0..n_states {
-                    g_u[i] -= h[i];
-                }
-
-                // f_minus_i_x = coupled_step(x_prev, 0) − h − x_prev
-                self.model.step_with_coupled_lu_into(
-                    &self.rhs_buf,
-                    u_zero,
-                    f_minus_i_x,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
                 for i in 0..n_states {
                     f_minus_i_x[i] = f_minus_i_x[i] - h[i] - self.rhs_buf[i];
                 }

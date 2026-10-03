@@ -1,7 +1,6 @@
-//! State-space representation with ZOH discretization and implicit-coupling support.
+//! State-space representation with ZOH discretization and semi-implicit coupling support.
 
-use nalgebra::linalg::LU;
-use nalgebra::{Complex, DMatrix, DVector, Dyn};
+use nalgebra::{Complex, DMatrix, DVector};
 use thiserror::Error;
 
 #[cfg(feature = "observe_detailed")]
@@ -17,37 +16,7 @@ const NEAR_UNITY_EIGENVALUE_THRESHOLD: f64 = 0.99;
 /// Result type for state-space operations.
 pub type Result<T> = std::result::Result<T, StateSpaceError>;
 
-/// Pre-allocated scratch buffers for zero-alloc solver methods.
-///
-/// Both vectors must be `state_dim()` long. They are overwritten on each call.
-pub struct SolverScratch {
-    pub rhs: DVector<f64>,
-    pub gain: DVector<f64>,
-}
-
-impl SolverScratch {
-    pub fn new(state_dim: usize) -> Self {
-        Self {
-            rhs: DVector::zeros(state_dim),
-            gain: DVector::zeros(state_dim),
-        }
-    }
-}
-
-/// Pre-factorized coupling data for coupled solver methods.
-pub struct CouplingData<'a> {
-    pub lu: &'a LU<f64, Dyn, Dyn>,
-    pub couplings: &'a [(usize, f64, f64)],
-}
-
-/// Solve target: which output to drive to what value, and which input to vary.
-pub struct SolveTarget {
-    pub y_target: f64,
-    pub output_index: usize,
-    pub input_index: usize,
-}
-
-/// Recoverable errors for state-space construction and stepping.
+/// Recoverable errors for state-space construction and solving.
 #[derive(Debug, Error)]
 pub enum StateSpaceError {
     #[error("matrix dimensions are incompatible: {0}")]
@@ -101,32 +70,23 @@ pub struct OutputMapping {
     pub input_to_output: Vec<(usize, usize, f64)>,
 }
 
-/// Discrete-time state-space model (ZOH base step) with optional implicit couplings.
+/// Discrete-time state-space model (ZOH base step) with per-step diagonal couplings.
 ///
-/// For `from_continuous`: M = I, N = A_d = expm(A_c·dt), B_eff = B_d = A_c⁻¹·(A_d − I)·B_c.
-/// For `from_discrete`: M and N are caller-supplied; B_eff = B_d (caller-supplied).
+/// The step is `x[k+1] = N·x[k] + B_eff·u[k]`. For `from_continuous`:
+/// N = A_d = expm(A_c·dt), B_eff = B_d = A_c⁻¹·(A_d − I)·B_c. For
+/// `from_discrete`: N and B_eff are caller-supplied.
 ///
-/// The implicit coupling step modifies the diagonal of M to account for
-/// infiltration and other conductances that depend on state variables.
-///
-/// When `m_is_identity` is true (always for `from_continuous` and `from_discrete`
-/// constructors), the coupled step uses an O(n) closed-form solve instead of an
-/// O(n³) LU factorization: `(I + D)·x = b` ⇒ `x[i] = b[i]` for uncoupled rows,
+/// The coupled step applies the per-step diagonal couplings in closed form:
+/// `(I + D)·x = b` ⇒ `x[i] = b[i]` for uncoupled rows,
 /// `x[i] = b[i] / (1 + d_i)` for coupled rows.
 #[derive(Clone)]
 pub struct StateSpaceModel {
     a_c: Option<DMatrix<f64>>,
     b_c: Option<DMatrix<f64>>,
-    m_mat: DMatrix<f64>,
-    m_lu: LU<f64, Dyn, Dyn>,
     n_mat: DMatrix<f64>,
     b_eff: DMatrix<f64>,
     pub c: DMatrix<f64>,
     pub d: DMatrix<f64>,
-    /// Whether `m_mat` is the identity matrix. Set in both constructors;
-    /// when true the coupled step and solve take the closed-form O(n)
-    /// diagonal-scaling path, avoiding an O(n³) LU factorization.
-    pub(crate) m_is_identity: bool,
     /// Gershgorin spectral radius upper bound for the discrete state matrix `A_d`.
     ///
     /// Always set for all construction paths; `bound < 1.0` does not guarantee
@@ -141,13 +101,10 @@ impl std::fmt::Debug for StateSpaceModel {
         f.debug_struct("StateSpaceModel")
             .field("a_c", &self.a_c)
             .field("b_c", &self.b_c)
-            .field("m_mat", &self.m_mat)
-            .field("m_lu", &"LU{...}")
             .field("n_mat", &self.n_mat)
             .field("b_eff", &self.b_eff)
             .field("c", &self.c)
             .field("d", &self.d)
-            .field("m_is_identity", &self.m_is_identity)
             .field(
                 "max_discrete_eigenvalue_magnitude",
                 &self.max_discrete_eigenvalue_magnitude,
@@ -189,7 +146,7 @@ pub fn gershgorin_false_positive_count() -> u64 {
 impl StateSpaceModel {
     /// Constructs a fully-discrete model from pre-discretized matrices.
     ///
-    /// Sets M = I (identity) so that `step()` degenerates to `A_d·x + B_d·u`.
+    /// The step is `x[k+1] = A_d·x + B_d·u`.
     pub fn from_discrete(
         a_d: DMatrix<f64>,
         b_d: DMatrix<f64>,
@@ -197,9 +154,6 @@ impl StateSpaceModel {
         d: DMatrix<f64>,
     ) -> Result<Self> {
         validate_state_space_dimensions(&a_d, &b_d, &c, &d)?;
-        let n = a_d.nrows();
-        let eye = DMatrix::<f64>::identity(n, n);
-        let m_lu = eye.clone().lu();
 
         let gershgorin_bound = gershgorin_spectral_radius(&a_d);
         if gershgorin_bound >= 1.0 + 1e-10 {
@@ -211,13 +165,10 @@ impl StateSpaceModel {
         Ok(Self {
             a_c: None,
             b_c: None,
-            m_mat: eye,
-            m_lu,
             n_mat: a_d,
             b_eff: b_d,
             c,
             d,
-            m_is_identity: true,
             max_discrete_eigenvalue_magnitude: gershgorin_bound,
         })
     }
@@ -245,19 +196,6 @@ impl StateSpaceModel {
     /// `bound >= 1.0 + 1e-10`.
     pub fn max_discrete_eigenvalue_magnitude(&self) -> f64 {
         self.max_discrete_eigenvalue_magnitude
-    }
-
-    /// Whether `m_mat` is the identity matrix.
-    ///
-    /// When true the coupled step and solve use the O(n) closed-form
-    /// diagonal-scaling path instead of an O(n³) LU factorization.
-    pub fn m_is_identity(&self) -> bool {
-        self.m_is_identity
-    }
-
-    /// Implicit-half matrix M (I for continuous-path; caller-supplied for discrete-path).
-    pub fn m_mat(&self) -> &DMatrix<f64> {
-        &self.m_mat
     }
 
     /// Explicit-half matrix N = A_d (or caller-supplied for discrete-path).
@@ -307,8 +245,8 @@ impl StateSpaceModel {
     /// Constructs from continuous A_c, B_c using ZOH (matrix exponential) discretization.
     ///
     /// ZOH is unconditionally stable and matches OCHRE's approach. The step becomes:
-    /// `x[k+1] = A_d·x[k] + B_d·u[k]` with `M = I` (no implicit solve needed for the
-    /// base step). Semi-implicit infiltration coupling adds to M and N via the coupling API.
+    /// `x[k+1] = A_d·x[k] + B_d·u[k]`. Semi-implicit infiltration coupling enters
+    /// through the per-step coupling API.
     pub fn from_continuous(
         a_c: &DMatrix<f64>,
         b_c: &DMatrix<f64>,
@@ -324,8 +262,6 @@ impl StateSpaceModel {
         let (c, d) = build_output_matrices(n, b_c.ncols(), output_mapping)?;
 
         let (a_d, b_d) = discretize_auto(a_c, b_c, dt)?;
-
-        let eye = DMatrix::<f64>::identity(n, n);
 
         // Stability check on discrete A_d.
         //
@@ -392,55 +328,23 @@ impl StateSpaceModel {
         // Invariant check removed: calling eigenvalue_check unconditionally on every
         // from_continuous call stalls on large RC matrices (nalgebra Schur QR has
         // unlimited iterations). The fallback path above already runs eigenvalue_check
-        // when Gershgorin flags instability — the common stable path does not need it.
-
-        let m_lu = eye.clone().lu();
+        // when Gershgorin flags instability. The common stable path does not need it.
 
         Ok(Self {
             a_c: Some(a_c.clone()),
             b_c: Some(b_c.clone()),
-            m_mat: eye,
-            m_lu,
             n_mat: a_d,
             b_eff: b_d,
             c,
             d,
-            m_is_identity: true,
             max_discrete_eigenvalue_magnitude: gershgorin_bound,
         })
     }
 
-    /// Zero-allocation step: x[k+1] = M⁻¹·(N·x[k] + B_eff·u[k]).
+    /// Zero-allocation step: x[k+1] = N·x[k] + B_eff·u[k].
     pub fn step_into(&self, x: &DVector<f64>, u: &DVector<f64>, buf: &mut DVector<f64>) {
         buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
         buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
-        self.m_lu.solve_mut(buf);
-    }
-
-    /// Zero-allocation step with explicit state-dependent forcing: x[k+1] = M⁻¹·(N·x[k] + B_eff·u[k] + f).
-    ///
-    /// The forcing vector `f` (dimension = state_dim) is added to the RHS before solving.
-    /// This supports explicit treatment of nonlinear effects (e.g., ΔT-dependent
-    /// convective film coefficients) without modifying the static A-matrix.
-    // Retained for the explicit forcing path; unused until the Courant-condition
-    // constraint blocking PerStepTarp activation (T-0034 Known Limitations) is resolved.
-    #[allow(dead_code)]
-    pub fn step_into_with_forcing(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        buf: &mut DVector<f64>,
-        forcing: &DVector<f64>,
-    ) {
-        debug_assert_eq!(
-            forcing.len(),
-            self.state_dim(),
-            "forcing vector dimension mismatch"
-        );
-        buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
-        buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
-        *buf += forcing; // buf += f (explicit forcing)
-        self.m_lu.solve_mut(buf);
     }
 
     /// Convenience step that allocates a new vector (use `step_into` for hot paths).
@@ -455,18 +359,11 @@ impl StateSpaceModel {
         &self.c * x + &self.d * u
     }
 
-    /// Full eigenvalue stability check on the equivalent discrete state matrix.
+    /// Full eigenvalue stability check on the discrete state matrix N.
     ///
-    /// Computes A_d = M⁻¹·N and checks all eigenvalue magnitudes.
+    /// Computes the eigenvalue magnitudes of N and checks them all.
     pub fn verify_stability(&self) -> Result<StabilityVerdict> {
-        let n = self.state_dim();
-        let eye = DMatrix::<f64>::identity(n, n);
-        let m_inv = self
-            .m_lu
-            .solve(&eye)
-            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
-        let a_d_equiv = m_inv * &self.n_mat;
-        let eigs = a_d_equiv.complex_eigenvalues();
+        let eigs = self.n_mat.complex_eigenvalues();
         let max_mag = eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max);
         if max_mag <= 1.0 + 1e-10 {
             Ok(StabilityVerdict::Stable)
@@ -478,7 +375,7 @@ impl StateSpaceModel {
     }
 
     /// Solves for a scalar input that drives a specific output row to `y_target`
-    /// after one implicit step.
+    /// after one coupled step.
     pub fn solve_for_output_input(
         &self,
         x: &DVector<f64>,
@@ -526,64 +423,14 @@ impl StateSpaceModel {
         }
     }
 
-    /// Coupled discrete step with per-step diagonal coupling, using a pre-built LU.
+    /// Coupled discrete step with per-step diagonal coupling (closed-form O(n) solve).
     ///
-    /// Builds the RHS `(N - D)·x + B_eff·u + f` into `buf`, then solves
-    /// `(M + D)·x[k+1] = buf` using the provided LU factorization.
-    ///
-    /// Use `build_coupled_lu` to create `coupled_lu` once per step, then
-    /// pass it to both this method and `solve_for_scalar_input_coupled`.
-    pub fn step_with_coupled_lu_into(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        buf: &mut DVector<f64>,
-        coupled_lu: &LU<f64, Dyn, Dyn>,
-        couplings: &[(usize, f64, f64)],
-    ) {
-        self.build_coupled_rhs(x, u, buf, couplings);
-        coupled_lu.solve_mut(buf);
-    }
-
-    /// Coupled discrete step with per-step diagonal coupling and explicit forcing.
-    ///
-    /// Same as [`step_with_coupled_lu_into`] but adds the forcing vector `f` to
-    /// the RHS before solving. See [`step_into_with_forcing`] for rationale.
-    // Retained for the explicit forcing path; unused until the Courant-condition
-    // constraint blocking PerStepTarp activation (T-0034 Known Limitations) is resolved.
-    #[allow(dead_code)]
-    pub fn step_with_coupled_lu_into_with_forcing(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        buf: &mut DVector<f64>,
-        coupled_lu: &LU<f64, Dyn, Dyn>,
-        couplings: &[(usize, f64, f64)],
-        forcing: &DVector<f64>,
-    ) {
-        debug_assert_eq!(
-            forcing.len(),
-            self.state_dim(),
-            "forcing vector dimension mismatch"
-        );
-        self.build_coupled_rhs(x, u, buf, couplings);
-        *buf += forcing;
-        coupled_lu.solve_mut(buf);
-    }
-
-    /// Coupled discrete step with identity M and diagonal coupling (closed-form O(n) solve).
-    ///
-    /// M = I, so `(I + D)·x = b` ⇒ `x[i] = b[i]` for uncoupled rows,
+    /// `(I + D)·x = b` ⇒ `x[i] = b[i]` for uncoupled rows,
     /// `x[i] = b[i] / (1 + d_i)` for coupled rows. Builds the RHS via
     /// [`build_coupled_rhs`] then applies diagonal scaling.
     ///
-    /// Zero allocations — `gemv` uses pre-allocated buffers and the scaling
+    /// Zero allocations: `gemv` uses pre-allocated buffers and the scaling
     /// loop is O(k) over coupled rows.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure `self.m_is_identity` is true. The method asserts this
-    /// in debug builds.
     ///
     /// Vendor alignment: OCHRE StateSpaceModel.py `update_model()` (line 318)
     /// uses `A·x + B·u` forward multiplication with no per-step factorization.
@@ -612,11 +459,6 @@ impl StateSpaceModel {
         couplings: &[(usize, f64, f64)],
         d_agg: &mut [f64],
     ) {
-        debug_assert!(
-            self.m_is_identity,
-            "step_with_identity_coupling_into: M must be identity"
-        );
-
         self.build_coupled_rhs(x, u, buf, couplings);
 
         // Aggregate diagonal damping per state index before dividing.
@@ -649,116 +491,14 @@ impl StateSpaceModel {
         }
     }
 
-    /// Coupled discrete step with per-step diagonal coupling (convenience: builds LU internally).
-    ///
-    /// Dispatches to [`step_with_identity_coupling_into`] when `m_is_identity` is true
-    /// (the common production path), falling back to O(n³) LU factorization only when
-    /// M ≠ I (test-only `from_discrete` models with non-identity M).
-    pub fn step_with_coupling_into(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        buf: &mut DVector<f64>,
-        m_scratch: &mut DMatrix<f64>,
-        couplings: &[(usize, f64, f64)],
-    ) {
-        if self.m_is_identity {
-            self.step_with_identity_coupling_into(x, u, buf, couplings);
-        } else {
-            let lu = self.build_coupled_lu(m_scratch, couplings);
-            self.step_with_coupled_lu_into(x, u, buf, &lu, couplings);
-        }
-    }
-
-    /// Builds the LU factorization of the coupled implicit matrix M + D.
-    ///
-    /// Used when the same coupling needs to be applied to both the step and the
-    /// HVAC solve in the same timestep. Reuses `m_scratch` as working storage.
-    pub fn build_coupled_lu(
-        &self,
-        m_scratch: &mut DMatrix<f64>,
-        couplings: &[(usize, f64, f64)],
-    ) -> LU<f64, Dyn, Dyn> {
-        m_scratch.clone_from(&self.m_mat);
-        for &(idx, d_diag, _) in couplings {
-            debug_assert!(idx < self.state_dim(), "coupling index {idx} out of bounds");
-            m_scratch[(idx, idx)] += d_diag;
-        }
-        // Take the matrix content (leaves m_scratch as 0x0), factorize without clone.
-        // m_scratch will be rebuilt from m_mat on next call via clone_from anyway.
-        std::mem::take(m_scratch).lu()
-    }
-
     /// Like `solve_for_scalar_input` but with per-step diagonal coupling.
     ///
-    /// Applies the same D perturbation and forcing as `step_with_coupling_into`:
+    /// Applies the same D perturbation and forcing as the coupled step:
     ///   RHS uses (N - D)·x instead of N·x, plus forcing terms.
-    ///   LHS uses the pre-built coupled LU factorization of (M + D).
+    ///   LHS solves (I + D)·x_next = rhs by closed-form diagonal scaling.
     ///
     /// `couplings` entries are `(state_idx, d_diag, forcing)` -- same format as
-    /// `step_with_coupling_into`.
-    pub fn solve_for_scalar_input_coupled(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        y_target: f64,
-        output_index: usize,
-        input_index: usize,
-        coupling: &CouplingData<'_>,
-    ) -> Result<f64> {
-        let m_coupled_lu = coupling.lu;
-        let couplings = coupling.couplings;
-        if output_index >= self.c.nrows() {
-            return Err(StateSpaceError::OutputIndexOutOfBounds {
-                output_index,
-                output_dim: self.c.nrows(),
-            });
-        }
-        if input_index >= self.b_eff.ncols() {
-            return Err(StateSpaceError::InputIndexOutOfBounds {
-                index: input_index,
-                input_dim: self.b_eff.ncols(),
-            });
-        }
-
-        let u_i_original = u[input_index];
-
-        // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f
-        let mut rhs_fixed =
-            &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
-        for &(idx, d_diag, forcing) in couplings {
-            rhs_fixed[idx] -= d_diag * x[idx]; // subtract D·x
-            rhs_fixed[idx] += forcing; // add forcing
-        }
-
-        let x_next_fixed = m_coupled_lu
-            .solve(&rhs_fixed)
-            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
-
-        // Gain: how much does x_next change per unit of u[input_index]?
-        let g = m_coupled_lu
-            .solve(&self.b_eff.column(input_index).into_owned())
-            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
-
-        let c_row = self.c.row(output_index);
-        let d_row = self.d.row(output_index);
-        let y_fixed =
-            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
-
-        let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
-
-        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
-            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
-        }
-
-        Ok((y_target - y_fixed) / effective_gain)
-    }
-
-    /// Like [`solve_for_scalar_input_coupled`] but for the identity M case (closed-form O(n) solve).
-    ///
-    /// Instead of LU factorization, solves `(I + D)·x_next = rhs` and `(I + D)·g = b_col`
-    /// by diagonal scaling: `x[i] = rhs[i] / (1 + d_i)` for coupled rows,
-    /// `x[i] = rhs[i]` for uncoupled rows.
+    /// `step_with_identity_coupling_into`.
     pub fn solve_for_scalar_input_identity_coupled(
         &self,
         x: &DVector<f64>,
@@ -768,11 +508,6 @@ impl StateSpaceModel {
         input_index: usize,
         couplings: &[(usize, f64, f64)],
     ) -> Result<f64> {
-        debug_assert!(
-            self.m_is_identity,
-            "solve_for_scalar_input_identity_coupled: M must be identity"
-        );
-
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -859,150 +594,15 @@ impl StateSpaceModel {
         // Compute rhs without the variable input contribution
         let rhs_fixed =
             &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
-        let x_next_fixed = self
-            .m_lu
-            .solve(&rhs_fixed)
-            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
 
         // Gain: how much does x_next change per unit of u[input_index]?
-        let g = self
-            .m_lu
-            .solve(&self.b_eff.column(input_index).into_owned())
-            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+        let g = self.b_eff.column(input_index).into_owned();
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed =
-            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+        let y_fixed = (c_row * &rhs_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
-
-        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
-            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
-        }
-
-        Ok((y_target - y_fixed) / effective_gain)
-    }
-
-    /// Like `solve_for_scalar_input_coupled` but uses pre-allocated buffers.
-    pub fn solve_for_scalar_input_coupled_into(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        target: &SolveTarget,
-        coupling: &CouplingData<'_>,
-        scratch: &mut SolverScratch,
-    ) -> Result<f64> {
-        let y_target = target.y_target;
-        let output_index = target.output_index;
-        let input_index = target.input_index;
-        let m_coupled_lu = coupling.lu;
-        let couplings = coupling.couplings;
-        let rhs_buf = &mut scratch.rhs;
-        let gain_buf = &mut scratch.gain;
-        if output_index >= self.c.nrows() {
-            return Err(StateSpaceError::OutputIndexOutOfBounds {
-                output_index,
-                output_dim: self.c.nrows(),
-            });
-        }
-        if input_index >= self.b_eff.ncols() {
-            return Err(StateSpaceError::InputIndexOutOfBounds {
-                index: input_index,
-                input_dim: self.b_eff.ncols(),
-            });
-        }
-
-        let u_i_original = u[input_index];
-
-        // Build RHS in-place: rhs_buf = N·x + B_eff·u - b_col·u_i - D·x + f
-        rhs_buf.gemv(1.0, &self.n_mat, x, 0.0);
-        rhs_buf.gemv(1.0, &self.b_eff, u, 1.0);
-        let b_col = self.b_eff.column(input_index);
-        for i in 0..rhs_buf.len() {
-            rhs_buf[i] -= b_col[i] * u_i_original;
-        }
-        for &(idx, d_diag, forcing) in couplings {
-            rhs_buf[idx] -= d_diag * x[idx];
-            rhs_buf[idx] += forcing;
-        }
-
-        // Solve in-place: rhs_buf = M_coupled⁻¹ · rhs_buf
-        if !m_coupled_lu.solve_mut(rhs_buf) {
-            return Err(StateSpaceError::ImplicitMatrixSingular);
-        }
-
-        // Gain vector in-place: gain_buf = M_coupled⁻¹ · b_col
-        gain_buf.copy_from(&b_col);
-        if !m_coupled_lu.solve_mut(gain_buf) {
-            return Err(StateSpaceError::ImplicitMatrixSingular);
-        }
-
-        let c_row = self.c.row(output_index);
-        let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
-
-        let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
-
-        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
-            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
-        }
-
-        Ok((y_target - y_fixed) / effective_gain)
-    }
-
-    /// Like `solve_for_scalar_input` but uses pre-allocated buffers.
-    pub fn solve_for_output_input_into(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        target: &SolveTarget,
-        scratch: &mut SolverScratch,
-    ) -> Result<f64> {
-        let y_target = target.y_target;
-        let output_index = target.output_index;
-        let input_index = target.input_index;
-        let rhs_buf = &mut scratch.rhs;
-        let gain_buf = &mut scratch.gain;
-        if output_index >= self.c.nrows() {
-            return Err(StateSpaceError::OutputIndexOutOfBounds {
-                output_index,
-                output_dim: self.c.nrows(),
-            });
-        }
-        if input_index >= self.b_eff.ncols() {
-            return Err(StateSpaceError::InputIndexOutOfBounds {
-                index: input_index,
-                input_dim: self.b_eff.ncols(),
-            });
-        }
-
-        let u_i_original = u[input_index];
-
-        // Build RHS in-place: rhs_buf = N·x + B_eff·u - b_col·u_i
-        rhs_buf.gemv(1.0, &self.n_mat, x, 0.0);
-        rhs_buf.gemv(1.0, &self.b_eff, u, 1.0);
-        let b_col = self.b_eff.column(input_index);
-        for i in 0..rhs_buf.len() {
-            rhs_buf[i] -= b_col[i] * u_i_original;
-        }
-
-        // Solve in-place: rhs_buf = M⁻¹ · rhs_buf
-        if !self.m_lu.solve_mut(rhs_buf) {
-            return Err(StateSpaceError::ImplicitMatrixSingular);
-        }
-
-        // Gain vector in-place: gain_buf = M⁻¹ · b_col
-        gain_buf.copy_from(&b_col);
-        if !self.m_lu.solve_mut(gain_buf) {
-            return Err(StateSpaceError::ImplicitMatrixSingular);
-        }
-
-        let c_row = self.c.row(output_index);
-        let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
-
-        let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
 
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });
@@ -1403,6 +1003,8 @@ fn reciprocal_condition_estimate_1_norm(a: &DMatrix<f64>, a_inv: &DMatrix<f64>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::Dyn;
+    use nalgebra::linalg::LU;
 
     fn assert_matrix_close(actual: &DMatrix<f64>, expected: &DMatrix<f64>, tol: f64) {
         assert_eq!(actual.shape(), expected.shape());
@@ -1417,6 +1019,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Builds and factors `(I + D)` from the coupling list: the same matrix the
+    /// coupled step solves in closed form, factorized here as the LU oracle the
+    /// closed-form paths are checked against.
+    fn factor_identity_plus_couplings(
+        n: usize,
+        couplings: &[(usize, f64, f64)],
+    ) -> LU<f64, Dyn, Dyn> {
+        let mut i_plus_d = DMatrix::<f64>::identity(n, n);
+        for &(idx, d_diag, _) in couplings {
+            i_plus_d[(idx, idx)] += d_diag;
+        }
+        i_plus_d.lu()
+    }
+
+    /// LU-oracle reference for the coupled scalar solve: builds the coupled RHS
+    /// `(N - D)·x + B_eff·u + f` and resolves both the state and the gain
+    /// column with a freshly factored `(I + D)` instead of the closed-form
+    /// diagonal scaling.
+    fn reference_coupled_scalar_solve(
+        model: &StateSpaceModel,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        couplings: &[(usize, f64, f64)],
+    ) -> f64 {
+        let lu = factor_identity_plus_couplings(model.state_dim(), couplings);
+        let u_i_original = u[input_index];
+
+        let mut rhs_fixed = model.n_mat() * x + model.b_eff() * u
+            - model.b_eff().column(input_index) * u_i_original;
+        for &(idx, d_diag, forcing) in couplings {
+            rhs_fixed[idx] -= d_diag * x[idx];
+            rhs_fixed[idx] += forcing;
+        }
+
+        let x_next_fixed = lu
+            .solve(&rhs_fixed)
+            .expect("oracle factorization of (I + D) should be nonsingular");
+        let g = lu
+            .solve(&model.b_eff().column(input_index).into_owned())
+            .expect("oracle factorization of (I + D) should be nonsingular");
+
+        let c_row = model.c.row(output_index);
+        let d_row = model.d.row(output_index);
+        let y_fixed =
+            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+        let effective_gain = (c_row * &g)[0] + model.d[(output_index, input_index)];
+
+        (y_target - y_fixed) / effective_gain
     }
 
     #[test]
@@ -1876,13 +1531,12 @@ mod tests {
         model.step_into(&x, &u, &mut buf_step);
 
         let mut buf_coupled = DVector::zeros(2);
-        let mut m_scratch = DMatrix::zeros(2, 2);
-        model.step_with_coupling_into(&x, &u, &mut buf_coupled, &mut m_scratch, &[]);
+        model.step_with_identity_coupling_into(&x, &u, &mut buf_coupled, &[]);
 
         for i in 0..2 {
             assert!(
                 (buf_step[i] - buf_coupled[i]).abs() < 1e-12,
-                "step_into and step_with_coupling_into differ at index {i}: \
+                "step_into and step_with_identity_coupling_into differ at index {i}: \
                  step={}, coupled={}",
                 buf_step[i],
                 buf_coupled[i]
@@ -1920,16 +1574,9 @@ mod tests {
 
         // Coupled: run 10 steps with large diagonal
         let mut x_coupled = x0;
-        let mut m_scratch = DMatrix::zeros(1, 1);
         let large_d = 5.0;
         for _ in 0..10 {
-            model.step_with_coupling_into(
-                &x_coupled,
-                &u,
-                &mut buf,
-                &mut m_scratch,
-                &[(0, large_d, 0.0)],
-            );
+            model.step_with_identity_coupling_into(&x_coupled, &u, &mut buf, &[(0, large_d, 0.0)]);
             x_coupled.copy_from(&buf);
         }
 
@@ -2016,29 +1663,25 @@ mod tests {
         let forcing = 1.0;
 
         let couplings = [(0_usize, d_diag, forcing)];
-        let mut m_scratch = DMatrix::zeros(1, 1);
-        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
 
-        // Solve for input_index=1 to hit y_target
-        let solved_u = model
-            .solve_for_scalar_input_coupled(
-                &x,
-                &u,
-                y_target,
-                0,
-                1,
-                &CouplingData {
-                    lu: &lu,
-                    couplings: &couplings,
-                },
-            )
+        // LU oracle: factor (I + D) locally and solve the coupled scalar
+        // problem with it.
+        let solved_u = reference_coupled_scalar_solve(&model, &x, &u, y_target, 0, 1, &couplings);
+
+        // The closed-form coupled solve must match the oracle.
+        let solved_identity = model
+            .solve_for_scalar_input_identity_coupled(&x, &u, y_target, 0, 1, &couplings)
             .expect("coupled solve should succeed");
+        assert!(
+            (solved_identity - solved_u).abs() <= 1.0e-10,
+            "identity solve {solved_identity} should match the LU oracle {solved_u}"
+        );
 
         // Step with the solved input and verify output matches target
         let mut u_solved = u.clone();
         u_solved[1] = solved_u;
         let mut buf = DVector::zeros(1);
-        model.step_with_coupling_into(&x, &u_solved, &mut buf, &mut m_scratch, &couplings);
+        model.step_with_identity_coupling_into(&x, &u_solved, &mut buf, &couplings);
         let y_actual = model.output(&buf, &u_solved)[0];
 
         assert!(
@@ -2124,8 +1767,8 @@ mod tests {
     // ── Identity-coupled solver tests ───────────────────────────────────────
 
     /// The identity-coupled step path (closed-form diagonal scaling) produces
-    /// numerically identical results to the LU factorization path when M = I.
-    /// Tests a range of state dimensions, coupling counts, and diagonal
+    /// numerically identical results to a locally factored `(I + D)` LU
+    /// oracle. Tests a range of state dimensions, coupling counts, and diagonal
     /// magnitudes to cover the full production parameter space.
     #[test]
     fn identity_coupled_step_matches_lu_step() {
@@ -2157,7 +1800,6 @@ mod tests {
 
                 let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
                     .expect("model should build");
-                assert!(model.m_is_identity());
 
                 let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
                 let u = DVector::from_fn(n, |i, _| 5.0 + 0.5 * i as f64);
@@ -2171,11 +1813,11 @@ mod tests {
                 let mut buf_id = DVector::zeros(n);
                 model.step_with_identity_coupling_into(&x, &u, &mut buf_id, &couplings);
 
-                // LU path
+                // LU oracle: solve the coupled RHS with a locally factored (I + D).
+                let lu = factor_identity_plus_couplings(n, &couplings);
                 let mut buf_lu = DVector::zeros(n);
-                let mut m_scratch = DMatrix::zeros(n, n);
-                let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
-                model.step_with_coupled_lu_into(&x, &u, &mut buf_lu, &lu, &couplings);
+                model.build_coupled_rhs(&x, &u, &mut buf_lu, &couplings);
+                lu.solve_mut(&mut buf_lu);
 
                 for i in 0..n {
                     let delta = (buf_id[i] - buf_lu[i]).abs();
@@ -2193,7 +1835,7 @@ mod tests {
     /// Multiple coupling entries on the *same* state index must be aggregated
     /// (`rhs / (1 + Σ d_j)`) rather than sequentially divided
     /// (`rhs / Π(1 + d_j)`). This regression test places two couplings on
-    /// state 0 and verifies the identity path matches the LU path and the
+    /// state 0 and verifies the identity path matches the LU oracle and the
     /// closed-form aggregated value, not the buggy product form.
     #[test]
     fn identity_coupled_step_aggregates_multiple_couplings_same_state() {
@@ -2219,7 +1861,6 @@ mod tests {
 
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
             .expect("model should build");
-        assert!(model.m_is_identity());
 
         let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
         let u = DVector::from_fn(n, |i, _| 5.0 + 0.5 * i as f64);
@@ -2231,11 +1872,11 @@ mod tests {
         let mut buf_id = DVector::zeros(n);
         model.step_with_identity_coupling_into(&x, &u, &mut buf_id, &couplings);
 
-        // LU path (ground truth: solves (I + D)·x_next = rhs with D aggregated)
+        // LU oracle (ground truth: solves (I + D)·x_next = rhs with D aggregated)
+        let lu = factor_identity_plus_couplings(n, &couplings);
         let mut buf_lu = DVector::zeros(n);
-        let mut m_scratch = DMatrix::zeros(n, n);
-        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
-        model.step_with_coupled_lu_into(&x, &u, &mut buf_lu, &lu, &couplings);
+        model.build_coupled_rhs(&x, &u, &mut buf_lu, &couplings);
+        lu.solve_mut(&mut buf_lu);
 
         for i in 0..n {
             let delta = (buf_id[i] - buf_lu[i]).abs();
@@ -2277,7 +1918,8 @@ mod tests {
     }
 
     /// The identity-coupled scalar solve path produces numerically identical
-    /// results to the LU-coupled scalar solve when M = I.
+    /// results to the LU-oracle reference that resolves `(I + D)` by
+    /// factorization.
     #[test]
     fn identity_scalar_solve_matches_lu_scalar_solve() {
         for n in [1, 2, 5, 10, 20] {
@@ -2305,7 +1947,6 @@ mod tests {
 
             let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
                 .expect("model should build");
-            assert!(model.m_is_identity());
 
             let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
             let u = DVector::from_fn(m, |i, _| 5.0 + (i as f64) * 0.5);
@@ -2314,9 +1955,6 @@ mod tests {
             let couplings: Vec<(usize, f64, f64)> = (0..k)
                 .map(|i| (i, 0.1 + 0.2 * i as f64, -0.5 + 0.5 * i as f64))
                 .collect();
-
-            let mut m_scratch = DMatrix::zeros(n, n);
-            let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
 
             // Test only (input_idx, output_idx) pairs where the path through
             // the system has non-zero effective gain. With diagonal B_eff and
@@ -2336,19 +1974,9 @@ mod tests {
                     )
                     .expect("identity scalar solve should succeed");
 
-                let solved_lu = model
-                    .solve_for_scalar_input_coupled(
-                        &x,
-                        &u,
-                        y_target,
-                        output_idx,
-                        input_idx,
-                        &CouplingData {
-                            lu: &lu,
-                            couplings: &couplings,
-                        },
-                    )
-                    .expect("LU scalar solve should succeed");
+                let solved_lu = reference_coupled_scalar_solve(
+                    &model, &x, &u, y_target, output_idx, input_idx, &couplings,
+                );
 
                 let delta = (solved_id - solved_lu).abs();
                 assert!(
@@ -2363,7 +1991,7 @@ mod tests {
     /// `identity_coupled_step_aggregates_multiple_couplings_same_state`:
     /// with duplicate coupling entries on the same state index, the identity
     /// scalar solve must aggregate damping (`(I + Σ d_j)⁻¹`) and match the LU
-    /// path, not the buggy sequential-product form.
+    /// oracle, not the buggy sequential-product form.
     #[test]
     fn identity_scalar_solve_aggregates_multiple_couplings_same_state() {
         let n = 3;
@@ -2389,16 +2017,12 @@ mod tests {
 
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
             .expect("model should build");
-        assert!(model.m_is_identity());
 
         let x = DVector::from_fn(n, |i, _| 20.0 + i as f64);
         let u = DVector::from_fn(m, |i, _| 5.0 + (i as f64) * 0.5);
 
         // Two couplings on state 0 (d=0.4 and d=0.2), one on state 1 (d=0.3).
         let couplings: Vec<(usize, f64, f64)> = vec![(0, 0.4, 1.0), (0, 0.2, 0.5), (1, 0.3, -0.5)];
-
-        let mut m_scratch = DMatrix::zeros(n, n);
-        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
 
         // With diagonal B_eff and identity C, gain is non-zero when
         // input_idx == output_idx and the row is coupled. State 0 carries two
@@ -2417,69 +2041,14 @@ mod tests {
                 )
                 .expect("identity scalar solve should succeed");
 
-            let solved_lu = model
-                .solve_for_scalar_input_coupled(
-                    &x,
-                    &u,
-                    y_target,
-                    output_idx,
-                    input_idx,
-                    &CouplingData {
-                        lu: &lu,
-                        couplings: &couplings,
-                    },
-                )
-                .expect("LU scalar solve should succeed");
+            let solved_lu = reference_coupled_scalar_solve(
+                &model, &x, &u, y_target, output_idx, input_idx, &couplings,
+            );
 
             let delta = (solved_id - solved_lu).abs();
             assert!(
                 delta <= 1e-10,
                 "row={row}: id={solved_id:e} lu={solved_lu:e} delta={delta:e}"
-            );
-        }
-    }
-
-    /// `step_with_coupling_into` dispatches to the identity path when
-    /// `m_is_identity` is true, producing the same result as calling
-    /// `step_with_identity_coupling_into` directly.
-    #[test]
-    fn step_with_coupling_into_dispatches_to_identity_path() {
-        let a_c = DMatrix::from_row_slice(
-            3,
-            3,
-            &[-0.02, 0.001, 0.0, 0.001, -0.015, 0.0, 0.0, 0.0, -0.01],
-        );
-        let b_c = DMatrix::from_row_slice(3, 3, &[0.02, 0.0, 0.0, 0.0, 0.015, 0.0, 0.0, 0.0, 0.01]);
-
-        let mapping = OutputMapping {
-            output_count: 3,
-            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)],
-            input_to_output: vec![],
-        };
-
-        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
-            .expect("model should build");
-        assert!(model.m_is_identity());
-
-        let x = DVector::from_row_slice(&[22.0, 21.0, 20.0]);
-        let u = DVector::from_row_slice(&[10.0, 8.0, 6.0]);
-        let couplings = vec![(0_usize, 0.5, 2.0), (2_usize, 0.3, 1.0)];
-
-        // Direct identity path
-        let mut buf_direct = DVector::zeros(3);
-        model.step_with_identity_coupling_into(&x, &u, &mut buf_direct, &couplings);
-
-        // Via dispatch
-        let mut buf_dispatch = DVector::zeros(3);
-        let mut m_scratch = DMatrix::zeros(3, 3);
-        model.step_with_coupling_into(&x, &u, &mut buf_dispatch, &mut m_scratch, &couplings);
-
-        for i in 0..3 {
-            assert!(
-                (buf_direct[i] - buf_dispatch[i]).abs() < 1e-12,
-                "row {i}: direct={} dispatch={}",
-                buf_direct[i],
-                buf_dispatch[i]
             );
         }
     }
@@ -2510,7 +2079,6 @@ mod tests {
 
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
             .expect("model should build");
-        assert!(model.m_is_identity());
 
         let x = DVector::from_row_slice(&[21.0, 20.5, 19.0]);
         let u = DVector::from_row_slice(&[5.0, 3.0, 0.0, 0.0]);
@@ -2533,29 +2101,5 @@ mod tests {
             (y_actual - y_target).abs() < 1e-9,
             "round-trip failed: y_actual={y_actual} y_target={y_target}"
         );
-    }
-
-    /// `m_is_identity` is true after construction for both paths.
-    #[test]
-    fn m_is_identity_flag_is_set_in_both_constructors() {
-        // from_continuous
-        let a_c = DMatrix::from_row_slice(2, 2, &[-0.02, 0.0, 0.0, -0.01]);
-        let b_c = DMatrix::from_row_slice(2, 1, &[0.02, 0.01]);
-        let mapping = OutputMapping {
-            output_count: 2,
-            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
-            input_to_output: vec![],
-        };
-        let model =
-            StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).expect("should build");
-        assert!(model.m_is_identity());
-
-        // from_discrete
-        let a_d = DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.0, 0.3]);
-        let b_d = DMatrix::from_row_slice(2, 1, &[0.1, 0.2]);
-        let c = DMatrix::identity(2, 2);
-        let d = DMatrix::zeros(2, 1);
-        let model2 = StateSpaceModel::from_discrete(a_d, b_d, c, d).expect("should build");
-        assert!(model2.m_is_identity());
     }
 }

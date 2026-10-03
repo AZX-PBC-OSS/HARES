@@ -54,7 +54,7 @@ use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, HaresError, PortSlots, THERMAL,
     ThermalCategory, ZoneId,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
 use crate::state_space::StateSpaceModel;
 
@@ -63,16 +63,15 @@ use initialization::initialize_steady_state;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 
-/// Per-step coupled-solve state: tracks whether couplings are active and which
-/// solver path to use for the HVAC capacity solve in [`ThermalSolver::solve_ideal_capacity_for_target`].
+/// Per-step coupled-solve state: tracks whether couplings are active, which
+/// selects the solver path for the HVAC capacity solve in
+/// [`ThermalSolver::solve_ideal_capacity_for_target`].
 #[derive(Debug, Clone)]
 pub(crate) enum CoupledState {
     /// No couplings active; use uncoupled solve path.
     Uncoupled,
-    /// Couplings active with M = I; use closed-form O(n) diagonal-scaling solve.
+    /// Couplings active; use closed-form O(n) diagonal-scaling solve.
     Identity,
-    /// Couplings active with M ≠ I; use O(n³) LU factorization solve.
-    LU(nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>),
 }
 
 #[derive(Debug, Clone)]
@@ -88,10 +87,9 @@ pub struct ThermalSolver {
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
-    /// Reusable state-step buffer: receives M⁻¹(N·x + B_eff·u).
+    /// Reusable state-step buffer: receives N·x + B_eff·u (coupling-scaled
+    /// when couplings are active).
     rhs_buf: DVector<f64>,
-    /// Pre-allocated scratch matrix for per-step modified implicit matrix (M + D).
-    m_scratch: DMatrix<f64>,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
     /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
@@ -170,12 +168,12 @@ pub struct ThermalSolver {
     /// Used for relative flux-residual convergence checking.
     lwr_net_flux_prev_buf: Vec<f64>,
     /// Pre-allocated forcing vector for per-step interior convection correction.
-    /// Dimension equals `model.state_dim()`. Cleared before each step, populated
-    /// with ΔQ·dt/C terms for each interior boundary, then passed to
-    /// `step_into_with_forcing`. Empty (zero-length) when film model is AshraeSimple.
+    /// Dimension equals `model.state_dim()`. Cleared before each step and
+    /// populated with ΔQ·dt/C terms for each interior boundary. Empty
+    /// (zero-length) when film model is AshraeSimple.
     ///
-    /// Currently unused — PerStepTarp is disabled at solver_builder level pending
-    /// resolution of the Courant-condition constraint (see T-0034 Implementation Notes).
+    /// Currently unused: PerStepTarp is disabled at solver_builder level pending
+    /// resolution of the Courant-condition constraint.
     #[allow(dead_code)]
     convection_forcing: DVector<f64>,
     /// Per-boundary A-matrix film resistance [m²·K/W] paralleling the
@@ -857,7 +855,6 @@ impl ThermalSolver {
         let last_u = DVector::<f64>::zeros(n_inputs);
         let u_buf = DVector::<f64>::zeros(n_inputs);
         let rhs_buf = DVector::<f64>::zeros(n_states);
-        let m_scratch = DMatrix::zeros(n_states, n_states);
         let convection_forcing =
             if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
                 DVector::<f64>::zeros(n_states)
@@ -987,7 +984,6 @@ impl ThermalSolver {
             last_u,
             u_buf,
             rhs_buf,
-            m_scratch,
             coupling_buf,
             last_coupling,
             last_coupled_state,

@@ -225,7 +225,7 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
 /// With this fix the per-step allocation count drops from 13 (pre-fix) to
 /// at most 11 (post-fix).  The remaining 11/step are from other sources
 /// (DVector::zeros(0) in u_buf swap, exterior_surface_temps clone,
-/// build_coupled_lu, model::output) that are tracked separately.
+/// model::output) that are tracked separately.
 #[test]
 fn radiant_gain_weight_distribution_zero_allocations() {
     let env = make_env(20.0, 0.0);
