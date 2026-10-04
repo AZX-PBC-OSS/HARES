@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Event-load streams set the top bit of the stream nonce, which keeps them
 /// disjoint from the small indexed streams (the dwelling's own stream 0 and
 /// the EV-driver streams counted up from 1).
-const EVENT_LOAD_STREAM_TAG: u64 = 1 << 63;
+pub const EVENT_LOAD_STREAM_TAG: u64 = 1 << 63;
 
 /// One ChaCha8 stream: the generator key and the stream nonce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

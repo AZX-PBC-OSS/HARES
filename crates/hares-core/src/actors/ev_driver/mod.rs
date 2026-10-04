@@ -59,8 +59,8 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState, HaresError,
-    PlugInPolicy, ScheduleSource, Telemetry,
+    ChargingStrategy, ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId,
+    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -1207,6 +1207,15 @@ impl Actor for EvDriverActor {
 
     fn dispatch_target_name(&self) -> Option<&str> {
         Some(self.target_name())
+    }
+
+    fn required_control_capabilities(&self) -> ControlCapabilities {
+        ControlCapabilities::POWER_SETPOINT
+            | ControlCapabilities::SOC_TARGET
+            | ControlCapabilities::EV_PLUG_IN
+            | ControlCapabilities::EV_DRIVE
+            | ControlCapabilities::EV_AWAY_CHARGE
+            | ControlCapabilities::EV_SET_READY_BY
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
@@ -7195,9 +7204,13 @@ mod tests {
                 steps_per_day: 96,
             },
             &id_by_name,
-            &rng,
-            &mut 0,
-        );
+            &mut crate::dwelling::EvDriverRng {
+                rng: &rng,
+                next_stream: 0,
+                rebuilt: &[],
+            },
+        )
+        .expect("build the driver");
         assert_eq!(
             actors.len(),
             1,

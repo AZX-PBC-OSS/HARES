@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+use hares_equipment::{ElectricBoilerConfig, Equipment, EquipmentConfig, EquipmentRegistry};
 use hares_io::OutputFormat;
-use hares_types::HaresError;
+use hares_types::{FluidType, HaresError};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -52,6 +53,63 @@ fn equipment_names(dwelling: &Dwelling) -> Vec<String> {
         .iter()
         .map(|e| e.descriptor().name.clone())
         .collect()
+}
+
+fn boiler_on_loop_7(name: &str, fluid_type: FluidType, dwelling: &Dwelling) -> Box<dyn Equipment> {
+    let config = EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Boiler".to_string(),
+        ElectricBoilerConfig {
+            zone_id: Some(1),
+            loop_id: Some(7),
+            capacity_w: 0.0,
+            fluid_type,
+            ..ElectricBoilerConfig::default()
+        },
+    )
+    .expect("boiler config");
+    let mut boiler = EquipmentRegistry::new()
+        .create("Electric Boiler", config.clone())
+        .expect("create boiler");
+    boiler
+        .init(&config, dwelling.latest_env())
+        .expect("init boiler");
+    boiler
+}
+
+/// A rejected roster change never touches the live output file: the
+/// recorder for a new schema is created only once every other check of the
+/// change has passed, so the file keeps its inode, length and modification
+/// time.
+#[cfg(unix)]
+#[test]
+fn a_rejected_roster_change_leaves_the_live_output_file_untouched() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output_path = dir.path().join("out.csv");
+    let mut dwelling = Dwelling::from_config(config(&output_path)).expect("build the dwelling");
+    let water = boiler_on_loop_7("Boiler-Water", FluidType::Water, &dwelling);
+    dwelling
+        .add_equipment(water)
+        .expect("the first declarer of loop 7 is accepted");
+    let file_state = || {
+        let metadata = std::fs::metadata(&output_path).expect("the output file exists");
+        (
+            metadata.ino(),
+            metadata.len(),
+            metadata.modified().expect("modification time"),
+        )
+    };
+    let before = file_state();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let glycol = boiler_on_loop_7("Boiler-Glycol", FluidType::Glycol, &dwelling);
+    dwelling
+        .add_equipment(glycol)
+        .expect_err("a conflicting fluid on loop 7 is rejected");
+
+    assert_eq!(file_state(), before);
 }
 
 #[test]

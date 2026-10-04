@@ -54,15 +54,25 @@ pub enum HaresError {
         value: f64,
         step_index: u64,
     },
-    /// Equipment was rejected before joining a dwelling. `warnings` are the
-    /// warnings the equipment raised during its own initialisation, in the
-    /// run warning log's format: the equipment never joined, so they belong
-    /// to the caller rather than to the run.
-    #[error("{reason} (the rejected equipment warned: {})", warnings.join("; "))]
+    /// Equipment was rejected before joining a dwelling: every rejected
+    /// add or replace returns this variant, with the rejection in `reason`.
+    /// `warnings` are the warnings the equipment raised during its own
+    /// initialisation (possibly none), in the run warning log's format: the
+    /// equipment never joined, so they belong to the caller rather than to
+    /// the run.
+    #[error("{reason}{}", rejected_equipment_warnings(warnings))]
     RejectedEquipment {
         reason: Box<HaresError>,
         warnings: Vec<String>,
     },
+}
+
+fn rejected_equipment_warnings(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" (the rejected equipment warned: {})", warnings.join("; "))
+    }
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
@@ -120,6 +130,10 @@ mod tests {
                 reason: Box::new(HaresError::Equipment("duplicate name".to_string())),
                 warnings: vec!["Battery: init warning".to_string()],
             },
+            HaresError::RejectedEquipment {
+                reason: Box::new(HaresError::Dwelling("not found".to_string())),
+                warnings: Vec::new(),
+            },
         ];
         for err in errors {
             let json = serde_json::to_string(&err).expect("serialize error");
@@ -140,6 +154,24 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize deprecated physics");
         assert_eq!(decoded, err);
         assert!(json.contains("physically impossible temperature"));
+    }
+
+    #[test]
+    fn rejected_equipment_displays_its_reason_and_any_warnings() {
+        let reason = HaresError::Equipment("duplicate name".to_string());
+        let bare = HaresError::RejectedEquipment {
+            reason: Box::new(reason.clone()),
+            warnings: Vec::new(),
+        };
+        let warned = HaresError::RejectedEquipment {
+            reason: Box::new(reason.clone()),
+            warnings: vec!["a: w1".to_string(), "a: w2".to_string()],
+        };
+        assert_eq!(bare.to_string(), reason.to_string());
+        assert_eq!(
+            warned.to_string(),
+            format!("{reason} (the rejected equipment warned: a: w1; a: w2)")
+        );
     }
 
     #[test]

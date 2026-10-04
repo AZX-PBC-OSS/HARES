@@ -1037,6 +1037,7 @@ impl DomainSolver for FluidSolver {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{FixedOffset, TimeZone};
@@ -1049,7 +1050,7 @@ mod tests {
         ZoneState,
     };
 
-    use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
+    use crate::fluid_solver::{FluidSolver, FluidSolverConfig, plan_loop_types};
 
     fn env() -> EnvironmentState {
         EnvironmentState {
@@ -1308,6 +1309,41 @@ mod tests {
             ],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_loop_types_maps_each_declared_loop_to_its_fluid() {
+        let single = plan_loop_types(&[(LoopId(1), FluidType::Water)]).expect("one loop");
+        assert_eq!(single, HashMap::from([(LoopId(1), FluidType::Water)]));
+
+        let distinct = plan_loop_types(&[
+            (LoopId(1), FluidType::Water),
+            (LoopId(2), FluidType::Glycol),
+        ])
+        .expect("two loops of different fluids");
+        assert_eq!(
+            distinct,
+            HashMap::from([
+                (LoopId(1), FluidType::Water),
+                (LoopId(2), FluidType::Glycol)
+            ])
+        );
+    }
+
+    #[test]
+    fn plan_loop_types_rejects_one_loop_with_two_fluids_naming_both() {
+        let err = plan_loop_types(&[
+            (LoopId(7), FluidType::Water),
+            (LoopId(7), FluidType::Glycol),
+        ])
+        .expect_err("one loop cannot carry two fluids");
+        let message = err.to_string();
+        assert!(
+            message.contains("LoopId(7)")
+                && message.contains("Water")
+                && message.contains("Glycol"),
+            "the error names the loop and both fluids: {message}"
+        );
     }
 
     // =======================================================================

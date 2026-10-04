@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, EquipmentId,
-    GridExportRule, HaresError, StormWatchTrigger, Telemetry,
+    BmsAction, BmsMode, BmsScheduleWindow, ControlCapabilities, ControlSignal, EnvironmentState,
+    EquipmentId, GridExportRule, HaresError, StormWatchTrigger, Telemetry,
 };
 
 use crate::Actor;
@@ -1009,6 +1009,14 @@ impl Actor for BatteryManagementActor {
             DispatchTarget::ByName(n) => Some(n.as_ref()),
             DispatchTarget::ByEndUse(_) => None,
         }
+    }
+
+    fn required_control_capabilities(&self) -> ControlCapabilities {
+        ControlCapabilities::POWER_SETPOINT
+            | ControlCapabilities::SOC_TARGET
+            | ControlCapabilities::POWER_LIMIT
+            | ControlCapabilities::GRID_CONNECT
+            | ControlCapabilities::SELF_CONSUMPTION
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {

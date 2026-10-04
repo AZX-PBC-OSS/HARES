@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
-use hares_types::{EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId};
+use hares_types::{
+    ControlCapabilities, EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId,
+};
 
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
@@ -57,6 +59,15 @@ pub trait Actor: Send + Sync + 'static {
         None
     }
 
+    /// The control capabilities the equipment named by
+    /// [`Self::dispatch_target_name`] must declare to accept every signal
+    /// this actor sends it. The dwelling evicts the actor when a
+    /// replacement under that name lacks one. Default: none, for actors
+    /// with no bound target.
+    fn required_control_capabilities(&self) -> ControlCapabilities {
+        ControlCapabilities::empty()
+    }
+
     /// Re-resolve this actor's equipment binding against the dwelling's
     /// live name→id map.
     ///
@@ -70,6 +81,9 @@ pub trait Actor: Send + Sync + 'static {
     /// dwelling's identity contract exists to prevent. The map lookup
     /// missing is the documented "operate without SOC feedback" mode,
     /// recoverable on a later refresh once the named equipment exists.
+    ///
+    /// Runs after a roster change is committed, so it must not panic: a
+    /// missing name is a state to record, never a reason to unwind.
     ///
     /// Default: no-op — actors that are not bound to exactly one equipment
     /// by name have nothing to resolve.

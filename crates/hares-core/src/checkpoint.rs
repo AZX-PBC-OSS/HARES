@@ -34,7 +34,11 @@ use serde::{Deserialize, Serialize};
 /// snapshot carries its own `schema_version`
 /// ([`hares_envelope::THERMAL_SNAPSHOT_SCHEMA_VERSION`]), validated
 /// independently of this constant.
-pub const CHECKPOINT_VERSION: u32 = 10;
+///
+/// v11: `next_ev_driver_stream` carries the built-in EV driver stream
+/// cursor; checkpoints written by v10 builds are rejected by the version
+/// gate.
+pub const CHECKPOINT_VERSION: u32 = 11;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -114,6 +118,11 @@ pub struct DwellingCheckpoint {
     /// so the first post-restore step sees the same env.electrical that
     /// the original continuous run would have at the same step index.
     pub prior_electrical_summary: ElectricalSummary,
+    /// Offset of the next unused built-in EV driver RNG stream. A dwelling
+    /// rebuilt to resume replays only the surviving roster, not its history,
+    /// so without this a driver built after the resume could take the
+    /// stream of a restored driver.
+    pub next_ev_driver_stream: u64,
 }
 
 impl DwellingCheckpoint {
@@ -293,6 +302,7 @@ mod tests {
                 blob: vec![1, 2, 3],
             }],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
         }
     }
 
@@ -326,23 +336,18 @@ mod tests {
             .collect()
     }
 
-    /// The checkpoint schema `CHECKPOINT_VERSION` 9 reads, as the SHA-256
-    /// of [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 10;
+    /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
+    /// [`type_schema`]`::<DwellingCheckpoint>()`.
+    const PINNED_VERSION: u32 = 11;
     const PINNED_SCHEMA_SHA256: &str =
-        "ca5aa5e7c6535d6c8decfedd4d5fa4822a4d6ca7c2c3238a2fbad150aedca26a";
+        "c46f2973a815897b87bf73427e4d24cded36b5c6fee7b34a62d474dc740c8b8c";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
     /// current `CHECKPOINT_VERSION`. Any field added, removed, renamed,
     /// reordered or retyped changes the schema, and the version gate is only
     /// sound if that change comes with a version bump: bump
-    /// `CHECKPOINT_VERSION` and re-pin both constants together. The one
-    /// sanctioned exception is the branch whose checkpoint schema change
-    /// shares `CHECKPOINT_VERSION` 9 with the output-results branch: it
-    /// re-pins the fingerprint for its shape without renumbering, and the
-    /// fold bumps the version once for both changes (see the
-    /// `CHECKPOINT_VERSION` doc).
+    /// `CHECKPOINT_VERSION` and re-pin both constants together.
     #[test]
     fn checkpoint_shape_is_pinned_to_its_version() {
         let schema = type_schema::<DwellingCheckpoint>();
@@ -441,6 +446,7 @@ mod tests {
             rng_word_pos: 0,
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
         };
 
         let path =
@@ -469,6 +475,7 @@ mod tests {
             rng_word_pos: 0,
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
         };
 
         let path =
@@ -592,6 +599,7 @@ mod tests {
             rng_word_pos: 0,
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(
@@ -641,6 +649,7 @@ mod tests {
             rng_word_pos: 0,
             actor_states: vec![],
             prior_electrical_summary: summary.clone(),
+            next_ev_driver_stream: 0,
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(
@@ -668,6 +677,7 @@ mod tests {
             rng_word_pos: 0,
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
         };
 
         let path = std::path::PathBuf::from("/nonexistent-dir-xyz/cp.json");

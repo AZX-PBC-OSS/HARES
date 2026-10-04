@@ -1284,6 +1284,34 @@ mod tests {
         approx_eq(slots.fluid[1].total_flow_kg_s, 2.0);
     }
 
+    /// Only fluid declarations name loops; identical pairs collapse, and a
+    /// loop declared with two fluids yields both pairs for the loop-type
+    /// planning to reject.
+    #[test]
+    fn fluid_loop_declarations_collect_distinct_fluid_pairs_in_order() {
+        let thermal_carrying_a_loop = PortDeclaration {
+            loop_id: Some(LoopId(3)),
+            fluid_type: Some(FluidType::Water),
+            ..PortDeclaration::thermal(ZoneId(1))
+        };
+        let decls = [
+            thermal_carrying_a_loop,
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::electrical(),
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(2), FluidType::Glycol),
+            PortDeclaration::fluid(LoopId(1), FluidType::Glycol),
+        ];
+        assert_eq!(
+            fluid_loop_declarations(&decls),
+            vec![
+                (LoopId(1), FluidType::Water),
+                (LoopId(2), FluidType::Glycol),
+                (LoopId(1), FluidType::Glycol),
+            ]
+        );
+    }
+
     #[test]
     fn from_declarations_builds_correct_slots() {
         let decls = &[

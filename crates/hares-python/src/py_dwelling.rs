@@ -1175,18 +1175,8 @@ impl PyDwelling {
             .create("PV", config.clone())
             .map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
-
-        // Register the PV surface orientation with the environment so that
-        // Perez irradiance is computed for this panel during simulation.
         let surface_id = hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
             .map_err(to_py_err)?;
-        dwelling.environment.register_surface(SurfaceGeometry {
-            surface_id,
-            azimuth_deg: pv.azimuth,
-            tilt_deg: pv.tilt,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
 
         // PV init() validates that a SurfaceIrradiance entry exists for each
         // array. The environment computes real irradiance during simulation;
@@ -1209,9 +1199,21 @@ impl PyDwelling {
         eq.init(&config, &init_env).map_err(to_py_err)?;
 
         dwelling.add_equipment(eq).map_err(to_py_err)?;
+        // Only an accepted panel registers its orientation, so that Perez
+        // irradiance is computed for it during simulation.
+        dwelling.environment.register_surface(SurfaceGeometry {
+            surface_id,
+            azimuth_deg: pv.azimuth,
+            tilt_deg: pv.tilt,
+            area_m2: 1.0,
+            omni_directional: false,
+        });
         Ok(())
     }
 
+    /// Add an EV with the driver actor that simulates its use. The driver
+    /// joins with the EV; drivers and battery managers already attached to
+    /// other equipment keep their state.
     pub fn add_ev(&mut self, ev: &PyEv) -> PyResult<()> {
         let config = ev_config_from_py(ev)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -1368,6 +1370,13 @@ impl PyDwelling {
     }
 
     /// Replace equipment by name with a new equipment config object (Battery, PV, or EV).
+    ///
+    /// Actors bound to the replaced name stay and drive the replacement
+    /// when it keeps that name and accepts their signals; they are removed
+    /// when the replacement takes another name or cannot accept their
+    /// signals. The replacement's own driver or battery manager is attached
+    /// unless an actor already holds its name. A rejected replacement
+    /// leaves the dwelling unchanged.
     pub fn replace_equipment(
         &mut self,
         name: String,
@@ -2866,6 +2875,29 @@ mod tests {
     use crate::py_equipment::PyPv;
     use crate::utils::extract_seconds;
     use crate::utils::{extract_datetime, parse_datetime_str};
+
+    /// A rejected add or replace raises the exception class of the reason
+    /// it was rejected for, and its message carries the rejected
+    /// equipment's warnings.
+    #[test]
+    fn rejected_equipment_raises_the_exception_of_its_reason() {
+        use hares_types::HaresError;
+        let rejected = |reason: HaresError| HaresError::RejectedEquipment {
+            reason: Box::new(reason),
+            warnings: vec!["EV1: init warning".to_string()],
+        };
+        Python::attach(|py| {
+            let equipment = super::to_py_err(rejected(HaresError::Equipment("dup".to_string())));
+            assert!(equipment.is_instance_of::<super::HaresEquipmentError>(py));
+            assert!(equipment.to_string().contains("EV1: init warning"));
+
+            let config = super::to_py_err(rejected(HaresError::Io("no file".to_string())));
+            assert!(config.is_instance_of::<super::HaresConfigError>(py));
+
+            let simulation = super::to_py_err(rejected(HaresError::Control("taken".to_string())));
+            assert!(simulation.is_instance_of::<super::HaresSimulationError>(py));
+        });
+    }
 
     #[derive(Debug)]
     struct TestDwelling {

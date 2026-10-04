@@ -91,7 +91,7 @@ use crate::health::{ActorTiming, ActorTimings};
 use crate::health::{RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
-use crate::rng::{RNG_STREAM_EV_DRIVER_BASE, advance_dwelling_rng, derive_sub_rng};
+use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock};
@@ -6672,24 +6672,43 @@ pub(crate) struct ActorPricing {
     pub(crate) steps_per_day: usize,
 }
 
+/// Where built-in EV drivers get their RNG state.
+pub(crate) struct EvDriverRng<'a> {
+    /// The dwelling RNG every driver stream derives from.
+    pub(crate) rng: &'a ChaCha8Rng,
+    /// Offset of the next unused stream in the range reserved for built-in
+    /// EV drivers (see [`crate::rng::ev_driver_stream`]).
+    pub(crate) next_stream: u64,
+    /// Live drivers being rebuilt. A driver built under one of their names
+    /// takes over that driver's state, its RNG stream and position
+    /// included, and uses no new stream: rebuilding a driver (to give it a
+    /// tariff's prices) never replays or reassigns its draws.
+    pub(crate) rebuilt: &'a [&'a dyn Actor],
+}
+
 /// Build actor instances from equipment seeds.
 ///
 /// Pure function for testability -- takes equipment, existing actors and
 /// the tariff inputs, and returns new built-in actors. A seed whose actor
-/// name an existing actor holds builds nothing. Each EV driver built takes
-/// the RNG stream `RNG_STREAM_EV_DRIVER_BASE + *ev_driver_stream` and
-/// advances the cursor.
+/// name an existing actor holds builds nothing. Each EV driver that does
+/// not take over a rebuilt driver's state gets the next unused driver
+/// stream. Battery management actors are always built fresh: their state
+/// is derived from the prices they are built with.
 /// `pub(crate)` so integration tests outside this module can exercise the
 /// real seed → actor construction path (e.g. the EV driver's actor/equipment
 /// contract tests) rather than re-deriving the arm's wiring by hand.
+///
+/// # Errors
+///
+/// The driver stream range is used up, or a rebuilt driver's state cannot
+/// be carried over.
 pub(crate) fn build_actors_from_seeds(
     equipment: &[Box<dyn Equipment>],
     existing_actors: &[&dyn Actor],
     pricing: ActorPricing,
     equipment_id_by_name: &HashMap<String, EquipmentId>,
-    rng: &ChaCha8Rng,
-    ev_driver_stream: &mut u64,
-) -> Vec<Box<dyn Actor>> {
+    driver_rng: &mut EvDriverRng<'_>,
+) -> Result<Vec<Box<dyn Actor>>> {
     let ActorPricing {
         has_tariff,
         price_schedule,
@@ -6796,18 +6815,23 @@ pub(crate) fn build_actors_from_seeds(
                     }
                 }
 
-                let ev_seed = {
-                    let stream = RNG_STREAM_EV_DRIVER_BASE + *ev_driver_stream;
-                    let sub = derive_sub_rng(rng, stream);
-                    #[cfg(any(debug_assertions, test))]
-                    check_ev_rng_stream_no_collision(
-                        &mut seen_rng_pairs,
-                        sub.get_seed(),
-                        sub.get_stream(),
-                        &actor_name,
-                    );
-                    *ev_driver_stream += 1;
-                    sub
+                let predecessor = driver_rng.rebuilt.iter().find(|a| a.name() == actor_name);
+                let ev_seed = match predecessor {
+                    // Replaced below by the predecessor's own RNG state.
+                    Some(_) => driver_rng.rng.clone(),
+                    None => {
+                        let stream = ev_driver_stream(driver_rng.next_stream)?;
+                        let sub = derive_sub_rng(driver_rng.rng, stream);
+                        #[cfg(any(debug_assertions, test))]
+                        check_ev_rng_stream_no_collision(
+                            &mut seen_rng_pairs,
+                            sub.get_seed(),
+                            sub.get_stream(),
+                            &actor_name,
+                        );
+                        driver_rng.next_stream += 1;
+                        sub
+                    }
                 };
                 let mut actor = EvDriverActor::new(
                     &format!("EvDriver:{name}"),
@@ -6834,6 +6858,9 @@ pub(crate) fn build_actors_from_seeds(
                 if let Some(ref prices) = price_schedule {
                     actor = actor.with_price_schedule(Arc::clone(prices), steps_per_day);
                 }
+                if let Some(predecessor) = predecessor {
+                    actor.load_state(&predecessor.save_state()?)?;
+                }
                 actor.resolve_equipment_id(equipment_id_by_name);
 
                 built_in_actors.push(Box::new(actor));
@@ -6841,7 +6868,7 @@ pub(crate) fn build_actors_from_seeds(
         }
     }
 
-    built_in_actors
+    Ok(built_in_actors)
 }
 
 #[cfg(test)]
@@ -6849,6 +6876,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::DwellingCheckpoint;
     use crate::derive_dwelling_rng;
+    use crate::rng::RNG_STREAM_EV_DRIVER_BASE;
     use conversions::{
         build_output_column_index, equipment_config_from_spec, json_value_to_config_value,
     };
@@ -10862,8 +10890,8 @@ occupancy = 1.0
     // ---------------------------------------------------------------
 
     /// `build_actors_from_seeds` with no equipment ids, 24 steps per day,
-    /// a tariff exactly when a price schedule is given, and EV driver
-    /// streams starting at the first.
+    /// a tariff exactly when a price schedule is given, no rebuilt drivers,
+    /// and EV driver streams starting at the first.
     fn built_in_actors(
         equipment: &[Box<dyn Equipment>],
         existing: &[Box<dyn Actor>],
@@ -10880,9 +10908,13 @@ occupancy = 1.0
                 steps_per_day: 24,
             },
             &HashMap::new(),
-            rng,
-            &mut 0,
+            &mut EvDriverRng {
+                rng,
+                next_stream: 0,
+                rebuilt: &[],
+            },
         )
+        .expect("build the built-in actors")
     }
 
     #[test]
@@ -14085,6 +14117,15 @@ master_seed = 0
         eq
     }
 
+    /// The reason inside the `RejectedEquipment` every rejected add or
+    /// replace returns.
+    fn rejection_reason(err: &HaresError) -> &HaresError {
+        match err {
+            HaresError::RejectedEquipment { reason, .. } => reason,
+            other => panic!("a rejected add or replace returns RejectedEquipment, got {other:?}"),
+        }
+    }
+
     /// `add_equipment` rejecting a fluid-type-conflicting candidate must
     /// leave the dwelling exactly as it was: it must not push the candidate
     /// and then fail.
@@ -14107,7 +14148,10 @@ master_seed = 0
         let err = dwelling
             .add_equipment(glycol)
             .expect_err("a second declarer of loop 7 with a conflicting fluid type is rejected");
-        assert!(matches!(err, HaresError::Envelope(_)), "got: {err:?}");
+        assert!(
+            matches!(rejection_reason(&err), HaresError::Envelope(_)),
+            "got: {err:?}"
+        );
 
         let names_after: Vec<String> = dwelling
             .equipment()
@@ -14202,7 +14246,10 @@ master_seed = 0
             Err(err) => err,
             Ok(_) => panic!("a replacement conflicting with loop 7's fluid type must be rejected"),
         };
-        assert!(matches!(err, HaresError::Envelope(_)), "got: {err:?}");
+        assert!(
+            matches!(rejection_reason(&err), HaresError::Envelope(_)),
+            "got: {err:?}"
+        );
 
         let furnace = dwelling
             .equipment()
@@ -14344,7 +14391,10 @@ master_seed = 0
         let err = dwelling
             .add_equipment(glycol)
             .expect_err("a post-step conflicting fluid declaration is rejected");
-        assert!(matches!(err, HaresError::Equipment(_)), "got: {err:?}");
+        assert!(
+            matches!(rejection_reason(&err), HaresError::Equipment(_)),
+            "got: {err:?}"
+        );
 
         let names_after: Vec<String> = dwelling
             .equipment()
@@ -14576,6 +14626,496 @@ master_seed = 0
             !dwelling.latest_env().equipment_core.contains_key(&id),
             "the removed equipment's core output must leave the snapshot at removal"
         );
+    }
+
+    /// A real EV with the default charging strategy, initialised against
+    /// `env`: its actor seed builds an `EvDriver:<name>` that rolls driving
+    /// days from its RNG stream.
+    fn driven_ev(name: &str, env: &EnvironmentState) -> Box<dyn Equipment> {
+        let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
+            "capacity_kwh": 60.0,
+            "charging_level": "L2",
+            "max_charging_power_kw": 7.2,
+        }))
+        .expect("minimal EvConfig");
+        let config = EquipmentConfig::from_typed(name.to_string(), "EV".to_string(), config)
+            .expect("typed EV config");
+        let mut ev = EquipmentRegistry::new()
+            .create("EV", config.clone())
+            .expect("create EV");
+        ev.init(&config, env).expect("init EV");
+        ev
+    }
+
+    fn add_driven_ev(dwelling: &mut Dwelling, name: &str) {
+        let ev = driven_ev(name, &dwelling.latest_env);
+        dwelling
+            .add_equipment(ev)
+            .unwrap_or_else(|err| panic!("add {name}: {err}"));
+    }
+
+    fn driver_stream(dwelling: &Dwelling, ev: &str) -> u64 {
+        let name = format!("EvDriver:{ev}");
+        dwelling
+            .actors
+            .iter()
+            .find(|a| a.name() == name)
+            .and_then(|a| a.rng_pair())
+            .unwrap_or_else(|| panic!("{name} is registered and owns an RNG stream"))
+            .1
+    }
+
+    fn net_power_kw(dwelling: &mut Dwelling, steps: usize) -> Vec<f64> {
+        (0..steps)
+            .map(|_| dwelling.step().expect("step").net_electric_power_kw)
+            .collect()
+    }
+
+    /// Everything a rejected roster change must leave as it was.
+    fn roster_fingerprint(dwelling: &Dwelling) -> String {
+        let equipment: Vec<(String, EquipmentId)> = dwelling
+            .equipment()
+            .iter()
+            .map(|e| (e.descriptor().name.clone(), e.descriptor().id))
+            .collect();
+        let mut core_ids: Vec<EquipmentId> =
+            dwelling.latest_env.equipment_core.keys().copied().collect();
+        core_ids.sort();
+        let mut telemetry_names: Vec<&String> =
+            dwelling.latest_env.equipment_telemetry.keys().collect();
+        telemetry_names.sort();
+        let mut auto_names: Vec<&String> = dwelling.auto_registered_actor_names.iter().collect();
+        auto_names.sort();
+        let mut column_index: Vec<(&String, &usize)> =
+            dwelling.roster.output_column_index.iter().collect();
+        column_index.sort();
+        format!(
+            "{equipment:?}|{:?}|{auto_names:?}|{:?}|{}|{}|{core_ids:?}|{telemetry_names:?}|\
+             {:?}|{column_index:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            actor_names(dwelling),
+            dwelling.scheduler.plan(),
+            dwelling.next_equipment_id,
+            dwelling.next_ev_driver_stream,
+            dwelling.warnings.to_vec(),
+            dwelling.roster.output_value_count,
+            dwelling.roster.record_scratch.len(),
+            dwelling.roster.equipment_execution_order,
+            dwelling.roster.equipment_ids,
+            dwelling.ports,
+            dwelling.rollback_ports,
+            dwelling
+                .recorder
+                .as_ref()
+                .map(|r| (r.total_rows(), r.schema().fields().len())),
+            dwelling.tariff_evaluator.is_some(),
+        )
+    }
+
+    /// A pre-step dwelling with output enabled whose output file cannot be
+    /// created, so every roster plan fails at its last step.
+    fn dwelling_whose_recorder_cannot_be_created() -> (Dwelling, tempfile::TempDir) {
+        let mut dwelling = bestest_dwelling();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        dwelling.write_output = true;
+        dwelling.output_path = tmp.path().join("missing").join("out.csv");
+        (dwelling, tmp)
+    }
+
+    /// Every roster entrance rejects a change whose plan fails, and leaves
+    /// the dwelling as it was: rosters, ids, schedule, caches, environment
+    /// snapshot, ports, recorder, tariff and warning log.
+    #[test]
+    fn every_roster_entrance_leaves_the_dwelling_unchanged_when_its_plan_fails() {
+        let (mut dwelling, _tmp) = dwelling_whose_recorder_cannot_be_created();
+        let existing = dwelling
+            .equipment()
+            .first()
+            .expect("bestest assembles equipment")
+            .descriptor()
+            .clone();
+        let before = roster_fingerprint(&dwelling);
+        let mut attempts: Vec<(&str, Result<()>)> = vec![
+            (
+                "remove_equipment",
+                dwelling.remove_equipment(&existing.name).map(drop),
+            ),
+            (
+                "remove_equipment_by_end_use",
+                dwelling
+                    .remove_equipment_by_end_use(std::slice::from_ref(&existing.end_use))
+                    .map(drop),
+            ),
+            ("clear_equipment", dwelling.clear_equipment()),
+            ("auto_register_actors", dwelling.auto_register_actors()),
+            (
+                "add_actor",
+                dwelling.add_actor(Box::new(StubActor {
+                    name: "Observer".to_string(),
+                })),
+            ),
+            (
+                "set_tariff",
+                dwelling.set_tariff(ElectricTariff::default(), chrono_tz::Tz::UTC),
+            ),
+        ];
+        let added = TestEquipment::new("Added", ControlCapabilities::empty());
+        attempts.push(("add_equipment", dwelling.add_equipment(Box::new(added))));
+        let replacement = TestEquipment::new("Replacement", ControlCapabilities::empty());
+        attempts.push((
+            "replace_equipment",
+            dwelling
+                .replace_equipment(&existing.name, Box::new(replacement))
+                .map(drop),
+        ));
+        for (entrance, result) in attempts {
+            assert!(result.is_err(), "{entrance} must be rejected");
+        }
+        assert_eq!(roster_fingerprint(&dwelling), before);
+    }
+
+    /// Two EVs added after assembly drive on distinct RNG streams: the
+    /// stream cursor advances with each driver built.
+    #[test]
+    fn ev_drivers_added_after_assembly_take_distinct_streams() {
+        let mut dwelling = bestest_dwelling();
+        add_driven_ev(&mut dwelling, "EV1");
+        add_driven_ev(&mut dwelling, "EV2");
+        assert_ne!(
+            driver_stream(&dwelling, "EV1"),
+            driver_stream(&dwelling, "EV2")
+        );
+    }
+
+    /// A dwelling resumed from a checkpoint continues the stream cursor of
+    /// the run that wrote it: after EV1 is removed and added back (its
+    /// driver taking a second stream), an EV added after the resume gets
+    /// the stream and the trajectory of the continuous run, never the
+    /// restored EV1 driver's stream.
+    #[test]
+    fn a_resumed_dwelling_gives_a_new_ev_driver_the_stream_of_the_continuous_run() {
+        let mut continuous = bestest_dwelling();
+        add_driven_ev(&mut continuous, "EV1");
+        let ev1 = continuous.remove_equipment("EV1").expect("remove EV1");
+        continuous.add_equipment(ev1).expect("add EV1 back");
+        net_power_kw(&mut continuous, 4);
+        let checkpoint = continuous.save_checkpoint().expect("checkpoint");
+
+        let mut resumed = bestest_dwelling();
+        add_driven_ev(&mut resumed, "EV1");
+        resumed.load_checkpoint(checkpoint).expect("restore");
+
+        add_driven_ev(&mut continuous, "EV2");
+        add_driven_ev(&mut resumed, "EV2");
+        assert_eq!(
+            driver_stream(&resumed, "EV2"),
+            driver_stream(&continuous, "EV2")
+        );
+        assert_ne!(
+            driver_stream(&resumed, "EV2"),
+            driver_stream(&resumed, "EV1")
+        );
+        let resumed_power = net_power_kw(&mut resumed, 96);
+        let continuous_power = net_power_kw(&mut continuous, 96);
+        let first_difference = resumed_power
+            .iter()
+            .zip(&continuous_power)
+            .position(|(r, c)| r != c);
+        assert_eq!(
+            first_difference, None,
+            "resumed {resumed_power:?}\ncontinuous {continuous_power:?}"
+        );
+    }
+
+    /// Between steps a restored dwelling reports the time and weather of
+    /// its last completed step, as the run that wrote the checkpoint does,
+    /// so equipment initialised against it after the resume starts alike.
+    #[test]
+    fn a_restored_dwelling_reports_the_environment_of_its_last_step() {
+        let mut continuous = bestest_dwelling();
+        net_power_kw(&mut continuous, 4);
+        let checkpoint = continuous.save_checkpoint().expect("checkpoint");
+
+        let mut resumed = bestest_dwelling();
+        resumed.load_checkpoint(checkpoint).expect("restore");
+
+        assert_eq!(
+            resumed.latest_env.current_time,
+            continuous.latest_env.current_time
+        );
+        assert_eq!(
+            format!("{:?}", resumed.latest_env.weather),
+            format!("{:?}", continuous.latest_env.weather)
+        );
+    }
+
+    /// Built-in EV drivers draw from a bounded range of RNG streams below
+    /// the event loads' streams; a dwelling that has used them all rejects
+    /// the next EV instead of aliasing another stream.
+    #[test]
+    fn exhausted_ev_driver_streams_reject_the_next_ev() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.next_ev_driver_stream = crate::rng::EV_DRIVER_STREAM_COUNT;
+        let before = roster_fingerprint(&dwelling);
+
+        let ev = driven_ev("EV1", &dwelling.latest_env);
+        let err = dwelling
+            .add_equipment(ev)
+            .expect_err("no EV driver stream is left");
+
+        assert!(err.to_string().contains("RNG stream"), "got: {err}");
+        assert_eq!(roster_fingerprint(&dwelling), before);
+    }
+
+    /// Attaching a tariff mid-run rebuilds the built-in actors with its
+    /// prices but keeps each existing EV driver's state, RNG position
+    /// included: a flat tariff leaves the default-strategy EV's trajectory
+    /// exactly as it is without one.
+    #[test]
+    fn a_mid_run_tariff_keeps_existing_ev_driver_state() {
+        let mut with_tariff = bestest_dwelling();
+        let mut without = bestest_dwelling();
+        for dwelling in [&mut with_tariff, &mut without] {
+            add_driven_ev(dwelling, "EV1");
+            net_power_kw(dwelling, 30);
+        }
+        let stream = driver_stream(&with_tariff, "EV1");
+        with_tariff
+            .set_tariff(ElectricTariff::default(), chrono_tz::Tz::UTC)
+            .expect("attach a tariff");
+
+        assert_eq!(driver_stream(&with_tariff, "EV1"), stream);
+        assert_eq!(
+            net_power_kw(&mut with_tariff, 96),
+            net_power_kw(&mut without, 96)
+        );
+    }
+
+    /// Replacing equipment in kind with equipment that rejects an actor's
+    /// signals evicts that actor rather than leaving it dispatching to a
+    /// target that refuses every command.
+    #[test]
+    fn replace_in_kind_evicts_actors_whose_signals_the_replacement_rejects() {
+        let mut dwelling = bestest_dwelling();
+        add_driven_ev(&mut dwelling, "EV1");
+        let stream = driver_stream(&dwelling, "EV1");
+
+        let another_ev = driven_ev("EV1", &dwelling.latest_env);
+        if let Err(err) = dwelling.replace_equipment("EV1", another_ev) {
+            panic!("replace the EV with another EV: {err}");
+        }
+        assert_eq!(
+            driver_stream(&dwelling, "EV1"),
+            stream,
+            "an EV accepts its driver's signals, so the driver stays"
+        );
+
+        if let Err(err) = dwelling.replace_equipment(
+            "EV1",
+            Box::new(TestEquipment::new(
+                "EV1",
+                ControlCapabilities::POWER_SETPOINT,
+            )),
+        ) {
+            panic!("replace in kind: {err}");
+        }
+
+        assert!(
+            !actor_names(&dwelling).contains(&"EvDriver:EV1".to_string()),
+            "the driver must leave with the EV: {:?}",
+            actor_names(&dwelling)
+        );
+    }
+
+    /// Every rejected add or replace returns `RejectedEquipment`, whether
+    /// or not the candidate raised warnings, with the reason inside.
+    #[test]
+    fn rejected_add_and_replace_return_rejected_equipment_without_warnings() {
+        let mut dwelling = bestest_dwelling();
+        let existing = dwelling
+            .equipment()
+            .first()
+            .expect("bestest assembles equipment")
+            .descriptor()
+            .name
+            .clone();
+
+        let add = dwelling.add_equipment(Box::new(TestEquipment::new(
+            &existing,
+            ControlCapabilities::empty(),
+        )));
+        let replace = dwelling.replace_equipment(
+            "No Such Equipment",
+            Box::new(TestEquipment::new("X", ControlCapabilities::empty())),
+        );
+
+        assert!(
+            matches!(
+                add,
+                Err(HaresError::RejectedEquipment { ref reason, ref warnings })
+                    if matches!(**reason, HaresError::Equipment(_)) && warnings.is_empty()
+            ),
+            "got: {add:?}"
+        );
+        assert!(
+            matches!(
+                replace,
+                Err(HaresError::RejectedEquipment { ref reason, ref warnings })
+                    if matches!(**reason, HaresError::Dwelling(_)) && warnings.is_empty()
+            ),
+            "got: {:?}",
+            replace.map(|_| ())
+        );
+    }
+
+    /// `add_equipment_with_actors` is one change: a supplied actor whose
+    /// name is taken rejects the equipment too, and an equipment whose name
+    /// is taken is rejected for that, ahead of its actors.
+    #[test]
+    fn add_equipment_with_actors_rejects_both_or_neither() {
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .add_actor(Box::new(StubActor {
+                name: "Taken".to_string(),
+            }))
+            .expect("add an actor");
+        let before = roster_fingerprint(&dwelling);
+
+        let taken_actor = dwelling.add_equipment_with_actors(
+            Box::new(TestEquipment::new("Fresh", ControlCapabilities::empty())),
+            vec![Box::new(StubActor {
+                name: "Taken".to_string(),
+            })],
+        );
+        assert!(
+            matches!(
+                &taken_actor,
+                Err(HaresError::RejectedEquipment { reason, .. })
+                    if matches!(**reason, HaresError::Control(_))
+            ),
+            "got: {taken_actor:?}"
+        );
+        assert_eq!(roster_fingerprint(&dwelling), before);
+
+        let existing = dwelling.equipment()[0].descriptor().name.clone();
+        let both_taken = dwelling.add_equipment_with_actors(
+            Box::new(TestEquipment::new(&existing, ControlCapabilities::empty())),
+            vec![Box::new(StubActor {
+                name: "Taken".to_string(),
+            })],
+        );
+        assert!(
+            matches!(
+                &both_taken,
+                Err(HaresError::RejectedEquipment { reason, .. })
+                    if matches!(**reason, HaresError::Equipment(_))
+            ),
+            "the duplicate equipment name is reported first: {both_taken:?}"
+        );
+        assert_eq!(roster_fingerprint(&dwelling), before);
+    }
+
+    /// A supplied actor holding the built-in actor's name takes its place:
+    /// no built-in driver is built and no driver stream is consumed.
+    #[test]
+    fn a_supplied_driver_replaces_the_built_in_one() {
+        let mut dwelling = bestest_dwelling();
+        let cursor = dwelling.next_ev_driver_stream;
+        let ev = driven_ev("EV1", &dwelling.latest_env);
+
+        dwelling
+            .add_equipment_with_actors(
+                ev,
+                vec![Box::new(StubActor {
+                    name: "EvDriver:EV1".to_string(),
+                })],
+            )
+            .expect("add the EV with its own driver");
+
+        assert_eq!(dwelling.next_ev_driver_stream, cursor);
+        assert!(
+            !dwelling
+                .auto_registered_actor_names
+                .contains("EvDriver:EV1")
+        );
+        assert_eq!(
+            actor_names(&dwelling)
+                .iter()
+                .filter(|n| n.as_str() == "EvDriver:EV1")
+                .count(),
+            1
+        );
+    }
+
+    /// Equipment whose `core_output` panics: a roster change that reads it
+    /// must panic before it changes anything.
+    struct PanickingCoreOutput {
+        inner: TestEquipment,
+    }
+
+    impl Equipment for PanickingCoreOutput {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            self.inner.descriptor()
+        }
+        fn rename(&mut self, name: String) {
+            self.inner.rename(name);
+        }
+        fn set_equipment_id(&mut self, id: EquipmentId) -> std::result::Result<(), HaresError> {
+            self.inner.set_equipment_id(id)
+        }
+        fn ports(&self) -> &[PortDeclaration] {
+            self.inner.ports()
+        }
+        fn init(
+            &mut self,
+            config: &EquipmentConfig,
+            env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), HaresError> {
+            self.inner.init(config, env)
+        }
+        fn update_control(&mut self, env: &hares_types::EnvironmentState) -> OperatingMode {
+            self.inner.update_control(env)
+        }
+        fn step(
+            &mut self,
+            env: &hares_types::EnvironmentState,
+            dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), HaresError> {
+            self.inner.step(env, dt, ports)
+        }
+        fn telemetry(&self) -> &Telemetry {
+            self.inner.telemetry()
+        }
+        fn core_output(&self) -> &CoreOutput {
+            panic!("core_output panics");
+        }
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            self.inner.save_state()
+        }
+        fn load_state(&mut self, state: &[u8]) -> std::result::Result<(), HaresError> {
+            self.inner.load_state(state)
+        }
+        fn apply_signal(&mut self, signal: &ControlSignal) -> std::result::Result<(), HaresError> {
+            self.inner.apply_signal(signal)
+        }
+    }
+
+    /// A panic raised by equipment code during a roster change leaves the
+    /// dwelling as it was: every call into equipment and actor code happens
+    /// before the change is committed.
+    #[test]
+    fn a_panicking_candidate_leaves_the_dwelling_unchanged() {
+        let mut dwelling = bestest_dwelling();
+        let before = roster_fingerprint(&dwelling);
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dwelling.add_equipment(Box::new(PanickingCoreOutput {
+                inner: TestEquipment::new("Panicky", ControlCapabilities::empty()),
+            }))
+        }));
+
+        assert!(panicked.is_err());
+        assert_eq!(roster_fingerprint(&dwelling), before);
     }
 
     /// With output disabled the step result still reports every zone's

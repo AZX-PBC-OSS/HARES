@@ -18,7 +18,7 @@ use hares_equipment::Equipment;
 use hares_io::{StreamingRecorder, build_schema};
 use hares_tariff::{ElectricTariff, TariffEvaluator};
 use hares_types::{
-    AmbientLocation, CustomAccumulator, EndUse, EquipmentId, FluidType, HaresError,
+    AmbientLocation, CoreOutput, CustomAccumulator, EndUse, EquipmentId, FluidType, HaresError,
     HumidityAccumulator, LoopId, PortDeclaration, PortSlots, ThermalAccumulator, Warning, ZoneId,
     telemetry_keys as tk,
 };
@@ -30,12 +30,12 @@ use crate::scheduler::{ActorSlot, ExecutionPhase};
 
 use super::conversions::build_output_column_index;
 use super::{
-    ActorPricing, Dwelling, EquipmentColumns, Result, ZoneColumnCaches, build_actor_column_map,
-    build_actors_from_seeds, build_end_use_aggregate_indices, build_equipment_column_map,
-    build_hvac_thermal_consistency, build_zone_column_caches, compute_equipment_dispatch_targets,
-    compute_equipment_execution_order, enrich_schema_with_telemetry_units,
-    equipment_descriptor_specs, extend_schema_with_actor_columns, validate_equipment_zones,
-    zone_display_name,
+    ActorPricing, Dwelling, EquipmentColumns, EvDriverRng, Result, ZoneColumnCaches,
+    build_actor_column_map, build_actors_from_seeds, build_end_use_aggregate_indices,
+    build_equipment_column_map, build_hvac_thermal_consistency, build_zone_column_caches,
+    compute_equipment_dispatch_targets, compute_equipment_execution_order,
+    enrich_schema_with_telemetry_units, equipment_descriptor_specs,
+    extend_schema_with_actor_columns, validate_equipment_zones, zone_display_name,
 };
 
 /// The values the per-step path reads that derive from the equipment and
@@ -117,6 +117,9 @@ struct RosterPlan {
     pre_step: Option<PreStepRosterCaches>,
     equipment_execution_order: Vec<usize>,
     equipment_ids: Vec<EquipmentId>,
+    /// The current core output of each equipment the environment snapshot
+    /// has no entry for yet (equipment joining the dwelling).
+    joining_core_outputs: Vec<(EquipmentId, CoreOutput)>,
     hvac_thermal_consistency: Vec<Vec<usize>>,
     zones: ZoneColumnCaches,
     output: OutputCachesPlan,
@@ -168,19 +171,16 @@ impl ActorRosterChange {
     }
 }
 
-/// Returns `err` with the warnings the rejected candidate raised during
-/// its own `init` attached. The candidate never joined the dwelling, so
-/// its warnings belong to the caller's error, not to the run's log.
+/// The error every rejected add or replace returns: the reason, with the
+/// warnings the rejected candidate raised during its own `init` (possibly
+/// none). The candidate never joined the dwelling, so its warnings belong
+/// to the caller's error, not to the run's log.
 fn reject_candidate(err: HaresError, candidate: &mut dyn Equipment) -> HaresError {
     let mut drained: Vec<Warning> = Vec::new();
     candidate.drain_warnings(&mut drained);
-    if drained.is_empty() {
-        err
-    } else {
-        HaresError::RejectedEquipment {
-            reason: Box::new(err),
-            warnings: drained.iter().map(Warning::to_string).collect(),
-        }
+    HaresError::RejectedEquipment {
+        reason: Box::new(err),
+        warnings: drained.iter().map(Warning::to_string).collect(),
     }
 }
 
@@ -288,13 +288,15 @@ impl Dwelling {
 
     /// Adds to `change` the built-in actors the actor seeds of `equipment`
     /// build, priced by `tariff`. A seed whose actor name the changed
-    /// roster already carries builds nothing.
+    /// roster already carries builds nothing; a driver rebuilt under the
+    /// name of one of `rebuilt` takes over its state.
     fn seed_built_in_actors(
         &self,
         change: &mut ActorRosterChange,
         equipment: &[Box<dyn Equipment>],
         tariff: Option<&TariffEvaluator>,
-    ) {
+        rebuilt: &[&dyn Actor],
+    ) -> Result<()> {
         let interval_secs = self.clock.time_res.num_seconds() as u32;
         assert!(
             interval_secs > 0,
@@ -303,7 +305,11 @@ impl Dwelling {
         let steps_per_day = 86_400 / interval_secs as usize;
         let price_schedule: Option<Arc<[f64]>> =
             tariff.and_then(|te| te.price_slice(0, te.total_steps()).map(Arc::from));
-        let mut next_ev_driver_stream = change.next_ev_driver_stream;
+        let mut driver_rng = EvDriverRng {
+            rng: &self.rng,
+            next_stream: change.next_ev_driver_stream,
+            rebuilt,
+        };
         let built_in = build_actors_from_seeds(
             equipment,
             &change.prospective(&self.actors),
@@ -313,11 +319,11 @@ impl Dwelling {
                 steps_per_day,
             },
             &self.equipment_id_by_name,
-            &self.rng,
-            &mut next_ev_driver_stream,
-        );
-        change.next_ev_driver_stream = next_ev_driver_stream;
+            &mut driver_rng,
+        )?;
+        change.next_ev_driver_stream = driver_rng.next_stream;
         change.built_in.extend(built_in);
+        Ok(())
     }
 
     fn commit_actor_change(&mut self, change: ActorRosterChange) {
@@ -352,33 +358,43 @@ impl Dwelling {
         self.rebuild_schedule();
     }
 
-    /// The change that rebuilds every built-in actor fresh from the
-    /// equipment's actor seeds, priced by `tariff`, keeping every user
-    /// actor.
-    fn plan_built_in_actor_rebuild(&self, tariff: Option<&TariffEvaluator>) -> ActorRosterChange {
-        let keep = self
+    /// The change that rebuilds every built-in actor from the equipment's
+    /// actor seeds, priced by `tariff`, keeping every user actor. A rebuilt
+    /// EV driver keeps the state of the driver it replaces.
+    fn plan_built_in_actor_rebuild(
+        &self,
+        tariff: Option<&TariffEvaluator>,
+    ) -> Result<ActorRosterChange> {
+        let keep: Vec<bool> = self
             .actors
             .iter()
             .map(|a| !self.auto_registered_actor_names.contains(a.name()))
             .collect();
+        let rebuilt: Vec<&dyn Actor> = self
+            .actors
+            .iter()
+            .zip(&keep)
+            .filter_map(|(actor, &keep)| (!keep).then_some(actor.as_ref()))
+            .collect();
         let mut change = self.actor_change(keep);
-        change.next_ev_driver_stream = 0;
-        self.seed_built_in_actors(&mut change, &self.equipment, tariff);
-        change
+        self.seed_built_in_actors(&mut change, &self.equipment, tariff, &rebuilt)?;
+        Ok(change)
     }
 
     /// Rebuilds the built-in BMS and EV driver actors from the equipment's
     /// actor seeds with the current tariff's prices.
     ///
     /// Built-in actors run ahead of user actors. A seed whose actor name a
-    /// user actor already holds builds nothing.
+    /// user actor already holds builds nothing. A rebuilt EV driver keeps
+    /// the state of the driver it replaces, its RNG stream and position
+    /// included; a battery management actor restarts from the new prices.
     ///
     /// # Errors
     ///
     /// The roster plan's error; on `Err` the actor roster and schedule are
     /// exactly as before the call.
     pub fn auto_register_actors(&mut self) -> Result<()> {
-        let change = self.plan_built_in_actor_rebuild(self.tariff_evaluator.as_ref());
+        let change = self.plan_built_in_actor_rebuild(self.tariff_evaluator.as_ref())?;
         let plan =
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
         self.commit_actor_change(change);
@@ -403,7 +419,7 @@ impl Dwelling {
         let end = (self.clock.start_time + self.clock.duration).with_timezone(&tz);
         let interval_secs = self.clock.time_res.num_seconds() as u32;
         let evaluator = TariffEvaluator::new(tariff, start, end, interval_secs)?;
-        let change = self.plan_built_in_actor_rebuild(Some(&evaluator));
+        let change = self.plan_built_in_actor_rebuild(Some(&evaluator))?;
         let plan =
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
         // Parse warnings report in every run the tariff is attached to: a
@@ -436,10 +452,10 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// The entrance validation's or the roster plan's error. On `Err` the
-    /// dwelling is exactly as before the call, and the error carries the
-    /// warnings the equipment raised during its own `init`
-    /// ([`HaresError::RejectedEquipment`]).
+    /// [`HaresError::RejectedEquipment`], whose reason is the entrance
+    /// validation's or the roster plan's error and which carries the
+    /// warnings the equipment raised during its own `init`. On `Err` the
+    /// dwelling is exactly as before the call.
     pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) -> Result<()> {
         self.add_equipment_with_actors(eq, Vec::new())
     }
@@ -450,37 +466,41 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// As [`Self::add_equipment`], and `HaresError::Control` when a
-    /// supplied actor's name is already registered.
+    /// As [`Self::add_equipment`]; the reason is `HaresError::Control` when
+    /// the equipment passes its own validation but a supplied actor's name
+    /// is already registered.
     pub fn add_equipment_with_actors(
         &mut self,
         mut eq: Box<dyn Equipment>,
         actors: Vec<Box<dyn Actor>>,
     ) -> Result<()> {
-        let planned_next_equipment_id = self
-            .ensure_actor_names_free(&actors)
-            .and_then(|()| self.validate_candidate_equipment(&mut eq))
-            .map_err(|err| reject_candidate(err, eq.as_mut()))?;
+        let planned = self
+            .validate_candidate_equipment(&mut eq)
+            .and_then(|next_equipment_id| {
+                self.ensure_actor_names_free(&actors)?;
+                let mut change = self.actor_change(vec![true; self.actors.len()]);
+                change.supplied = actors;
+                self.seed_built_in_actors(
+                    &mut change,
+                    std::slice::from_ref(&eq),
+                    self.tariff_evaluator.as_ref(),
+                    &[],
+                )?;
+                let mut equipment = self.equipment_refs();
+                equipment.push(eq.as_ref());
+                let plan =
+                    self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?;
+                Ok((next_equipment_id, change, plan))
+            });
+        let (next_equipment_id, change, plan) =
+            planned.map_err(|err| reject_candidate(err, eq.as_mut()))?;
+        let mut joined_warnings: Vec<Warning> = Vec::new();
+        eq.drain_warnings(&mut joined_warnings);
         // Post-registration LUT mutation through the Equipment trait
         // setters is rejected from here on.
         eq.mark_initialized();
-        let mut change = self.actor_change(vec![true; self.actors.len()]);
-        change.supplied = actors;
-        self.seed_built_in_actors(
-            &mut change,
-            std::slice::from_ref(&eq),
-            self.tariff_evaluator.as_ref(),
-        );
-        let plan = {
-            let mut equipment = self.equipment_refs();
-            equipment.push(eq.as_ref());
-            self.plan_roster_caches(&equipment, &change.prospective(&self.actors))
-        };
-        let plan = plan.map_err(|err| reject_candidate(err, eq.as_mut()))?;
 
-        self.next_equipment_id = planned_next_equipment_id;
-        let mut joined_warnings: Vec<Warning> = Vec::new();
-        eq.drain_warnings(&mut joined_warnings);
+        self.next_equipment_id = next_equipment_id;
         for warning in joined_warnings {
             self.warnings.push_warning(warning);
         }
@@ -786,72 +806,84 @@ impl Dwelling {
     /// surviving equipment's (the evictee's own name is exempt:
     /// replace-in-kind).
     ///
-    /// Actors follow the name: when the replacement keeps the replaced
-    /// name, the actors targeting it stay and re-bind to the replacement;
-    /// when it takes another name, they are evicted as on removal. The
-    /// replacement's actor seed builds its built-in actor unless an actor
-    /// already holds that actor's name.
+    /// Actors follow the name while the replacement accepts their signals:
+    /// when the replacement keeps the replaced name, the actors targeting
+    /// it stay and re-bind to the replacement unless the replacement lacks
+    /// a control capability they require
+    /// ([`Actor::required_control_capabilities`]), in which case they are
+    /// evicted; when the replacement takes another name, every actor
+    /// targeting the old name is evicted, as on removal. The replacement's
+    /// actor seed builds its built-in actor unless an actor already holds
+    /// that actor's name.
     ///
     /// # Errors
     ///
-    /// `HaresError::Dwelling` when no equipment has the name; the entrance
-    /// validation's or the roster plan's error otherwise. On `Err` the
-    /// dwelling is exactly as before the call, and the error carries the
-    /// warnings the replacement raised during its own `init`.
+    /// [`HaresError::RejectedEquipment`], whose reason is
+    /// `HaresError::Dwelling` when no equipment has the name, and the
+    /// entrance validation's or the roster plan's error otherwise. On `Err`
+    /// the dwelling is exactly as before the call.
     pub fn replace_equipment(
         &mut self,
         name: &str,
         mut new_equipment: Box<dyn Equipment>,
     ) -> Result<Box<dyn Equipment>> {
-        let Some(pos) = self
+        let planned = self
             .equipment
             .iter()
             .position(|e| e.descriptor().name == name)
-        else {
-            return Err(reject_candidate(
-                HaresError::Dwelling(format!("equipment '{name}' not found")),
-                new_equipment.as_mut(),
-            ));
-        };
-        let planned_next_equipment_id = self
-            .validate_replacement_equipment(&mut new_equipment, name, pos)
-            .map_err(|err| reject_candidate(err, new_equipment.as_mut()))?;
-        new_equipment.mark_initialized();
-        let renamed = new_equipment.descriptor().name != name;
-        let mut change = self.actor_change(
-            self.actors
-                .iter()
-                .map(|a| !renamed || a.dispatch_target_name() != Some(name))
-                .collect(),
-        );
-        self.seed_built_in_actors(
-            &mut change,
-            std::slice::from_ref(&new_equipment),
-            self.tariff_evaluator.as_ref(),
-        );
-        let plan = {
-            let mut equipment = self.equipment_refs();
-            equipment[pos] = new_equipment.as_ref();
-            self.plan_roster_caches(&equipment, &change.prospective(&self.actors))
-        };
-        let plan = plan.map_err(|err| reject_candidate(err, new_equipment.as_mut()))?;
-
-        self.next_equipment_id = planned_next_equipment_id;
-        let mut old = std::mem::replace(&mut self.equipment[pos], new_equipment);
+            .ok_or_else(|| HaresError::Dwelling(format!("equipment '{name}' not found")))
+            .and_then(|pos| {
+                let next_equipment_id =
+                    self.validate_replacement_equipment(&mut new_equipment, name, pos)?;
+                Ok((pos, next_equipment_id))
+            })
+            .and_then(|(pos, next_equipment_id)| {
+                let replacement = new_equipment.descriptor();
+                let renamed = replacement.name != name;
+                let accepted = replacement.control_capabilities;
+                let mut change = self.actor_change(
+                    self.actors
+                        .iter()
+                        .map(|a| {
+                            a.dispatch_target_name() != Some(name)
+                                || (!renamed
+                                    && accepted.contains(a.required_control_capabilities()))
+                        })
+                        .collect(),
+                );
+                self.seed_built_in_actors(
+                    &mut change,
+                    std::slice::from_ref(&new_equipment),
+                    self.tariff_evaluator.as_ref(),
+                    &[],
+                )?;
+                let mut equipment = self.equipment_refs();
+                equipment[pos] = new_equipment.as_ref();
+                let plan =
+                    self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?;
+                Ok((pos, next_equipment_id, change, plan))
+            });
+        let (pos, next_equipment_id, change, plan) =
+            planned.map_err(|err| reject_candidate(err, new_equipment.as_mut()))?;
         // The evicted equipment's deferred step warnings drain before it
         // leaves: unstamped before the first step, stamped with the step in
-        // flight after.
+        // flight after. Every call into equipment code happens before the
+        // change is committed.
         let mut drained: Vec<Warning> = Vec::new();
-        old.drain_warnings(&mut drained);
-        for warning in &mut drained {
-            if self.clock.current_step > 0 {
+        self.equipment[pos].drain_warnings(&mut drained);
+        if self.clock.current_step > 0 {
+            for warning in &mut drained {
                 warning.step_index = Some(self.clock.current_step);
             }
         }
-        self.equipment[pos].drain_warnings(&mut drained);
+        new_equipment.drain_warnings(&mut drained);
+        new_equipment.mark_initialized();
+
+        self.next_equipment_id = next_equipment_id;
         for warning in drained {
             self.warnings.push_warning(warning);
         }
+        let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
         Ok(old)
@@ -1046,6 +1078,14 @@ impl Dwelling {
             column_index,
         );
 
+        let joining_core_outputs = equipment
+            .iter()
+            .map(|eq| eq.descriptor().id)
+            .zip(equipment)
+            .filter(|(id, _)| !self.latest_env.equipment_core.contains_key(id))
+            .map(|(id, eq)| (id, eq.core_output().clone()))
+            .collect();
+
         Ok(RosterPlan {
             equipment_id_by_name,
             dispatch_targets: compute_equipment_dispatch_targets(equipment),
@@ -1053,6 +1093,7 @@ impl Dwelling {
             pre_step,
             equipment_execution_order: compute_equipment_execution_order(equipment),
             equipment_ids: equipment.iter().map(|eq| eq.descriptor().id).collect(),
+            joining_core_outputs,
             hvac_thermal_consistency,
             zones,
             output,
@@ -1110,9 +1151,12 @@ impl Dwelling {
     }
 
     /// Installs a plan computed by [`Self::plan_roster_caches`]. Every
-    /// fallible decision already happened in the plan, so nothing here can
-    /// fail. Every entrance commits its new equipment and actor rosters
-    /// immediately before calling this.
+    /// fallible decision, and every read of equipment output, already
+    /// happened in the plan, so nothing here can fail or run equipment
+    /// code; the only actor code it runs is the name accessor and
+    /// [`Actor::resolve_equipment_id`], which must not panic. Every
+    /// entrance commits its new equipment and actor rosters immediately
+    /// before calling this.
     fn install_roster_caches(&mut self, plan: RosterPlan) {
         self.equipment_id_by_name = plan.equipment_id_by_name;
         // Every actor's equipment binding goes stale on any identity change
@@ -1144,12 +1188,9 @@ impl Dwelling {
         self.latest_env.equipment_telemetry.retain(|name, _| {
             name == tk::HUMIDITY_SOLVER_TELEMETRY_KEY || live_names.contains_key(name)
         });
-        for eq in &self.equipment {
-            self.latest_env
-                .equipment_core
-                .entry(eq.descriptor().id)
-                .or_insert_with(|| eq.core_output().clone());
-        }
+        self.latest_env
+            .equipment_core
+            .extend(plan.joining_core_outputs);
         self.solver_feedback_actor
             .set_dispatch_targets(plan.dispatch_targets);
         self.environment

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use hares_envelope::FluidSolver;
-use hares_types::{HaresError, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ZoneId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -78,6 +78,7 @@ impl Dwelling {
                 })
                 .collect::<Result<Vec<_>>>()?,
             prior_electrical_summary: self.prior_electrical_summary.clone(),
+            next_ev_driver_stream: self.next_ev_driver_stream,
         })
     }
 
@@ -92,8 +93,12 @@ impl Dwelling {
         self.validate_building_state(&cp)?;
         let equipment_blobs = self.matched_equipment_blobs(&cp)?;
         let actor_blobs = self.matched_actor_blobs(&cp)?;
+        let last_step_env = self.last_step_environment(cp.timestep_index)?;
         self.load_component_states(&equipment_blobs, &actor_blobs)?;
 
+        if let Some(env) = last_step_env {
+            self.latest_env = env;
+        }
         self.apply_building_state(&cp)?;
         self.clock.current_step = cp.timestep_index;
         let mut restored_rng = ChaCha8Rng::from_seed(cp.rng_state);
@@ -101,6 +106,7 @@ impl Dwelling {
         restored_rng.set_word_pos(cp.rng_word_pos);
         self.rng = restored_rng;
         self.prior_electrical_summary = cp.prior_electrical_summary;
+        self.next_ev_driver_stream = cp.next_ev_driver_stream;
 
         // Populate latest_env.equipment_core and equipment_telemetry from the
         // restored equipment state so that actors read correct SOC, power flows,
@@ -126,6 +132,24 @@ impl Dwelling {
         self.clock.current_step = 0;
         self.snapshot_equipment_state();
         Ok(())
+    }
+
+    /// The environment snapshot of the step before `timestep_index`, as the
+    /// run that wrote the checkpoint holds it between steps: equipment
+    /// initialised against it before the next step (an add after a resume)
+    /// sees the same time and weather as in that run. Computed on a copy,
+    /// so a failure leaves the dwelling's snapshot unchanged. `None` for a
+    /// checkpoint taken before the first step.
+    fn last_step_environment(&mut self, timestep_index: u64) -> Result<Option<EnvironmentState>> {
+        let Some(last_step) = timestep_index.checked_sub(1) else {
+            return Ok(None);
+        };
+        let mut last_step_clock = self.clock.clone();
+        last_step_clock.current_step = last_step;
+        let mut env = self.latest_env.clone();
+        self.environment
+            .update_in_place(&mut env, &last_step_clock)?;
+        Ok(Some(env))
     }
 
     /// Checks the format version and the building physics part of `cp`
