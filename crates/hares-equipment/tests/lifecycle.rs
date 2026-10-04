@@ -36,6 +36,7 @@ use hares_equipment::{
         TanklessWaterHeaterConfig,
     },
 };
+use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     ControlSignal, CoreCapabilities, CoreOutput, EnvironmentState, EquipmentDescriptor, FuelType,
     OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, telemetry_keys as tk,
@@ -1315,7 +1316,8 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 ("sensible_gain_fraction", 0.0),
             ],
             &[("event_window_source", "constant")],
-        ),
+        )
+        .with_rng_stream(RngStream::event_load(dwelling_seed(0, 0), class)),
         _ => config_mixed(
             class,
             class,

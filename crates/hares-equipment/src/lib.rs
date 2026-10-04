@@ -337,6 +337,12 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// Whether `init` draws from `EquipmentConfig::rng_stream`. The dwelling
+    /// assigns a stream only to equipment that returns `true`.
+    fn uses_rng_stream(&self) -> bool {
+        false
+    }
+
     /// Returns the per-timestep effective ventilation recovery efficiencies
     /// `(sensible, latent)` if this equipment is a ventilation device (HRV/ERV).
     ///

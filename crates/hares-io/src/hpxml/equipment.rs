@@ -1491,6 +1491,57 @@ mod tests {
     }
 
     #[test]
+    fn appliance_specs_carry_their_hpxml_system_identifier() {
+        let xml = minimal_appliance_xml(
+            "<ClothesWasher><SystemIdentifier id='Washer-Laundry'/></ClothesWasher>\
+             <ClothesWasher><SystemIdentifier id='Washer-Garage'/></ClothesWasher>\
+             <CookingRange />",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let washer_ids: Vec<Option<&str>> = specs
+            .iter()
+            .filter(|s| s.name == "Clothes Washer")
+            .map(|s| s.system_id.as_deref())
+            .collect();
+        assert_eq!(washer_ids, [Some("Washer-Laundry"), Some("Washer-Garage")]);
+        assert_eq!(find_spec(&specs, "Cooking Range").system_id, None);
+    }
+
+    #[test]
+    fn same_type_appliances_without_unique_ids_are_rejected() {
+        for (inner, expected) in [
+            (
+                "<Microwave><SystemIdentifier id='M1'/></Microwave><Microwave />",
+                "need a SystemIdentifier id each",
+            ),
+            (
+                "<Microwave><SystemIdentifier id='M1'/></Microwave>\
+                 <Microwave><SystemIdentifier id='M1'/></Microwave>",
+                "duplicate SystemIdentifier id 'M1'",
+            ),
+        ] {
+            let building = parse_building(&minimal_appliance_xml(inner)).expect("should parse");
+            let err = resolve_equipment(
+                &building,
+                &DefaultsStore::empty(),
+                &json!({}),
+                None,
+                &mut Vec::new(),
+            )
+            .expect_err("same-type appliances need unique ids");
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
     fn clothes_washer_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<ClothesWasher />");
         let building = parse_building(&xml).expect("should parse");

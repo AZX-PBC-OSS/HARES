@@ -149,6 +149,18 @@ static ISLAND_UNSERVED_WARNED: std::sync::atomic::AtomicBool =
 /// `TimeStep` for sub-hourly simulation.
 const PV_RE_EVAL_MIN_STEP_SECS: f64 = 300.0;
 
+/// The identity a spec's random stream is keyed by: its HPXML
+/// SystemIdentifier id, else the instance name its caller gave it, else its
+/// class name. Two event loads with the same identity are rejected at
+/// assembly rather than told apart by their order.
+fn rng_identity(spec: &hares_io::EquipmentSpec) -> String {
+    spec.system_id
+        .as_ref()
+        .or(spec.instance_name.as_ref())
+        .unwrap_or(&spec.name)
+        .clone()
+}
+
 fn create_equipment_from_spec(
     registry: &EquipmentRegistry,
     spec: &hares_io::EquipmentSpec,
@@ -2525,6 +2537,10 @@ fn build_from_blueprint_inner(
         }
     }
 
+    // Captured before instance naming, which numbers same-class specs by
+    // their order and so is not a stable identity for a random stream.
+    let rng_identities: Vec<String> = equipment_specs.iter().map(rng_identity).collect();
+
     // Deduplicate equipment instance names before the uniqueness check.
     // Blueprint callers may add specs with the same name (e.g. two "PV"
     // arrays) via add_equipment_spec(); assign canonical "Name #N" instance
@@ -2551,8 +2567,8 @@ fn build_from_blueprint_inner(
 
     let registry = EquipmentRegistry::new();
     let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
-    let mut equipment_by_rng_stream: HashMap<u64, String> = HashMap::new();
-    for spec in &equipment_specs {
+    let mut equipment_by_rng_stream: HashMap<u64, (String, &str)> = HashMap::new();
+    for (spec, rng_identity) in equipment_specs.iter().zip(&rng_identities) {
         if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
             continue;
         }
@@ -2579,17 +2595,34 @@ fn build_from_blueprint_inner(
             merged_cfg.setpoints_reconciled.clone(),
         );
         merged_cfg.zone_map = Some(zone_map.clone());
-        let rng_stream = RngStream::event_load(rng.get_seed(), &merged_cfg.name);
-        if let Some(other) =
-            equipment_by_rng_stream.insert(rng_stream.stream, merged_cfg.name.clone())
-        {
-            return Err(HaresError::Dwelling(format!(
-                "equipment '{other}' and '{}' map to the same random stream \
-                 {:#x}; rename one of them",
-                merged_cfg.name, rng_stream.stream
-            )));
+        if eq.uses_rng_stream() {
+            let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
+            if let Some((other, other_identity)) = equipment_by_rng_stream
+                .insert(rng_stream.stream, (merged_cfg.name.clone(), rng_identity))
+            {
+                return Err(HaresError::Dwelling(format!(
+                    "event loads '{other}' (identity '{other_identity}') and '{}' \
+                     (identity '{rng_identity}') map to the same random stream; give \
+                     each a unique HPXML SystemIdentifier id or instance name",
+                    merged_cfg.name
+                )));
+            }
+            merged_cfg.rng_stream = Some(rng_stream);
         }
-        merged_cfg.rng_stream = Some(rng_stream);
+        if eq.uses_rng_stream() {
+            let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
+            if let Some((other, other_identity)) = equipment_by_rng_stream
+                .insert(rng_stream.stream, (merged_cfg.name.clone(), rng_identity))
+            {
+                return Err(HaresError::Dwelling(format!(
+                    "event loads '{other}' (identity '{other_identity}') and '{}' \
+                     (identity '{rng_identity}') map to the same random stream; give \
+                     each a unique HPXML SystemIdentifier id or instance name",
+                    merged_cfg.name
+                )));
+            }
+            merged_cfg.rng_stream = Some(rng_stream);
+        }
         // The served zone as HVAC resolves it: the config's zone_id, else
         // the conditioned zone. Only HVAC's equivalent battery model reads
         // the capacitance.

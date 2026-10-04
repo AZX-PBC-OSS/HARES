@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::Datelike;
 
-use hares_types::rng::{RngStream, dwelling_seed};
+use hares_types::rng::RngStream;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
@@ -33,8 +33,6 @@ const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 2;
 /// ChaCha8 words consumed by one `f64` start draw.
 const WORDS_PER_DRAW: u128 = 2;
 
-const KEY_BUILDING_ID: &str = "building_id";
-const KEY_MASTER_SEED: &str = "master_seed";
 const KEY_N_UNITS: &str = "n_units";
 const KEY_ACTIVE_POWER_KW: &str = "active_power_kw";
 const KEY_ACTIVE_DURATION_S: &str = "active_duration_s";
@@ -244,9 +242,8 @@ pub struct EventBasedLoad {
     power_setpoint_override: Option<f64>,
     delay_remaining_s: f64,
 
-    rng_stream: RngStream,
-    rng_draws: u64,
-    rng: ChaCha8Rng,
+    /// `None` until `init` (or a checkpoint restore) supplies the stream.
+    start_draws: Option<StartDraws>,
 
     /// Pre-extracted deterministic events from schedule kW series.
     extracted_events: Vec<ExtractedEvent>,
@@ -292,9 +289,8 @@ pub struct WetAppliance {
 
     hot_water_draw_rate_kg_s: f64,
 
-    rng_stream: RngStream,
-    rng_draws: u64,
-    rng: ChaCha8Rng,
+    /// `None` until `init` (or a checkpoint restore) supplies the stream.
+    start_draws: Option<StartDraws>,
 
     /// Pre-extracted deterministic events from schedule kW series.
     extracted_events: Vec<ExtractedEvent>,
@@ -333,7 +329,6 @@ impl EventBasedLoad {
             zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
-        let rng_stream = derive_rng_stream(&config);
         Self {
             descriptor,
             ports,
@@ -354,9 +349,7 @@ impl EventBasedLoad {
             forced_mode: None,
             power_setpoint_override: None,
             delay_remaining_s: 0.0,
-            rng_stream,
-            rng_draws: 0,
-            rng: rng_stream.rng_at(0),
+            start_draws: config.rng_stream.map(|stream| StartDraws::at(stream, 0)),
             extracted_events: Vec::new(),
             event_cursor: 0,
             current_step: 0,
@@ -365,30 +358,17 @@ impl EventBasedLoad {
         }
     }
 
-    fn maybe_start_event(&mut self, window_open: bool, probability: f64) {
-        if self.phase != EventPhase::Idle {
-            return;
-        }
-        if self.delay_remaining_s > 0.0 {
-            return;
+    fn maybe_start_event(&mut self, window_open: bool, probability: f64) -> crate::Result<()> {
+        if self.phase != EventPhase::Idle || self.delay_remaining_s > 0.0 {
+            return Ok(());
         }
         let should_start = match self.forced_mode {
             Some(ForcedMode::Idle) => false,
             Some(ForcedMode::Active) => true,
             None => {
-                if !window_open {
-                    false
-                } else {
-                    let p = probability.clamp(0.0, 1.0);
-                    if p <= 0.0 {
-                        false
-                    } else if p >= 1.0 {
-                        true
-                    } else {
-                        self.rng_draws = self.rng_draws.saturating_add(1);
-                        self.rng.random::<f64>() < p
-                    }
-                }
+                window_open
+                    && require_stream(self.start_draws.as_mut(), &self.descriptor.name)?
+                        .starts(probability)
             }
         };
 
@@ -396,6 +376,7 @@ impl EventBasedLoad {
             self.phase = EventPhase::Active;
             self.remaining_phase_s = self.active_duration_s;
         }
+        Ok(())
     }
 
     fn apply_overrides(&mut self) {
@@ -569,6 +550,10 @@ impl Equipment for EventBasedLoad {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn uses_rng_stream(&self) -> bool {
+        true
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -702,9 +687,10 @@ impl Equipment for EventBasedLoad {
             self.ports.push(PortDeclaration::fuel());
         }
 
-        self.rng_stream = derive_rng_stream(config);
-        self.rng_draws = 0;
-        self.rng = self.rng_stream.rng_at(0);
+        self.start_draws = Some(StartDraws::at(
+            require_stream(config.rng_stream, &config.name)?,
+            0,
+        ));
 
         // If a kW time series was provided, pre-extract events for deterministic replay.
         if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
@@ -783,7 +769,7 @@ impl Equipment for EventBasedLoad {
             // Stochastic fallback (no schedule data).
             let window_open = self.event_window_source.value_at(env)? > 0.0;
             let probability = self.event_probability_source.value_at(env)?;
-            self.maybe_start_event(window_open, probability);
+            self.maybe_start_event(window_open, probability)?;
         }
 
         let month_scale = self
@@ -819,14 +805,15 @@ impl Equipment for EventBasedLoad {
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
+        let start_draws = require_stream(self.start_draws.as_ref(), &self.descriptor.name)?;
         try_save_versioned(
             &EventBasedLoadState {
                 phase: self.phase,
                 remaining_phase_s: self.remaining_phase_s,
                 load_fraction: self.load_fraction,
                 forced_mode: self.forced_mode,
-                rng_stream: self.rng_stream,
-                rng_draws: self.rng_draws,
+                rng_stream: start_draws.stream,
+                rng_draws: start_draws.draws,
                 event_window_source_state: capture_schedule_source_state(&self.event_window_source),
                 event_probability_source_state: capture_schedule_source_state(
                     &self.event_probability_source,
@@ -852,14 +839,10 @@ impl Equipment for EventBasedLoad {
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
-        self.rng_stream = decoded.rng_stream;
-        self.rng_draws = decoded.rng_draws;
+        self.start_draws = Some(StartDraws::at(decoded.rng_stream, decoded.rng_draws));
         self.event_cursor = decoded.event_cursor;
         self.current_step = decoded.current_step;
 
-        self.rng = self
-            .rng_stream
-            .rng_at(u128::from(self.rng_draws) * WORDS_PER_DRAW);
         restore_schedule_source_state(
             &mut self.event_window_source,
             &decoded.event_window_source_state,
@@ -975,7 +958,6 @@ impl WetAppliance {
             zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
-        let rng_stream = derive_rng_stream(&config);
         Self {
             descriptor,
             ports,
@@ -1001,9 +983,7 @@ impl WetAppliance {
             forced_mode: None,
             delay_remaining_s: 0.0,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_stream,
-            rng_draws: 0,
-            rng: rng_stream.rng_at(0),
+            start_draws: config.rng_stream.map(|stream| StartDraws::at(stream, 0)),
             extracted_events: Vec::new(),
             event_cursor: 0,
             current_step: 0,
@@ -1012,30 +992,17 @@ impl WetAppliance {
         }
     }
 
-    fn maybe_start_cycle(&mut self, window_open: bool, probability: f64) {
-        if self.active {
-            return;
-        }
-        if self.delay_remaining_s > 0.0 {
-            return;
+    fn maybe_start_cycle(&mut self, window_open: bool, probability: f64) -> crate::Result<()> {
+        if self.active || self.delay_remaining_s > 0.0 {
+            return Ok(());
         }
         let should_start = match self.forced_mode {
             Some(ForcedMode::Idle) => false,
             Some(ForcedMode::Active) => true,
             None => {
-                if !window_open {
-                    false
-                } else {
-                    let p = probability.clamp(0.0, 1.0);
-                    if p <= 0.0 {
-                        false
-                    } else if p >= 1.0 {
-                        true
-                    } else {
-                        self.rng_draws = self.rng_draws.saturating_add(1);
-                        self.rng.random::<f64>() < p
-                    }
-                }
+                window_open
+                    && require_stream(self.start_draws.as_mut(), &self.descriptor.name)?
+                        .starts(probability)
             }
         };
 
@@ -1044,6 +1011,7 @@ impl WetAppliance {
             self.phase_index = 0;
             self.elapsed_in_phase_s = 0.0;
         }
+        Ok(())
     }
 
     fn apply_overrides(&mut self) {
@@ -1256,6 +1224,10 @@ impl Equipment for WetAppliance {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn uses_rng_stream(&self) -> bool {
+        true
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -1433,9 +1405,10 @@ impl Equipment for WetAppliance {
         }
         self.core_output = CoreOutput::default();
 
-        self.rng_stream = derive_rng_stream(config);
-        self.rng_draws = 0;
-        self.rng = self.rng_stream.rng_at(0);
+        self.start_draws = Some(StartDraws::at(
+            require_stream(config.rng_stream, &config.name)?,
+            0,
+        ));
 
         // If a kW time series was provided, pre-extract events for deterministic replay.
         if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
@@ -1511,7 +1484,7 @@ impl Equipment for WetAppliance {
             // Stochastic fallback.
             let window_open = self.event_window_source.value_at(env)? > 0.0;
             let probability = self.event_probability_source.value_at(env)?;
-            self.maybe_start_cycle(window_open, probability);
+            self.maybe_start_cycle(window_open, probability)?;
         }
 
         let month_scale = self
@@ -1546,6 +1519,7 @@ impl Equipment for WetAppliance {
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
+        let start_draws = require_stream(self.start_draws.as_ref(), &self.descriptor.name)?;
         try_save_versioned(
             &WetApplianceState {
                 active: self.active,
@@ -1554,8 +1528,8 @@ impl Equipment for WetAppliance {
                 load_fraction: self.load_fraction,
                 forced_mode: self.forced_mode,
                 hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
-                rng_stream: self.rng_stream,
-                rng_draws: self.rng_draws,
+                rng_stream: start_draws.stream,
+                rng_draws: start_draws.draws,
                 event_window_source_state: capture_schedule_source_state(&self.event_window_source),
                 event_probability_source_state: capture_schedule_source_state(
                     &self.event_probability_source,
@@ -1604,12 +1578,7 @@ impl Equipment for WetAppliance {
             self.ports.push(PortDeclaration::fuel());
         }
 
-        self.rng_stream = decoded.rng_stream;
-        self.rng_draws = decoded.rng_draws;
-
-        self.rng = self
-            .rng_stream
-            .rng_at(u128::from(self.rng_draws) * WORDS_PER_DRAW);
+        self.start_draws = Some(StartDraws::at(decoded.rng_stream, decoded.rng_draws));
         restore_schedule_source_state(
             &mut self.event_window_source,
             &decoded.event_window_source_state,
@@ -1920,16 +1889,47 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
     Ok(Some(value))
 }
 
-/// The dwelling injects each load's stream before `init()`. A load built
-/// outside a dwelling derives the same stream a dwelling with its
-/// `master_seed` and `building_id` would give it.
-fn derive_rng_stream(config: &EquipmentConfig) -> RngStream {
-    if let Some(stream) = config.rng_stream {
-        return stream;
+/// An event load's random stream and the start draws taken from it.
+#[derive(Clone, Debug)]
+struct StartDraws {
+    stream: RngStream,
+    draws: u64,
+    rng: ChaCha8Rng,
+}
+
+impl StartDraws {
+    fn at(stream: RngStream, draws: u64) -> Self {
+        Self {
+            stream,
+            draws,
+            rng: stream.rng_at(u128::from(draws) * WORDS_PER_DRAW),
+        }
     }
-    let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
-    let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
-    RngStream::event_load(dwelling_seed(master_seed, building_id), &config.name)
+
+    /// Whether an idle load starts: certain at `probability` outside (0, 1),
+    /// otherwise one draw.
+    fn starts(&mut self, probability: f64) -> bool {
+        let p = probability.clamp(0.0, 1.0);
+        if p <= 0.0 {
+            false
+        } else if p >= 1.0 {
+            true
+        } else {
+            self.draws = self.draws.saturating_add(1);
+            self.rng.random::<f64>() < p
+        }
+    }
+}
+
+/// The dwelling assigns each event load its stream; a load built outside a
+/// dwelling must be given one through `EquipmentConfig::rng_stream`.
+fn require_stream<T>(stream: Option<T>, name: &str) -> crate::Result<T> {
+    stream.ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "event load '{name}' has no random stream: set EquipmentConfig::rng_stream \
+             when building it outside a dwelling"
+        ))
+    })
 }
 
 fn mode_to_forced(mode: OperatingMode) -> ForcedMode {
@@ -2079,9 +2079,10 @@ mod tests {
     };
 
     use super::{
-        EventBasedLoad, KEY_BUILDING_ID, KEY_MASTER_SEED, ResolvedZip, RngStream, WetAppliance,
-        ZipLoad, dwelling_seed, map_ochre_pdf_to_cycle_schedule,
+        EventBasedLoad, ResolvedZip, RngStream, WetAppliance, ZipLoad,
+        map_ochre_pdf_to_cycle_schedule,
     };
+    use hares_types::rng::dwelling_seed;
 
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
@@ -2132,6 +2133,16 @@ mod tests {
         }
     }
 
+    /// A raw config carrying the stream a dwelling would assign `name`.
+    fn raw_config(
+        name: String,
+        class_name: String,
+        raw: HashMap<String, crate::config::ConfigValue>,
+    ) -> EquipmentConfig {
+        let stream = RngStream::event_load(dwelling_seed(1234, 7), &name);
+        EquipmentConfig::raw(name, class_name, raw).with_rng_stream(stream)
+    }
+
     fn event_config(name: &str, class_name: &str) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
@@ -2142,9 +2153,7 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.4.into());
         raw.insert("latent_gain_fraction".to_string(), 0.1.into());
-        raw.insert("building_id".to_string(), 7.0.into());
-        raw.insert("master_seed".to_string(), 1234.0.into());
-        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
+        raw_config(name.to_string(), class_name.to_string(), raw)
     }
 
     fn wet_config(name: &str, class_name: &str, n_units: f64) -> EquipmentConfig {
@@ -2160,9 +2169,7 @@ mod tests {
         raw.insert("n_units".to_string(), n_units.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
         raw.insert("latent_gain_fraction".to_string(), 0.05.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
-        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
+        raw_config(name.to_string(), class_name.to_string(), raw)
     }
 
     fn set_schedule_payload(env: &mut EnvironmentState, values: Vec<f64>) {
@@ -2498,10 +2505,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 30.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
-        let config =
-            EquipmentConfig::raw("wrap_test".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("wrap_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut env = base_env();
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
@@ -2523,7 +2527,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         // No compact event schedule keys
-        let config = EquipmentConfig::raw("empty".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("empty".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &env);
         assert!(err.is_err(), "init with no schedule should fail");
@@ -2612,49 +2616,22 @@ mod tests {
         }
     }
 
-    // =======================================================================
-    // equipment_id in RNG seed: different names produce different seeds
-    // =======================================================================
-
     #[test]
-    fn different_equipment_names_produce_different_rng_sequences() {
+    fn init_without_a_stream_is_rejected() {
         let env = base_env();
+        let mut event = event_config("Dishwasher", "EventBasedLoad");
+        event.rng_stream = None;
+        let err = EventBasedLoad::new(event.clone())
+            .init(&event, &env)
+            .expect_err("an event load without a stream must not init");
+        assert!(err.to_string().contains("no random stream"), "{err}");
 
-        // Two configs with same master_seed and building_id but different names
-        let config_a = event_config("Dishwasher", "EventBasedLoad");
-        let config_b = event_config("Clothes Washer", "EventBasedLoad");
-
-        let mut eq_a = EventBasedLoad::new(config_a.clone());
-        eq_a.init(&config_a, &env).unwrap();
-        let mut eq_b = EventBasedLoad::new(config_b.clone());
-        eq_b.init(&config_b, &env).unwrap();
-
-        assert_ne!(
-            eq_a.rng_stream, eq_b.rng_stream,
-            "Different equipment names must produce different RNG streams"
-        );
-    }
-
-    #[test]
-    fn derive_rng_stream_uses_injected_stream_when_present() {
-        let mut cfg = event_config("Dishwasher", "EventBasedLoad");
-        let injected = RngStream {
-            seed: [0xAB; 32],
-            stream: 7,
-        };
-        cfg.rng_stream = Some(injected);
-        assert_eq!(super::derive_rng_stream(&cfg), injected);
-    }
-
-    #[test]
-    fn derive_rng_stream_without_injection_matches_the_dwelling_stream() {
-        let cfg = event_config("Dishwasher", "EventBasedLoad");
-        let master_seed = cfg.get_f64(KEY_MASTER_SEED).expect("master_seed") as u64;
-        let building_id = cfg.get_f64(KEY_BUILDING_ID).expect("building_id") as i64;
-        assert_eq!(
-            super::derive_rng_stream(&cfg),
-            RngStream::event_load(dwelling_seed(master_seed, building_id), "Dishwasher"),
-        );
+        let mut wet = wet_config("washer", "Clothes Washer", 1.0);
+        wet.rng_stream = None;
+        let err = WetAppliance::new(wet.clone(), "Clothes Washer")
+            .init(&wet, &env)
+            .expect_err("a wet appliance without a stream must not init");
+        assert!(err.to_string().contains("no random stream"), "{err}");
     }
 
     #[test]
@@ -2668,25 +2645,9 @@ mod tests {
         cfg.rng_stream = Some(injected);
         let mut eq = EventBasedLoad::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
-        assert_eq!(eq.rng_stream, injected);
-        assert_eq!(eq.rng.get_stream(), 9);
-    }
-
-    #[test]
-    fn same_name_same_seed_produces_identical_rng() {
-        let env = base_env();
-        let config_a = event_config("Dishwasher", "EventBasedLoad");
-        let config_b = event_config("Dishwasher", "EventBasedLoad");
-
-        let mut eq_a = EventBasedLoad::new(config_a.clone());
-        eq_a.init(&config_a, &env).unwrap();
-        let mut eq_b = EventBasedLoad::new(config_b.clone());
-        eq_b.init(&config_b, &env).unwrap();
-
-        assert_eq!(
-            eq_a.rng_stream, eq_b.rng_stream,
-            "Same name + same config should produce identical streams"
-        );
+        let start_draws = eq.start_draws.as_ref().expect("init supplies the stream");
+        assert_eq!(start_draws.stream, injected);
+        assert_eq!(start_draws.rng.get_stream(), 9);
     }
 
     // =======================================================================
@@ -2708,7 +2669,7 @@ mod tests {
             load_fraction: 1.0,
             forced_mode: None,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_stream: eq.rng_stream,
+            rng_stream: eq.start_draws.as_ref().expect("initialized").stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
@@ -2750,9 +2711,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 1.0.into());
-        let config = EquipmentConfig::raw(
+        let config = raw_config(
             "setpoint_test".to_string(),
             "EventBasedLoad".to_string(),
             raw,
@@ -2822,7 +2781,7 @@ mod tests {
             load_fraction: 1.0,
             forced_mode: None,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_stream: eq.rng_stream,
+            rng_stream: eq.start_draws.as_ref().expect("initialized").stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
@@ -3494,14 +3453,11 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("latent_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
         raw.insert(
             "event_power_kw_series".to_string(),
             ConfigValue::FloatArray(kw_series),
         );
-        let config =
-            EquipmentConfig::raw("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut env = base_env();
         let mut eq = EventBasedLoad::new(config.clone());
@@ -3644,9 +3600,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 1.0.into());
-        let config = EquipmentConfig::raw(
+        let config = raw_config(
             "setpoint_active".to_string(),
             "EventBasedLoad".to_string(),
             raw,
@@ -3702,13 +3656,11 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
         raw.insert(
             "event_power_kw_series".to_string(),
             ConfigValue::FloatArray(kw_series),
         );
-        let config = EquipmentConfig::raw(
+        let config = raw_config(
             "field_unchanged".to_string(),
             "EventBasedLoad".to_string(),
             raw,
@@ -3750,10 +3702,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 1.0.into());
-        let config =
-            EquipmentConfig::raw("mode_test".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("mode_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
@@ -3788,10 +3737,8 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 1.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
-        let config = EquipmentConfig::raw("no_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("no_frac".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3810,10 +3757,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
-        let config =
-            EquipmentConfig::raw("neg_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("neg_frac".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3832,10 +3776,7 @@ mod tests {
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
-        let config =
-            EquipmentConfig::raw("over_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("over_frac".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3855,10 +3796,7 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
         raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
-        raw.insert("building_id".to_string(), 1.0.into());
-        raw.insert("master_seed".to_string(), 42.0.into());
-        let config =
-            EquipmentConfig::raw("overflow".to_string(), "EventBasedLoad".to_string(), raw);
+        let config = raw_config("overflow".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3877,10 +3815,8 @@ mod tests {
         raw.insert("phase_0_power_kw".to_string(), 0.5.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
-        let config = EquipmentConfig::raw("no_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let config = raw_config("no_frac".to_string(), "Clothes Washer".to_string(), raw);
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3900,10 +3836,7 @@ mod tests {
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
-        let config =
-            EquipmentConfig::raw("neg_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let config = raw_config("neg_frac".to_string(), "Clothes Washer".to_string(), raw);
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3923,10 +3856,7 @@ mod tests {
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
-        let config =
-            EquipmentConfig::raw("over_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let config = raw_config("over_frac".to_string(), "Clothes Washer".to_string(), raw);
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -3947,10 +3877,7 @@ mod tests {
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
         raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
-        let config =
-            EquipmentConfig::raw("overflow".to_string(), "Clothes Washer".to_string(), raw);
+        let config = raw_config("overflow".to_string(), "Clothes Washer".to_string(), raw);
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
@@ -4289,10 +4216,8 @@ mod tests {
         raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
         raw.insert("latent_gain_fraction".to_string(), 0.05.into());
         raw.insert("hot_water_draw_volume_l".to_string(), volume.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
         (
-            EquipmentConfig::raw(
+            raw_config(
                 "test_water_draw".to_string(),
                 "Clothes Washer".to_string(),
                 raw,
@@ -4377,7 +4302,7 @@ mod tests {
         raw.insert("phase_1_duration_s".to_string(), 120.0.into());
         // phase_1_has_water_draw intentionally absent
 
-        let config = EquipmentConfig::raw(
+        let config = raw_config(
             "test_parse_water_draw".to_string(),
             "Clothes Washer".to_string(),
             raw,
@@ -4396,8 +4321,7 @@ mod tests {
         raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("cycle_phase_0_has_water_draw".to_string(), true.into());
 
-        let config =
-            EquipmentConfig::raw("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
+        let config = raw_config("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
         let phases = super::parse_cycle_phases(&config).unwrap();
         assert_eq!(phases.len(), 1);
         assert!(phases[0].has_water_draw);
@@ -4460,15 +4384,13 @@ mod tests {
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
         raw.insert("latent_gain_fraction".to_string(), 0.5.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
         if let Some(dt) = dryer_type {
             raw.insert(
                 "dryer_type".to_string(),
                 crate::config::ConfigValue::Text(dt.to_string()),
             );
         }
-        EquipmentConfig::raw(name.to_string(), "Clothes Dryer".to_string(), raw)
+        raw_config(name.to_string(), "Clothes Dryer".to_string(), raw)
     }
 
     #[test]

@@ -606,6 +606,7 @@ mod dhw_integration_tests {
     use crate::event_load::WetAppliance;
     use crate::water_heater::resistance::ResistanceWH;
     use crate::{Equipment, EquipmentConfig};
+    use hares_types::rng::{RngStream, dwelling_seed};
 
     fn base_env() -> EnvironmentState {
         EnvironmentState {
@@ -665,10 +666,9 @@ mod dhw_integration_tests {
         raw.insert("phase_0_has_water_draw".to_string(), true.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
         raw.insert("hot_water_draw_volume_l".to_string(), draw_volume_l.into());
         EquipmentConfig::raw("washer".to_string(), "Clothes Washer".to_string(), raw)
+            .with_rng_stream(RngStream::event_load(dwelling_seed(987, 11), "washer"))
     }
 
     fn wh_config() -> EquipmentConfig {

@@ -3742,7 +3742,12 @@ mod tests {
             })
             .collect();
 
-        let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config);
+        let stream = hares_types::rng::RngStream::event_load(
+            hares_types::rng::dwelling_seed(0, 0),
+            &spec.name,
+        );
+        let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
+            .with_rng_stream(stream);
 
         let env = hares_types::EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),

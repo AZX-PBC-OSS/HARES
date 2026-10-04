@@ -22,16 +22,16 @@ pub struct RngStream {
 }
 
 impl RngStream {
-    /// The stream an event load named `name` draws from under the dwelling
-    /// key `seed`.
+    /// The stream an event load with the stable `identity` draws from under
+    /// the dwelling key `seed`.
     ///
-    /// The nonce depends on the name only, so adding, removing or
+    /// The nonce depends on the identity only, so adding, removing or
     /// reordering other loads never moves this load's draws.
     #[must_use]
-    pub fn event_load(seed: [u8; 32], name: &str) -> Self {
+    pub fn event_load(seed: [u8; 32], identity: &str) -> Self {
         Self {
             seed,
-            stream: EVENT_LOAD_STREAM_TAG | (fnv1a_64(name.as_bytes()) >> 1),
+            stream: EVENT_LOAD_STREAM_TAG | (fnv1a_64(identity.as_bytes()) >> 1),
         }
     }
 
@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_load_streams_are_tagged_and_name_keyed() {
+    fn event_load_streams_are_tagged_and_identity_keyed() {
         let seed = dwelling_seed(3, 42);
         let a = RngStream::event_load(seed, "Clothes Washer");
         let b = RngStream::event_load(seed, "Dishwasher");

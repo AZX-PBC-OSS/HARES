@@ -19,7 +19,8 @@ pub const RNG_STREAM_DWELLING: u64 = 0;
 pub const RNG_STREAM_EV_DRIVER_BASE: u64 = 1;
 // Event-based load equipment (EventBasedLoad, WetAppliance) draws from
 // `hares_types::rng::RngStream::event_load`: a stream keyed by the load's
-// name with the top bit set, disjoint from the indexed streams above.
+// stable identity with the top bit set, disjoint from the indexed streams
+// above.
 
 /// Derives a deterministic per-dwelling RNG from a master seed and building ID.
 ///

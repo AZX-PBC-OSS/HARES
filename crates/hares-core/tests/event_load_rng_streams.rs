@@ -1,12 +1,11 @@
 //! Each stochastic event load in a dwelling draws from its own random
-//! stream, keyed by the dwelling seed and the load's name.
+//! stream, keyed by the dwelling seed and the load's stable identity.
 //!
-//! The probes are two raw `EventBasedLoad`-class specs with identical
-//! parameters (a constant start probability strictly inside (0, 1), so every
-//! idle step draws) and distinct classes, so the assembly's instance-name
-//! pass leaves their names alone. Each load's per-step on/off pattern is a
-//! direct read of its draw sequence; identical configs make any difference
-//! between the two patterns attributable to the streams alone.
+//! The probes are raw event-load specs with identical parameters (a
+//! constant start probability strictly inside (0, 1), so every idle step
+//! draws). Each load's per-step on/off pattern is a direct read of its draw
+//! sequence; identical configs make any difference between two patterns
+//! attributable to the streams alone.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +13,7 @@ use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::dwelling::DwellingBlueprint;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_io::OutputFormat;
-use hares_types::{FuelType, telemetry_keys as tk};
+use hares_types::{FuelType, HaresError, telemetry_keys as tk};
 use serde_json::json;
 
 const PROBE_A: &str = "EventBasedLoad";
@@ -89,15 +88,62 @@ fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
     }
 }
 
-fn build(probes: &[&str]) -> Dwelling {
-    let hpxml = fixture_dir().join("home.xml");
-    let mut blueprint = DwellingBlueprint::from_config(dwelling_config(&hpxml)).expect("blueprint");
-    for class in probes {
-        blueprint
-            .add_equipment_spec(probe_spec(class))
-            .expect("add probe spec");
+fn try_build_from(
+    hpxml: &Path,
+    specs: Vec<hares_io::EquipmentSpec>,
+) -> Result<Dwelling, HaresError> {
+    let mut blueprint = DwellingBlueprint::from_config(dwelling_config(hpxml)).expect("blueprint");
+    for spec in specs {
+        blueprint.add_equipment_spec(spec).expect("add probe spec");
     }
-    blueprint.build().expect("build dwelling")
+    blueprint.build()
+}
+
+fn try_build(specs: Vec<hares_io::EquipmentSpec>) -> Result<Dwelling, HaresError> {
+    try_build_from(&fixture_dir().join("home.xml"), specs)
+}
+
+fn build(classes: &[&str]) -> Dwelling {
+    try_build(classes.iter().map(|class| probe_spec(class)).collect()).expect("build dwelling")
+}
+
+fn named_probe(class: &str, instance_name: &str) -> hares_io::EquipmentSpec {
+    hares_io::EquipmentSpec {
+        instance_name: Some(instance_name.to_string()),
+        ..probe_spec(class)
+    }
+}
+
+/// An HPXML microwave carrying `id` as its SystemIdentifier and the probe's
+/// event parameters in its extension.
+fn hpxml_microwave(id: &str) -> String {
+    format!(
+        "<Microwave><SystemIdentifier id='{id}'/><extension>\
+         <active_power_kw>1.0</active_power_kw>\
+         <active_duration_s>1800</active_duration_s>\
+         <cooldown_duration_s>900</cooldown_duration_s>\
+         <event_window_source>constant</event_window_source>\
+         <event_probability_source>constant</event_probability_source>\
+         <event_probability_constant>0.3</event_probability_constant>\
+         <sensible_gain_fraction>0.0</sensible_gain_fraction>\
+         <latent_gain_fraction>0.0</latent_gain_fraction>\
+         </extension></Microwave>"
+    )
+}
+
+/// The fixture HPXML with `microwave_ids` added to its appliances.
+fn write_hpxml_with_microwaves(dir: &Path, microwave_ids: &[&str]) -> PathBuf {
+    let src = std::fs::read_to_string(fixture_dir().join("home.xml")).expect("fixture home.xml");
+    let marker = "</Appliances>";
+    assert!(src.contains(marker), "fixture must contain {marker}");
+    let microwaves: String = microwave_ids.iter().map(|id| hpxml_microwave(id)).collect();
+    let path = dir.join(format!("home_{}.xml", microwave_ids.join("_")));
+    std::fs::write(
+        &path,
+        src.replacen(marker, &format!("{microwaves}{marker}"), 1),
+    )
+    .expect("write HPXML");
+    path
 }
 
 fn is_on(dwelling: &Dwelling, name: &str) -> bool {
@@ -170,5 +216,68 @@ fn event_load_streams_survive_checkpoint() {
     assert_eq!(
         actual, expected,
         "a resumed dwelling must continue each event load's stream exactly"
+    );
+}
+
+/// Instance naming numbers same-class loads by order ("Microwave #1",
+/// "#2"), so removing the first renames the second to "Microwave". Its
+/// stream is keyed by its HPXML SystemIdentifier id, so its draws stay.
+#[test]
+fn same_class_hpxml_load_keeps_its_draws_when_a_sibling_is_removed() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let both = write_hpxml_with_microwaves(tmp.path(), &["Microwave-Kitchen", "Microwave-Bar"]);
+    let alone = write_hpxml_with_microwaves(tmp.path(), &["Microwave-Bar"]);
+
+    let mut both = try_build_from(&both, Vec::new()).expect("build both microwaves");
+    let both = record(&mut both, &["Microwave #1", "Microwave #2"], STEPS);
+    assert_ne!(both[0], both[1], "same-class siblings must not share draws");
+
+    let mut alone = try_build_from(&alone, Vec::new()).expect("build the second alone");
+    let alone = record(&mut alone, &["Microwave"], STEPS);
+    assert_eq!(
+        alone[0], both[1],
+        "removing a same-class sibling must not change the survivor's draws"
+    );
+}
+
+/// The blueprint counterpart: callers name same-class loads, instance
+/// naming renumbers them by order, and the caller's name keys the stream.
+#[test]
+fn same_class_named_load_keeps_its_draws_when_a_sibling_is_removed() {
+    let first = named_probe(PROBE_A, "Probe One");
+    let second = named_probe(PROBE_A, "Probe Two");
+
+    let mut both = try_build(vec![first, second.clone()]).expect("build both probes");
+    let both = record(
+        &mut both,
+        &[&format!("{PROBE_A} #1"), &format!("{PROBE_A} #2")],
+        STEPS,
+    );
+    assert_ne!(both[0], both[1], "same-class siblings must not share draws");
+
+    let mut alone = try_build(vec![second]).expect("build the second probe alone");
+    let alone = record(&mut alone, &["Probe Two"], STEPS);
+    assert_eq!(
+        alone[0], both[1],
+        "removing a same-class sibling must not change the survivor's draws"
+    );
+}
+
+/// An HPXML SystemIdentifier id and a caller's instance name can name the
+/// same identity; the two loads would then share a stream, so assembly
+/// rejects them instead of telling them apart by order.
+#[test]
+fn event_loads_sharing_an_identity_are_rejected() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let hpxml = write_hpxml_with_microwaves(tmp.path(), &["Shared"]);
+    let err = try_build_from(&hpxml, vec![named_probe(PROBE_A, "Shared")])
+        .err()
+        .expect("event loads sharing an identity must not build");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'Microwave'")
+            && msg.contains("'Shared'")
+            && msg.contains("same random stream"),
+        "the rejection must name both loads and the violation, got: {msg}"
     );
 }

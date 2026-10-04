@@ -12,6 +12,7 @@ use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad}
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
+use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
     ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
@@ -350,7 +351,8 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
             ("cooldown_duration_s", 0.0.into()),
         ],
         &[],
-    );
+    )
+    .with_rng_stream(RngStream::event_load(dwelling_seed(0, 0), &specs[0].name));
 
     let mut eq = EventBasedLoad::new(config.clone());
     // payload len=2 while injected column index is 2. BoundaryPolicy::Wrap should map idx 2 -> 0.

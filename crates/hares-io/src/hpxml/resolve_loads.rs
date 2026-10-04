@@ -13,7 +13,7 @@ use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::xml_helpers::{
-    capitalize, child_f64, child_load_kwh, child_load_therms, child_text, parse_fuel,
+    capitalize, child_f64, child_load_kwh, child_load_therms, child_text, element_id, parse_fuel,
     parse_schedule_extension_params,
 };
 use hares_physics::units as conv;
@@ -201,6 +201,7 @@ pub(super) fn resolve_scheduled_loads(
             ("Microwave", "Microwave"),
             ("Dehumidifier", "Dehumidifier"),
         ] {
+            require_unique_appliance_ids(appliances, tag)?;
             let mut counter = 0u32;
             for node in appliances.children_named(tag) {
                 counter += 1;
@@ -635,6 +636,7 @@ pub(super) fn resolve_scheduled_loads(
                 };
 
                 let mut spec = build_spec(name.to_string(), fuel, params, defaults);
+                spec.system_id = element_id(node);
                 if counter > 1 {
                     spec.instance_name = Some(canonical_instance_namer(name, counter as usize));
                 }
@@ -1066,6 +1068,35 @@ pub(super) fn resolve_ventilation(
             cfg,
             defaults,
         )?);
+    }
+    Ok(())
+}
+
+/// Same-type appliances are told apart by their SystemIdentifier ids (their
+/// instance names number them by order), so when an HPXML lists more than
+/// one of a type, each must carry a unique id.
+fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), HpxmlError> {
+    let ids: Vec<Option<String>> = appliances.children_named(tag).map(element_id).collect();
+    if ids.len() < 2 {
+        return Ok(());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in &ids {
+        let Some(id) = id else {
+            return Err(HpxmlError::Parse(
+                format!(
+                    "{} {tag} elements need a SystemIdentifier id each to be told \
+                     apart, but one has none",
+                    ids.len()
+                )
+                .into(),
+            ));
+        };
+        if !seen.insert(id) {
+            return Err(HpxmlError::Parse(
+                format!("duplicate SystemIdentifier id '{id}' among {tag} elements").into(),
+            ));
+        }
     }
     Ok(())
 }
