@@ -215,9 +215,10 @@ def hares_48h() -> "pl.DataFrame":
         output_verbosity=9,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
-        write_output=False,
+        write_output=True,
         output_path=str(Path(tempfile.mkdtemp()) / "hares_thermal_trace.csv"),
     )
+    dwelling.initialize()
     return dwelling.simulate()
 
 
@@ -228,7 +229,8 @@ def hares_48h() -> "pl.DataFrame":
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Solar gain model diverges ~35% from OCHRE -- needs IAM/SHGC calibration",
+    reason="Zone temp worst 6h step 2.26°C vs 0.1°C threshold, 48h mean abs 0.80°C vs 0.5°C threshold; "
+    "window solar gain ~30% higher than OCHRE -- needs IAM/SHGC calibration",
     raises=AssertionError,
     strict=True,
 )
@@ -324,7 +326,7 @@ def test_48h_thermal_trace(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame")
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Zone temp diverges ~0.5-1°C overnight -- HVAC cycling and solar gain differences propagate",
+    reason="Zone temp diverges up to ~4.6°C overnight (mean abs ~0.87°C) -- HVAC cycling and solar gain differences propagate",
     raises=AssertionError,
     strict=True,
 )
@@ -376,7 +378,7 @@ def test_overnight_losses(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame") 
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Window solar gain ~35% higher than OCHRE -- needs IAM/SHGC/area calibration",
+    reason="Window solar gain ~30% higher than OCHRE (mean ratio ~1.30, worst step 31.5%) -- needs IAM/SHGC/area calibration",
     raises=AssertionError,
     strict=True,
 )
