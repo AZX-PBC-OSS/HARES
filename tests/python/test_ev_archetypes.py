@@ -32,7 +32,7 @@ class TestEvArchetypeId:
 class TestFromVehicleWithArchetype:
     @pytest.mark.parametrize("aid", ARCHETYPE_IDS)
     def test_all_archetypes_create_valid_ev(self, aid):
-        ev = EV.from_vehicle_with_archetype(VehicleId.tesla_model_y_lr(), aid, seed=42)
+        ev = EV.from_vehicle_with_archetype(VehicleId.tesla_model_y_lr(), aid)
         assert ev.capacity_kwh is not None and ev.capacity_kwh > 0
         assert ev.max_charging_kw is not None and ev.max_charging_kw > 0
 
@@ -40,7 +40,6 @@ class TestFromVehicleWithArchetype:
         ev = EV.from_vehicle_with_archetype(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l1(),
-            seed=0,
         )
         assert ev.max_charging_kw <= 1.8
 
@@ -48,7 +47,6 @@ class TestFromVehicleWithArchetype:
         ev = EV.from_vehicle_with_archetype(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l2(),
-            seed=0,
         )
         assert ev.max_charging_kw == 11.5
 

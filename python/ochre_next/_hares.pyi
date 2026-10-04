@@ -1349,7 +1349,6 @@ class EV:
     def from_vehicle_with_archetype(
         vehicle_id: VehicleId,
         archetype_id: EvArchetypeId,
-        seed: int,
     ) -> EV: ...
     @staticmethod
     def by_vehicle_id(id: str) -> EV: ...

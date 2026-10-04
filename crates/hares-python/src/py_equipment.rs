@@ -764,12 +764,7 @@ impl PyEv {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (vehicle_id, archetype_id, seed=0))]
-    fn from_vehicle_with_archetype(
-        vehicle_id: PyVehicleId,
-        archetype_id: PyEvArchetypeId,
-        #[allow(unused_variables)] seed: u64,
-    ) -> Self {
+    fn from_vehicle_with_archetype(vehicle_id: PyVehicleId, archetype_id: PyEvArchetypeId) -> Self {
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
         let spec = rust_vid.spec();
