@@ -2609,20 +2609,6 @@ fn build_from_blueprint_inner(
             }
             merged_cfg.rng_stream = Some(rng_stream);
         }
-        if eq.uses_rng_stream() {
-            let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
-            if let Some((other, other_identity)) = equipment_by_rng_stream
-                .insert(rng_stream.stream, (merged_cfg.name.clone(), rng_identity))
-            {
-                return Err(HaresError::Dwelling(format!(
-                    "event loads '{other}' (identity '{other_identity}') and '{}' \
-                     (identity '{rng_identity}') map to the same random stream; give \
-                     each a unique HPXML SystemIdentifier id or instance name",
-                    merged_cfg.name
-                )));
-            }
-            merged_cfg.rng_stream = Some(rng_stream);
-        }
         // The served zone as HVAC resolves it: the config's zone_id, else
         // the conditioned zone. Only HVAC's equivalent battery model reads
         // the capacitance.
