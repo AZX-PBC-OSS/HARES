@@ -157,23 +157,15 @@ fn compute_direct_power(
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(
-    not(feature = "observe"),
-    allow(dead_code)
-    // Why: fields dc_power_kw_before_losses and lut_path_active are only read
-    // inside #[cfg(feature = "observe")] blocks in step(). Without the feature
-    // they are written but never read, triggering dead_code. Gating the fields
-    // themselves behind #[cfg(feature = "observe")] would require conditional
-    // construction at every call site (LUT path, non-LUT path, test helpers),
-    // which is more invasive than a single suppression.
-)]
 struct ArrayStepOutput {
     dc_power_kw: f64,
     ac_power_kw: f64,
     irradiance_w_m2: f64,
     cell_temp_c: f64,
     interp_method: Option<InterpolationMethod>,
+    #[cfg(any(test, feature = "observe"))]
     dc_power_kw_before_losses: f64,
+    #[cfg(any(test, feature = "observe"))]
     lut_path_active: bool,
 }
 
@@ -519,15 +511,15 @@ impl PV {
             // rather than in dc_no_losses so the before-losses value is
             // comparable with the non-LUT path (where irradiance already
             // includes soiling).
-            let dc_before_losses = dc_soiled;
-
             return ArrayStepOutput {
                 dc_power_kw,
                 ac_power_kw,
                 irradiance_w_m2,
                 cell_temp_c,
                 interp_method: Some(interp_method),
-                dc_power_kw_before_losses: dc_before_losses,
+                #[cfg(any(test, feature = "observe"))]
+                dc_power_kw_before_losses: dc_soiled,
+                #[cfg(any(test, feature = "observe"))]
                 lut_path_active: true,
             };
         }
@@ -553,7 +545,9 @@ impl PV {
             irradiance_w_m2,
             cell_temp_c,
             interp_method: None,
+            #[cfg(any(test, feature = "observe"))]
             dc_power_kw_before_losses: dc_before_losses,
+            #[cfg(any(test, feature = "observe"))]
             lut_path_active: false,
         }
     }

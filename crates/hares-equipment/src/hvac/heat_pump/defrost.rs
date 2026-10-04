@@ -282,10 +282,6 @@ impl DefrostCycleTracker {
         conditions_favor_frost: bool,
         outdoor_db_c: f64,
     ) -> crate::Result<()> {
-        #[cfg_attr(
-            not(any(debug_assertions, feature = "observe")),
-            allow(unused_variables)
-        )]
         let frost_before = self.accumulated_frost_s;
         let old_state = self.state;
         match self.state {

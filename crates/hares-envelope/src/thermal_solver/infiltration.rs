@@ -182,8 +182,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
 
         // Natural ventilation is only applied to the indoor/conditioned zone.
         // Returns (q_total, q_stack_adj, q_wind_adj, cd) — all in m³/s except cd (dimensionless).
-        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
-        let (q_nat_m3_s, q_stack_m3_s, q_wind_m3_s, cd_used) = if zone.id == config.indoor_zone_id {
+        let nat_vent = if zone.id == config.indoor_zone_id {
             config
                 .natural_ventilation
                 .as_ref()
@@ -208,6 +207,9 @@ pub(crate) fn apply_infiltration_and_ventilation(
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
+        let q_nat_m3_s = nat_vent.0;
+        #[cfg(feature = "observe")]
+        let (_, q_stack_m3_s, q_wind_m3_s, cd_used) = nat_vent;
 
         // Forced mechanical ventilation flow -- only for zones with explicit flow
         // or the indoor zone (which gets the global ventilation rate).

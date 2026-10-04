@@ -31,16 +31,10 @@ trap 'rm -rf "$TMPDIR"' EXIT
 echo "Running gen_ocv.py..."
 cd "$REPO_ROOT"
 
-uv run python "$GEN_OCV_PY" > "$TMPDIR/gen_ocv_output.txt" 2>&1 || {
+uv run --locked --extra pybamm python "$GEN_OCV_PY" --toml-dir "$TMPDIR/ocv_tables" \
+    > "$TMPDIR/gen_ocv_output.txt" 2>&1 || {
     echo "ERROR: gen_ocv.py failed"
-    if grep -q "ModuleNotFoundError.*pybamm" "$TMPDIR/gen_ocv_output.txt"; then
-        echo "PyBaMM is not installed. Install it for gen_ocv.py CI checks:"
-        echo "  uv sync --extra pybamm"
-        echo "Or with the pinned version:"
-        echo "  uv pip install -r scripts/pybamm-requirements.txt"
-    else
-        cat "$TMPDIR/gen_ocv_output.txt"
-    fi
+    cat "$TMPDIR/gen_ocv_output.txt"
     exit 1
 }
 
@@ -196,7 +190,7 @@ done
 if [ "$DIFF_FOUND" -ne 0 ]; then
     echo ""
     echo "FAIL: OCV tables in ocv.rs are out of sync with gen_ocv.py output."
-    echo "Run 'uv run python scripts/gen_ocv.py' and update ocv.rs."
+    echo "Run 'uv run --locked --extra pybamm python scripts/gen_ocv.py' and update ocv.rs."
     exit 1
 fi
 

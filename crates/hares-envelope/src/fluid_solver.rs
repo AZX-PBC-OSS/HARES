@@ -284,13 +284,6 @@ impl DomainSolver for FluidSolver {
         FLUID
     }
 
-    // Why: `total_declared_thermal_w` and observe-gated accumulator
-    // variables are assigned under `#[cfg(any(debug_assertions, ...))]`
-    // or `#[cfg(feature = "observe")]` but not read in release builds
-    // without those features. The compiler sees the assignment as
-    // unused; the suppression is the correct response to cfg-conditional
-    // variable use.
-    #[allow(unused_assignments)]
     fn resolve(
         &mut self,
         ports: &PortSlots,
@@ -605,8 +598,6 @@ impl DomainSolver for FluidSolver {
                     // ── Topology-based conservation check ──
 
                     #[cfg(feature = "observe")]
-                    let mut violations = 0u32;
-                    #[cfg(feature = "observe")]
                     let mut max_imbalance = 0.0_f64;
 
                     // Precompute child count per node.
@@ -692,7 +683,9 @@ impl DomainSolver for FluidSolver {
                         if max_local_imbalance > MASS_FLOW_TOLERANCE {
                             #[cfg(feature = "observe")]
                             {
-                                violations += 1;
+                                self.num_conservation_violations += 1;
+                                self.max_mass_imbalance_kg_s =
+                                    self.max_mass_imbalance_kg_s.max(max_imbalance);
                             }
                             return Err(HaresError::Envelope(format!(
                                 "fluid loop {loop_id:?} node {node_id:?} ({node_role:?}): \
@@ -708,7 +701,6 @@ impl DomainSolver for FluidSolver {
                     {
                         self.max_mass_imbalance_kg_s =
                             self.max_mass_imbalance_kg_s.max(max_imbalance);
-                        self.num_conservation_violations += u64::from(violations);
                     }
                 } else {
                     // ── Serial-flow consistency check (no topology) ──
@@ -2007,6 +1999,15 @@ mod tests {
             err.to_string().contains("mass conservation violated"),
             "the error must name the check, got: {err}"
         );
+        #[cfg(feature = "observe")]
+        {
+            assert_eq!(solver.num_conservation_violations, 1);
+            assert!(
+                (solver.max_mass_imbalance_kg_s - 0.2).abs() < 1e-12,
+                "splitter imbalance is 1.0 in against 1.2 out, got {}",
+                solver.max_mass_imbalance_kg_s
+            );
+        }
     }
 
     // =======================================================================

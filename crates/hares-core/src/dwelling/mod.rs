@@ -93,8 +93,7 @@ use crate::invariants::check_basement_lighting_foundation;
 use crate::rng::{RNG_STREAM_EV_DRIVER_BASE, advance_dwelling_rng, derive_sub_rng};
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
-#[cfg_attr(not(test), allow(unused_imports))]
-use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
+use crate::{Actor, ActorInterest, EnvironmentManager, SimClock};
 
 #[cfg(feature = "observe")]
 use crate::diagnostics::DiagnosticAccumulator;
@@ -7958,6 +7957,7 @@ pub(crate) fn build_actors_from_seeds(
 mod tests {
     use super::*;
     use crate::checkpoint::DwellingCheckpoint;
+    use crate::derive_dwelling_rng;
     use conversions::json_value_to_config_value;
     use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;

@@ -2142,7 +2142,7 @@ pub(super) fn resolve_hvac(
         specs.push(spec);
     }
 
-    #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+    #[cfg(feature = "observe")]
     let heating_loop_end = specs.len();
 
     for cooling in descendants_named(hvac, "CoolingSystem") {

@@ -32,7 +32,7 @@ cd "$REPO_ROOT"
 
 GENERATED_FIXTURE="$TMPDIR/generated_ashrae_rc_reference.json"
 
-uv run --extra ochre python "$GEN_SCRIPT" --output "$GENERATED_FIXTURE" > "$TMPDIR/gen_output.txt" 2>&1 || {
+uv run --locked --extra ochre python "$GEN_SCRIPT" --output "$GENERATED_FIXTURE" > "$TMPDIR/gen_output.txt" 2>&1 || {
     echo "ERROR: gen_ashrae_reference.py failed"
     cat "$TMPDIR/gen_output.txt"
     exit 1
@@ -47,7 +47,7 @@ if ! diff -q "$GENERATED_FIXTURE" "$FIXTURE" > /dev/null 2>&1; then
     diff -u "$FIXTURE" "$GENERATED_FIXTURE" || true
     echo ""
     echo "To fix: re-run the script and commit the updated fixture:"
-    echo "  uv run --extra ochre python scripts/gen_ashrae_reference.py"
+    echo "  uv run --locked --extra ochre python scripts/gen_ashrae_reference.py"
     echo "  git add tests/fixtures/parity/ashrae_rc_reference.json"
     echo "  git commit -m 'Regenerate ASHRAE RC reference fixture'"
     exit 1

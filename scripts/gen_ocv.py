@@ -17,7 +17,7 @@ SOC convention:
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -26,8 +26,14 @@ import pybamm
 SOC_POINTS = 51
 SOC = np.linspace(0.0, 1.0, SOC_POINTS)
 
-# TOML output directory (relative to script location)
-TOML_DIR = Path(__file__).resolve().parent.parent / "defaults" / "ocv_tables"
+_parser = argparse.ArgumentParser(description=__doc__)
+_parser.add_argument(
+    "--toml-dir",
+    type=Path,
+    default=Path(__file__).resolve().parent.parent / "defaults" / "ocv_tables",
+    help="directory the per-chemistry TOML tables are written to",
+)
+TOML_DIR: Path = _parser.parse_args().toml_dir
 
 
 def build_ocv_curve(
@@ -55,7 +61,9 @@ def build_ocv_curve(
     return ocv, u_pos_vals, u_neg_vals
 
 
-def get_stoich_limits(param: pybamm.ParameterValues) -> tuple[float, float, float, float]:
+def get_stoich_limits(
+    param: pybamm.ParameterValues,
+) -> tuple[float, float, float, float]:
     """Return (x_n_min, x_n_max, x_p_min, x_p_max) from ElectrodeSOHSolver."""
     solver = pybamm.lithium_ion.ElectrodeSOHSolver(param)
     x_n_min, x_n_max, x_p_min, x_p_max = solver.get_min_max_stoichiometries()
@@ -80,7 +88,7 @@ def check_monotonic(ocv: np.ndarray, name: str) -> None:
         print(f"  [WARN] {name} OCV has {n_violations} non-monotonic steps")
         bad_idx = np.where(diffs < 0)[0]
         for i in bad_idx[:5]:
-            print(f"    SOC[{i}]={SOC[i]:.2f}: {ocv[i]:.4f} -> {ocv[i+1]:.4f}")
+            print(f"    SOC[{i}]={SOC[i]:.2f}: {ocv[i]:.4f} -> {ocv[i + 1]:.4f}")
 
 
 # LTO OCP function (negative electrode)
@@ -93,11 +101,7 @@ def lto_ocp_Colclasure2011(sto: float | np.ndarray) -> float | np.ndarray:
     Flat plateau at ~1.556 V with small boundary-stabilising exponential terms.
     Reference: Colclasure et al. (2011) Electrochimica Acta 58, 33-43.
     """
-    return (
-        1.5564
-        + 0.0120 * np.exp(-100.0 * sto)
-        + 0.0020 * np.exp(-10.0 * (1.0 - sto))
-    )
+    return 1.5564 + 0.0120 * np.exp(-100.0 * sto) + 0.0020 * np.exp(-10.0 * (1.0 - sto))
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +124,12 @@ print(f"  neg stoich: {x_n_min_nmc:.6f} (0% SOC) -> {x_n_max_nmc:.6f} (100% SOC)
 print(f"  pos stoich: {x_p_max_nmc:.6f} (0% SOC) -> {x_p_min_nmc:.6f} (100% SOC)")
 
 ocv_nmc, u_pos_nmc_vals, u_neg_nmc_vals = build_ocv_curve(
-    u_pos_nmc, u_neg_nmc,
-    x_n_min_nmc, x_n_max_nmc,
-    x_p_min_nmc, x_p_max_nmc,
+    u_pos_nmc,
+    u_neg_nmc,
+    x_n_min_nmc,
+    x_n_max_nmc,
+    x_p_min_nmc,
+    x_p_max_nmc,
 )
 print(f"  OCV range: {ocv_nmc[0]:.4f}V -> {ocv_nmc[-1]:.4f}V")
 check_monotonic(ocv_nmc, "NMC")
@@ -142,9 +149,12 @@ print(f"  neg stoich: {x_n_min_lfp:.6f} (0% SOC) -> {x_n_max_lfp:.6f} (100% SOC)
 print(f"  pos stoich: {x_p_max_lfp:.6f} (0% SOC) -> {x_p_min_lfp:.6f} (100% SOC)")
 
 ocv_lfp, u_pos_lfp_vals, u_neg_lfp_vals = build_ocv_curve(
-    u_pos_lfp, u_neg_lfp,
-    x_n_min_lfp, x_n_max_lfp,
-    x_p_min_lfp, x_p_max_lfp,
+    u_pos_lfp,
+    u_neg_lfp,
+    x_n_min_lfp,
+    x_n_max_lfp,
+    x_p_min_lfp,
+    x_p_max_lfp,
 )
 print(f"  OCV range: {ocv_lfp[0]:.4f}V -> {ocv_lfp[-1]:.4f}V")
 check_monotonic(ocv_lfp, "LFP")
@@ -164,9 +174,12 @@ print(f"  neg stoich: {x_n_min_nca:.6f} (0% SOC) -> {x_n_max_nca:.6f} (100% SOC)
 print(f"  pos stoich: {x_p_max_nca:.6f} (0% SOC) -> {x_p_min_nca:.6f} (100% SOC)")
 
 ocv_nca, u_pos_nca_vals, u_neg_nca_vals = build_ocv_curve(
-    u_pos_nca, u_neg_nca,
-    x_n_min_nca, x_n_max_nca,
-    x_p_min_nca, x_p_max_nca,
+    u_pos_nca,
+    u_neg_nca,
+    x_n_min_nca,
+    x_n_max_nca,
+    x_p_min_nca,
+    x_p_max_nca,
 )
 print(f"  OCV range: {ocv_nca[0]:.4f}V -> {ocv_nca[-1]:.4f}V")
 check_monotonic(ocv_nca, "NCA")
@@ -191,8 +204,8 @@ print("LTO  (NMC811 positive [Chen2020] + LTO negative [Colclasure2011])")
 print("=" * 70)
 
 # LTO stoichiometry limits: nearly full swing (LTO is fully reversible)
-x_n_min_lto = 0.02   # discharged (0% SOC) - LTO delithiated
-x_n_max_lto = 0.97   # charged (100% SOC) - LTO lithiated
+x_n_min_lto = 0.02  # discharged (0% SOC) - LTO delithiated
+x_n_max_lto = 0.97  # charged (100% SOC) - LTO lithiated
 
 # NMC811 positive: reuse Chen2020 limits
 x_p_min_lto = x_p_min_nmc  # 100% SOC
@@ -204,10 +217,12 @@ print("  neg OCP source: Colclasure et al. (2011) Electrochimica Acta 58:33-43")
 print("  pos OCP source: Chen2020 NMC811 (nmc_LGM50_ocp_Chen2020)")
 
 ocv_lto, u_pos_lto_vals, u_neg_lto_vals = build_ocv_curve(
-    u_pos_nmc,           # NMC811 positive OCP
+    u_pos_nmc,  # NMC811 positive OCP
     lto_ocp_Colclasure2011,  # LTO negative OCP
-    x_n_min_lto, x_n_max_lto,
-    x_p_min_lto, x_p_max_lto,
+    x_n_min_lto,
+    x_n_max_lto,
+    x_p_min_lto,
+    x_p_max_lto,
 )
 print(f"  OCV range: {ocv_lto[0]:.4f}V -> {ocv_lto[-1]:.4f}V")
 check_monotonic(ocv_lto, "LTO")
@@ -242,20 +257,27 @@ print()
 print("=" * 70)
 print("SUMMARY")
 print("=" * 70)
-print(f"{'Chemistry':<10} {'SOC Source':<35} {'V@0%':>7} {'V@50%':>7} {'V@100%':>8} {'Monotonic':>10}")
+print(
+    f"{'Chemistry':<10} {'SOC Source':<35} {'V@0%':>7} {'V@50%':>7} {'V@100%':>8} {'Monotonic':>10}"
+)
 print("-" * 78)
 for name, source, ocv, _ in chemistries:
     v0 = ocv[0]
     v50 = ocv[25]
     v100 = ocv[-1]
-    mono = "YES" if np.all(np.diff(ocv) > 0) else ("FLAT" if np.all(np.diff(ocv) >= 0) else "NO")
+    mono = (
+        "YES"
+        if np.all(np.diff(ocv) > 0)
+        else ("FLAT" if np.all(np.diff(ocv) >= 0) else "NO")
+    )
     print(f"{name:<10} {source:<35} {v0:>7.4f} {v50:>7.4f} {v100:>8.4f} {mono:>10}")
 
 # ---------------------------------------------------------------------------
 # TOML output
 #
 # Writes per-chemistry TOML files suitable for runtime loading via
-# Battery::set_ocv_table(). Files are written to defaults/ocv_tables/.
+# Battery::set_ocv_table(). Files are written to --toml-dir, which defaults
+# to defaults/ocv_tables/.
 # ---------------------------------------------------------------------------
 print()
 print("=" * 70)

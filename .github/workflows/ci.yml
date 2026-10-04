@@ -40,6 +40,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -F observe,profiling -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --workspace --all-targets --release -- -D warnings
+      - run: cargo clippy --workspace --all-targets --release -F dst -- -D warnings
+      - run: cargo clippy --workspace --all-targets --release -F observe -- -D warnings
 
   advisories:
     name: "cargo deny advisories"
@@ -113,7 +115,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv sync --extra pybamm
       - run: bash scripts/check_ocv.sh
 
   check-ashrae-reference:

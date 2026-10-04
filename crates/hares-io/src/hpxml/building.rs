@@ -1629,11 +1629,8 @@ fn parse_boundary(
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
             let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)?;
-            // `pitch_source` is only used inside `#[cfg(feature = "observe")]`;
-            // without that feature the compiler warns it is unused.
-            #[allow(unused_variables)]
-            let (pitch_value, pitch_source) = match pitch {
-                Some(p) => (p, "explicit"),
+            let pitch_value = match pitch {
+                Some(p) => p,
                 None => {
                     tracing::warn!(
                         boundary_id = id,
@@ -1651,11 +1648,16 @@ fn parse_boundary(
                     // (vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh:188).
                     // HPXML v4.0: Roof/Pitch is optional (0..1 per hpxml-elements.md).
                     pitch_absent_ids.push(id.clone());
-                    (4.0, "defaulted")
+                    4.0
                 }
             };
             #[cfg(feature = "observe")]
             {
+                let pitch_source = if pitch.is_some() {
+                    "explicit"
+                } else {
+                    "defaulted"
+                };
                 tracing::info!(
                     target: "observe",
                     column = "pitch_source",
