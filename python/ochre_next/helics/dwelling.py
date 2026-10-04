@@ -60,6 +60,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
     ) from exc
 
 from ochre_next import ControlSignal
+from ochre_next._hares import MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 from ochre_next._hares import Dwelling as PyDwelling
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
@@ -99,6 +100,8 @@ class HELICSDiagnostics(TypedDict):
 # per Python, rejected per Rust with no boundary warning).
 #   ThermalSetpoint.heating_setpoint_c: [-50, 100] °C  (Rust: [-50, 100])
 #   ThermalSetpoint.cooling_setpoint_c: [0, 60] °C      (Rust: [0, 60])
+#   ThermalSetpoint.deadband_c: [MIN_THERMOSTAT_BAND_C, MAX_THERMOSTAT_BAND_C]
+#     °C, and only with a named setpoint (the Rust constants themselves)
 #   DutyCycle.on_fraction: [0, 1]
 #   PowerSetpoint.active_power_kw: finite only (Rust: finite only)
 THERMAL_SETPOINT_HEAT_MIN_C = -50.0
@@ -113,6 +116,46 @@ DUTY_CYCLE_ON_FRACTION_MAX = 1.0
 # Number of consecutive timesteps a subscription can go without receiving
 # data before a stale-subscription warning is emitted.
 STALE_SUBSCRIPTION_THRESHOLD = 10
+
+
+def _validate_thermal_setpoint_band(
+    signal_body: dict[str, Any],
+    equipment: str,
+    logger: logging.Logger,
+) -> int:
+    """Flag a ThermalSetpoint deadband outside the thermostat band range or
+    carried without a named setpoint. Returns the count of flagged fields."""
+    val = signal_body.get("deadband_c")
+    if val is None:
+        return 0
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Control signal 'ThermalSetpoint' deadband_c for equipment '%s' is not a number: %r",
+            equipment,
+            val,
+        )
+        return 1
+    if not math.isfinite(v) or v < MIN_THERMOSTAT_BAND_C or v > MAX_THERMOSTAT_BAND_C:
+        logger.warning(
+            "Control signal 'ThermalSetpoint' deadband_c for equipment '%s' = %r outside range "
+            "[%g, %g] °C",
+            equipment,
+            v,
+            MIN_THERMOSTAT_BAND_C,
+            MAX_THERMOSTAT_BAND_C,
+        )
+        return 1
+    if signal_body.get("heating_setpoint_c") is None and signal_body.get("cooling_setpoint_c") is None:
+        logger.warning(
+            "Control signal 'ThermalSetpoint' for equipment '%s' carries deadband_c %r but names "
+            "no setpoint; the release form carries no deadband",
+            equipment,
+            v,
+        )
+        return 1
+    return 0
 
 
 def validate_control_signal(
@@ -160,6 +203,7 @@ def validate_control_signal(
                         lo,
                         hi,
                     )
+        clamped += _validate_thermal_setpoint_band(signal_body, equipment, logger)
     elif signal_type == "DutyCycle":
         val = signal_body.get("on_fraction")
         if val is not None:

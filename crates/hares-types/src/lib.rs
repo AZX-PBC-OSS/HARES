@@ -20,6 +20,7 @@ pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod thermostat_band;
 pub mod warning;
 pub mod zip;
 pub mod zone_map;
@@ -46,6 +47,10 @@ pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
 pub use text::{normalize_ascii, parse_trimmed_f64};
+pub use thermostat_band::{
+    MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C, thermal_setpoint_band_c,
+    validate_thermostat_band_c,
+};
 pub use zone_map::{ZoneMap, ZoneRole};
 
 #[cfg(test)]

@@ -213,6 +213,28 @@ class TestControlSignalConstructors:
         assert d["heating_setpoint_c"] == 20.0
         assert d["deadband_c"] == 2.0
 
+    @pytest.mark.parametrize(
+        ("heat_c", "deadband_c"),
+        [(None, 1.0), (None, 0.0), (20.0, 0.0), (20.0, 1e-17), (20.0, 30.0)],
+    )
+    def test_thermal_setpoint_rejects_a_deadband_outside_the_contract(self, heat_c, deadband_c):
+        with pytest.raises(ValueError):
+            ControlSignal.thermal_setpoint(heat_c=heat_c, deadband_c=deadband_c)
+        with pytest.raises(ValueError):
+            Signal.thermal_setpoint(heating_c=heat_c, deadband_c=deadband_c)
+        with pytest.raises(ValueError):
+            DispatchRequest.thermal_setpoint("HVAC", heating_c=heat_c, deadband_c=deadband_c)
+        with pytest.raises(ValueError):
+            ControlSignal.from_dict(
+                {"type": "ThermalSetpoint", "heating_setpoint_c": heat_c, "deadband_c": deadband_c}
+            )
+
+    def test_thermal_setpoint_release_form_carries_nothing(self):
+        d = ControlSignal.thermal_setpoint().to_dict()
+        assert d["heating_setpoint_c"] is None
+        assert d["cooling_setpoint_c"] is None
+        assert d["deadband_c"] is None
+
     def test_thermal_setpoint_delta(self):
         sig = ControlSignal.thermal_setpoint_delta(
             heating_delta_c=1.0, cooling_delta_c=-0.5

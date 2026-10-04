@@ -33,6 +33,17 @@ pub enum HaresError {
     Tariff(String),
     #[error("invalid state: {0}")]
     InvalidState(String),
+    /// A thermostat switching band (an HVAC hysteresis or a water-heater
+    /// tank deadband, configured or signalled) outside the range a
+    /// thermostat can realize; see [`crate::thermostat_band`].
+    #[error(
+        "{field} = {value_c} °C is not a thermostat switching band: it must be finite and \
+         within [{min}, {max}] °C (a thermostat cannot switch on a difference finer than its \
+         sensor resolves)",
+        min = crate::MIN_THERMOSTAT_BAND_C,
+        max = crate::MAX_THERMOSTAT_BAND_C
+    )]
+    ThermostatBand { field: String, value_c: f64 },
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,
@@ -147,6 +158,10 @@ mod tests {
                 equipment: "Cooking Range".to_string(),
                 key: "sensibel_gain_fraction".to_string(),
                 reason: "is not a parameter this equipment reads".to_string(),
+            },
+            HaresError::ThermostatBand {
+                field: "hysteresis_c".to_string(),
+                value_c: 0.0,
             },
         ];
         for err in errors {

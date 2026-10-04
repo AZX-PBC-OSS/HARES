@@ -294,7 +294,7 @@ fn hp_cooler_cfg(
                     cooling_setpoint_c: Some(24.0),
                     ..Default::default()
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,

@@ -21,7 +21,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
-    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, tank_thermostat_update,
+    weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -869,24 +870,16 @@ impl Equipment for ResistanceWH {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
-                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
-                    if !sp.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater setpoint: {sp}"
-                        )));
-                    }
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if let Some(sp) = update.setpoint_c {
                     self.target_setpoint_c = sp;
                     if self.setpoint_ramp_rate_c_per_s.is_none() {
                         self.setpoint_c = sp;
                     }
                 }
-                if let Some(db) = deadband_c {
-                    if !db.is_finite() || *db < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater deadband: {db}"
-                        )));
-                    }
-                    self.deadband_c = *db;
+                if let Some(band_c) = update.band_c {
+                    self.deadband_c = band_c;
                 }
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
@@ -1406,6 +1399,34 @@ mod tests {
                 "error must name the field for {bad_setpoint}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn thermal_setpoint_band_follows_the_shared_contract() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+        let configured = eq.deadband_c;
+        for (setpoint, db) in [
+            (None, 0.0),
+            (None, 3.0),
+            (Some(50.0), 0.0),
+            (Some(50.0), 1e-17),
+        ] {
+            eq.apply_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: setpoint,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            })
+            .expect_err("a release carrying a deadband or a sub-band deadband is rejected");
+            assert_eq!(eq.deadband_c, configured);
+        }
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(3.0),
+        })
+        .unwrap();
+        assert_eq!(eq.deadband_c, 3.0);
     }
 
     #[test]

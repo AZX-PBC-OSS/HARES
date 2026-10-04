@@ -1556,7 +1556,7 @@ mod tests {
                 "cooling_eir": 16.0,
                 "number_of_speeds": 1,
                 "is_mini_split": true,
-                "hysteresis_c": 0.0
+                "hysteresis_c": hares_types::MIN_THERMOSTAT_BAND_C
             }),
             "MSHP Cooler",
         );

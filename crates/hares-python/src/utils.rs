@@ -285,6 +285,18 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
 // finite-checking or dict helper from one reviewed place.
 
 /// Reject non-finite f64 values at the boundary, naming the field.
+/// The `ThermalSetpoint` deadband contract at construction: a deadband only
+/// with a named setpoint, and within a thermostat's switching-band range.
+pub(crate) fn validate_thermal_setpoint_band(
+    heating_c: Option<f64>,
+    cooling_c: Option<f64>,
+    deadband_c: Option<f64>,
+) -> PyResult<()> {
+    hares_types::thermal_setpoint_band_c(heating_c, cooling_c, deadband_c)
+        .map(|_| ())
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
 pub(crate) fn validate_finite(value: f64, name: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(PyValueError::new_err(format!(

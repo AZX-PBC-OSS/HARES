@@ -1453,7 +1453,7 @@ fn lifecycle_tankless_water_heater() {
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(50.0),
             cooling_setpoint_c: None,
-            deadband_c: Some(2.0),
+            deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
@@ -1479,7 +1479,7 @@ fn lifecycle_gas_tankless_water_heater() {
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(50.0),
             cooling_setpoint_c: None,
-            deadband_c: Some(2.0),
+            deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,

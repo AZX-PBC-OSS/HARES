@@ -6,7 +6,10 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::{EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId};
+use crate::{
+    EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId,
+    thermal_setpoint_band_c,
+};
 
 /// Target component for split duty cycle control (HPWH compressor vs backup element).
 ///
@@ -36,14 +39,15 @@ pub enum DRLevel {
 /// Typed external control signals consumed by equipment models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ControlSignal {
-    /// Absolute thermostat override. When at least one setpoint is named
-    /// (`heating_setpoint_c` or `cooling_setpoint_c` is `Some`), `deadband_c`
-    /// is the thermostat hysteresis applied with those setpoints and must be
-    /// positive: a zero-width hysteresis gives the thermostat no switching
-    /// margin and degenerates the HVAC equivalent battery model. When neither
-    /// setpoint is named (the release form), the signal is a pass-through and
-    /// no state, `deadband_c` included, is modified; autonomous control
-    /// resumes.
+    /// Absolute thermostat override.
+    ///
+    /// A named setpoint overrides that axis; an unnamed one follows the
+    /// equipment's schedule. `deadband_c`, allowed only with a named
+    /// setpoint, is the thermostat switching band the equipment adopts (see
+    /// [`crate::thermostat_band`]) and, on HVAC, the minimum cooling-heating
+    /// gap. A signal that names no setpoint (and so no deadband) is the
+    /// release form: it hands both axes back to the schedule and changes
+    /// nothing else.
     ThermalSetpoint {
         heating_setpoint_c: Option<f64>,
         cooling_setpoint_c: Option<f64>,
@@ -244,42 +248,16 @@ impl ControlSignal {
                         "ThermalSetpoint cooling_setpoint_c invalid: {c}, expected [0, 60] °C"
                     )));
                 }
-                if let Some(db) = deadband_c
-                    && (*db < 0.0 || *db > 5.0 || !db.is_finite())
+                if let (Some(h), Some(c), Some(db)) = (
+                    heating_setpoint_c,
+                    cooling_setpoint_c,
+                    thermal_setpoint_band_c(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?,
+                ) && c - h < db
                 {
                     return Err(HaresError::Control(format!(
-                        "ThermalSetpoint deadband_c invalid: {db}, expected [0, 5] °C"
-                    )));
-                }
-                if let (Some(h), Some(c), Some(db)) =
-                    (heating_setpoint_c, cooling_setpoint_c, deadband_c)
-                    && h + db >= *c
-                {
-                    return Err(HaresError::Control(format!(
-                        "ThermalSetpoint: heating ({h}) + deadband ({db}) = {} not < cooling ({c})",
-                        h + db
-                    )));
-                }
-                // A zero-width hysteresis is rejected before it can reach the
-                // thermostat: with `deadband_c == 0.0` the turn-on and
-                // turn-off thresholds coincide, the equipment has no
-                // switching margin, and the HVAC equivalent battery model's
-                // energy window degenerates (`max_energy_kwh ==
-                // min_energy_kwh` with positive zone capacitance, an
-                // enforced invariant). Only the named-setpoint form applies
-                // the deadband: an all-`None` signal is the release form,
-                // clears the override so autonomous control resumes, and
-                // never writes the hysteresis (its deadband still passes
-                // this validator's range checks; it is simply inert).
-                if let Some(db) = deadband_c
-                    && *db == 0.0
-                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
-                {
-                    return Err(HaresError::Control(format!(
-                        "ThermalSetpoint deadband_c must be > 0 when the signal names a \
-                         setpoint, got {db}: a zero-width hysteresis gives the thermostat \
-                         no switching margin and degenerates the equivalent battery model \
-                         (max_energy_kwh == min_energy_kwh)"
+                        "ThermalSetpoint: the cooling-heating gap {} °C (heating {h}, cooling {c}) \
+                         is below deadband_c {db} °C",
+                        c - h
                     )));
                 }
             }
@@ -866,22 +844,74 @@ mod tests {
 
     #[test]
     fn thermal_setpoint_deadband_out_of_range() {
-        assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            deadband_c: Some(-0.1),
-        });
-        assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            deadband_c: Some(6.0),
-        });
+        for db in [-0.1, 10.5, f64::INFINITY] {
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+        }
     }
 
     #[test]
     fn thermal_setpoint_deadband_collision() {
         assert_err(&ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(22.0),
+            cooling_setpoint_c: Some(23.0),
+            deadband_c: Some(2.0),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_named_deadband_below_a_thermostat_band_rejected() {
+        for db in [
+            0.0,
+            -0.0,
+            5e-324,
+            f64::MIN_POSITIVE,
+            1e-17,
+            1e-16,
+            1e-15,
+            0.05,
+        ] {
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: Some(24.0),
+                deadband_c: Some(db),
+            });
+        }
+    }
+
+    #[test]
+    fn thermal_setpoint_deadband_without_a_named_setpoint_rejected() {
+        for db in [0.0, 1.0, 5.0] {
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+        }
+    }
+
+    #[test]
+    fn thermal_setpoint_accepts_a_water_heater_deadband() {
+        // The heat pump water heater's default tank deadband, 14.7 °F.
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(51.7),
+            cooling_setpoint_c: None,
+            deadband_c: Some(8.166_666_667),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_gap_equal_to_the_deadband_accepted() {
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
             cooling_setpoint_c: Some(23.0),
             deadband_c: Some(2.0),
         });
@@ -900,7 +930,7 @@ mod tests {
             deadband_c: None,
         });
         assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
+            heating_setpoint_c: Some(20.0),
             cooling_setpoint_c: None,
             deadband_c: Some(f64::NAN),
         });

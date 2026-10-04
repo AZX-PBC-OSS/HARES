@@ -42,6 +42,7 @@ use hares_types::{
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
+use crate::utils::validate_thermal_setpoint_band;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -634,6 +635,7 @@ impl PyDispatchRequest {
         deadband_c: Option<f64>,
         priority: Option<PyPriority>,
     ) -> PyResult<Self> {
+        validate_thermal_setpoint_band(heating_c, cooling_c, deadband_c)?;
         Ok(Self {
             target,
             signal: PySignal::ThermalSetpoint {
@@ -1029,12 +1031,13 @@ impl PySignal {
         heating_c: Option<f64>,
         cooling_c: Option<f64>,
         deadband_c: Option<f64>,
-    ) -> Self {
-        PySignal::ThermalSetpoint {
+    ) -> PyResult<Self> {
+        validate_thermal_setpoint_band(heating_c, cooling_c, deadband_c)?;
+        Ok(PySignal::ThermalSetpoint {
             heating_c,
             cooling_c,
             deadband_c,
-        }
+        })
     }
 
     #[staticmethod]

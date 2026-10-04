@@ -103,6 +103,21 @@ def test_dwelling_gym_spaces_and_mapping():
     assert isinstance(truncated, bool)
 
 
+def test_deadband_action_bounds_are_the_thermostat_band_range():
+    from ochre_next._hares import MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from ochre_next.rl.gym_env import _field_bounds
+
+    assert _field_bounds("deadband_c") == (MIN_THERMOSTAT_BAND_C, MAX_THERMOSTAT_BAND_C)
+    assert MIN_THERMOSTAT_BAND_C > 0.0
+
+
+def test_deadband_action_without_a_setpoint_field_is_rejected():
+    with pytest.raises(ValueError, match="no setpoint field"):
+        _sorted_action_layout({"HVAC": ["deadband_c"]})
+    layout, _ = _sorted_action_layout({"HVAC": ["deadband_c", "heat_c"]})
+    assert [f for _, f in layout] == ["deadband_c", "heat_c"]
+
+
 def test_sorted_action_layout_preserves_equipment_sort_order():
     layout, type_by_equip = sorted_action_layout(
         {"B": ["reactive_power_kvar", "active_power_kw"], "A": ["active_power_kw"]}

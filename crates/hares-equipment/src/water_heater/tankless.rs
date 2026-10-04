@@ -22,6 +22,7 @@ use hares_physics::water_density_kg_m3;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::Siting;
+use super::tank_thermostat_update;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
@@ -629,14 +630,17 @@ impl Equipment for TanklessWH {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
                 cooling_setpoint_c,
-                ..
+                deadband_c,
             } => {
-                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
-                    if !sp.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater setpoint: {sp}"
-                        )));
-                    }
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if let Some(band_c) = update.band_c {
+                    return Err(HaresError::Control(format!(
+                        "a tankless water heater has no thermostat switching band, got \
+                         deadband_c {band_c}"
+                    )));
+                }
+                if let Some(sp) = update.setpoint_c {
                     self.setpoint_c = sp;
                 }
             }
@@ -821,6 +825,31 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    #[test]
+    fn thermal_setpoint_band_is_rejected_for_a_heater_without_a_tank_thermostat() {
+        use hares_types::ControlSignal;
+        let cfg = config();
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        let setpoint_before = eq.setpoint_c;
+        for (setpoint, db) in [(None, 1.0), (Some(50.0), 1.0)] {
+            eq.apply_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: setpoint,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            })
+            .expect_err("a tankless heater has no switching band to set");
+            assert_eq!(eq.setpoint_c, setpoint_before);
+        }
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, 50.0);
     }
 
     /// Reactive-power contract for tankless water heaters: control

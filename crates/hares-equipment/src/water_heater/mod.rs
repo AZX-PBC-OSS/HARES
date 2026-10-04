@@ -70,7 +70,9 @@ pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
-use hares_types::{EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource};
+use hares_types::{
+    EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource, thermal_setpoint_band_c,
+};
 
 use crate::EquipmentRegistry;
 
@@ -223,6 +225,43 @@ pub(super) fn apply_jacket_r_value(
     let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
     let r_total = 1.0 / ua_base + jacket_r / lateral_area_m2;
     1.0 / r_total
+}
+
+/// What a `ThermalSetpoint` sets on a water heater's thermostat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TankThermostatUpdate {
+    /// The tank setpoint, from `heating_setpoint_c`.
+    pub setpoint_c: Option<f64>,
+    /// The tank deadband, from `deadband_c` (see `hares_types::thermostat_band`).
+    pub band_c: Option<f64>,
+}
+
+/// Reads a `ThermalSetpoint` under the contract every water heater shares
+/// with HVAC: a named setpoint overrides it, `deadband_c` is the switching
+/// band and comes only with a named setpoint, and the release form sets
+/// nothing. A water heater has no cooling setpoint, so naming one is an
+/// error rather than a value substituted for the tank setpoint.
+pub(super) fn tank_thermostat_update(
+    heating_setpoint_c: Option<f64>,
+    cooling_setpoint_c: Option<f64>,
+    deadband_c: Option<f64>,
+) -> crate::Result<TankThermostatUpdate> {
+    if let Some(cooling) = cooling_setpoint_c {
+        return Err(HaresError::Control(format!(
+            "a water heater has no cooling setpoint, got cooling_setpoint_c {cooling}"
+        )));
+    }
+    if let Some(sp) = heating_setpoint_c
+        && !sp.is_finite()
+    {
+        return Err(HaresError::Control(format!(
+            "invalid water-heater setpoint: {sp}"
+        )));
+    }
+    Ok(TankThermostatUpdate {
+        setpoint_c: heating_setpoint_c,
+        band_c: thermal_setpoint_band_c(heating_setpoint_c, cooling_setpoint_c, deadband_c)?,
+    })
 }
 
 /// Thermostat hysteresis logic shared by all storage water heater types.

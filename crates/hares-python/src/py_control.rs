@@ -15,7 +15,7 @@ use crate::py_enums::{
 };
 use crate::utils::{
     dict_optional, dict_required, finite_f64_optional, finite_f64_required, validate_finite,
-    validate_non_negative, validate_range,
+    validate_non_negative, validate_range, validate_thermal_setpoint_band,
 };
 
 #[pyclass(name = "ControlSignal")]
@@ -78,9 +78,7 @@ impl PyControlSignal {
         if let Some(v) = cool_c {
             validate_finite(v, "cooling_setpoint_c")?;
         }
-        if let Some(v) = deadband_c {
-            validate_finite(v, "deadband_c")?;
-        }
+        validate_thermal_setpoint_band(heat_c, cool_c, deadband_c)?;
         Ok(Self {
             signal: ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: heat_c,
@@ -411,11 +409,17 @@ impl PyControlSignal {
     pub fn from_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let kind: String = dict_required(d, "type")?;
         let signal = match kind.as_str() {
-            "ThermalSetpoint" => ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: finite_f64_optional(d, "heating_setpoint_c")?,
-                cooling_setpoint_c: finite_f64_optional(d, "cooling_setpoint_c")?,
-                deadband_c: finite_f64_optional(d, "deadband_c")?,
-            },
+            "ThermalSetpoint" => {
+                let heating_setpoint_c = finite_f64_optional(d, "heating_setpoint_c")?;
+                let cooling_setpoint_c = finite_f64_optional(d, "cooling_setpoint_c")?;
+                let deadband_c = finite_f64_optional(d, "deadband_c")?;
+                validate_thermal_setpoint_band(heating_setpoint_c, cooling_setpoint_c, deadband_c)?;
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c,
+                    cooling_setpoint_c,
+                    deadband_c,
+                }
+            }
             "ModeOverride" => ControlSignal::ModeOverride {
                 mode: parse_mode_or_enum(d, "mode")?,
             },

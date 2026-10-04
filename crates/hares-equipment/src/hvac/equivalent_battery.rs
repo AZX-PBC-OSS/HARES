@@ -3,7 +3,7 @@
 use super::hvac_core::HvacEquipment;
 use super::thermostat::ThermostatMode;
 use hares_physics::units::power_w_to_kw;
-use hares_types::HaresError;
+use hares_types::{HaresError, MIN_THERMOSTAT_BAND_C};
 
 /// OCHRE reference temperature for heating mode: temperature at which Energy=0.
 /// Matches OCHRE `HVAC.make_equivalent_battery_model()` (HVAC.py:626).
@@ -178,16 +178,15 @@ impl HvacEquipment {
                     zone_capacitance_kwh_per_k, max_e
                 )));
             }
-            // max_energy_kwh must exceed min_energy_kwh when deadband > 0
             let deadband_range = (max_e - min_energy_kwh).max(0.0);
             if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
                 return Err(HaresError::Equipment(format!(
-                    "EBM invariant violation: max_energy_kwh={} equals min_energy_kwh={}, \
-                     implying zero deadband range while capacitance is positive \
-                     ({zone_capacitance_kwh_per_k}). The thermostat hysteresis is 0: a \
-                     ThermalSetpoint signal that names a setpoint is rejected for \
-                     deadband_c 0 at application, so check the configured hysteresis_c.",
-                    max_e, min_energy_kwh
+                    "EBM invariant violation: the energy window max_energy_kwh={max_e} - \
+                     min_energy_kwh={min_energy_kwh} is not above f64 resolution. It is the \
+                     zone capacitance ({zone_capacitance_kwh_per_k} kWh/K) times the \
+                     thermostat band ({hysteresis} °C), and every source of the band is \
+                     validated to at least {MIN_THERMOSTAT_BAND_C} °C, so the zone \
+                     capacitance is not physical."
                 )));
             }
         }
@@ -319,6 +318,17 @@ mod tests {
     /// Turn-on threshold for cooling: thermostat FSM formula (thermostat.rs:404).
     fn cooling_t_on(setpoint: f64, hysteresis: f64, offset: f64) -> f64 {
         setpoint + hysteresis * (1.0 - offset)
+    }
+
+    #[test]
+    fn a_window_below_f64_resolution_names_the_capacitance() {
+        let eq = heating_equipment(21.0, 10_000.0, hares_types::MIN_THERMOSTAT_BAND_C, 0.2);
+        let err = eq
+            .make_equivalent_battery_model(20.5, 1e-15, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect_err("a window below f64 resolution is an invariant violation");
+        let msg = err.to_string();
+        assert!(msg.contains("capacitance is not physical"), "{msg}");
+        assert!(msg.contains("0.1 °C"), "{msg}");
     }
 
     // ---------------------------------------------------------------------------

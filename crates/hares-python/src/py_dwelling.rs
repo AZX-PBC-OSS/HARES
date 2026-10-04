@@ -2643,9 +2643,10 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         // config/file loading (HPXML, weather, schedules). This is a conscious trade-off:
         // a rare runtime Io error will surface as ConfigError rather than adding a
         // separate Python exception type for a case that effectively never occurs.
-        HaresError::Io(_) | HaresError::Dwelling(_) | HaresError::Envelope(_) => {
-            HaresConfigError::new_err(msg)
-        }
+        HaresError::Io(_)
+        | HaresError::Dwelling(_)
+        | HaresError::Envelope(_)
+        | HaresError::ThermostatBand { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }

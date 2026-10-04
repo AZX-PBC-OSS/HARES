@@ -76,7 +76,10 @@ fn field_bounds(field: &str) -> (f64, f64) {
         "setpoint_c" | "heat_c" | "cool_c" | "heating_setpoint_c" | "cooling_setpoint_c" => {
             (-50.0, 80.0)
         }
-        "deadband_c" => (0.0, 30.0),
+        "deadband_c" => (
+            hares_types::MIN_THERMOSTAT_BAND_C,
+            hares_types::MAX_THERMOSTAT_BAND_C,
+        ),
         _ => (-1.0e6, 1.0e6),
     }
 }
@@ -103,6 +106,8 @@ fn build_control_signal(
                 .or(lower.get("cool_c"))
                 .copied();
             let deadband_c = lower.get("deadband_c").copied();
+            hares_types::thermal_setpoint_band_c(heat_c, cool_c, deadband_c)
+                .map_err(|err| err.to_string())?;
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: heat_c,
                 cooling_setpoint_c: cool_c,
@@ -589,7 +594,21 @@ mod tests {
 
     #[test]
     fn field_bounds_deadband() {
-        assert_eq!(field_bounds("deadband_c"), (0.0, 30.0));
+        assert_eq!(
+            field_bounds("deadband_c"),
+            (
+                hares_types::MIN_THERMOSTAT_BAND_C,
+                hares_types::MAX_THERMOSTAT_BAND_C
+            )
+        );
+    }
+
+    #[test]
+    fn build_thermal_setpoint_rejects_a_deadband_without_a_setpoint() {
+        let mut values = HashMap::new();
+        values.insert("deadband_c".to_string(), 1.0);
+        let err = build_control_signal("ThermalSetpoint", &values).unwrap_err();
+        assert!(err.contains("names no setpoint"), "{err}");
     }
 
     #[test]

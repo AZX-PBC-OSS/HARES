@@ -22,10 +22,9 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
+        apply_simple_mode_override_in_control, compute_and_write_ebm_telemetry, lookup_zone,
+        outage_forces_off, register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
         zone_id_from_config,
     },
 };
@@ -85,12 +84,17 @@ pub struct GasFurnace {
     zip: hares_types::zip::ResolvedZip,
 }
 
+/// Version 2: the thermostat hysteresis is persisted.
+const FURNACE_CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FurnaceState {
     mode: ThermostatMode,
     duty_cycle: f64,
     last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
+    /// The hysteresis in force, which a named `ThermalSetpoint` may have set.
+    thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_kw: f64,
@@ -153,6 +157,10 @@ impl ElectricFurnace {
 }
 
 impl Equipment for ElectricFurnace {
+    fn checkpoint_version() -> u32 {
+        FURNACE_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -401,6 +409,7 @@ impl Equipment for ElectricFurnace {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -429,6 +438,7 @@ impl Equipment for ElectricFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -490,7 +500,7 @@ impl Equipment for ElectricFurnace {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Furnace")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -559,6 +569,10 @@ impl GasFurnace {
 }
 
 impl Equipment for GasFurnace {
+    fn checkpoint_version() -> u32 {
+        FURNACE_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -823,6 +837,7 @@ impl Equipment for GasFurnace {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -851,6 +866,7 @@ impl Equipment for GasFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -916,7 +932,7 @@ impl Equipment for GasFurnace {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }

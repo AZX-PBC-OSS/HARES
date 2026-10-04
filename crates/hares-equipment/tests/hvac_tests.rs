@@ -5,8 +5,9 @@ use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
 use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DefrostControl, DefrostStrategy, DuctConfig,
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, EquipmentConfig,
-    EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
-    HvacSetpointConfig, IdealHvacConfig, RejectUnknownKeys,
+    EquipmentRegistry, GasBoilerConfig, GasFurnaceConfig, HeatPumpCommonConfig,
+    HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig, RejectUnknownKeys,
+    hvac::ThermostatConfig,
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
@@ -3160,7 +3161,7 @@ fn mshp_load_above_stage1_runs_continuously() {
                     cooling_setpoint_c: Some(26.0),
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -4709,16 +4710,8 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: the actuate release form must not degenerate the HVAC
-// equivalent battery model or desync the electrical accounting.
-//
-// The release signal (ThermalSetpoint with neither setpoint named) used to
-// write its deadband_c into the thermostat hysteresis on every HVAC control
-// arm. A release of thermal_setpoint(None, None, 0.0) zeroed the hysteresis;
-// the EBM's energy window (capacitance * hysteresis) collapsed, the next
-// Heating/Cooling step failed the enforced EBM invariant, and the tolerated
-// rollback of that step left a stale core_output whose electric power no
-// longer matched the rolled-back ports.
+// The thermostat band behind the HVAC equivalent battery's energy window
+// (zone capacitance x hysteresis): every source of it keeps the window open.
 // ---------------------------------------------------------------------------
 #[test]
 fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
@@ -4733,8 +4726,7 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let env_warm = env_with_zone_temp(22.0);
     eq.init(&cfg, &env_warm).unwrap();
 
-    // The actuate sequence: an event setback, then the consumer's release
-    // form, which carries a zero deadband and names no setpoint.
+    // The actuate sequence: an event setback, then the release form.
     eq.apply_control(&ControlSignal::ThermalSetpointDelta {
         heating_delta_c: Some(-4.0),
         cooling_delta_c: Some(4.0),
@@ -4743,13 +4735,12 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: None,
         cooling_setpoint_c: None,
-        deadband_c: Some(0.0),
+        deadband_c: None,
     })
     .expect("the release form must be accepted and leave no state behind");
 
     // After the release the zone drops below the heating setpoint: the next
-    // step runs in Heating mode, where the EBM is constructed. This step
-    // failed the degenerate-window invariant before the fix.
+    // step runs in Heating mode, where the EBM is constructed.
     let env_cold = env_with_zone_temp(18.0);
     eq.update_control(&env_cold);
     let mut ports = ports_for_zone1();
@@ -4782,54 +4773,54 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
     let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
     let range = ebm_max - ebm_min;
-    let expected = ZONE_CAPACITANCE_KWH_PER_K * 1.0; // default hysteresis_c
+    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
         (range - expected).abs() < 1e-9,
         "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
     );
 }
 
+/// Every band below a thermostat's resolution, down to the subnormals, is
+/// rejected at application; the unit then still heats with an open window.
 #[test]
-fn named_form_zero_deadband_is_rejected_before_state_degenerates() {
-    let mut cfg = electric_furnace_config("furnace_zerodb");
-    cfg.zone_capacitance_kwh_per_k = 2.0;
+fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    let mut cfg = electric_furnace_config("furnace_subband");
+    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
-    let env = env_with_zone_temp(22.0);
-    eq.init(&cfg, &env).unwrap();
+    eq.init(&cfg, &env_with_zone_temp(22.0)).unwrap();
 
-    let err = eq
-        .apply_control(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: Some(22.0),
+    for db in [
+        0.0,
+        5e-324,
+        f64::MIN_POSITIVE,
+        1e-300,
+        1e-17,
+        1e-16,
+        2e-16,
+        1e-15,
+        1e-12,
+    ] {
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
             cooling_setpoint_c: None,
-            deadband_c: Some(0.0),
+            deadband_c: Some(db),
         })
-        .expect_err("a zero deadband on a named setpoint must be rejected at application");
-    assert!(
-        err.to_string()
-            .contains("deadband_c must be > 0 when the signal names a setpoint"),
-        "the rejection must name the constraint, got: {err}"
-    );
-
-    // The rejected signal must have left the thermostat untouched: a normal
-    // event-then-release sequence afterwards still steps with an open EBM
-    // window at the default hysteresis.
-    eq.apply_control(&ControlSignal::ThermalSetpointDelta {
-        heating_delta_c: Some(-4.0),
-        cooling_delta_c: Some(4.0),
-    })
-    .unwrap();
+        .expect_err("a band below a thermostat's resolution must be rejected");
+    }
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: None,
         cooling_setpoint_c: None,
         deadband_c: Some(0.0),
     })
-    .unwrap();
+    .expect_err("the release form carries no deadband");
+
     let env_cold = env_with_zone_temp(18.0);
     eq.update_control(&env_cold);
     let mut ports = ports_for_zone1();
     eq.step(&env_cold, Duration::from_secs(60), &mut ports)
-        .expect("a step after the rejected signal must succeed");
+        .expect("a step after the rejected signals must succeed");
     let ebm_min = eq
         .telemetry()
         .get(tk::EBM_MIN_ENERGY_KWH)
@@ -4838,9 +4829,145 @@ fn named_form_zero_deadband_is_rejected_before_state_degenerates() {
         .telemetry()
         .get(tk::EBM_MAX_ENERGY_KWH)
         .unwrap_or(f64::NAN);
+    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
-        (ebm_max - ebm_min - 2.0).abs() < 1e-9,
-        "the EBM window must equal capacitance * default hysteresis (2.0 kWh), got {}",
+        (ebm_max - ebm_min - expected).abs() < 1e-9,
+        "the EBM window must equal capacitance * default hysteresis ({expected} kWh), got {}",
         ebm_max - ebm_min
     );
+}
+
+#[test]
+fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
+    for hysteresis_c in [0.0, 1e-17] {
+        let result = EquipmentConfig::from_typed(
+            "ashp_zero_hysteresis".to_string(),
+            "ASHP Heater".to_string(),
+            HeatPumpHeaterConfig {
+                common: HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    heating_capacity_w: Some(8_000.0),
+                    heating_eir: Some(0.3),
+                    backup_capacity_w: Some(0.0),
+                    hysteresis_c: Some(hysteresis_c),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .and_then(|mut cfg| {
+            cfg.zone_capacitance_kwh_per_k = 2.0;
+            let registry = EquipmentRegistry::new();
+            let mut eq = registry.create("ASHP Heater", cfg.clone())?;
+            eq.init(&cfg, &env_with_zone_temp(15.0))
+        });
+        let err = result.expect_err("a sub-band hysteresis must be rejected");
+        assert!(
+            matches!(err, hares_types::HaresError::ThermostatBand { .. }),
+            "{hysteresis_c}: {err}"
+        );
+    }
+}
+
+/// A band set by a named signal and kept through the release survives a
+/// checkpoint: the restored unit's EBM window equals the continuous one.
+#[test]
+fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const BAND_C: f64 = 0.25;
+    let baseboard = EquipmentConfig::from_typed(
+        "bb_band".to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+            setpoint: HvacSetpointConfig::default(),
+        },
+    )
+    .unwrap();
+    let gas_boiler = EquipmentConfig::from_typed(
+        "gb_band".to_string(),
+        "Gas Boiler".to_string(),
+        GasBoilerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            capacity_w: 10_000.0,
+            afue: 0.8,
+            flow_rate_kg_s: 0.5,
+            return_temp_c: 70.0,
+            fluid_type: FluidType::Water,
+            fan_power_w: None,
+            number_of_speeds: 1,
+            setpoint: HvacSetpointConfig::default(),
+            condensing: false,
+        },
+    )
+    .unwrap();
+    let cases = [
+        ("Electric Furnace", electric_furnace_config("ef_band")),
+        ("Gas Furnace", gas_furnace_config("gf_band")),
+        ("Electric Baseboard", baseboard),
+        ("Electric Boiler", electric_boiler_config("eb_band")),
+        ("Gas Boiler", gas_boiler),
+    ];
+    let registry = EquipmentRegistry::new();
+    let env_warm = env_with_zone_temp(22.0);
+    let env_cold = env_with_zone_temp(18.0);
+    for (kind, mut cfg) in cases {
+        cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+        let mut continuous = registry.create(kind, cfg.clone()).unwrap();
+        continuous.init(&cfg, &env_warm).unwrap();
+        continuous
+            .apply_control(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(BAND_C),
+            })
+            .unwrap();
+        continuous
+            .apply_control(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            })
+            .unwrap();
+        continuous.update_control(&env_warm);
+        continuous
+            .step(
+                &env_warm,
+                Duration::from_secs(60),
+                &mut ports_for_zone1_with_water_loop(),
+            )
+            .unwrap();
+
+        let mut restored = registry.create(kind, cfg.clone()).unwrap();
+        restored.init(&cfg, &env_warm).unwrap();
+        restored
+            .load_state(&continuous.save_state().unwrap())
+            .unwrap();
+
+        let mut windows = [0.0; 2];
+        for (window, eq) in windows.iter_mut().zip([&mut continuous, &mut restored]) {
+            eq.update_control(&env_cold);
+            eq.step(
+                &env_cold,
+                Duration::from_secs(60),
+                &mut ports_for_zone1_with_water_loop(),
+            )
+            .unwrap();
+            let t = eq.telemetry();
+            *window =
+                t.get(tk::EBM_MAX_ENERGY_KWH).unwrap() - t.get(tk::EBM_MIN_ENERGY_KWH).unwrap();
+        }
+        let expected = ZONE_CAPACITANCE_KWH_PER_K * BAND_C;
+        assert!(
+            (windows[0] - expected).abs() < 1e-9 && windows[1] == windows[0],
+            "{kind}: continuous window {} kWh, restored {} kWh, expected {expected}",
+            windows[0],
+            windows[1]
+        );
+    }
 }

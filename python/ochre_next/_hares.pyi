@@ -18,6 +18,11 @@ from ._hares_types import (
     SteppableStepResult as SteppableStepResult,
 )
 
+# Range of a thermostat switching band [°C]: an HVAC hysteresis, a tank
+# deadband, or the deadband_c of a ThermalSetpoint that names a setpoint.
+MIN_THERMOSTAT_BAND_C: float
+MAX_THERMOSTAT_BAND_C: float
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------

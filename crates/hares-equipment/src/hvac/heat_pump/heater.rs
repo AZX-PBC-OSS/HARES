@@ -20,8 +20,8 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        apply_heating_control_unchecked, compute_and_write_ebm_telemetry, lookup_zone,
-        outage_forces_off, register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
+        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -2695,11 +2695,7 @@ impl HeatPumpHeaterCore {
                 self.hvac.control.max_capacity_fraction = *fraction;
             }
             _ => {
-                apply_heating_control_unchecked(
-                    &mut self.hvac,
-                    signal,
-                    &self.descriptor.equipment_type,
-                )?;
+                self.hvac.apply_control_signal(signal)?;
             }
         }
         Ok(())
@@ -7212,7 +7208,7 @@ mod tests {
     #[test]
     fn checkpoint_time_at_current_speed_s() {
         let cfg = heater_config_with(|typed| {
-            typed.common.hysteresis_c = Some(0.0);
+            typed.common.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_lockout_temp_c = Some(100.0);
         });
@@ -7253,7 +7249,7 @@ mod tests {
     #[test]
     fn checkpoint_min_on_off_time_s() {
         let cfg = heater_config_with(|typed| {
-            typed.common.hysteresis_c = Some(0.0);
+            typed.common.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_lockout_temp_c = Some(100.0);
         });
@@ -7350,7 +7346,7 @@ mod tests {
     #[test]
     fn startup_config_survives_checkpoint_heater() {
         let cfg = heater_config_with(|typed| {
-            typed.common.hysteresis_c = Some(0.0);
+            typed.common.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_lockout_temp_c = Some(100.0);
         });
@@ -7403,7 +7399,7 @@ mod tests {
     #[test]
     fn heater_step_off_step_clears_was_on_and_restart_fires_fresh_ramp() {
         let cfg = heater_config_with(|typed| {
-            typed.common.hysteresis_c = Some(0.0);
+            typed.common.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         // Cold zone (16 °C < 21 °C heating setpoint) → HP on. OAT 5 °C is
         // above DEFAULT_HP_LOCKOUT_TEMP_C (-17.78 °C) and above

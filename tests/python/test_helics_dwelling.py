@@ -992,6 +992,32 @@ def test_control_signal_thermal_setpoint_heat_out_of_range_warns(
     assert orchestrator.helics_control_clamped >= 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 0.0},
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 30.0},
+        {"type": "ThermalSetpoint", "deadband_c": 1.0},
+    ],
+)
+def test_control_signal_thermal_setpoint_band_violation_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(json.dumps({"HVAC": body}))
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 1
+
+
 def test_control_signal_thermal_setpoint_cool_out_of_range_warns(
     monkeypatch: pytest.MonkeyPatch,
 ):

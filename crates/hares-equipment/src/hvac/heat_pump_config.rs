@@ -12,7 +12,7 @@ fn default_min_compressor_fraction() -> f64 {
 }
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
-use hares_types::FuelType;
+use hares_types::{FuelType, validate_thermostat_band_c};
 
 /// Fields shared between `HeatPumpHeaterConfig` and `HeatPumpCoolerConfig`.
 ///
@@ -385,12 +385,8 @@ impl HeatPumpHeaterConfig {
                 )));
             }
         }
-        if let Some(v) = self.common.hysteresis_c
-            && v < 0.0
-        {
-            return Err(HaresError::Equipment(
-                "HeatPumpHeaterConfig: hysteresis_c must be >= 0".to_string(),
-            ));
+        if let Some(v) = self.common.hysteresis_c {
+            validate_thermostat_band_c("HeatPumpHeaterConfig hysteresis_c", v)?;
         }
         if let Some(v) = self.common.airflow_m3_s_per_w
             && v <= 0.0
@@ -652,12 +648,8 @@ impl HeatPumpCoolerConfig {
             }
         }
 
-        if let Some(value) = self.common.hysteresis_c
-            && value < 0.0
-        {
-            return Err(HaresError::Equipment(
-                "HeatPumpCoolerConfig: hysteresis_c must be >= 0".to_string(),
-            ));
+        if let Some(value) = self.common.hysteresis_c {
+            validate_thermostat_band_c("HeatPumpCoolerConfig hysteresis_c", value)?;
         }
         if let Some(value) = self.common.airflow_m3_s_per_w
             && value <= 0.0

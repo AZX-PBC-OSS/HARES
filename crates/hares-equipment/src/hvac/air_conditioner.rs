@@ -2925,12 +2925,12 @@ mod tests {
     fn room_ac_vs_central_different_dse() {
         let central_with_duct_losses = ac_config_with(|typed| {
             typed.capacity_w = 3_500.0;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.duct.dse_cool = Some(0.80);
         });
         let central_no_duct_losses = ac_config_with(|typed| {
             typed.capacity_w = 3_500.0;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.duct.dse_cool = Some(1.0);
         });
 
@@ -3016,7 +3016,7 @@ mod tests {
         // Zero hysteresis so activation threshold equals setpoint, not setpoint+1.
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 2;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.stage_capacities_w = Some(vec![4_000.0, 8_000.0]);
             typed.stage_eirs = Some(vec![0.33, 0.33]);
         });
@@ -3071,7 +3071,8 @@ mod tests {
     #[test]
     fn single_speed_cooling_call_uses_full_duty_cycle() {
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
-        let cfg = ac_config_with(|typed| typed.hysteresis_c = Some(0.0));
+        let cfg =
+            ac_config_with(|typed| typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C));
 
         // Both environments are above setpoint so cooling is On in both cases.
         let env_full = env(24.6, 0.010, 18.0, 35.0);
@@ -3101,7 +3102,7 @@ mod tests {
     fn variable_speed_ideal_uses_fractional_duty_cycle() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(0.25/0.5)=0.5
         let env_full = env(24.60, 0.010, 18.0, 35.0); // clamped to 1.0
@@ -3133,7 +3134,7 @@ mod tests {
     fn central_four_speed_ac_uses_variable_speed_mode() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = None;
         });
         let env = env(24.25, 0.010, 18.0, 35.0);
@@ -3161,7 +3162,7 @@ mod tests {
     fn central_four_speed_variable_speed_interpolates_stage_ladder() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.stage_capacities_w = Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]);
             typed.stage_eirs = Some(vec![0.20, 0.25, 0.30, 0.35]);
             typed.stage_shrs = Some(vec![0.75, 0.75, 0.75, 0.75]);
@@ -3731,7 +3732,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3765,7 +3766,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3811,7 +3812,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3939,7 +3940,7 @@ mod tests {
     #[test]
     fn checkpoint_time_at_current_speed_s() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
@@ -3980,7 +3981,7 @@ mod tests {
     #[test]
     fn checkpoint_min_on_off_time_s() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
@@ -4054,7 +4055,7 @@ mod tests {
     #[test]
     fn startup_config_survives_checkpoint_ac() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = Some(0.25);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
@@ -4130,7 +4131,7 @@ mod tests {
     #[test]
     fn ac_step_off_step_clears_was_on_and_restart_fires_fresh_ramp() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = Some(0.25);
         });
         // Hot zone (28 °C > 24 °C cooling setpoint) → compressor on.
@@ -5227,7 +5228,7 @@ mod dr_tests {
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -5723,7 +5724,7 @@ mod crankcase_tests {
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),

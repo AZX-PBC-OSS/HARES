@@ -254,29 +254,6 @@ impl IdealHvac {
         self.thermostat_fsm.effective_setpoints()
     }
 
-    fn validate_runtime_override(
-        &self,
-        candidate: RuntimeSetpointOverride,
-    ) -> crate::Result<RuntimeSetpointOverride> {
-        let merged = self
-            .thermostat_fsm
-            .static_setpoints
-            .with_schedule_override(self.thermostat_fsm.schedule_setpoints)
-            .with_control_override(Some(candidate));
-        let reconciled = merged.reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
-        if (reconciled.heating_c - merged.heating_c).abs() > 0.001
-            || (reconciled.cooling_c - merged.cooling_c).abs() > 0.001
-        {
-            return Err(HaresError::Equipment(format!(
-                "runtime setpoint override would violate deadband: \
-                 cooling-heating gap {} C < required {} C",
-                merged.cooling_c - merged.heating_c,
-                2.0 * self.thermostat_fsm.thermostat.hysteresis_c,
-            )));
-        }
-        Ok(candidate)
-    }
-
     fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
         match self.ideal_capacity_mode {
             IdealCapacityMode::On => true,
@@ -385,7 +362,7 @@ impl Equipment for IdealHvac {
             self.thermostat_fsm.static_setpoints.cooling_c = cooling_sp;
         }
         if let Some(deadband) = typed.deadband_c {
-            self.thermostat_fsm.thermostat.hysteresis_c = deadband.max(0.0);
+            self.thermostat_fsm.thermostat.hysteresis_c = deadband;
         }
         if let Some(n_speeds) = typed.n_speeds {
             // OCHRE parity: auto-ideal variable-speed threshold is 4+ speeds.
@@ -457,7 +434,7 @@ impl Equipment for IdealHvac {
             self.cooling_capacity_w = cool_cap.max(0.0);
         }
         if let Some(deadband) = extract_numeric(config, "deadband_c") {
-            self.thermostat_fsm.thermostat.hysteresis_c = deadband.max(0.0);
+            self.thermostat_fsm.thermostat.hysteresis_c = deadband;
         }
         if let Some(n_speeds) = extract_numeric(config, "n_speeds") {
             // OCHRE parity: auto-ideal variable-speed threshold is 4+ speeds.
@@ -975,41 +952,8 @@ impl Equipment for IdealHvac {
                 self.ideal_capacity_w = *capacity_w;
                 self.ideal_capacity_degraded = *degraded;
             }
-            ControlSignal::ThermalSetpoint {
-                heating_setpoint_c,
-                cooling_setpoint_c,
-                deadband_c,
-            } => {
-                // A zero-width hysteresis is rejected before any state
-                // changes: the turn-on and turn-off thresholds would
-                // coincide and the EBM's energy window would collapse.
-                if let Some(db) = deadband_c
-                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
-                    && *db <= 0.0
-                {
-                    return Err(HaresError::Control(format!(
-                        "ThermalSetpoint deadband_c must be > 0 when the signal names a \
-                         setpoint, got {db}: a zero-width hysteresis gives the thermostat \
-                         no switching margin and degenerates the equivalent battery model \
-                         (max_energy_kwh == min_energy_kwh)"
-                    )));
-                }
-                let candidate = RuntimeSetpointOverride {
-                    heating_c: *heating_setpoint_c,
-                    cooling_c: *cooling_setpoint_c,
-                };
-                self.thermostat_fsm.runtime_setpoints =
-                    Some(self.validate_runtime_override(candidate)?);
-                // The deadband applies as hysteresis only when the signal
-                // names a setpoint; the release form (neither named) is a
-                // pure pass-through and must not touch the hysteresis.
-                if let Some(db) = deadband_c
-                    && db.is_finite()
-                    && *db >= 0.0
-                    && (heating_setpoint_c.is_some() || cooling_setpoint_c.is_some())
-                {
-                    self.thermostat_fsm.thermostat.hysteresis_c = *db;
-                }
+            ControlSignal::ThermalSetpoint { .. } | ControlSignal::ThermalSetpointDelta { .. } => {
+                self.thermostat_fsm.apply_thermal_setpoint_signal(signal)?;
             }
             ControlSignal::ModeOverride { mode } if *mode == OperatingMode::Off => {
                 if let Some(sim_time) = self.last_sim_time {
@@ -1019,26 +963,6 @@ impl Equipment for IdealHvac {
                     self.ideal_capacity_w = 0.0;
                     self.ideal_capacity_degraded = false;
                 }
-            }
-            ControlSignal::ThermalSetpointDelta {
-                heating_delta_c,
-                cooling_delta_c,
-            } => {
-                let base = self
-                    .thermostat_fsm
-                    .static_setpoints
-                    .with_schedule_override(self.thermostat_fsm.schedule_setpoints);
-                let prior = self.thermostat_fsm.runtime_setpoints.unwrap_or_default();
-                let candidate = RuntimeSetpointOverride {
-                    heating_c: heating_delta_c
-                        .map(|d| base.heating_c + d)
-                        .or(prior.heating_c),
-                    cooling_c: cooling_delta_c
-                        .map(|d| base.cooling_c + d)
-                        .or(prior.cooling_c),
-                };
-                self.thermostat_fsm.runtime_setpoints =
-                    Some(self.validate_runtime_override(candidate)?);
             }
             ControlSignal::IdealCapacityModeOverride { mode } => {
                 self.ideal_capacity_mode = *mode;
@@ -3311,6 +3235,23 @@ mod tests {
                 format!("{err:?}").to_lowercase().contains(token),
                 "error must name the offending signal for {bad:?}, got {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn signal_arm_rejects_a_band_below_a_thermostat_band_without_state_change() {
+        use hares_types::ControlSignal;
+
+        let mut eq = init_ideal("IH-band", 20.0, 26.0, 18.0);
+        let before = eq.thermostat_fsm.clone();
+        for db in [f64::NAN, 0.0, 5e-324, 1e-17] {
+            eq.apply_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            })
+            .expect_err("a band below a thermostat band must be rejected");
+            assert_eq!(eq.thermostat_fsm, before, "{db}: no state may change");
         }
     }
 

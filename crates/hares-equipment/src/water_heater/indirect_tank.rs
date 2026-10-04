@@ -28,7 +28,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
-    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, tank_thermostat_update,
+    weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
@@ -655,20 +656,17 @@ impl Equipment for IndirectTank {
         match signal {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
+                cooling_setpoint_c,
                 deadband_c,
-                ..
             } => {
-                if let Some(sp) = heating_setpoint_c {
-                    self.target_setpoint_c = *sp;
-                    self.setpoint_c = *sp;
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if let Some(sp) = update.setpoint_c {
+                    self.target_setpoint_c = sp;
+                    self.setpoint_c = sp;
                 }
-                if let Some(db) = deadband_c {
-                    if !db.is_finite() || *db <= 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater deadband: {db}"
-                        )));
-                    }
-                    self.deadband_c = *db;
+                if let Some(band_c) = update.band_c {
+                    self.deadband_c = band_c;
                 }
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
@@ -852,13 +850,38 @@ mod control_domain_tests {
             .expect("typed config")
     }
 
-    /// The arm stores the setpoint with no check of its own — not even
-    /// finiteness, which every sibling water-heater arm checks — and
-    /// silently clamps an out-of-domain LoadFraction into [0, 1]. The
-    /// DutyCycle arms in the sibling files reject out-of-domain values, and
-    /// the central validator rejects both signals on the checked path, so
-    /// the same garbage must not silently become a different constraint on
-    /// the unchecked path here either.
+    #[test]
+    fn thermal_setpoint_band_follows_the_shared_contract() {
+        let cfg = config();
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        let configured = eq.deadband_c;
+        for (setpoint, db) in [
+            (None, 0.0),
+            (None, 3.0),
+            (Some(50.0), 0.0),
+            (Some(50.0), 1e-17),
+        ] {
+            eq.apply_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: setpoint,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            })
+            .expect_err("a release carrying a deadband or a sub-band deadband is rejected");
+            assert_eq!(eq.deadband_c, configured);
+        }
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(3.0),
+        })
+        .unwrap();
+        assert_eq!(eq.deadband_c, 3.0);
+    }
+
+    /// The central validator rejects out-of-domain setpoints and load
+    /// fractions on the checked path, so the same garbage must not silently
+    /// become a different constraint on the unchecked path either.
     #[test]
     fn out_of_domain_control_values_rejected_on_unchecked_path() {
         let cfg = config();

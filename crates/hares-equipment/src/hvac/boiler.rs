@@ -21,11 +21,10 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, lookup_zone, loop_id_from_config, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
-        zone_id_from_config,
+        apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
+        apply_simple_mode_override_in_control, compute_and_write_ebm_telemetry, lookup_zone,
+        loop_id_from_config, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
+        update_heating_control, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -141,12 +140,17 @@ pub struct GasBoiler {
     zip: hares_types::zip::ResolvedZip,
 }
 
+/// Version 2: the thermostat hysteresis is persisted.
+const BOILER_CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoilerState {
     mode: ThermostatMode,
     duty_cycle: f64,
     last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
+    /// The hysteresis in force, which a named `ThermalSetpoint` may have set.
+    thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_kw: f64,
@@ -213,6 +217,10 @@ impl ElectricBoiler {
 }
 
 impl Equipment for ElectricBoiler {
+    fn checkpoint_version() -> u32 {
+        BOILER_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -435,6 +443,7 @@ impl Equipment for ElectricBoiler {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -462,6 +471,7 @@ impl Equipment for ElectricBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -519,7 +529,7 @@ impl Equipment for ElectricBoiler {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Boiler")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -628,6 +638,10 @@ impl GasBoiler {
 }
 
 impl Equipment for GasBoiler {
+    fn checkpoint_version() -> u32 {
+        BOILER_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -875,6 +889,7 @@ impl Equipment for GasBoiler {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -902,6 +917,7 @@ impl Equipment for GasBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -962,7 +978,7 @@ impl Equipment for GasBoiler {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Boiler")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }

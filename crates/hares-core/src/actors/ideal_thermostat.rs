@@ -89,10 +89,21 @@ impl OverrideState {
         }
     }
 
-    /// Adds a deadband override.
+    /// Adds a deadband to a setpoint override. A deadband applies only with a
+    /// named setpoint: a state carrying one without a setpoint is rejected by
+    /// `IdealThermostat::set_override` and fails the step in `decide()`.
     pub fn with_deadband(mut self, deadband_c: f64) -> Self {
         self.deadband_c = Some(deadband_c);
         self
+    }
+
+    /// The `ThermalSetpoint` this override dispatches.
+    pub fn signal(&self) -> ControlSignal {
+        ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: self.heating_setpoint_c,
+            cooling_setpoint_c: self.cooling_setpoint_c,
+            deadband_c: self.deadband_c,
+        }
     }
 
     /// Clears all overrides.
@@ -229,21 +240,16 @@ impl IdealThermostat {
         &self.override_state
     }
 
-    /// Updates the override state, rejecting strictly inverted setpoints.
-    ///
-    /// When both `heating_setpoint_c` and `cooling_setpoint_c` are set and
-    /// `heating >= cooling`, the override is rejected with a typed error in
-    /// every build profile.
-    ///
-    /// NOTE: This method only catches strict inversion (heating >= cooling).
-    /// Deadband violations (cooling - heating < 2 * hysteresis_c) are not
-    /// checked here — they are caught later in `decide()` which is the
-    /// authoritative gate.
+    /// Updates the override state, rejecting a strictly inverted setpoint
+    /// pair and any state whose signal the control-signal validator rejects
+    /// (a deadband without a named setpoint, a band outside a thermostat's
+    /// range). Deadband violations against the equipment hysteresis
+    /// (cooling - heating < 2 * hysteresis_c) are caught in `decide()`.
     ///
     /// # Errors
-    /// An inverted setpoint pair is a physics violation: a typed error
-    /// naming the actor and the setpoints.
+    /// A typed error naming the actor and the rejected state.
     pub fn set_override(&mut self, state: OverrideState) -> Result<(), HaresError> {
+        state.signal().validate_numeric_bounds()?;
         if let (Some(heating_c), Some(cooling_c)) =
             (state.heating_setpoint_c, state.cooling_setpoint_c)
             && heating_c >= cooling_c
@@ -368,6 +374,15 @@ impl Actor for IdealThermostat {
             }
         }
 
+        let signal = self.override_state.signal();
+        if let Err(err) = signal.validate_numeric_bounds() {
+            self.override_violation = Some(format!(
+                "invalid override in IdealThermostat '{}': {err}",
+                self.name
+            ));
+            return;
+        }
+
         tracing::debug!(
             actor = %self.name,
             target = self.target_name(),
@@ -384,11 +399,7 @@ impl Actor for IdealThermostat {
         // and must take precedence over schedule-level setpoints.
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
-            signal: ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: self.override_state.heating_setpoint_c,
-                cooling_setpoint_c: self.override_state.cooling_setpoint_c,
-                deadband_c: self.override_state.deadband_c,
-            },
+            signal,
             priority: PriorityTier::UserOverride,
         });
     }
@@ -574,6 +585,23 @@ mod tests {
             }
             _ => panic!("expected ThermalSetpoint signal"),
         }
+    }
+
+    #[test]
+    fn a_deadband_override_without_a_setpoint_is_rejected_not_dropped() {
+        let mut thermostat =
+            IdealThermostat::new("HVAC").with_override(OverrideState::none().with_deadband(1.5));
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        thermostat.decide(&env, &mut requests);
+        assert!(requests.is_empty(), "nothing may be emitted: {requests:?}");
+        assert!(!thermostat.healthy(), "the rejection must fail the step");
+
+        let mut thermostat = IdealThermostat::new("HVAC");
+        thermostat
+            .set_override(OverrideState::none().with_deadband(1.5))
+            .expect_err("a deadband needs a named setpoint");
+        assert!(!thermostat.has_override());
     }
 
     #[test]

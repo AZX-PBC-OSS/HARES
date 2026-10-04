@@ -17,8 +17,6 @@ use crate::{ConfigPayload, EquipmentConfig};
 
 use super::hvac_core::MAX_CONDITIONED_ZONE_TEMP_C;
 
-// Re-exported from crate root; used by `apply_heating_control_unchecked`
-// and `update_heating_control`.
 use crate::HvacEquipment;
 
 #[doc(hidden)]
@@ -236,15 +234,6 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     result
 }
 
-/// Shared `apply_control_unchecked` logic for heating equipment that uses
-pub fn apply_heating_control_unchecked(
-    hvac: &mut HvacEquipment,
-    signal: &ControlSignal,
-    _equipment_name: &str,
-) -> crate::Result<()> {
-    hvac.apply_control_signal(signal)
-}
-
 /// Apply solver-driven ideal heating capacity for simple heating equipment.
 ///
 /// `capacity_w` is interpreted as delivered heating capacity [W]. The control is
@@ -267,7 +256,7 @@ pub fn apply_simple_heating_ideal_capacity_control(
 
 /// Apply `ModeOverride` and `DemandResponse` signals for simple heating-only
 /// equipment. Returns `true` when the signal was consumed; the caller should
-/// not forward it to `apply_heating_control_unchecked`.
+/// not forward it to `HvacEquipment::apply_control_signal`.
 pub fn apply_simple_mode_override_and_dr(
     mode_override: &mut Option<OperatingMode>,
     dr_level: &mut hares_types::DRLevel,
