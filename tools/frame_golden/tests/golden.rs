@@ -6,6 +6,8 @@ mod common;
 
 use std::path::PathBuf;
 
+use arrow::array::{Float64Array, Int64Array};
+
 use frame_golden::adapter::{RunOutput, RunRequest};
 use frame_golden::capture;
 use frame_golden::compare::{compare_run, delta_run};
@@ -203,4 +205,81 @@ fn manifest_positive_initialization_duration_runs_warmup() {
         "a positive initialization_duration_s must run the warm-up: {:?}",
         health.warmup
     );
+}
+
+/// A one-day, hourly fleet manifest with two homes built from the same
+/// resstock fixture and weighted 1.0 and 3.0: the manifest's weights must
+/// be the weights the run reports, in home order, so the same building
+/// twice is told apart by its weight rather than its identity.
+fn weighted_fleet_manifest() -> String {
+    let features = frame_golden::manifest::running_features()
+        .into_iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let home = |weight: f64| {
+        format!(
+            r#"
+[[home]]
+bldg_id = 2
+hpxml = "tests/fixtures/resstock/2025.1/bldg0000002/home.xml"
+schedule = "tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv"
+weather = "tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"
+initialization_duration_s = 0
+weight = {weight:.1}
+overrides = {{}}
+"#
+        )
+    };
+    format!(
+        r#"
+kind = "fleet"
+features = [{features}]
+defaults = "defaults"
+resolution = "hourly"
+
+[simulation]
+start_time = "2018-01-01T00:00:00-05:00"
+duration = 86400
+time_res = 3600
+output_verbosity = 2
+master_seed = 0
+{}
+{}
+"#,
+        home(1.0),
+        home(3.0)
+    )
+}
+
+#[test]
+fn fleet_manifest_weights_reach_the_weights_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("fleet_weights.toml");
+    std::fs::write(&manifest_path, weighted_fleet_manifest()).unwrap();
+
+    let products = run_products(&manifest_path);
+    let weights = products
+        .frames
+        .get("weights")
+        .expect("a fleet run produces a weights product");
+    let batch = weights
+        .batches
+        .first()
+        .expect("the weights product has a batch");
+    let bldg_ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("bldg_id is an Int64 column");
+    let sample_weights = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("sample_weight is a Float64 column");
+    assert_eq!(bldg_ids.len(), 2, "one weights row per home");
+    assert_eq!(bldg_ids.value(0), 2, "rows are in home order");
+    assert_eq!(bldg_ids.value(1), 2, "rows are in home order");
+    assert_eq!(sample_weights.value(0), 1.0, "the first home's weight");
+    assert_eq!(sample_weights.value(1), 3.0, "the second home's weight");
 }

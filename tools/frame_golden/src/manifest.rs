@@ -3,9 +3,10 @@
 //! The manifest names the exact feature set the fixture runs under, the
 //! defaults directory, optional per-file defaults replacements, a
 //! `SimulationConfig` table verbatim, an optional `[tariff]` table
-//! (dwelling manifests only), and the homes. Unknown keys are rejected at
-//! every level the tool owns, so a typo cannot silently change what a
-//! golden pins.
+//! (dwelling manifests only), and the homes; a fleet manifest also states
+//! each home's weight and the resolution its products are bucketed at.
+//! Unknown keys are rejected at every level the tool owns, so a typo
+//! cannot silently change what a golden pins.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,15 @@ pub enum ManifestKind {
     Fleet,
 }
 
+/// The resolution a fleet's products are bucketed at, as the manifest
+/// spells it. Any other string is rejected at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestResolution {
+    FifteenMin,
+    Hourly,
+}
+
 /// One `[[home]]` entry. Paths are repository-relative; `overrides` is the
 /// engine's equipment override map verbatim.
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +65,11 @@ pub struct HomeEntry {
     /// same fixed convergence loop, so the number of warm-up days is not
     /// chosen here.
     pub initialization_duration_s: u64,
+    /// The home's sample weight: what the home contributes to the fleet
+    /// aggregate. Required for kind "fleet" and rejected for kind
+    /// "dwelling"; a NaN, infinite or negative value fails the run when
+    /// `Fleet::with_sample_weights` classifies it.
+    pub weight: Option<f64>,
     pub overrides: serde_json::Value,
 }
 
@@ -94,6 +109,11 @@ pub struct GoldenManifest {
     /// serde missing-field error.
     #[serde(default)]
     pub home: Vec<HomeEntry>,
+    /// The resolution the fleet's products are bucketed at. Required for
+    /// kind "fleet" and rejected for kind "dwelling"; the validator states
+    /// both rules.
+    #[serde(default)]
+    pub resolution: Option<ManifestResolution>,
     /// The optional `[tariff]` table. `parse` checks its shape (dwelling
     /// manifests only, `file` and `zone` present, no other key) and parses
     /// `zone`; [`GoldenManifest::tariff`] reads and validates the file at
@@ -199,6 +219,43 @@ impl GoldenManifest {
                 ),
             }),
             ManifestKind::Dwelling | ManifestKind::Fleet => Ok(()),
+        }?;
+        for home in &self.home {
+            match (self.kind, home.weight) {
+                (ManifestKind::Fleet, None) => {
+                    return Err(FrameGoldenError::Manifest {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "[[home]] bldg_id {}: weight is required for kind \"fleet\"",
+                            home.bldg_id
+                        ),
+                    });
+                }
+                (ManifestKind::Dwelling, Some(_)) => {
+                    return Err(FrameGoldenError::Manifest {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "[[home]] bldg_id {}: weight is accepted for kind \"fleet\" only, found kind {:?}",
+                            home.bldg_id, self.kind
+                        ),
+                    });
+                }
+                (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => {}
+            }
+        }
+        match (self.kind, self.resolution) {
+            (ManifestKind::Fleet, None) => Err(FrameGoldenError::Manifest {
+                path: path.to_path_buf(),
+                detail: "resolution is required for kind \"fleet\"".to_string(),
+            }),
+            (ManifestKind::Dwelling, Some(_)) => Err(FrameGoldenError::Manifest {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "resolution is accepted for kind \"fleet\" only, found kind {:?}",
+                    self.kind
+                ),
+            }),
+            (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => Ok(()),
         }
     }
 

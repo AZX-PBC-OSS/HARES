@@ -1,11 +1,14 @@
 //! Manifest acceptance tests: unknown keys are rejected, dwelling manifests
-//! need exactly one home, a manifest's `[tariff]` table is dwelling-only
-//! with a parseable zone and a loadable tariff file, and compare-all
-//! selects manifests by exact feature set.
+//! need exactly one home, fleet manifests carry a weight on every home and
+//! a resolution while dwelling manifests reject both keys, a manifest's
+//! `[tariff]` table is dwelling-only with a parseable zone and a loadable
+//! tariff file, and compare-all selects manifests by exact feature set.
 
 use std::collections::BTreeMap;
 
-use frame_golden::manifest::{GoldenManifest, running_features, select_manifests};
+use frame_golden::manifest::{
+    GoldenManifest, ManifestResolution, running_features, select_manifests,
+};
 
 /// The flat tariff the golden fixtures point at, as JSON, for the
 /// `[tariff]` file tests to corrupt.
@@ -108,9 +111,92 @@ fn manifest_dwelling_kind_requires_exactly_one_home() {
         "the error states the rule: {error}"
     );
 
-    let fleet_two = manifest_text("fleet", "[]", 2);
+    let fleet_two = manifest_text("fleet", "[]", 2)
+        .replace("overrides = {}", "weight = 1.0\noverrides = {}")
+        .replace(
+            "defaults = \"defaults\"",
+            "defaults = \"defaults\"\nresolution = \"hourly\"",
+        );
     let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fleet_two).unwrap();
     assert_eq!(manifest.home.len(), 2);
+}
+
+#[test]
+fn manifest_fleet_requires_weight_and_resolution() {
+    // A resolution but no weight on any home: the error names the missing
+    // field.
+    let missing_weight = manifest_text("fleet", "[]", 2).replace(
+        "defaults = \"defaults\"",
+        "defaults = \"defaults\"\nresolution = \"hourly\"",
+    );
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &missing_weight)
+        .expect_err("a fleet home without a weight must be rejected");
+    assert!(
+        error.to_string().contains("weight"),
+        "the error names the field: {error}"
+    );
+
+    // Weights without a resolution: the error names the missing field.
+    let missing_resolution =
+        manifest_text("fleet", "[]", 2).replace("overrides = {}", "weight = 1.0\noverrides = {}");
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &missing_resolution)
+        .expect_err("a fleet manifest without a resolution must be rejected");
+    assert!(
+        error.to_string().contains("resolution"),
+        "the error names the field: {error}"
+    );
+
+    // Both keys present: the manifest parses and keeps the resolution.
+    let full = missing_weight.replace("overrides = {}", "weight = 1.0\noverrides = {}");
+    let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &full).unwrap();
+    assert_eq!(manifest.resolution, Some(ManifestResolution::Hourly));
+
+    // The fifteen-minute spelling round-trips too.
+    let fifteen = full.replace("resolution = \"hourly\"", "resolution = \"fifteen_min\"");
+    let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fifteen).unwrap();
+    assert_eq!(manifest.resolution, Some(ManifestResolution::FifteenMin));
+
+    // A resolution string outside the enum is rejected.
+    let unknown = full.replace("resolution = \"hourly\"", "resolution = \"monthly\"");
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &unknown)
+        .expect_err("an unknown resolution string must be rejected");
+    assert!(
+        error.to_string().contains("monthly"),
+        "the error names the unknown string: {error}"
+    );
+}
+
+#[test]
+fn manifest_dwelling_rejects_fleet_keys() {
+    let weight = manifest_text("dwelling", "[]", 1)
+        .replace("overrides = {}", "weight = 1.0\noverrides = {}");
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &weight)
+        .expect_err("a dwelling home carrying a weight must be rejected");
+    let error = error.to_string();
+    assert!(
+        error.contains("weight"),
+        "the error names the field: {error}"
+    );
+    assert!(
+        error.contains("fleet"),
+        "the error states the kind rule: {error}"
+    );
+
+    let resolution = manifest_text("dwelling", "[]", 1).replace(
+        "defaults = \"defaults\"",
+        "defaults = \"defaults\"\nresolution = \"hourly\"",
+    );
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &resolution)
+        .expect_err("a dwelling manifest carrying a resolution must be rejected");
+    let error = error.to_string();
+    assert!(
+        error.contains("resolution"),
+        "the error names the field: {error}"
+    );
+    assert!(
+        error.contains("fleet"),
+        "the error states the kind rule: {error}"
+    );
 }
 
 #[test]

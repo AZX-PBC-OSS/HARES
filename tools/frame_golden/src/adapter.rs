@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::golden::{MetricsRow, flatten_metrics};
-use crate::manifest::{GoldenManifest, ManifestKind, repo_path};
+use crate::manifest::{GoldenManifest, ManifestKind, ManifestResolution, repo_path};
 
 /// Whether a run keeps its frames. `Full` retains every product in memory
 /// (the engine's own file output goes to a deleted temp directory);
@@ -297,7 +297,21 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
             }
         })
         .collect();
-    let fleet = Fleet::from_buildings(configs);
+    // The manifest states each home's weight and the aggregation
+    // resolution; both rules are checked when the manifest parses, so the
+    // adapter hands them to the fleet untouched.
+    let weights: Vec<f64> = req
+        .manifest
+        .home
+        .iter()
+        .map(|home| {
+            home.weight
+                .expect("a fleet home carries a weight: the manifest validator rejects a fleet home without one")
+        })
+        .collect();
+    let fleet = Fleet::from_buildings(configs)
+        .with_sample_weights(weights)
+        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
     let construct = construct_start.elapsed();
 
     let simulate_start = Instant::now();
@@ -319,12 +333,13 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
             )));
         }
     }
-    // Aggregate at the run's own resolution when it is hourly or coarser;
-    // sub-hourly runs resample into 15-minute buckets.
-    let resolution = if base_sim.time_res.num_seconds() >= 3600 {
-        AggregationResolution::Hourly
-    } else {
-        AggregationResolution::FifteenMin
+    let resolution = match req
+        .manifest
+        .resolution
+        .expect("a fleet manifest carries a resolution: the manifest validator rejects a fleet manifest without one")
+    {
+        ManifestResolution::Hourly => AggregationResolution::Hourly,
+        ManifestResolution::FifteenMin => AggregationResolution::FifteenMin,
     };
     // The simulate timing includes the aggregate step: the fleet's
     // products do not exist until aggregation has run.
