@@ -359,12 +359,16 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     write_temp_file(&schedule_path, &build_schedule_csv());
     write_temp_file(&weather_path, &build_epw_8760());
 
+    // Both runs' output files and their `_diagnostics.csv` siblings go in a
+    // directory removed when the test ends.
+    let output_dir = tempfile::tempdir().expect("temp dir");
     let build_config = |retain: bool| DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
         schedule_path: schedule_path.clone(),
         weather_path: weather_path.clone(),
         sim_config: {
-            let mut cfg = simulation_config_with_flags(unique_temp_path("csv"), retain, true);
+            let output_path = output_dir.path().join(format!("retain_{retain}.csv"));
+            let mut cfg = simulation_config_with_flags(output_path, retain, true);
             cfg.output_verbosity = 6;
             cfg
         },

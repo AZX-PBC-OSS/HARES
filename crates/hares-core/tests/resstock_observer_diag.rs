@@ -61,21 +61,13 @@ mod tests {
         "UNKNOWN".into()
     }
 
-    fn utn(base: &str) -> String {
-        format!(
-            "{base}_{}_{:?}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            std::thread::current().id()
-        )
-    }
-
     #[test]
     fn observer_diagnostic_2024_2_winter_24h() {
         let bldg_dir = fixtures_dir().join("2024.2").join("bldg0000002");
-        let output = std::env::temp_dir().join(utn("obs_diag"));
+        // The output and its `_diagnostics.csv` sibling go in a directory
+        // removed when the test ends.
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output = output_dir.path().join("obs_diag");
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),

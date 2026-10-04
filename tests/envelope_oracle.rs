@@ -19,22 +19,6 @@ mod tests {
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
@@ -412,9 +396,8 @@ mod tests {
     ///     These large OCHRE deltas are logged as diagnostics, not hard failures.
     #[test]
     fn envelope_oracle_beopt_1h() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_envelope_oracle_beopt", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
@@ -439,7 +422,6 @@ mod tests {
             actual_path.display()
         );
         let hares = parse_csv_columns(&actual_path);
-        let _actual_guard = TempFile(actual_path.clone());
 
         // Also load OCHRE reference CSV for timeseries comparison
         let ochre_csv = fixture_dir().join("ochre_reference.csv");
@@ -862,9 +844,8 @@ mod tests {
         use hares_core::Dwelling;
         use hares_types::ZoneId;
 
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_per_equip_oracle", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = output_dir.path().join("hares_per_equip_oracle.csv");
 
         let config = beopt_config(output_path.clone());
         let mut dwelling = Dwelling::from_config(config).expect("dwelling init");

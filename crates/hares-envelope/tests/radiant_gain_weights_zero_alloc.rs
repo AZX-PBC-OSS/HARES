@@ -2,8 +2,8 @@
 //!
 //! `thermal_solver_step_allocation_free_after_first_step` runs the dwelling's
 //! per-step sequence (`prepare_inputs`, then three
-//! `solve_ideal_capacity_for_target` calls for every zone with a sensible
-//! input, then `integrate`) and asserts that
+//! `solve_ideal_capacity_for_target` calls for each of the two zones with a
+//! sensible input, then `integrate`) and asserts that
 //! the allocation bracket around the whole sequence reads zero over 100 steps
 //! after the first. It runs twice, once with couplings active (the
 //! identity-coupled scalar solve) and once with none (the uncoupled scalar
@@ -49,12 +49,20 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 fn make_env(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
     EnvironmentState {
         ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
-        zones: vec![ZoneState {
-            id: ZoneId(1),
-            temperature_c: zone_temp,
-            humidity_ratio: 0.008,
-            volume_m3: 200.0,
-        }],
+        zones: vec![
+            ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            },
+            ZoneState {
+                id: ZoneId(2),
+                temperature_c: zone_temp - 2.0,
+                humidity_ratio: 0.007,
+                volume_m3: 120.0,
+            },
+        ],
         weather: WeatherState {
             outdoor_temp_c: outdoor_temp,
             outdoor_humidity_ratio: 0.004,
@@ -104,10 +112,10 @@ fn make_env(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
     }
 }
 
-/// Build a `ThermalSolver` with two interior LWR surfaces so that
-/// `distribute_radiant_lwr_surfaces` is exercised on every step, and a zone
-/// sensible input whose B column drives the zone air so
-/// `solve_ideal_capacity_for_target` has a non-zero effective gain.
+/// Build a two-zone `ThermalSolver` with two interior LWR surfaces in zone 1
+/// so that `distribute_radiant_lwr_surfaces` is exercised on every step, and
+/// a sensible input per zone whose B column drives that zone's air so
+/// `solve_ideal_capacity_for_target` has a non-zero effective gain in each.
 ///
 /// `infiltration` selects the coupling state of every step: non-empty produces
 /// infiltration couplings (the identity-coupled solve path), empty gives the
@@ -116,12 +124,14 @@ fn make_solver(
     env: &EnvironmentState,
     infiltration: Vec<(ZoneId, InfiltrationMethod)>,
 ) -> ThermalSolver {
-    // 3-state model: state 0 = zone air, state 1 & 2 = wall nodes.
+    // 4-state model: state 0 = zone 1 air, states 1 & 2 = wall nodes,
+    // state 3 = zone 2 air.
     let a_c = DMatrix::from_row_slice(
-        3,
-        3,
+        4,
+        4,
         &[
             -1.0 / 50_000.0,
+            0.0,
             0.0,
             0.0,
             0.0,
@@ -129,42 +139,57 @@ fn make_solver(
             0.0,
             0.0,
             0.0,
+            0.0,
             -1.0 / 30_000.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0 / 60_000.0,
         ],
     );
-    // 4 inputs: outdoor temp, zone sensible (HVAC), and 2 surface heat inputs
-    // (indexed at 2 and 3). The zone sensible column drives the zone air so
-    // the ideal-capacity solve's effective gain is non-zero.
+    // 5 inputs: outdoor temp, zone 1 sensible (HVAC), 2 surface heat inputs
+    // (indexed at 2 and 3), and zone 2 sensible (HVAC). Each zone's sensible
+    // column drives its air so the ideal-capacity solve's effective gain is
+    // non-zero.
     let b_c = DMatrix::from_row_slice(
-        3,
         4,
+        5,
         &[
             1.0 / 50_000.0,
             1.0 / 50_000.0,
             0.0,
-            0.0, // zone air: outdoor + HVAC sensible drive
+            0.0,
+            0.0, // zone 1 air: outdoor + HVAC sensible drive
             0.0,
             0.0,
             1.0 / 40_000.0,
+            0.0,
             0.0, // wall 1: surface input
             0.0,
             0.0,
             0.0,
-            1.0 / 30_000.0, // wall 2: surface input
+            1.0 / 30_000.0,
+            0.0, // wall 2: surface input
+            1.0 / 60_000.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0 / 60_000.0, // zone 2 air: outdoor + HVAC sensible drive
         ],
     );
     let mapping = OutputMapping {
-        output_count: 1,
-        node_to_output: vec![(0, 0, 1.0)],
+        output_count: 2,
+        node_to_output: vec![(0, 0, 1.0), (1, 3, 1.0)],
         input_to_output: vec![],
     };
     let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
     let wiring = StateSpaceWiring {
-        zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
-        zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
-        // Zone sensible input at column 1 (the dedicated HVAC column).
-        zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+        zone_state_indices: HashMap::from([(ZoneId(1), 0), (ZoneId(2), 3)]),
+        zone_output_indices: HashMap::from([(ZoneId(1), 0), (ZoneId(2), 1)]),
+        // Each zone's sensible input is its dedicated HVAC column.
+        zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1), (ZoneId(2), 4)]),
         outdoor_temp_input_indices: vec![0],
         ground_temp_input_indices: vec![],
         ground_temp_input_depths_m: vec![],
@@ -273,8 +298,10 @@ fn thermal_solver_step_allocation_free_after_first_step() {
     // Non-zero infiltration conductance keeps a coupling entry alive on every
     // step, which routes the ideal-capacity solve through the
     // identity-coupled path and the step through the coupled integrator.
-    let couplings_active: Vec<(ZoneId, InfiltrationMethod)> =
-        vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })];
+    let couplings_active: Vec<(ZoneId, InfiltrationMethod)> = vec![
+        (ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 }),
+        (ZoneId(2), InfiltrationMethod::Ach { ach: 0.3 }),
+    ];
     let none: Vec<(ZoneId, InfiltrationMethod)> = Vec::new();
 
     for (couplings_active, infiltration) in [(false, none), (true, couplings_active)] {
@@ -295,6 +322,7 @@ fn thermal_solver_step_allocation_free_after_first_step() {
             .keys()
             .copied()
             .collect();
+        assert_eq!(sensible_zones.len(), 2, "both zones must be solved");
 
         // Port with a non-zero radiant gain to ensure the distribution path is taken.
         let ports = PortSlots {

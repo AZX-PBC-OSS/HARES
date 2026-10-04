@@ -354,7 +354,7 @@ fn case_600ff_zone_air_balance_residual_bounded() {
         match dwelling.step() {
             Ok(_) => {
                 let r = dwelling
-                    .thermal_solver
+                    .thermal_solver()
                     .component_gains()
                     .zone_air_balance_residual_w;
                 if r.abs() > max_abs {

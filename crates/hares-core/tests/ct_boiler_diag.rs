@@ -56,25 +56,14 @@ mod tests {
         "UNKNOWN".into()
     }
 
-    fn utn(base: &str) -> String {
-        // Uniqueness by construction: pid + monotonic counter + nanos
-        // (see hares-core/tests/engine.rs).
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{base}_{}_{nanos}_{seq}", std::process::id())
-    }
-
     #[test]
     fn ct_boiler_diagnostic() {
         let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
 
-        let output = std::env::temp_dir().join(utn("ct_boiler_diag.csv"));
-        let _cleanup = TmpGuard(output.clone());
+        // The output and its `_diagnostics.csv` sibling go in a directory
+        // removed when the test ends.
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output = output_dir.path().join("ct_boiler_diag.csv");
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
@@ -510,14 +499,6 @@ mod tests {
                 solvers.envelope_gains.hvac_cooling_w,
                 solvers.envelope_gains.port_convective_w,
             );
-        }
-    }
-
-    /// Delete temp file on drop.
-    struct TmpGuard(PathBuf);
-    impl Drop for TmpGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
         }
     }
 }

@@ -10,9 +10,9 @@ use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever checkpoint schema or state encoding changes. The test
-/// `checkpoint_shape_is_pinned_to_its_version` pins the serialized shape to
-/// this version, so a schema change fails it until the version is bumped and
-/// the shape re-pinned.
+/// `checkpoint_shape_is_pinned_to_its_version` pins a fingerprint of the
+/// type-derived serde schema to this version, so a schema change fails it
+/// until the version is bumped and the fingerprint re-pinned.
 ///
 /// v7: `actor_states` entries became [`ActorStateCheckpoint`] records
 /// carrying a per-actor schema version, and `EvDriverSnapshot` gained the
@@ -24,12 +24,16 @@ use serde::{Deserialize, Serialize};
 /// both against the live equipment — checkpoints written by v7 builds
 /// (positionally-indexed opaque blobs) are rejected by the version gate.
 ///
-/// v9 (the output-results branch): event-load equipment state records its
-/// random stream (key and stream nonce) instead of the key alone.
-/// v9 (the fix-rt9 branch): the thermal solver's state became one
-/// [`ThermalSnapshot`] record, which also carries the last step's coupling
-/// terms the ideal-capacity solve reads. Both schema changes landed as 9
-/// on their own branches; the fold reconciles them as one bump:
+/// v10 (the fold of the two v9-claiming branches): event-load equipment
+/// state records its random stream (key and stream nonce) instead of the
+/// key alone, and the thermal solver's state became one
+/// [`ThermalSnapshot`] record, which carries the last step's coupling
+/// terms the ideal-capacity solve reads, the ventilation recovery
+/// effectiveness the next step reads, and the ideal-capacity failure
+/// counts and last-good capacities its degraded fallback reads; the
+/// snapshot carries its own `schema_version`
+/// ([`hares_envelope::THERMAL_SNAPSHOT_SCHEMA_VERSION`]), validated
+/// independently of this constant.
 pub const CHECKPOINT_VERSION: u32 = 10;
 
 /// One equipment's checkpointed state, identity-keyed.
@@ -219,17 +223,22 @@ mod tests {
     use super::{
         ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
     };
-    use hares_envelope::ThermalSnapshot;
+    use hares_envelope::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
 
     fn empty_thermal() -> ThermalSnapshot {
         ThermalSnapshot {
+            schema_version: THERMAL_SNAPSHOT_SCHEMA_VERSION,
             x: vec![],
             last_u: vec![],
             lwr_t_prev_c: vec![],
             interior_surface_temps: vec![],
             interior_surface_prev_temps: vec![],
             last_coupling: vec![],
+            sensible_recovery_efficiency: 0.0,
+            latent_recovery_efficiency: 0.0,
+            ideal_capacity_failure_counts: vec![],
+            last_good_capacity_w: vec![],
         }
     }
 
@@ -249,8 +258,7 @@ mod tests {
         }
     }
 
-    /// A checkpoint with every collection non-empty, so its serialized form
-    /// exposes the shape of every element type.
+    /// A checkpoint with every field holding a distinct, non-default value.
     fn populated_checkpoint() -> DwellingCheckpoint {
         DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,
@@ -263,12 +271,17 @@ mod tests {
             }],
             rng_state: [42; 32],
             thermal: ThermalSnapshot {
+                schema_version: THERMAL_SNAPSHOT_SCHEMA_VERSION,
                 x: vec![1.0, 2.0],
                 last_u: vec![0.1],
                 lwr_t_prev_c: vec![15.0, 18.0],
                 interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
                 interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
                 last_coupling: vec![(0, 0.25, 3.5), (1, 0.0, -1.25)],
+                sensible_recovery_efficiency: 0.34,
+                latent_recovery_efficiency: 0.12,
+                ideal_capacity_failure_counts: vec![(ZoneId(1), 2)],
+                last_good_capacity_w: vec![(ZoneId(1), 5537.98)],
             },
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![1.0, 2.0, 3.0],
@@ -283,100 +296,116 @@ mod tests {
         }
     }
 
-    /// Collects the type of every leaf of `value` under its path; array
-    /// elements share the path `[]`, so the result is the set of shapes the
-    /// value's elements take, independent of the values themselves.
-    fn collect_shape(
-        value: &serde_json::Value,
-        path: &str,
-        shape: &mut std::collections::BTreeSet<String>,
-    ) {
-        use serde_json::Value;
-        match value {
-            Value::Object(fields) => {
-                for (name, field) in fields {
-                    collect_shape(field, &format!("{path}.{name}"), shape);
-                }
-            }
-            Value::Array(items) => {
-                assert!(
-                    !items.is_empty(),
-                    "{path} is empty: populate it so its element shape is pinned"
-                );
-                for item in items {
-                    collect_shape(item, &format!("{path}[]"), shape);
-                }
-            }
-            Value::Number(_) => {
-                shape.insert(format!("{path}: number"));
-            }
-            Value::String(_) => {
-                shape.insert(format!("{path}: string"));
-            }
-            Value::Bool(_) => {
-                shape.insert(format!("{path}: bool"));
-            }
-            Value::Null => {
-                shape.insert(format!("{path}: null"));
-            }
-        }
+    /// The serde schema of `T` and every type it nests, derived from the
+    /// types (not from a sample value), as canonical JSON: each container's
+    /// field names in order, every primitive's exact type (`F64`, `U64`,
+    /// `U128`, ...), tuple arity and element order, enum variant names and
+    /// payloads, and `Option` inner types.
+    fn type_schema<T: serde::Deserialize<'static>>() -> String {
+        type_schema_with(|tracer| tracer.trace_simple_type::<T>().map(|(format, _)| format))
     }
 
-    /// The serialized checkpoint shape that `CHECKPOINT_VERSION` 9 reads.
-    const PINNED_VERSION: u32 = 9;
-    const PINNED_SHAPE: &[&str] = &[
-        ".actor_states[].blob[]: number",
-        ".actor_states[].name: string",
-        ".actor_states[].schema_version: number",
-        ".bldg_id: number",
-        ".equipment_states[].blob[]: number",
-        ".equipment_states[].equipment_id: number",
-        ".equipment_states[].name: string",
-        ".fluid_states[]: number",
-        ".format_version: number",
-        ".humidity_states[][]: number",
-        ".prior_electrical_summary.actual_pv_kw: number",
-        ".prior_electrical_summary.base_load_kw: number",
-        ".prior_electrical_summary.battery_power_kw: number",
-        ".prior_electrical_summary.ev_power_kw: number",
-        ".prior_electrical_summary.net_grid_kw: number",
-        ".prior_electrical_summary.pv_generation_kw: number",
-        ".rng_state[]: number",
-        ".rng_stream: number",
-        ".rng_word_pos: number",
-        ".thermal.interior_surface_prev_temps[][]: number",
-        ".thermal.interior_surface_temps[][]: number",
-        ".thermal.last_coupling[][]: number",
-        ".thermal.last_u[]: number",
-        ".thermal.lwr_t_prev_c[]: number",
-        ".thermal.x[]: number",
-        ".timestep_index: number",
-    ];
+    /// [`type_schema`] for a type that nests enums: `trace` traces each
+    /// nested enum before the root so every variant is recorded.
+    fn type_schema_with(
+        trace: impl FnOnce(
+            &mut serde_reflection::Tracer,
+        ) -> serde_reflection::Result<serde_reflection::Format>,
+    ) -> String {
+        let mut tracer = serde_reflection::Tracer::new(serde_reflection::TracerConfig::default());
+        let root = trace(&mut tracer).expect("trace the type");
+        let registry = tracer.registry().expect("every traced type is complete");
+        serde_json::to_string(&(root, registry)).expect("serialize the schema")
+    }
 
-    /// The serialized checkpoint, including the embedded `ThermalSnapshot`
-    /// and every other type it nests, has the shape pinned for the current
-    /// `CHECKPOINT_VERSION`. Any field added, removed, renamed or retyped
-    /// changes the shape, and the version gate is only sound if that change
-    /// comes with a version bump: bump `CHECKPOINT_VERSION` and re-pin both
-    /// constants together.
+    fn sha256_hex(text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// The checkpoint schema `CHECKPOINT_VERSION` 9 reads, as the SHA-256
+    /// of [`type_schema`]`::<DwellingCheckpoint>()`.
+    const PINNED_VERSION: u32 = 9;
+    const PINNED_SCHEMA_SHA256: &str =
+        "ca5aa5e7c6535d6c8decfedd4d5fa4822a4d6ca7c2c3238a2fbad150aedca26a";
+
+    /// The checkpoint's serde schema, including the embedded
+    /// `ThermalSnapshot` and every type it nests, is the one pinned for the
+    /// current `CHECKPOINT_VERSION`. Any field added, removed, renamed,
+    /// reordered or retyped changes the schema, and the version gate is only
+    /// sound if that change comes with a version bump: bump
+    /// `CHECKPOINT_VERSION` and re-pin both constants together. The one
+    /// sanctioned exception is the branch whose checkpoint schema change
+    /// shares `CHECKPOINT_VERSION` 9 with the output-results branch: it
+    /// re-pins the fingerprint for its shape without renumbering, and the
+    /// fold bumps the version once for both changes (see the
+    /// `CHECKPOINT_VERSION` doc).
     #[test]
     fn checkpoint_shape_is_pinned_to_its_version() {
-        let value = serde_json::to_value(populated_checkpoint()).expect("serialize checkpoint");
-        let mut shape = std::collections::BTreeSet::new();
-        collect_shape(&value, "", &mut shape);
-        let pinned: std::collections::BTreeSet<String> = PINNED_SHAPE
-            .iter()
-            .map(|path| (*path).to_string())
-            .collect();
+        let schema = type_schema::<DwellingCheckpoint>();
+        let fingerprint = sha256_hex(&schema);
         assert_eq!(
-            shape, pinned,
-            "the serialized checkpoint shape changed: bump CHECKPOINT_VERSION and re-pin \
-             PINNED_VERSION and PINNED_SHAPE together"
+            fingerprint, PINNED_SCHEMA_SHA256,
+            "the checkpoint schema changed: bump CHECKPOINT_VERSION and re-pin \
+             PINNED_VERSION and PINNED_SCHEMA_SHA256 together. Actual fingerprint: \
+             {fingerprint}. Schema:\n{schema}"
         );
         assert_eq!(
             CHECKPOINT_VERSION, PINNED_VERSION,
-            "CHECKPOINT_VERSION changed: re-pin PINNED_SHAPE for the new version"
+            "CHECKPOINT_VERSION changed: re-pin PINNED_SCHEMA_SHA256 for the new version"
         );
+    }
+
+    /// Each kind of change the tripwire must catch, as the field type before
+    /// and after the change: the schemas differ for every pair, and a
+    /// field's schema is part of its container's, so the pinned fingerprint
+    /// fails on each.
+    #[test]
+    fn type_schema_distinguishes_every_kind_of_retype() {
+        mod before {
+            #[derive(serde::Deserialize)]
+            pub enum Mode {
+                Heat,
+                Cool,
+            }
+        }
+        mod after {
+            #[derive(serde::Deserialize)]
+            pub enum Mode {
+                Heat,
+                Off,
+            }
+        }
+
+        for (change, before, after) in [
+            ("f64 to u64", type_schema::<f64>(), type_schema::<u64>()),
+            ("u32 to i64", type_schema::<u32>(), type_schema::<i64>()),
+            (
+                "tuple arity in a Vec element",
+                type_schema::<Vec<(usize, f64, f64)>>(),
+                type_schema::<Vec<(usize, f64)>>(),
+            ),
+            (
+                "tuple element order in a Vec element",
+                type_schema::<Vec<(usize, f64, f64)>>(),
+                type_schema::<Vec<(f64, usize, f64)>>(),
+            ),
+            (
+                "unit enum variant rename",
+                type_schema::<before::Mode>(),
+                type_schema::<after::Mode>(),
+            ),
+            (
+                "Option inner type",
+                type_schema::<Option<f64>>(),
+                type_schema::<Option<u64>>(),
+            ),
+        ] {
+            assert_ne!(before, after, "the schema must change on a {change}");
+        }
     }
 
     #[test]

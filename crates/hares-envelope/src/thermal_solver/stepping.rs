@@ -462,10 +462,6 @@ impl ThermalSolver {
                         .ideal_capacity_failure_counts
                         .remove(&zone)
                         .unwrap_or(0);
-                    #[cfg(feature = "observe")]
-                    {
-                        self.consecutive_nonconvergence_count.remove(&zone);
-                    }
                     tracing::info!(
                         zone_id = zone.0,
                         consecutive_failures = count,
@@ -475,10 +471,6 @@ impl ThermalSolver {
                     );
                 } else {
                     self.ideal_capacity_failure_counts.remove(&zone);
-                    #[cfg(feature = "observe")]
-                    {
-                        self.consecutive_nonconvergence_count.remove(&zone);
-                    }
                 }
                 capacity
             }
@@ -488,14 +480,6 @@ impl ThermalSolver {
                     .entry(zone)
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
-
-                #[cfg(feature = "observe")]
-                {
-                    self.consecutive_nonconvergence_count
-                        .entry(zone)
-                        .and_modify(|c| *c += 1)
-                        .or_insert(1);
-                }
 
                 let threshold = self.config.ideal_capacity_degraded_threshold;
                 if *count >= threshold

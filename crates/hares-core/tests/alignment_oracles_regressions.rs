@@ -6,7 +6,7 @@ mod bestest_reference_bands;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
@@ -559,13 +559,14 @@ fn run_fixture_to_columns_with_verbosity(
     if let Some(v) = output_verbosity_override {
         sim_config.output_verbosity = v;
     }
-    let output_path = unique_temp_path(fixture.id, "parquet");
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
     sim_config.output_format = OutputFormat::Parquet;
     sim_config.output_path = Some(output_path.clone());
     // The helper reads the run back from the Parquet file, so the recorder
     // must be on: build_dwelling_config leaves the fixture config's default
-    // (writing disabled) in place, and the output goes to the unique
-    // temporary path above, not into the tree.
+    // (writing disabled) in place, and the output goes to the temporary
+    // directory above, not into the tree.
     sim_config.write_output = true;
     dwelling_config.sim_config = sim_config;
 
@@ -584,17 +585,21 @@ fn run_fixture_to_columns_with_verbosity(
         .timeseries_path
         .as_deref()
         .unwrap_or(output_path.as_path());
-    let columns = read_parquet_columns(path).expect("actual parquet output must be readable");
-
-    let _ = fs::remove_file(output_path);
-    columns
+    read_parquet_columns(path).expect("actual parquet output must be readable")
 }
 
 fn simulate_fixture_steps(
     fixture: &ParityFixture,
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
-    let mut dwelling = build_dwelling(fixture);
+    // Recording is off, but the diagnostics CSV still lands beside the
+    // output path, so that path is in a directory removed afterwards.
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let mut dwelling_config = build_dwelling_config(fixture);
+    dwelling_config.sim_config.write_output = false;
+    dwelling_config.sim_config.output_path =
+        Some(output_dir.path().join(format!("{}.csv", fixture.id)));
+    let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
     if let Some(actor) = actor {
         dwelling.add_actor(actor).unwrap();
     }
@@ -603,13 +608,6 @@ fn simulate_fixture_steps(
         .simulate()
         .expect("fixture simulation must succeed")
         .steps
-}
-
-fn build_dwelling(fixture: &ParityFixture) -> Dwelling {
-    let mut dwelling_config = build_dwelling_config(fixture);
-    dwelling_config.sim_config.write_output = false;
-    dwelling_config.sim_config.output_path = Some(unique_temp_path(fixture.id, "csv"));
-    Dwelling::from_config(dwelling_config).expect("fixture dwelling must load")
 }
 
 fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffset>> {
@@ -954,23 +952,4 @@ fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
         accum += (a[i] - b[i]).abs();
     }
     accum / n as f64
-}
-
-fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
-    // See engine.rs: pid + monotonic counter (thread ids repeat across
-    // processes) make uniqueness constructive.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    let thread_id = format!("{:?}", std::thread::current().id());
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.push(format!(
-        "hares-alignment-{fixture_id}-{}-{nanos}-{thread_id}-{seq}.{extension}",
-        std::process::id()
-    ));
-    path
 }

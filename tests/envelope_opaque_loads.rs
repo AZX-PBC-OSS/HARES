@@ -33,14 +33,6 @@ mod tests {
     use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
     use hares_io::{EnvelopeComponentLoadsKwh, OutputFormat};
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        format!("{base}_{nanos}.{ext}")
-    }
-
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
@@ -102,8 +94,10 @@ mod tests {
         static RUN: OnceLock<(BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh)> =
             OnceLock::new();
         RUN.get_or_init(|| {
-            let output_path =
-                std::env::temp_dir().join(unique_temp_name("hares_opaque_loads_summer_24h", "csv"));
+            // The run's output and its `_diagnostics.csv` sibling go in a
+            // directory removed once the columns are parsed.
+            let output_dir = tempfile::tempdir().expect("temp dir");
+            let output_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
             let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
             let config = DwellingConfig {
                 hpxml_path: examples_dir().join("BEopt_example.xml"),
@@ -140,9 +134,7 @@ mod tests {
                 .envelope_loads_kwh
                 .expect("verbosity 6 must produce envelope-load metrics");
 
-            let data = parse_csv_columns(&output_path);
-            let _ = fs::remove_file(&output_path);
-            (data, envelope_loads)
+            (parse_csv_columns(&output_path), envelope_loads)
         })
     }
 

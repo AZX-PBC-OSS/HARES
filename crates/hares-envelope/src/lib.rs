@@ -40,6 +40,6 @@ pub use thermal_solver::{
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
     MechanicalVentilationParams, NaturalVentilationConfig, OpeningType, StateSpaceWiring,
-    ThermalSnapshot, ThermalSolver, ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
-    ZoneSensibleBreakdown,
+    THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot, ThermalSolver, ThermalSolverConfig,
+    ThermalSolverError, WindowSolarProperties, ZoneSensibleBreakdown,
 };

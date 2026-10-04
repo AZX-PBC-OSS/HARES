@@ -2,6 +2,7 @@
 
 mod autosize;
 pub mod blueprint;
+mod checkpointing;
 mod conversions;
 mod loop_allocator;
 mod premise_zip;
@@ -82,9 +83,6 @@ use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
 use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
-use crate::checkpoint::{
-    ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
-};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
@@ -1669,7 +1667,10 @@ pub struct Dwelling {
     /// ids. Guarantees auto-assignment can never collide with an id already
     /// in the vector.
     next_equipment_id: u32,
-    pub thermal_solver: ThermalSolver,
+    /// Private: the dwelling's port, zone and equipment caches are built
+    /// against this solver's geometry, so it is read through
+    /// [`Self::thermal_solver`] and changed only by the dwelling.
+    thermal_solver: ThermalSolver,
     pub humidity_solver: HumiditySolver,
     pub electrical_solver: ElectricalSolver,
     pub fluid_solver: FluidSolver,
@@ -3661,6 +3662,12 @@ impl Dwelling {
         &self.latest_env
     }
 
+    /// The dwelling's thermal (envelope) solver.
+    #[must_use]
+    pub fn thermal_solver(&self) -> &ThermalSolver {
+        &self.thermal_solver
+    }
+
     /// Load [kW] the island sources failed to cover during the last islanded
     /// step (would-be phantom grid import). 0.0 when not islanded.
     #[must_use]
@@ -4984,295 +4991,6 @@ impl Dwelling {
         self.recorder.as_ref().map(StreamingRecorder::total_rows)
     }
 
-    /// Snapshot current simulation state to an in-memory checkpoint struct.
-    pub fn save_checkpoint(&self) -> Result<DwellingCheckpoint> {
-        // humidity_ratios is a HashMap; sort by zone so serialized checkpoints
-        // of identical state are byte-identical (restore is order-insensitive).
-        let mut humidity_states: Vec<(ZoneId, f64)> = self
-            .humidity_solver
-            .humidity_ratios
-            .iter()
-            .map(|(zone, value)| (*zone, *value))
-            .collect();
-        humidity_states.sort_by_key(|&(zone, _)| zone);
-        let fluid_states = self.fluid_solver.snapshot_payload();
-
-        let mut equipment_states = Vec::with_capacity(self.equipment.len());
-        for eq in &self.equipment {
-            match eq.save_state() {
-                Ok(blob) => {
-                    let desc = eq.descriptor();
-                    equipment_states.push(EquipmentStateCheckpoint {
-                        name: desc.name.clone(),
-                        equipment_id: desc.id.0,
-                        blob,
-                    });
-                }
-                Err(e) => {
-                    #[cfg(feature = "observe")]
-                    tracing::error!(
-                        equipment_name = %eq.descriptor().name,
-                        equipment_type = %eq.descriptor().equipment_type,
-                        equipment_id = %eq.descriptor().id,
-                        error = %e,
-                        bldg_id = self.bldg_id,
-                        "checkpoint save_state failed for equipment",
-                    );
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok(DwellingCheckpoint {
-            format_version: CHECKPOINT_VERSION,
-            bldg_id: self.bldg_id,
-            timestep_index: self.clock.current_step(),
-            equipment_states,
-            rng_state: self.rng.get_seed(),
-            thermal: self.thermal_solver.snapshot_state(),
-            humidity_states,
-            fluid_states,
-            rng_stream: self.rng.get_stream(),
-            rng_word_pos: self.rng.get_word_pos(),
-            actor_states: self
-                .actors
-                .iter()
-                .map(|a| {
-                    a.save_state().map(|blob| ActorStateCheckpoint {
-                        name: a.name().to_string(),
-                        schema_version: a.checkpoint_version(),
-                        blob,
-                    })
-                })
-                .collect::<std::result::Result<Vec<_>, HaresError>>()?,
-            prior_electrical_summary: self.prior_electrical_summary.clone(),
-        })
-    }
-
-    /// Restore simulation state from a checkpoint.
-    pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
-        if cp.format_version != CHECKPOINT_VERSION {
-            return Err(HaresError::Io(format!(
-                "checkpoint version mismatch: file={}, expected={}",
-                cp.format_version, CHECKPOINT_VERSION
-            )));
-        }
-
-        self.clock.current_step = cp.timestep_index;
-        let mut restored_rng = ChaCha8Rng::from_seed(cp.rng_state);
-        restored_rng.set_stream(cp.rng_stream);
-        restored_rng.set_word_pos(cp.rng_word_pos);
-        self.rng = restored_rng;
-
-        if cp.equipment_states.len() != self.equipment.len() {
-            return Err(HaresError::Io(format!(
-                "checkpoint equipment count mismatch: checkpoint has {} equipment states, dwelling has {} equipment",
-                cp.equipment_states.len(),
-                self.equipment.len()
-            )));
-        }
-        // Equipment state restores are identity-keyed, not positional: each
-        // saved blob carries the equipment's name and id, and both must
-        // match the live equipment before the blob reaches `load_state`.
-        // A spec reorder between save and restore (or any other identity
-        // drift) fails here, naming both sides — under the positional `zip`
-        // this replaced, the same situation silently loaded one equipment's
-        // state into another (wrong SOC, wrong temperatures, no error).
-        let cp_equipment_map: HashMap<&str, &EquipmentStateCheckpoint> = cp
-            .equipment_states
-            .iter()
-            .map(|state| (state.name.as_str(), state))
-            .collect();
-        for eq in self.equipment.iter_mut() {
-            let desc = eq.descriptor();
-            let Some(&state) = cp_equipment_map.get(desc.name.as_str()) else {
-                return Err(HaresError::Io(format!(
-                    "checkpoint missing equipment state for '{}': the dwelling \
-                     and the checkpoint were built from different equipment sets",
-                    desc.name
-                )));
-            };
-            if state.equipment_id != desc.id.0 {
-                return Err(HaresError::Io(format!(
-                    "checkpoint equipment id mismatch for '{}': checkpoint id={}, \
-                     dwelling id={} — the equipment set or its order changed between \
-                     save and restore, and loading state positionally would hand one \
-                     equipment another's state",
-                    desc.name, state.equipment_id, desc.id.0
-                )));
-            }
-            eq.load_state(&state.blob)?;
-        }
-
-        self.thermal_solver
-            .restore_state(&cp.thermal)
-            .map_err(|err| HaresError::Envelope(format!("restore thermal state failed: {err}")))?;
-
-        // Sync zone temperatures in latest_env from the restored thermal state.
-        for (zone_id, temp_c) in self.thermal_solver.zone_temperatures_c() {
-            if let Some(zone) = self.latest_env.zones.iter_mut().find(|z| z.id == zone_id) {
-                zone.temperature_c = temp_c;
-            }
-        }
-
-        let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.into_iter().collect();
-        for zone in &mut self.latest_env.zones {
-            let humidity = checkpoint_zones.get(&zone.id).ok_or_else(|| {
-                HaresError::Io(format!(
-                    "checkpoint missing humidity state for zone {:?}",
-                    zone.id
-                ))
-            })?;
-            self.humidity_solver
-                .humidity_ratios
-                .insert(zone.id, *humidity);
-            zone.humidity_ratio = *humidity;
-        }
-        self.fluid_solver
-            .restore_from_payload(&cp.fluid_states)
-            .map_err(|err| HaresError::Envelope(format!("restore fluid state failed: {err}")))?;
-
-        // Restore actor decision-state. The saved schema version is checked
-        // against the live actor's `checkpoint_version()` before `load_state`
-        // runs, so a blob written against a different snapshot schema is
-        // rejected here with a version-mismatch error naming the actor —
-        // not as a postcard decode failure from inside `load_state`.
-        let mut restored_count = 0usize;
-        let cp_actor_map: std::collections::HashMap<&str, &ActorStateCheckpoint> = cp
-            .actor_states
-            .iter()
-            .map(|state| (state.name.as_str(), state))
-            .collect();
-        for actor in self.actors.iter_mut() {
-            if let Some(state) = cp_actor_map.get(actor.name()) {
-                let expected = actor.checkpoint_version();
-                if state.schema_version != expected {
-                    return Err(HaresError::Io(format!(
-                        "checkpoint actor schema version mismatch: actor='{}', blob={}, expected={}",
-                        actor.name(),
-                        state.schema_version,
-                        expected
-                    )));
-                }
-                // An empty blob is the "no mutable state" convention (see
-                // `Actor::save_state`) — but only the actor knows whether it
-                // has state. For a stateful actor, an empty blob can only be
-                // truncation or corruption: truncation predates the version
-                // stamp, so the gate above cannot catch it, and
-                // `load_state`'s empty-blob no-op would silently discard the
-                // checkpointed decision-state (the EV driver would resume on
-                // a full-SOC belief, home phase, and re-seeded RNG) while the
-                // restore reports success. The rule: an empty blob is valid
-                // only for an actor that also *saves* empty — probed against
-                // the live actor, whose `save_state` is unconditionally
-                // non-empty for every stateful implementation and empty for
-                // every stateless one.
-                if state.blob.is_empty() {
-                    let saves_empty =
-                        actor
-                            .save_state()
-                            .map(|blob| blob.is_empty())
-                            .map_err(|e| {
-                                HaresError::Io(format!(
-                                    "checkpoint cannot verify empty state blob for actor '{}': {e}",
-                                    actor.name()
-                                ))
-                            })?;
-                    if !saves_empty {
-                        return Err(HaresError::Io(format!(
-                            "checkpoint actor state blob for '{}' is empty but the actor has persistent state — truncated or corrupted checkpoint",
-                            actor.name()
-                        )));
-                    }
-                }
-                actor.load_state(&state.blob)?;
-                restored_count += 1;
-            }
-        }
-
-        if restored_count != self.actors.len() {
-            return Err(HaresError::Io(format!(
-                "checkpoint actor count mismatch: checkpoint has {} actor states, dwelling has {} actors",
-                restored_count,
-                self.actors.len()
-            )));
-        }
-
-        self.prior_electrical_summary = cp.prior_electrical_summary;
-
-        // Populate latest_env.equipment_core and equipment_telemetry from the
-        // restored equipment state so that actors read correct SOC, power flows,
-        // and connection state on the first post-restore step.
-        self.snapshot_equipment_state();
-        self.restored_from_checkpoint = true;
-
-        Ok(())
-    }
-
-    /// Restore building shell state from a prior-segment checkpoint.
-    ///
-    /// Transfers thermal envelope, humidity, fluid solver, clock, RNG, and
-    /// electrical summary. Equipment and actor states are intentionally NOT
-    /// restored — the current equipment set was freshly built by
-    /// `DwellingBlueprint::build()` and already initialized via `Equipment::init()`.
-    pub fn restore_building_state(&mut self, cp: &DwellingCheckpoint) -> Result<()> {
-        if cp.format_version != CHECKPOINT_VERSION {
-            return Err(HaresError::Io(format!(
-                "restore_building_state: checkpoint version mismatch: file={}, expected={}",
-                cp.format_version, CHECKPOINT_VERSION
-            )));
-        }
-
-        self.thermal_solver
-            .restore_state(&cp.thermal)
-            .map_err(|err| {
-                HaresError::Envelope(format!(
-                    "restore_building_state: thermal solver restore failed: {err}"
-                ))
-            })?;
-
-        // Sync zone temperatures in latest_env from the restored thermal state.
-        for (zone_id, temp_c) in self.thermal_solver.zone_temperatures_c() {
-            if let Some(zone) = self.latest_env.zones.iter_mut().find(|z| z.id == zone_id) {
-                zone.temperature_c = temp_c;
-            }
-        }
-
-        let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.iter().copied().collect();
-        for zone in &mut self.latest_env.zones {
-            let humidity = checkpoint_zones.get(&zone.id).ok_or_else(|| {
-                HaresError::Io(format!(
-                    "restore_building_state: checkpoint missing humidity for zone {:?}",
-                    zone.id
-                ))
-            })?;
-            self.humidity_solver
-                .humidity_ratios
-                .insert(zone.id, *humidity);
-            zone.humidity_ratio = *humidity;
-        }
-
-        self.fluid_solver
-            .restore_from_payload(&cp.fluid_states)
-            .map_err(|err| {
-                HaresError::Envelope(format!(
-                    "restore_building_state: fluid solver restore failed: {err}"
-                ))
-            })?;
-
-        self.prior_electrical_summary = cp.prior_electrical_summary.clone();
-
-        // Reset clock to start-of-segment. restore_building_state transfers
-        // only building physics state (thermal/humidity/fluid) — not the
-        // simulation clock, which was independently created for the new
-        // segment by build_from_blueprint.
-        self.clock.current_step = 0;
-
-        self.snapshot_equipment_state();
-
-        Ok(())
-    }
-
     /// Populates `latest_env.equipment_core` and `latest_env.equipment_telemetry`
     /// by snapshotting the current `core_output()` and `telemetry()` from every
     /// equipment instance.  Called after `load_checkpoint` so that the first
@@ -6569,9 +6287,14 @@ impl Dwelling {
         // 1 / (1 - rated_eff), e.g. 4× for a 75% effective HRV.
         for eq in &self.equipment {
             if let Some((eff_s, eff_l)) = eq.effective_ventilation_effectiveness() {
-                let vent = self.thermal_solver.ventilation_mut();
-                vent.sensible_recovery_efficiency = eff_s;
-                vent.latent_recovery_efficiency = eff_l;
+                self.thermal_solver
+                    .set_ventilation_recovery(eff_s, eff_l)
+                    .map_err(|err| {
+                        HaresError::Envelope(format!(
+                            "ventilation recovery from '{}' rejected: {err}",
+                            eq.descriptor().name
+                        ))
+                    })?;
                 #[cfg(feature = "observe")]
                 tracing::debug!(
                     equipment = %eq.descriptor().name,
@@ -8234,6 +7957,7 @@ pub(crate) fn build_actors_from_seeds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::DwellingCheckpoint;
     use conversions::json_value_to_config_value;
     use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;

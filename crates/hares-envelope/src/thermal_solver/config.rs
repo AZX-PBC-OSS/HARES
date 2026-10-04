@@ -849,6 +849,13 @@ pub enum ThermalSolverError {
     },
     #[error("{0}")]
     Configuration(String),
+    /// A snapshot handed to `restore_state` does not describe a state this
+    /// solver can hold.
+    #[error("invalid thermal snapshot: {0}")]
+    InvalidSnapshot(String),
+    /// A mechanical ventilation recovery efficiency outside `[0, 1]`.
+    #[error("{kind} ventilation recovery efficiency {value} is outside [0, 1]")]
+    InvalidVentilationRecovery { kind: &'static str, value: f64 },
 }
 
 pub type Result<T> = std::result::Result<T, ThermalSolverError>;

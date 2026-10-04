@@ -32,14 +32,6 @@ mod tests {
     use hares_physics::solar::GlazingCurve;
     use hares_types::{EndUse, ScheduleSourceConfig, ZoneId};
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        format!("{base}_{nanos}.{ext}")
-    }
-
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
@@ -262,11 +254,12 @@ mod tests {
 
     fn run_conditioned_scenario(scenario: &str, use_ideal: bool) {
         let mode_name = if use_ideal { "ideal" } else { "dynamic" };
-        let output_path = std::env::temp_dir().join(unique_temp_name(
-            &format!("hares_conditioned_{mode_name}_{scenario}"),
-            "csv",
-        ));
-        let _ = fs::remove_file(&output_path);
+        // The run's output and its `_diagnostics.csv` sibling go in a
+        // directory removed when the test ends.
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = output_dir
+            .path()
+            .join(format!("hares_conditioned_{mode_name}_{scenario}.csv"));
 
         let config = beopt_conditioned_config(scenario, output_path.clone());
         let n_steps = {
@@ -371,14 +364,14 @@ mod tests {
 
         eprintln!(
             "[{mode_name}] Boundary diagnostics configured: {}",
-            dwelling.thermal_solver.boundary_diagnostics_count()
+            dwelling.thermal_solver().boundary_diagnostics_count()
         );
 
         dwelling.enable_observer(n_steps);
 
         // Window parameter dump for solar investigation.
         {
-            let cfg = dwelling.thermal_solver.config();
+            let cfg = dwelling.thermal_solver().config();
             if !cfg.window_properties.is_empty() {
                 eprintln!(
                     "\n  [{mode_name}] Window properties ({} windows):",
@@ -417,7 +410,6 @@ mod tests {
                 });
             }
         }
-        let _ = fs::remove_file(&output_path);
 
         let snapshots = dwelling.drain_observations();
         assert_eq!(
@@ -462,7 +454,7 @@ mod tests {
 
         // Dump LWR zone config: how many surfaces per zone, which have driving_temp.
         {
-            let cfg = dwelling.thermal_solver.config();
+            let cfg = dwelling.thermal_solver().config();
             for zone_cfg in &cfg.interior_lwr_zones {
                 let n_driven = zone_cfg
                     .surfaces

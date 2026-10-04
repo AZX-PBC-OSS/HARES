@@ -13,14 +13,6 @@ mod tests {
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
     use hares_io::OutputFormat;
-
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        format!("{base}_{nanos}.{ext}")
-    }
     use hares_types::ZoneId;
     use std::collections::BTreeMap;
     use std::fs;
@@ -95,14 +87,23 @@ mod tests {
         }
     }
 
-    /// Builds the equipment-free BEopt dwelling for `scenario` and returns it
-    /// with its step count. Its windows are made fixed (`FractionOperable`
-    /// 0) before construction, so no natural ventilation is modeled: the
-    /// OCHRE free-float fixture does not model operable windows, and this
-    /// isolates envelope conduction, solar, and forced ventilation physics.
-    fn build_freefloat_dwelling(scenario: &str, output_path: PathBuf) -> (Dwelling, usize) {
-        let hpxml_dir = tempfile::tempdir().expect("temp dir");
-        let hpxml_path = hpxml_dir.path().join("BEopt_example_fixed_windows.xml");
+    /// An equipment-free BEopt dwelling, its step count, and the directory
+    /// holding its HPXML input and its output files (the run output and its
+    /// `_diagnostics.csv` sibling), removed when the run is dropped.
+    struct FreefloatRun {
+        dwelling: Dwelling,
+        n_steps: usize,
+        _files: tempfile::TempDir,
+    }
+
+    /// Builds the equipment-free BEopt dwelling for `scenario`. Its windows
+    /// are made fixed (`FractionOperable` 0) before construction, so no
+    /// natural ventilation is modeled: the OCHRE free-float fixture does not
+    /// model operable windows, and this isolates envelope conduction, solar,
+    /// and forced ventilation physics.
+    fn build_freefloat_dwelling(scenario: &str) -> FreefloatRun {
+        let files = tempfile::tempdir().expect("temp dir");
+        let hpxml_path = files.path().join("BEopt_example_fixed_windows.xml");
         let xml =
             fs::read_to_string(examples_dir().join("BEopt_example.xml")).expect("read BEopt HPXML");
         let operable = "<FractionOperable>0.67</FractionOperable>";
@@ -116,13 +117,13 @@ mod tests {
         )
         .expect("write fixed-window HPXML");
 
-        let config = beopt_freefloat_config(scenario, output_path, hpxml_path);
+        let config = beopt_freefloat_config(scenario, files.path().join("output.csv"), hpxml_path);
         let n_steps = (config.sim_config.duration.num_seconds()
             / config.sim_config.time_res.num_seconds()) as usize;
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
         assert!(
             dwelling
-                .thermal_solver
+                .thermal_solver()
                 .config()
                 .natural_ventilation
                 .is_none(),
@@ -131,7 +132,11 @@ mod tests {
         dwelling
             .clear_equipment()
             .expect("clear must refresh caches");
-        (dwelling, n_steps)
+        FreefloatRun {
+            dwelling,
+            n_steps,
+            _files: files,
+        }
     }
 
     fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
@@ -221,20 +226,17 @@ mod tests {
     }
 
     fn run_freefloat_scenario(scenario: &str) {
-        let output_path = std::env::temp_dir().join(unique_temp_name(
-            &format!("hares_freefloat_{scenario}"),
-            "csv",
-        ));
-        let _ = fs::remove_file(&output_path);
-
-        let (mut dwelling, n_steps) = build_freefloat_dwelling(scenario, output_path.clone());
+        let FreefloatRun {
+            mut dwelling,
+            n_steps,
+            _files,
+        } = build_freefloat_dwelling(scenario);
 
         dwelling.enable_observer(n_steps);
 
         for _ in 0..n_steps {
             dwelling.step().expect("dwelling.step");
         }
-        let _ = fs::remove_file(&output_path);
 
         let snapshots = dwelling.drain_observations();
         assert_eq!(
@@ -394,23 +396,27 @@ mod tests {
         let ochre = parse_csv_columns(&ochre_csv);
 
         // Solver config diagnostics.
-        let n_int_zones = dwelling.thermal_solver.config().interior_lwr_zones.len();
+        let n_int_zones = dwelling.thermal_solver().config().interior_lwr_zones.len();
         let n_int_surfaces: usize = dwelling
-            .thermal_solver
+            .thermal_solver()
             .config()
             .interior_lwr_zones
             .iter()
             .map(|z| z.surfaces.len())
             .sum();
-        let n_bd_diag = dwelling.thermal_solver.config().boundary_diagnostics.len();
-        let n_windows = dwelling.thermal_solver.config().window_properties.len();
-        let n_window_zone_ids = dwelling.thermal_solver.config().window_zone_ids.len();
+        let n_bd_diag = dwelling
+            .thermal_solver()
+            .config()
+            .boundary_diagnostics
+            .len();
+        let n_windows = dwelling.thermal_solver().config().window_properties.len();
+        let n_window_zone_ids = dwelling.thermal_solver().config().window_zone_ids.len();
         eprintln!("\n--- SOLVER CONFIG: {scenario} ---");
         eprintln!("  interior_lwr_zones: {n_int_zones} zones, {n_int_surfaces} total surfaces");
         eprintln!("  boundary_diagnostics: {n_bd_diag} entries");
         eprintln!("  window_properties: {n_windows}, window_zone_ids: {n_window_zone_ids}");
         for (i, z) in dwelling
-            .thermal_solver
+            .thermal_solver()
             .config()
             .interior_lwr_zones
             .iter()
@@ -437,7 +443,7 @@ mod tests {
         }
         // Boundary diagnostics
         for (i, bd) in dwelling
-            .thermal_solver
+            .thermal_solver()
             .config()
             .boundary_diagnostics
             .iter()
@@ -468,7 +474,7 @@ mod tests {
         }
         // Infiltration parameters
         eprintln!("  infiltration config:");
-        for (zone_id, method) in &dwelling.thermal_solver.config().infiltration {
+        for (zone_id, method) in &dwelling.thermal_solver().config().infiltration {
             match method {
                 hares_envelope::InfiltrationMethod::AshraeWindStack {
                     c_s,
@@ -497,7 +503,7 @@ mod tests {
             }
         }
         // State vector at init
-        let thermal_snap = dwelling.thermal_solver.snapshot_state();
+        let thermal_snap = dwelling.thermal_solver().snapshot_state();
         let x_state = &thermal_snap.x;
         eprintln!("  state vector ({} entries):", x_state.len());
         for (i, &t) in x_state.iter().enumerate().take(25) {
@@ -1344,28 +1350,18 @@ mod tests {
             };
 
         // ── Baseline: HARES solar (Perez model), no override ──────────────
-        let baseline_output = std::env::temp_dir().join(unique_temp_name(
-            &format!("hares_ff_baseline_{scenario}"),
-            "csv",
-        ));
-        let _ = fs::remove_file(&baseline_output);
-        let (mut dwelling_base, n_steps) =
-            build_freefloat_dwelling(scenario, baseline_output.clone());
+        let mut baseline = build_freefloat_dwelling(scenario);
+        let n_steps = baseline.n_steps;
         for _ in 0..n_steps {
-            dwelling_base.step().expect("dwelling.step (baseline)");
+            baseline.dwelling.step().expect("dwelling.step (baseline)");
         }
-        let _ = fs::remove_file(&baseline_output);
-        let (baseline_indoor, baseline_attic) = collect_temps(&dwelling_base.results());
+        let (baseline_indoor, baseline_attic) = collect_temps(&baseline.dwelling.results());
         let baseline_indoor_mae = mae(&baseline_indoor, &ochre_indoor);
         let baseline_attic_mae = mae(&baseline_attic, &ochre_attic);
 
         // ── Override: pvlib-computed POA matching OCHRE exactly ───────────
-        let override_output = std::env::temp_dir().join(unique_temp_name(
-            &format!("hares_ff_solar_{scenario}"),
-            "csv",
-        ));
-        let _ = fs::remove_file(&override_output);
-        let (mut dwelling_ov, _) = build_freefloat_dwelling(scenario, override_output.clone());
+        let mut solar_override = build_freefloat_dwelling(scenario);
+        let dwelling_ov = &mut solar_override.dwelling;
 
         let n_surfaces = dwelling_ov.environment.surface_count();
         let solar_data = load_solar_override(scenario, n_surfaces);
@@ -1379,7 +1375,6 @@ mod tests {
         for _ in 0..n_steps {
             dwelling_ov.step().expect("dwelling.step (override)");
         }
-        let _ = fs::remove_file(&override_output);
         let (override_indoor, override_attic) = collect_temps(&dwelling_ov.results());
         let override_indoor_mae = mae(&override_indoor, &ochre_indoor);
         let override_attic_mae = mae(&override_attic, &ochre_attic);

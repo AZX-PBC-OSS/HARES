@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+use hares_core::{Dwelling, DwellingCheckpoint, DwellingConfig, SimulationConfig};
 use hares_equipment::EvConfig;
 use hares_equipment::config::ConfigValue;
 use hares_equipment::ev::Ev;
@@ -506,20 +506,39 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
 }
 
 const RESUME_TOTAL_STEPS: usize = 96;
-const RESUME_CHECKPOINT_STEP: usize = 37;
 
-fn resumable_dwelling_config(output_dir: &Path, run: &str) -> DwellingConfig {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let home = root.join("tests/fixtures/resstock/2025.1/bldg0176227");
+/// One resume scenario: a building, its weather and start day, and the step
+/// at which the run is checkpointed.
+struct ResumeCase {
+    hpxml_path: PathBuf,
+    weather_file: &'static str,
+    utc_offset_west_h: i32,
+    month: u32,
+    day: u32,
+    checkpoint_step: usize,
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn resume_home_dir() -> PathBuf {
+    repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227")
+}
+
+fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) -> DwellingConfig {
+    let root = repo_root();
     DwellingConfig {
-        hpxml_path: home.join("home.xml"),
-        schedule_path: home.join("in.schedules.csv"),
-        weather_path: root.join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
+        hpxml_path: case.hpxml_path.clone(),
+        schedule_path: resume_home_dir().join("in.schedules.csv"),
+        weather_path: root
+            .join("tests/fixtures/resstock/2025.1/weather")
+            .join(case.weather_file),
         defaults_path: Some(root.join("defaults")),
         sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(8 * 3600)
+            start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
                 .expect("valid offset")
-                .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
                 .single()
                 .expect("valid start time"),
             duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
@@ -594,27 +613,162 @@ fn assert_frames_bitwise_equal(expected: &RecordBatch, actual: &RecordBatch) {
 /// must travel through the checkpoint.
 ///
 /// A dwelling step rebuilds the couplings before any ideal-capacity solve
-/// reads them: `Dwelling::step` calls `prepare_inputs`
-/// (`crates/hares-core/src/dwelling/mod.rs:5888`) before
-/// `collect_and_solve` (`:5947`), and `prepare_inputs_inner` rebuilds
-/// `last_coupling` (`crates/hares-envelope/src/thermal_solver/stepping.rs:714`,
-/// `:717`). This test therefore pins resume equality of the whole dwelling;
-/// the restore of the coupling state itself, which a solve called directly
-/// after `restore_state` reads, is pinned by the solver unit test
+/// reads them: `Dwelling::step` runs `ThermalSolver::prepare_inputs`, whose
+/// `prepare_inputs_inner` rebuilds `last_coupling`, before
+/// `SolverFeedbackActor::collect_and_solve` runs the solves. This test
+/// therefore pins resume equality of the whole dwelling; the restore of the
+/// coupling state itself, which a solve called directly after
+/// `restore_state` reads, is pinned by the solver unit test
 /// `restore_state_restores_coupling_state`.
 #[test]
 fn resumed_run_equals_continuous_run() {
+    let case = ResumeCase {
+        hpxml_path: resume_home_dir().join("home.xml"),
+        weather_file: "G0600770_2018.csv",
+        utc_offset_west_h: 8,
+        month: 1,
+        day: 15,
+        checkpoint_step: 37,
+    };
     let output_dir = tempfile::tempdir().expect("temp dir");
+    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, checkpoint| {
+        assert!(
+            dwelling.latest_env().zones.len() > 1,
+            "the fixture must model more than one zone"
+        );
+        assert!(
+            !checkpoint.thermal.last_coupling.is_empty(),
+            "couplings must be active at the checkpoint"
+        );
+    });
+}
 
-    let mut continuous = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "a"))
-        .expect("build continuous dwelling");
-    assert!(
-        continuous.latest_env().zones.len() > 1,
-        "the fixture must model more than one zone"
+/// The resume equality of `resumed_run_equals_continuous_run` on the same
+/// building with a whole-building heat recovery ventilator, in cold weather
+/// where defrost derates the ventilator's recovery effectiveness. A step
+/// reads the effectiveness the ventilator reported on the previous step, so
+/// the checkpoint must carry the derated value, not the rated one a freshly
+/// built dwelling starts from.
+#[test]
+fn resumed_hrv_run_equals_continuous_run() {
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let case = ResumeCase {
+        hpxml_path: write_hrv_variant(output_dir.path()),
+        weather_file: "G0900090_2018.csv",
+        utc_offset_west_h: 5,
+        month: 1,
+        day: 2,
+        checkpoint_step: 36,
+    };
+    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, _| {
+        let recovery = dwelling
+            .thermal_solver()
+            .config()
+            .ventilation
+            .sensible_recovery_efficiency;
+        assert!(
+            recovery < HRV_SENSIBLE_RECOVERY,
+            "the ventilator must be derated at the checkpoint (recovery {recovery}, \
+             rated {HRV_SENSIBLE_RECOVERY})"
+        );
+    });
+}
+
+const HRV_SENSIBLE_RECOVERY: f64 = 0.72;
+
+/// A checkpoint with an invalid thermal snapshot is rejected, by both
+/// `load_checkpoint` and `restore_building_state`, before any part of the
+/// dwelling changes: the dwelling that rejected it holds the same state as
+/// an identical dwelling never offered it, and runs on bitwise like it.
+#[test]
+fn rejected_checkpoint_leaves_the_dwelling_unchanged() {
+    let case = ResumeCase {
+        hpxml_path: resume_home_dir().join("home.xml"),
+        weather_file: "G0600770_2018.csv",
+        utc_offset_west_h: 8,
+        month: 1,
+        day: 15,
+        checkpoint_step: 5,
+    };
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let mut donor = Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "d"))
+        .expect("build donor dwelling");
+    for _ in 0..case.checkpoint_step {
+        donor.step().expect("donor step");
+    }
+    let mut bad = donor.save_checkpoint().expect("save checkpoint");
+    bad.thermal.x[0] = f64::NAN;
+
+    let mut offered =
+        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "o"))
+            .expect("build offered dwelling");
+    let mut untouched =
+        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "u"))
+            .expect("build untouched dwelling");
+    offered.step().expect("offered step");
+    untouched.step().expect("untouched step");
+
+    offered
+        .load_checkpoint(bad.clone())
+        .expect_err("a NaN thermal state must be rejected");
+    offered
+        .restore_building_state(&bad)
+        .expect_err("a NaN thermal state must be rejected");
+    assert_eq!(
+        offered.save_checkpoint().expect("save offered"),
+        untouched.save_checkpoint().expect("save untouched"),
+        "a rejected checkpoint changed the dwelling"
     );
+
+    offered.simulate().expect("offered run");
+    untouched.simulate().expect("untouched run");
+    assert_frames_bitwise_equal(&recorded_frame(&untouched), &recorded_frame(&offered));
+}
+
+/// Writes the resume building with its local exhaust fans replaced by one
+/// whole-building heat recovery ventilator and returns the HPXML path.
+fn write_hrv_variant(dir: &Path) -> PathBuf {
+    let xml = fs::read_to_string(resume_home_dir().join("home.xml")).expect("read HPXML");
+    let start = xml
+        .find("<VentilationFans>")
+        .expect("HPXML has ventilation fans");
+    let end_tag = "</VentilationFans>";
+    let end = xml
+        .find(end_tag)
+        .expect("HPXML closes its ventilation fans")
+        + end_tag.len();
+    let hrv = format!(
+        "<VentilationFans><VentilationFan>\
+         <SystemIdentifier id='VentilationFan1'/>\
+         <FanType>heat recovery ventilator</FanType>\
+         <RatedFlowRate>110.0</RatedFlowRate>\
+         <HoursInOperation>24.0</HoursInOperation>\
+         <UsedForWholeBuildingVentilation>true</UsedForWholeBuildingVentilation>\
+         <SensibleRecoveryEfficiency>{HRV_SENSIBLE_RECOVERY}</SensibleRecoveryEfficiency>\
+         <FanPower>60.0</FanPower>\
+         </VentilationFan></VentilationFans>"
+    );
+    let path = dir.join("home_hrv.xml");
+    fs::write(&path, format!("{}{hrv}{}", &xml[..start], &xml[end..])).expect("write HPXML");
+    path
+}
+
+/// Runs `case` continuously and, separately, to its checkpoint step,
+/// checkpointed and resumed in a freshly built dwelling, then asserts every
+/// output column of the resumed rows equals the continuous run's bitwise.
+/// `at_checkpoint` asserts the scenario's preconditions on the interrupted
+/// dwelling and its checkpoint.
+fn assert_resume_equals_continuous(
+    case: &ResumeCase,
+    output_dir: &Path,
+    at_checkpoint: impl FnOnce(&Dwelling, &DwellingCheckpoint),
+) {
+    let k = case.checkpoint_step;
+    let mut continuous = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "a"))
+        .expect("build continuous dwelling");
     let continuous_steps = continuous.simulate().expect("continuous run").steps;
     assert!(
-        continuous_steps[RESUME_CHECKPOINT_STEP..]
+        continuous_steps[k..]
             .iter()
             .any(|step| step.hvac_heating_w > 0.0),
         "the HVAC must run after the checkpoint for the resumed solves to be compared"
@@ -622,18 +776,15 @@ fn resumed_run_equals_continuous_run() {
     let continuous_frame = recorded_frame(&continuous);
     assert_eq!(continuous_frame.num_rows(), RESUME_TOTAL_STEPS);
 
-    let mut interrupted = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "b"))
+    let mut interrupted = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "b"))
         .expect("build interrupted dwelling");
-    for _ in 0..RESUME_CHECKPOINT_STEP {
+    for _ in 0..k {
         interrupted.step().expect("step before checkpoint");
     }
     let checkpoint = interrupted.save_checkpoint().expect("save checkpoint");
-    assert!(
-        !checkpoint.thermal.last_coupling.is_empty(),
-        "couplings must be active at the checkpoint"
-    );
+    at_checkpoint(&interrupted, &checkpoint);
 
-    let mut resumed = Dwelling::from_config(resumable_dwelling_config(output_dir.path(), "c"))
+    let mut resumed = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "c"))
         .expect("build resumed dwelling");
     resumed
         .load_checkpoint(checkpoint)
@@ -641,9 +792,6 @@ fn resumed_run_equals_continuous_run() {
     resumed.simulate().expect("resumed run");
     let resumed_frame = recorded_frame(&resumed);
 
-    let tail = continuous_frame.slice(
-        RESUME_CHECKPOINT_STEP,
-        RESUME_TOTAL_STEPS - RESUME_CHECKPOINT_STEP,
-    );
+    let tail = continuous_frame.slice(k, RESUME_TOTAL_STEPS - k);
     assert_frames_bitwise_equal(&tail, &resumed_frame);
 }

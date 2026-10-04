@@ -703,26 +703,44 @@ impl StateSpaceModel {
             }
         }
 
-        // Gain: g = (I + D)⁻¹ · b_col
-        scratch.gain.copy_from(&self.b_eff.column(input_index));
-        for i in 0..n {
-            if scratch.d_agg[i] != 0.0 {
-                scratch.gain[i] /= 1.0 + scratch.d_agg[i];
-            }
-        }
+        let effective_gain = self.identity_coupled_effective_gain(
+            output_index,
+            input_index,
+            &scratch.d_agg,
+            &mut scratch.gain,
+        );
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
         let y_fixed =
             (c_row * &scratch.tail_rhs)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
-        let effective_gain = (c_row * &scratch.gain)[0] + self.d[(output_index, input_index)];
-
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });
         }
 
         Ok((y_target - y_fixed) / effective_gain)
+    }
+
+    /// Effective gain of output `output_index` per unit of input
+    /// `input_index` under the per-state aggregated coupling damping `d_agg`:
+    /// `C·(I + D)⁻¹·b + D_oi`, with `gain` receiving `(I + D)⁻¹·b`. A state
+    /// with zero damping is not divided, so an all-zero `d_agg` gives the
+    /// uncoupled gain. The caller has bounds-checked both indices.
+    pub(crate) fn identity_coupled_effective_gain(
+        &self,
+        output_index: usize,
+        input_index: usize,
+        d_agg: &DVector<f64>,
+        gain: &mut DVector<f64>,
+    ) -> f64 {
+        gain.copy_from(&self.b_eff.column(input_index));
+        for i in 0..self.state_dim() {
+            if d_agg[i] != 0.0 {
+                gain[i] /= 1.0 + d_agg[i];
+            }
+        }
+        (self.c.row(output_index) * &*gain)[0] + self.d[(output_index, input_index)]
     }
 
     /// Computes the step-shared prefix of the scalar ideal-input solves:

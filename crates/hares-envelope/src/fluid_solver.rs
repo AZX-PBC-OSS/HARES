@@ -245,11 +245,10 @@ impl FluidSolver {
     }
 
     /// Restores solver state from a checkpoint payload produced by [`snapshot_payload`].
-    pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
-        self.last_known_temps.clear();
-        if payload.is_empty() {
-            return Ok(());
-        }
+    /// Checks that `payload` is a well-formed checkpoint payload: whole
+    /// `(loop_id, supply, return)` triples with integral loop ids in the
+    /// `LoopId` range.
+    pub fn validate_payload(payload: &[f64]) -> Result<(), HaresError> {
         if !payload.len().is_multiple_of(3) {
             return Err(HaresError::Envelope(format!(
                 "fluid checkpoint payload length {} is not a multiple of 3",
@@ -258,13 +257,23 @@ impl FluidSolver {
         }
         for chunk in payload.chunks_exact(3) {
             let loop_id_raw = chunk[0];
-            if !loop_id_raw.is_finite() || loop_id_raw < 0.0 || loop_id_raw > f64::from(u16::MAX) {
+            if !(0.0..=f64::from(u16::MAX)).contains(&loop_id_raw) || loop_id_raw.fract() != 0.0 {
                 return Err(HaresError::Envelope(format!(
                     "invalid loop_id in fluid checkpoint: {loop_id_raw}"
                 )));
             }
-            let loop_id = LoopId(loop_id_raw as u16);
-            self.last_known_temps.insert(loop_id, (chunk[1], chunk[2]));
+        }
+        Ok(())
+    }
+
+    /// Restores the last known loop temperatures from a payload; validates
+    /// it before changing anything.
+    pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
+        Self::validate_payload(payload)?;
+        self.last_known_temps.clear();
+        for chunk in payload.chunks_exact(3) {
+            self.last_known_temps
+                .insert(LoopId(chunk[0] as u16), (chunk[1], chunk[2]));
         }
         Ok(())
     }

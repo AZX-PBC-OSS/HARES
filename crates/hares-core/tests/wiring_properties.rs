@@ -189,7 +189,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         patches: None,
     };
     let dwelling = hares_core::Dwelling::from_config(config2).expect("dwelling builds");
-    let solver = &dwelling.thermal_solver;
+    let solver = dwelling.thermal_solver();
     let (n_states, n_inputs, _) = solver.model_dims();
     let cfg = solver.config();
 
@@ -332,7 +332,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
     };
 
     let dwelling = hares_core::Dwelling::from_config(config).expect("dwelling builds");
-    let solver = &dwelling.thermal_solver;
+    let solver = dwelling.thermal_solver();
     let cfg = solver.config();
     let indoor = cfg.indoor_zone_id;
 
@@ -470,7 +470,7 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
     };
 
     let dwelling = hares_core::Dwelling::from_config(config).expect("dwelling builds");
-    let cfg = dwelling.thermal_solver.config();
+    let cfg = dwelling.thermal_solver().config();
 
     // The attic floor is categorized Roof (is_attic_floor → Roof), as is
     // the single outdoor-facing roof plane (Roof1, 1509.3 ft² = 140.3 m²).
