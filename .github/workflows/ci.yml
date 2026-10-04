@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, initial-implementation]
   pull_request:
-    branches: [main]
+    branches: [main, initial-implementation]
   workflow_dispatch:
 
 concurrency:
@@ -145,20 +145,40 @@ jobs:
           mkdir -p target
           git status --porcelain --ignored --untracked-files=all -- . ':(exclude)target' \
             ':(exclude).venv' ':(exclude)*__pycache__*' ':(exclude)*.pytest_cache*' \
-            ':(exclude)*.ruff_cache*' ':(exclude)python/*/_hares*.so' \
-            ':(exclude)nextest-results.xml' | sort > target/stray-before.txt
+            ':(exclude)*.ruff_cache*' ':(exclude)python/*/_hares*.so' | sort > target/stray-before.txt
       - run: cargo nextest run --workspace --no-fail-fast --profile ci
+      - name: Copy JUnit report (default)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-default.xml
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F dst
+      - name: Copy JUnit report (dst)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-dst.xml
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F profiling
+      - name: Copy JUnit report (profiling)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-profiling.xml
       - run: cargo nextest run --workspace --no-fail-fast --profile ci -F observe
+      - name: Copy JUnit report (observe)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-observe.xml
       - run: cargo nextest run --workspace --release --no-fail-fast --profile ci
+      - name: Copy JUnit report (release)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-release.xml
       - run: cargo nextest run --release --no-fail-fast --profile ci -p hares-equipment
+      - name: Copy JUnit report (equipment-release)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-equipment-release.xml
+      - run: cargo nextest run -p hares-core --no-fail-fast --profile ci -F observe,profiling
+      - name: Copy JUnit report (core-observe-profiling)
+        if: success() || failure()
+        run: cp target/nextest/ci/nextest-results.xml target/nextest/ci/junit-core-observe-profiling.xml
       - name: Stray check
         run: |
           git status --porcelain --ignored --untracked-files=all -- . ':(exclude)target' \
             ':(exclude).venv' ':(exclude)*__pycache__*' ':(exclude)*.pytest_cache*' \
-            ':(exclude)*.ruff_cache*' ':(exclude)python/*/_hares*.so' \
-            ':(exclude)nextest-results.xml' | sort > target/stray-after.txt
+            ':(exclude)*.ruff_cache*' ':(exclude)python/*/_hares*.so' | sort > target/stray-after.txt
           if comm -13 target/stray-before.txt target/stray-after.txt | grep .; then
             echo "::error::the test run wrote files into the working tree"
             exit 1
@@ -167,7 +187,20 @@ jobs:
         if: success() || failure()
         with:
           name: nextest-results
-          path: nextest-results.xml
+          path: target/nextest/ci/junit-*.xml
+
+  golden:
+    name: "frame_golden compare-all"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the capture toolchain: the goldens are per-column bit
+      # digests, so they must be compared on the rustc release they were
+      # captured with. The rust-toolchain.toml file that owns this pin is
+      # added by a later entry.
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - run: cargo run --release -p frame_golden -- compare-all
+      - run: cargo run --release -p frame_golden -F dst -- compare-all
 
   python-test:
     name: "pytest (Python ${{ matrix.python-version }})"
@@ -252,6 +285,7 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   bench:
     name: "benchmark regression"
@@ -265,23 +299,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install critcmp
         run: cargo install critcmp --quiet
-      - name: Get main branch SHA
+      - name: Resolve baseline commit
         run: |
-          echo "MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1 | cut -c1-10)" >> $GITHUB_ENV
-      - name: Cache main benchmark baseline
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_SHA=$(git ls-remote origin "refs/heads/$BASE_REF" | cut -f1 | cut -c1-10)
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA=$(git rev-parse "$BEFORE" | cut -c1-10)
+          else
+            BASE_SHA=""
+          fi
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+      - name: Cache benchmark baseline
         id: cache
+        if: env.BASE_SHA != ''
         uses: actions/cache@v4
         with:
           path: baseline.json
-          key: bench-baseline-${{ env.MAIN_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
-      - name: Generate main baseline
-        if: steps.cache.outputs.cache-hit != 'true'
+          key: bench-baseline-${{ env.BASE_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
+      - name: Generate baseline
+        if: steps.cache.outputs.cache-hit != 'true' && env.BASE_SHA != ''
         run: |
-          git checkout main
-          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline main
-          critcmp --export main > baseline.json
+          git checkout "$BASE_SHA"
+          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline baseline
+          critcmp --export baseline > baseline.json
       - name: Restore PR branch
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-hit != 'true' && env.BASE_SHA != ''
         run: git checkout ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Run PR benchmarks
         run: cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline pr
