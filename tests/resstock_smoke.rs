@@ -5,6 +5,10 @@
 //! engine completes without error, produces physically plausible output,
 //! and that zone temperatures stay within physical bounds.
 //!
+//! Seasonal 72 h runs at 1 h resolution on the `bldg0000004` (July) and
+//! `bldg0000002` (January) fixtures additionally assert that the cooling,
+//! electric heating and gas end uses carry energy over the run.
+//!
 //! Fixtures are stored in tests/fixtures/resstock/{version}/ and were
 //! downloaded from the NREL OEDI data lake.
 
@@ -146,6 +150,16 @@ mod tests {
                     "Non-finite value ({v}) in '{col}' at row {i}"
                 );
             }
+        }
+
+        // Electric power is never negative: a negative total would mean a
+        // generation source booked into a load column or a sign error in the
+        // solver's net.
+        for (i, &v) in data["Total Electric Power (kW)"].iter().enumerate() {
+            assert!(
+                v >= 0.0,
+                "Total Electric Power ({v} kW) is negative at row {i}"
+            );
         }
     }
 
@@ -437,5 +451,147 @@ mod tests {
             "hvac_cooling {cooling_kwh} kWh must equal the crankcase heater's \
              {crankcase_energy_kwh} kWh"
         );
+    }
+
+    // ── seasonal 72 h runs ───────────────────────────────────────────────
+
+    /// Builds the shared seasonal configuration: 72 h at 3600 s starting at
+    /// midnight on the given date at UTC-7, one day of warm-up, CSV output
+    /// to the given path.
+    fn seasonal_72h_config(
+        version: &str,
+        bldg_dir: &Path,
+        month: u32,
+        day: u32,
+        output_path: &Path,
+    ) -> DwellingConfig {
+        DwellingConfig {
+            hpxml_path: bldg_dir.join("home.xml"),
+            schedule_path: bldg_dir.join("in.schedules.csv"),
+            weather_path: weather_path(version, bldg_dir),
+            defaults_path: Some(project_root().join("defaults")),
+            sim_config: SimulationConfig {
+                start_time: FixedOffset::west_opt(7 * 3600)
+                    .expect("UTC-7 offset")
+                    .with_ymd_and_hms(2018, month, day, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(72),
+                time_res: Duration::minutes(60),
+                output_verbosity: 1,
+                output_path: Some(output_path.to_path_buf()),
+                write_output: true,
+                output_format: OutputFormat::Csv,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 42,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                retain_batches: true,
+                rotation: hares_io::RotationPolicy::None,
+            },
+            overrides: None,
+            bldg_id: 200,
+            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
+            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
+        }
+    }
+
+    /// Three-day July run on the release's `bldg0000004` fixture (Texas
+    /// weather, a guaranteed cooling load). Asserts the cooling end use
+    /// carries energy over the run and that every output value stays inside
+    /// the physical bounds. No peak or total-energy band is asserted.
+    fn run_summer_72h(version: &str) {
+        let bldg_dir = fixture_building_dirs(version)
+            .into_iter()
+            .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000004"))
+            .expect("bldg0000004 fixture must exist");
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_resstock_summer_72h", "csv"));
+        let _guard = TempFile(output_path.clone());
+
+        let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &output_path);
+        let engine = SimulationEngine::new();
+        let result = engine.run(config).expect("engine.run should succeed");
+        assert!(
+            !matches!(result.status, SimStatus::Failed(_)),
+            "{version} summer 72 h run failed: {result:?}"
+        );
+
+        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        eprintln!("[{version}] summer_72h hvac_cooling: {cooling_kwh:.3} kWh");
+        assert!(
+            cooling_kwh > 0.0,
+            "{version} summer 72 h: hvac_cooling must carry energy, got {cooling_kwh} kWh"
+        );
+
+        assert_physics_bounds(&output_path);
+    }
+
+    /// Three-day January run on the release's `bldg0000002` fixture (Idaho
+    /// weather, a guaranteed heating load). The fixture heats with gas (a
+    /// boiler in 2025.1, a furnace in 2024.2), so `hvac_heating`, an electric
+    /// end use, measures only the boiler auxiliary or fan electricity, and
+    /// the run's gas energy is the sum of the output file's
+    /// `Total Gas Power (therms/hour)` column times the 1 h step. Asserts the
+    /// electric heating end use, the gas energy, and the physical bounds.
+    fn run_winter_72h(version: &str) {
+        let bldg_dir = fixture_building_dirs(version)
+            .into_iter()
+            .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
+            .expect("bldg0000002 fixture must exist");
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_resstock_winter_72h", "csv"));
+        let _guard = TempFile(output_path.clone());
+
+        let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &output_path);
+        let engine = SimulationEngine::new();
+        let result = engine.run(config).expect("engine.run should succeed");
+        assert!(
+            !matches!(result.status, SimStatus::Failed(_)),
+            "{version} winter 72 h run failed: {result:?}"
+        );
+
+        let heating_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        eprintln!("[{version}] winter_72h hvac_heating: {heating_kwh:.3} kWh");
+        assert!(
+            heating_kwh > 0.0,
+            "{version} winter 72 h: hvac_heating must carry energy, got {heating_kwh} kWh"
+        );
+
+        const STEP_HOURS: f64 = 1.0;
+        let gas_therms: f64 = parse_csv_columns(&output_path)
+            .remove("Total Gas Power (therms/hour)")
+            .expect("Total Gas Power (therms/hour) column in the output CSV")
+            .iter()
+            .sum::<f64>()
+            * STEP_HOURS;
+        eprintln!("[{version}] winter_72h gas energy: {gas_therms:.3} therms");
+        assert!(
+            gas_therms > 0.0,
+            "{version} winter 72 h: gas energy must be above zero, got {gas_therms} therms"
+        );
+
+        assert_physics_bounds(&output_path);
+    }
+
+    #[test]
+    fn resstock_2025_1_summer_72h() {
+        run_summer_72h("2025.1");
+    }
+
+    #[test]
+    fn resstock_2025_1_winter_72h() {
+        run_winter_72h("2025.1");
+    }
+
+    #[test]
+    fn resstock_2024_2_summer_72h() {
+        run_summer_72h("2024.2");
+    }
+
+    #[test]
+    fn resstock_2024_2_winter_72h() {
+        run_winter_72h("2024.2");
     }
 }
