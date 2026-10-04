@@ -2,9 +2,10 @@
 //!
 //! The manifest names the exact feature set the fixture runs under, the
 //! defaults directory, optional per-file defaults replacements, a
-//! `SimulationConfig` table verbatim, and the homes. Unknown keys are
-//! rejected at every level the tool owns, so a typo cannot silently change
-//! what a golden pins.
+//! `SimulationConfig` table verbatim, an optional `[tariff]` table
+//! (dwelling manifests only), and the homes. Unknown keys are rejected at
+//! every level the tool owns, so a typo cannot silently change what a
+//! golden pins.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,27 @@ pub struct HomeEntry {
     pub overrides: serde_json::Value,
 }
 
+/// The manifest's optional `[tariff]` table: the tariff a dwelling run is
+/// billed under and the IANA zone its billing periods resolve in.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TariffConfig {
+    /// Repository-relative JSON file deserialized into
+    /// `hares_tariff::ElectricTariff` and checked with `validate()`.
+    pub file: String,
+    /// IANA zone name (for example `America/Denver`).
+    pub zone: String,
+}
+
+impl TariffConfig {
+    /// The zone as a `chrono_tz::Tz`, with the zone name in the error.
+    fn zone_tz(&self) -> Result<chrono_tz::Tz, String> {
+        self.zone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|err| format!("zone {:?}: {err}", self.zone))
+    }
+}
+
 /// A golden fixture manifest, parsed with unknown keys rejected.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +94,16 @@ pub struct GoldenManifest {
     /// serde missing-field error.
     #[serde(default)]
     pub home: Vec<HomeEntry>,
+    /// The optional `[tariff]` table. `parse` checks its shape (dwelling
+    /// manifests only, `file` and `zone` present, no other key) and parses
+    /// `zone`; [`GoldenManifest::tariff`] reads and validates the file at
+    /// run time.
+    #[serde(default)]
+    pub tariff: Option<TariffConfig>,
+    /// Where the manifest was parsed from, for error messages; not part
+    /// of the manifest text itself.
+    #[serde(skip)]
+    pub source: PathBuf,
 }
 
 /// Every field of `hares_io::SimulationConfig`. A manifest key outside this
@@ -106,18 +138,24 @@ pub fn running_features() -> Vec<String> {
 impl GoldenManifest {
     /// Parses a manifest from bytes with unknown keys rejected everywhere.
     pub fn parse(path: &Path, text: &str) -> FrameGoldenResult<Self> {
-        let manifest: Self = toml::from_str(text).map_err(|err| FrameGoldenError::Manifest {
-            path: path.to_path_buf(),
-            detail: err.to_string(),
-        })?;
+        let mut manifest: Self =
+            toml::from_str(text).map_err(|err| FrameGoldenError::Manifest {
+                path: path.to_path_buf(),
+                detail: err.to_string(),
+            })?;
+        manifest.source = path.to_path_buf();
         manifest.validate(path)?;
         Ok(manifest)
     }
 
-    /// Loads and validates a manifest from disk.
+    /// Loads and validates a manifest from disk. A manifest with a
+    /// `[tariff]` table also has its tariff file read, parsed and
+    /// validated here, so a bad tariff fails when the manifest loads.
     pub fn load(path: &Path) -> FrameGoldenResult<Self> {
         let text = std::fs::read_to_string(path)?;
-        Self::parse(path, &text)
+        let manifest = Self::parse(path, &text)?;
+        manifest.tariff(&repo_root(path))?;
+        Ok(manifest)
     }
 
     fn validate(&self, path: &Path) -> FrameGoldenResult<()> {
@@ -130,6 +168,23 @@ impl GoldenManifest {
                     ),
                 });
             }
+        }
+        if let Some(tariff) = &self.tariff {
+            if self.kind != ManifestKind::Dwelling {
+                return Err(FrameGoldenError::Manifest {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "[tariff] is accepted for kind \"dwelling\" only, found kind {:?}",
+                        self.kind
+                    ),
+                });
+            }
+            tariff
+                .zone_tz()
+                .map_err(|detail| FrameGoldenError::Manifest {
+                    path: path.to_path_buf(),
+                    detail: format!("[tariff] {detail}"),
+                })?;
         }
         let count = self.home.len();
         match self.kind {
@@ -168,6 +223,47 @@ impl GoldenManifest {
             .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
         hares_io::SimulationConfig::from_toml(&text)
             .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))
+    }
+
+    /// Reads, parses and validates the manifest's tariff file against the
+    /// repository root: `file` is resolved with `repo_path`, deserialized
+    /// strictly into `hares_tariff::ElectricTariff` (unknown keys included,
+    /// so a misspelled key fails here) and checked with `validate()`.
+    /// Returns the tariff with its zone, or `None` when the manifest
+    /// carries no `[tariff]` table. Every failure names the manifest, the
+    /// `[tariff]` field and the cause.
+    pub fn tariff(
+        &self,
+        root: &Path,
+    ) -> FrameGoldenResult<Option<(hares_tariff::ElectricTariff, chrono_tz::Tz)>> {
+        let Some(config) = &self.tariff else {
+            return Ok(None);
+        };
+        let manifest_path = self.source.clone();
+        let fail = |detail: String| FrameGoldenError::Manifest {
+            path: manifest_path.clone(),
+            detail,
+        };
+
+        let file_path = repo_path(root, &config.file);
+        let text = std::fs::read_to_string(&file_path).map_err(|err| {
+            fail(format!(
+                "[tariff] file {:?}: cannot be read: {err}",
+                config.file
+            ))
+        })?;
+        let tariff: hares_tariff::ElectricTariff = serde_json::from_str(&text)
+            .map_err(|err| fail(format!("[tariff] file {:?}: {err}", config.file)))?;
+        tariff.validate().map_err(|err| {
+            fail(format!(
+                "[tariff] file {:?}: validate() failed: {err}",
+                config.file
+            ))
+        })?;
+        let tz = config
+            .zone_tz()
+            .map_err(|detail| fail(format!("[tariff] {detail}")))?;
+        Ok(Some((tariff, tz)))
     }
 }
 

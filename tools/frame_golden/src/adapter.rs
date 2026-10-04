@@ -194,6 +194,14 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .map_err(|err| FrameGoldenError::Engine(format!("dwelling construction failed: {err}")))?;
     let construct = construct_start.elapsed();
 
+    // The manifest's tariff attaches after construction and before the run,
+    // so the billing product appears when a tariff is configured.
+    if let Some((tariff, tz)) = req.manifest.tariff(req.repo_root)? {
+        dwelling
+            .set_tariff(tariff, tz)
+            .map_err(|err| FrameGoldenError::Engine(format!("set_tariff failed: {err}")))?;
+    }
+
     let simulate_start = Instant::now();
     let result = SimulationEngine::new()
         .run_dwelling(&mut dwelling, &sim)
@@ -226,9 +234,8 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         }
         _ => {}
     }
-    // A tariff is configured only through `Dwelling::set_tariff`, which no
-    // manifest reaches today, so this product appears only when a later
-    // entry wires tariffs into the adapter.
+    // The billing product appears only when a tariff is configured; the
+    // manifest's [tariff] table attaches one through `Dwelling::set_tariff`.
     if !dwelling.billing_summaries().is_empty() {
         frames.insert(
             "billing".to_string(),

@@ -657,7 +657,13 @@ impl TariffEvaluator {
                 };
                 peak * dr.rate_per_kw
             })
-            .sum()
+            .sum::<f64>()
+            // An empty (or all-filtered) rate list's sum carries the sign of
+            // the reduction's initialization, which is compiler latitude for
+            // floats (rustc 1.94 emits -0.0 here): adding the positive zero
+            // pins the sign (+0.0 + -0.0 = +0.0) without touching any other
+            // value, so the summary's bits do not depend on the toolchain.
+            + 0.0
     }
 
     /// Snapshot of the current billing period without closing it.

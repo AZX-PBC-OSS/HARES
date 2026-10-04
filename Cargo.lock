@@ -813,6 +813,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "chrono",
+ "chrono-tz",
  "hares-core",
  "hares-fleet",
  "hares-io",

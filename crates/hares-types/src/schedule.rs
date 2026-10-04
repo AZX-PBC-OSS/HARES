@@ -53,6 +53,7 @@ impl DayFilter {
 /// declaration order and the first match wins. Overlapping windows are allowed
 /// -- use ordering to express priority.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeWindow {
     pub day: DayFilter,
     pub start_minute: u16,
@@ -172,6 +173,7 @@ pub enum BoundaryPolicy {
 
 /// Parameters for a specific probability distribution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DistributionKind {
     /// Gaussian (normal): result = mean + std_dev × N(0,1).
     Gaussian { mean: f64, std_dev: f64 },
@@ -929,6 +931,7 @@ impl SeasonFilter {
 /// where summer might be Nov–Feb). The shoulder range (spring/fall intermediate
 /// season) is optional — without it, the split is binary summer/winter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeasonalSplit {
     /// First month of summer (1-indexed, inclusive).
     pub summer_start_month: u8,
@@ -1143,6 +1146,7 @@ pub enum BillingCycle {
 
 /// A named time-of-use period with day/time windows and season applicability.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TouPeriod {
     pub name: String,
     pub schedule: Vec<TimeWindow>,

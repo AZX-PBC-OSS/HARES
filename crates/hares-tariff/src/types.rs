@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Per-kWh energy rate for a TOU period and season.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnergyRate {
     pub period_name: String,
     pub season: SeasonFilter,
@@ -24,6 +25,7 @@ impl EnergyRate {
 /// Demand ratchet: bill at least `minimum_fraction` of the highest peak
 /// seen in the past `lookback_months`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RatchetConfig {
     pub lookback_months: u8,
     pub minimum_fraction: f64,
@@ -46,6 +48,7 @@ impl RatchetConfig {
 
 /// Per-kW demand charge for a TOU period and season.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DemandRate {
     /// `None` = coincident peak (system-wide).
     pub period_name: Option<String>,
@@ -115,6 +118,7 @@ fn validate_tiered(
 /// each subsequent rate applies between consecutive thresholds,
 /// and the last rate applies to all usage above the final threshold.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TieredBlock {
     pub season: SeasonFilter,
     /// Cumulative upper bounds per tier (kWh). Must be strictly ascending.
@@ -136,6 +140,7 @@ impl TieredBlock {
 
 /// How grid exports are compensated.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub enum ExportMode {
     NetMetering,
     NetBilling,
@@ -151,6 +156,7 @@ pub enum ExportMode {
 
 /// Export compensation configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRate {
     pub mode: ExportMode,
     pub tou_credits: Vec<EnergyRate>,
@@ -199,6 +205,7 @@ impl ExportRate {
 
 /// Fixed monthly and daily charges.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FixedCharges {
     pub monthly_usd: f64,
     pub daily_usd: f64,
@@ -228,6 +235,7 @@ impl FixedCharges {
 /// EnergyPlus supports this via `CriticalPeakSchedule` and dedicated CPP rate
 /// fields (`vendors/EnergyPlus/src/EnergyPlus/EconomicTariff.cc:768-930`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CppConfig {
     /// Rate per kWh during CPP event hours ($/kWh).
     pub event_rate_per_kwh: f64,
@@ -261,6 +269,7 @@ impl CppConfig {
 
 /// Complete electric utility tariff.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ElectricTariff {
     pub name: Option<String>,
     pub tou_schedule: Vec<TouPeriod>,
@@ -444,6 +453,7 @@ impl ElectricTariff {
 ///
 /// Same invariant as `TieredBlock`: `rates_per_therm.len() == thresholds_therms.len() + 1`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GasTieredBlock {
     pub season: SeasonFilter,
     pub thresholds_therms: Vec<f64>,
@@ -463,6 +473,7 @@ impl GasTieredBlock {
 
 /// Complete gas utility tariff.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GasTariff {
     pub name: Option<String>,
     pub tiered_rates: Vec<GasTieredBlock>,
@@ -1137,5 +1148,57 @@ mod tests {
             tou_credits: vec![],
         };
         assert!(er.validate().is_ok());
+    }
+
+    /// The committed flat tariff fixture, as the golden manifest's
+    /// `[tariff]` table points at it. A missing file fails every case
+    /// below, so the strictness test cannot pass against a stale tree.
+    fn flat_tariff_fixture() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/golden/flat_tariff.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("fixture {} must be readable: {err}", path.display()));
+        serde_json::from_str(&text).expect("fixture must be valid JSON")
+    }
+
+    /// A misspelled key anywhere in a tariff file, top level included, must
+    /// fail deserialization naming the key instead of being dropped.
+    #[test]
+    fn tariff_json_rejects_unknown_key() {
+        // Control: the pristine fixture deserializes and validates, so the
+        // rejections below come from the injected key, not the fixture.
+        let base = flat_tariff_fixture();
+        let pristine: ElectricTariff =
+            serde_json::from_value(base.clone()).expect("the committed fixture must deserialize");
+        pristine
+            .validate()
+            .expect("the committed fixture must validate");
+
+        let mut top_level = base.clone();
+        top_level["extra_key"] = serde_json::json!(1);
+        let err = serde_json::from_str::<ElectricTariff>(&top_level.to_string())
+            .expect_err("an unknown top-level key must be rejected");
+        assert!(
+            err.to_string().contains("extra_key"),
+            "the error names the key: {err}"
+        );
+
+        let mut inside_period = base.clone();
+        inside_period["tou_schedule"][0]["extra_key"] = serde_json::json!(1);
+        let err = serde_json::from_str::<ElectricTariff>(&inside_period.to_string())
+            .expect_err("an unknown key inside a tou_schedule period must be rejected");
+        assert!(
+            err.to_string().contains("extra_key"),
+            "the error names the key: {err}"
+        );
+
+        let mut inside_window = base.clone();
+        inside_window["tou_schedule"][0]["schedule"][0]["extra_key"] = serde_json::json!(1);
+        let err = serde_json::from_str::<ElectricTariff>(&inside_window.to_string())
+            .expect_err("an unknown key inside a period's schedule window must be rejected");
+        assert!(
+            err.to_string().contains("extra_key"),
+            "the error names the key: {err}"
+        );
     }
 }

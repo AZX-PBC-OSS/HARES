@@ -1,0 +1,36 @@
+{
+  "name": "flat",
+  "tou_schedule": [
+    {
+      "name": "flat",
+      "schedule": [
+        {
+          "day": "Any",
+          "start_minute": 0,
+          "end_minute": 1440,
+          "value": 0.0
+        }
+      ],
+      "season": "All"
+    }
+  ],
+  "demand_tou_schedule": [],
+  "energy_rates": [
+    {
+      "period_name": "flat",
+      "season": "All",
+      "rate_per_kwh": 0.15
+    }
+  ],
+  "demand_rates": [],
+  "tiered_rates": [],
+  "export_rate": {
+    "mode": "None",
+    "tou_credits": []
+  },
+  "fixed_charges": {
+    "monthly_usd": 10.0,
+    "daily_usd": 0.0
+  },
+  "billing_cycle": "Monthly"
+}
