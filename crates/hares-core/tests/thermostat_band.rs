@@ -28,9 +28,9 @@ fn heating_equipment_name(dwelling: &Dwelling) -> String {
         .clone()
 }
 
-/// A sub-band deadband is rejected before it reaches the furnace, so the
-/// furnace keeps heating and the zone holds its setpoint over twelve hours
-/// of -5 C weather.
+/// A sub-band deadband is rejected at dispatch, counted and warned, before
+/// it reaches the furnace, so the furnace keeps heating and the zone holds
+/// its setpoint over twelve hours of -5 C weather.
 #[test]
 fn a_sub_band_deadband_is_rejected_and_the_furnace_keeps_heating() {
     let mut dwelling = s54_dwelling();
@@ -49,7 +49,7 @@ fn a_sub_band_deadband_is_rejected_and_the_furnace_keeps_heating() {
                 },
                 None,
             )
-            .expect_err("a band below a thermostat's resolution is rejected");
+            .expect("the signal is queued; its bounds are checked at dispatch");
     }
     let mut lowest_zone_c = f64::INFINITY;
     for _ in 0..720 {
@@ -58,6 +58,7 @@ fn a_sub_band_deadband_is_rejected_and_the_furnace_keeps_heating() {
             lowest_zone_c = lowest_zone_c.min(zone_c);
         }
     }
+    assert_eq!(dwelling.health().rejected_control_signals, 2);
     assert_eq!(dwelling.health().port_rollbacks, 0);
     assert!(
         lowest_zone_c > 15.0,

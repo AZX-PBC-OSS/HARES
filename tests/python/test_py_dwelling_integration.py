@@ -1033,14 +1033,14 @@ class TestApplyControlPriority:
         # only correct tier arbitration (not same-tier FIFO) can make it win
         dw.apply_control(
             name,
-            ControlSignal.thermal_setpoint(heat_c=50.0, cool_c=25.0),
+            ControlSignal.thermal_setpoint(heat_c=50.0),
             priority=Priority.safety(),
         )
         # UserOverride suppress signal — queued second; must be rejected
         # by the dispatcher's cross-tier priority-inversion protection
         dw.apply_control(
             name,
-            ControlSignal.thermal_setpoint(heat_c=-50.0, cool_c=25.0),
+            ControlSignal.thermal_setpoint(heat_c=-50.0),
         )
 
         step = dw.step()

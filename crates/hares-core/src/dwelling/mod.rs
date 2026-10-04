@@ -3172,16 +3172,14 @@ impl Dwelling {
     /// external callers (e.g. Python bridges) to elevate a signal's priority
     /// (e.g. a freeze-protection `ThermalSetpoint` at `Safety`).
     ///
-    /// Returns `Err` if the signal fails its numeric bounds, the equipment is
-    /// not found, or the signal is rejected by the equipment's current state
-    /// (e.g. EvDrive while plugged in).
+    /// Returns `Err` if the equipment is not found or the signal is rejected
+    /// by the equipment's current state (e.g. EvDrive while plugged in).
     pub fn apply_control_validated(
         &mut self,
         name: &str,
         signal: ControlSignal,
         priority: Option<PriorityTier>,
     ) -> Result<()> {
-        signal.validate_numeric_bounds()?;
         let is_immediate = signal.is_immediate_state_update();
         if is_immediate {
             let eq = self

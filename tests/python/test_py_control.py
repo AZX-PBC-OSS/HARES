@@ -231,9 +231,7 @@ class TestControlSignalConstructors:
 
     def test_thermal_setpoint_release_form_carries_nothing(self):
         d = ControlSignal.thermal_setpoint().to_dict()
-        assert d["heating_setpoint_c"] is None
-        assert d["cooling_setpoint_c"] is None
-        assert d["deadband_c"] is None
+        assert d == {"type": "ThermalSetpoint"}
 
     def test_thermal_setpoint_delta(self):
         sig = ControlSignal.thermal_setpoint_delta(

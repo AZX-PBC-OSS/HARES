@@ -437,8 +437,12 @@ class TestSolarOverridePVProduction:
             f"power_zero={power_zero:.6f}, power_high={power_high:.6f}"
         )
 
-    def test_pv_produces_zero_at_night_with_summer_override(self):
+    def test_override_without_the_pv_surfaces_ends_the_run(self):
+        """The pvlib override carries only the envelope surfaces, so every PV
+        step fails; the second consecutive failure ends the run, naming the
+        PV, instead of running on with the PV dead."""
         from ochre_next import Dwelling
+        from ochre_next._hares import HaresSimulationError
 
         dw = Dwelling.from_hpxml(
             HPXML_PV,
@@ -458,12 +462,9 @@ class TestSolarOverridePVProduction:
         df = df.head(24)
         dw.set_solar_override(df)
 
-        for _ in range(6):
-            result = dw.step()
-            net_power = result["net_electric_power_kw"]
-            assert net_power >= 0, (
-                f"Expected non-negative net power at night, got {net_power} kW"
-            )
+        dw.step()
+        with pytest.raises(HaresSimulationError, match="PV"):
+            dw.step()
 
     def test_summer_daytime_with_pv_produces_negative_power(self):
         from ochre_next import Dwelling, PV
