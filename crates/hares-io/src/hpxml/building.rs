@@ -590,34 +590,41 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         ValueKind::Area,
     )?;
 
-    let conditioned_volume_m3 = parse_value_with_units(
-        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
-        ValueKind::Volume,
-    )?;
-
-    let ceiling_height_m = match (conditioned_volume_m3, conditioned_floor_area_m2) {
-        (Some(vol), Some(area)) if area > 0.0 => vol / area,
-        (Some(_), Some(_)) => {
+    let mut parse_warnings = Vec::new();
+    let conditioned_floor_area_m2 = match conditioned_floor_area_m2 {
+        Some(area) if area > 0.0 => area,
+        Some(_) => {
             return Err(HpxmlError::Parse(
                 "ConditionedFloorArea must be positive to derive ceiling height".into(),
             ));
         }
-        (None, None) => {
-            return Err(HpxmlError::Parse(
-                "missing both ConditionedBuildingVolume and ConditionedFloorArea; cannot derive ceiling height".into(),
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(HpxmlError::Parse(
-                "missing ConditionedBuildingVolume; cannot derive ceiling height".into(),
-            ));
-        }
-        (Some(_), None) => {
+        None => {
             return Err(HpxmlError::Parse(
                 "missing ConditionedFloorArea; cannot derive ceiling height".into(),
             ));
         }
     };
+    let conditioned_volume_m3 = match parse_value_with_units(
+        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
+        ValueKind::Volume,
+    )? {
+        Some(volume) => volume,
+        None => {
+            let volume = super::zone_geometry::default_conditioned_volume_m3(
+                details,
+                summary.path(&["BuildingConstruction", "AverageCeilingHeight"]),
+                conditioned_floor_area_m2,
+            )?;
+            parse_warnings.push(Warning::new(
+                "hpxml",
+                format!(
+                    "no ConditionedBuildingVolume; defaulted to {volume:.1} m3 as OS-HPXML does"
+                ),
+            ));
+            volume
+        }
+    };
+    let ceiling_height_m = conditioned_volume_m3 / conditioned_floor_area_m2;
 
     let total_conditioned_floors = parse_value_with_units(
         summary.path(&["BuildingConstruction", "NumberofConditionedFloors"]),
@@ -898,29 +905,50 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // The conditioned zone should exclude below-grade foundation area when a basement
     // is present. OCHRE: indoor_floor_area = conditioned_floor_area - first_floor_area * below_grade_floors.
     // If foundation floor area is missing, fall back to the floor-count ratio split.
+    let total = conditioned_floor_area_m2;
     let indoor_floor_area_m2 = match (
-        conditioned_floor_area_m2,
         total_conditioned_floors,
         foundation_floor_area_m2,
     ) {
-        (Some(total), Some(n_total), Some(foundation_area))
+        (Some(n_total), Some(foundation_area))
             if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
             let below_grade_floors = (n_total - floors_above_grade).max(0.0);
             Some((total - foundation_area * below_grade_floors).max(0.0))
         }
-        (Some(total), Some(n_total), None)
+        (Some(n_total), None)
             if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
             Some(total * floors_above_grade / n_total)
         }
-        _ => conditioned_floor_area_m2,
+        _ => Some(total),
     };
 
     let mut zones = build_zone_map(details, indoor_floor_area_m2)?;
     ensure_referenced_zones_exist(&boundaries, &mut zones);
+    // A space exists where an enclosure surface is adjacent to it: OS-HPXML
+    // creates spaces only for the locations surfaces name (geometry.rb:1738,
+    // `create_or_get_space`), and OCHRE builds no foundation zone for a
+    // slab, ambient or above-apartment foundation (hpxml.py:286) and no
+    // attic zone without an attic roof (hpxml.py:577). An attic, garage or
+    // foundation the HPXML groups declare with neither a floor area nor a
+    // surface touching it (a below-apartment attic, a slab-on-grade
+    // foundation) has no geometry and is no zone. A zone ducts run in
+    // stays, so their data is not dropped; with no geometry its volume is
+    // then an error.
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones)?;
+    zones.retain(|_, zone| {
+        !matches!(
+            zone.zone_type,
+            ZoneType::Attic | ZoneType::Garage | ZoneType::Foundation
+        ) || zone.floor_area_m2.is_some()
+            || !zone.duct_systems.is_empty()
+            || boundaries.iter().any(|b| {
+                b.interior_zone.as_ref() == Some(&zone.zone_type)
+                    || b.exterior_zone.as_ref() == Some(&zone.zone_type)
+            })
+    });
 
     // Auto-generate interior wall boundary (partition thermal mass).
     // Area = conditioned floor area, same-zone (Conditioned→Conditioned).
@@ -1115,7 +1143,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // Assign volumes to all zones from available geometry.
+    // Assign volumes to all zones: the OCHRE geometry from the zone's floor
+    // area where the HPXML gives one, else OS-HPXML's volume rule for the
+    // zone type (`zone_geometry`). A zone with neither keeps no volume and
+    // the environment rejects it.
     for zone in &mut zones_vec {
         zone.volume_m3 = match zone.zone_type {
             ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * ceiling_height_m),
@@ -1150,6 +1181,15 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             // Outdoor, Ground, Adjacent are filtered above; Other has no volume model.
             ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => None,
         };
+        if zone.volume_m3.is_none() {
+            zone.volume_m3 = match zone.zone_type {
+                ZoneType::Attic => super::zone_geometry::attic_volume_m3(details)?,
+                ZoneType::Garage | ZoneType::Foundation => {
+                    super::zone_geometry::slab_zone_volume_m3(details, &zone.zone_type)?
+                }
+                _ => None,
+            };
+        }
     }
 
     // Remove Attic↔Garage wall boundaries consumed by Path A attic volume computation.
@@ -1286,7 +1326,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             ValueKind::Raw,
         )?,
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
-        conditioned_volume_m3,
+        conditioned_volume_m3: Some(conditioned_volume_m3),
         ceiling_height_m,
         infiltration_height_m,
         floors_above_grade,
@@ -1300,7 +1340,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
             .filter(|zone| !zone.is_empty()),
         details_xml: details.clone(),
-        parse_warnings: Vec::new(),
+        parse_warnings,
     })
 }
 
@@ -2772,7 +2812,7 @@ fn find_descendant_f64(
 }
 
 #[derive(Clone, Copy)]
-enum ValueKind {
+pub(super) enum ValueKind {
     Raw,
     Area,
     UValue,
@@ -2785,7 +2825,7 @@ enum ValueKind {
     Volume,
 }
 
-fn parse_value_with_units(
+pub(super) fn parse_value_with_units(
     node: Option<&XmlNode>,
     kind: ValueKind,
 ) -> Result<Option<f64>, HpxmlError> {
@@ -4283,7 +4323,14 @@ mod tests {
 
     #[test]
     fn slab_missing_area_defaults_to_zero() {
-        let xml = SAMPLE_XML.replace("<Area units=\"ft2\">80</Area>", "");
+        // The foundation wall height gives the foundation its volume from its
+        // floor area, so the volume does not need the slab area.
+        let xml = SAMPLE_XML
+            .replace("<Area units=\"ft2\">80</Area>", "")
+            .replace(
+                "<Area units=\"ft2\">60</Area>",
+                "<Area units=\"ft2\">60</Area><Height units=\"ft\">8</Height>",
+            );
         let building = parse_building(&xml).expect("slab without Area should parse");
         let slab_boundary = building
             .boundaries
@@ -4366,24 +4413,29 @@ mod tests {
         let err = parse_building(&xml).expect_err("expected missing field failure");
         assert!(matches!(err, HpxmlError::Parse(_)));
         let msg = err.to_string();
-        assert!(
-            msg.contains("missing both ConditionedBuildingVolume and ConditionedFloorArea"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("missing ConditionedFloorArea"), "got: {msg}");
     }
 
+    /// No ConditionedBuildingVolume: OS-HPXML's default, the conditioned
+    /// floor area times an 8 ft ceiling, recorded as a warning.
     #[test]
-    fn missing_volume_only_returns_error() {
+    fn missing_volume_only_takes_the_os_hpxml_default() {
         let xml = SAMPLE_XML.replace(
             "<ConditionedBuildingVolume units=\"ft3\">17216</ConditionedBuildingVolume>",
             "",
         );
-        let err = parse_building(&xml).expect_err("expected missing volume failure");
-        assert!(matches!(err, HpxmlError::Parse(_)));
-        let msg = err.to_string();
+        let building = parse_building(&xml).expect("a missing volume takes the default");
+        assert_eq!(
+            building.conditioned_volume_m3,
+            Some(hares_physics::units::volume_ft3_to_m3(2152.0 * 8.0))
+        );
         assert!(
-            msg.contains("missing ConditionedBuildingVolume"),
-            "got: {msg}"
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("ConditionedBuildingVolume")),
+            "got {:?}",
+            building.parse_warnings
         );
     }
 

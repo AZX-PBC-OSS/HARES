@@ -22,10 +22,6 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 /// Re-exported from hares_physics::constants::CP_DRY_AIR_J_KG_K for convenience.
 /// ASHRAE HOF 2021 Ch.1, Table 2 footnote, valid 0–60°C range.
 pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
-/// Default zone volume when floor area is unknown [m³].
-pub const DEFAULT_VOLUME_M3: f64 = 200.0;
-/// Default storey height [m].
-pub const DEFAULT_HEIGHT_M: f64 = 2.5;
 /// Interior mass multiplier applied to zone air capacitance.
 pub const INTERIOR_MASS_MULTIPLIER: f64 = 7.0;
 /// Floor capacitance for any RC node [J/K].
@@ -487,6 +483,13 @@ pub enum InteriorLwrMethod {
 /// Errors raised during boundary RC construction.
 #[derive(Debug, Error)]
 pub enum BoundaryRcError {
+    /// A zone with no finite, positive air volume: its air capacitance has
+    /// no basis.
+    #[error("zone {zone_idx} has no usable air volume ({volume_m3:?} m3)")]
+    ZoneVolume {
+        zone_idx: usize,
+        volume_m3: Option<f64>,
+    },
     /// Non-positive site atmospheric pressure [Pa] supplied to zone capacitance derivation.
     /// Site pressure must be physically positive; zero or negative indicates
     /// missing or corrupted weather/configuration data.
@@ -527,16 +530,19 @@ pub fn derive_zone_capacitances(
     // ASHRAE HoF 2021 §1.8 Eq.28.
     let rho = dry_air_density_kg_m3(site_pressure_pa, 20.0);
 
-    Ok(zones
+    zones
         .iter()
-        .map(|z| {
-            let volume = z
-                .volume_m3
-                .or_else(|| z.floor_area_m2.map(|a| a * DEFAULT_HEIGHT_M))
-                .unwrap_or(DEFAULT_VOLUME_M3);
-            (rho * AIR_CP_J_KG_K * volume * z.mass_multiplier).max(MIN_CAPACITANCE_J_K)
+        .enumerate()
+        .map(|(zone_idx, z)| {
+            let volume = z.volume_m3.filter(|v| v.is_finite() && *v > 0.0).ok_or(
+                BoundaryRcError::ZoneVolume {
+                    zone_idx,
+                    volume_m3: z.volume_m3,
+                },
+            )?;
+            Ok((rho * AIR_CP_J_KG_K * volume * z.mass_multiplier).max(MIN_CAPACITANCE_J_K))
         })
-        .collect())
+        .collect()
 }
 
 /// Derive per-zone aggregate UA [W/K] from boundary R-values.
@@ -2101,23 +2107,7 @@ mod tests {
     // ── derive_zone_capacitances ────────────────────────────────────────
 
     #[test]
-    fn zone_capacitance_with_known_area() {
-        let zones = vec![ZoneInput {
-            floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }];
-        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
-        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
-        assert_eq!(caps.len(), 1);
-        // ρ computed from ideal gas law at 20 °C, not the 1.2041 constant.
-        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * (100.0 * DEFAULT_HEIGHT_M) * INTERIOR_MASS_MULTIPLIER;
-        assert!((caps[0] - expected).abs() < 1e-6);
-    }
-
-    #[test]
-    fn zone_capacitance_prefers_explicit_volume() {
+    fn zone_capacitance_follows_the_zone_volume() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(300.0),
@@ -2125,32 +2115,46 @@ mod tests {
         }];
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
-        // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
+        assert_eq!(caps.len(), 1);
+        // ρ computed from ideal gas law at 20 °C, not the 1.2041 constant.
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
         let expected = rho * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
+    /// A zone with no usable volume is an error naming the zone, not a
+    /// volume guessed from the floor area or a constant.
     #[test]
-    fn zone_capacitance_defaults_when_area_unknown() {
-        let zones = vec![ZoneInput {
-            floor_area_m2: None,
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }];
-        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
-        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
-        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
-        assert!((caps[0] - expected).abs() < 1e-6);
+    fn zone_capacitance_requires_a_volume() {
+        for volume_m3 in [None, Some(0.0), Some(f64::NAN)] {
+            let zones = vec![
+                ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                },
+                ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3,
+                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                },
+            ];
+            let err =
+                derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                    .expect_err("a zone with no usable volume must fail");
+            assert!(
+                matches!(err, BoundaryRcError::ZoneVolume { zone_idx: 1, .. }),
+                "{volume_m3:?}: got {err}"
+            );
+        }
     }
 
     #[test]
     fn zone_capacitance_respects_minimum() {
-        // Tiny area → capacitance should be clamped to MIN_CAPACITANCE_J_K.
+        // Tiny volume → capacitance should be clamped to MIN_CAPACITANCE_J_K.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(1e-12),
-            volume_m3: None,
+            volume_m3: Some(2.5e-12),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2189,11 +2193,10 @@ mod tests {
         let result = derive_zone_capacitances(&zones, 0.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            BoundaryRcError::InvalidSitePressure { value } => {
-                assert_eq!(value, 0.0);
-            }
-        }
+        assert!(
+            matches!(err, BoundaryRcError::InvalidSitePressure { value } if value == 0.0),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -2206,11 +2209,10 @@ mod tests {
         let result = derive_zone_capacitances(&zones, -1.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            BoundaryRcError::InvalidSitePressure { value } => {
-                assert_eq!(value, -1.0);
-            }
-        }
+        assert!(
+            matches!(err, BoundaryRcError::InvalidSitePressure { value } if value == -1.0),
+            "got {err}"
+        );
     }
 
     // ── Single zone, single boundary (no layers) ───────────────────────
@@ -2219,7 +2221,7 @@ mod tests {
     fn single_zone_no_layers_produces_valid_network() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2249,7 +2251,7 @@ mod tests {
     fn single_zone_with_layers_creates_layer_nodes() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2290,12 +2292,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
+                volume_m3: Some(200.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -2323,7 +2325,7 @@ mod tests {
     fn ground_only_has_no_outdoor_col() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2367,12 +2369,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
+                volume_m3: Some(200.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -2483,7 +2485,7 @@ mod tests {
     fn ground_only_multi_depth_has_no_outdoor_col() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2541,7 +2543,7 @@ mod tests {
     fn ground_cols_sorted_by_depth_when_boundaries_given_out_of_order() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2577,7 +2579,7 @@ mod tests {
     fn same_zone_no_layers_is_noop() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2597,7 +2599,7 @@ mod tests {
     fn same_zone_with_layers_creates_internal_mass() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2627,7 +2629,7 @@ mod tests {
     fn same_zone_odd_layers_halves_middle_capacitance() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2663,7 +2665,7 @@ mod tests {
     fn same_zone_single_layer_keeps_one_node_with_halved_cap() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2693,7 +2695,7 @@ mod tests {
     fn material_layer_same_zone_correct_topology() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2762,7 +2764,7 @@ mod tests {
         // inner→zone coupling reflects the interior film resistance (not exterior).
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -2876,7 +2878,7 @@ mod tests {
 
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3013,7 +3015,7 @@ mod tests {
     fn many_boundaries_no_node_id_collision() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3056,12 +3058,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(50.0),
-                volume_m3: None,
+                volume_m3: Some(125.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -3085,7 +3087,7 @@ mod tests {
     fn no_boundaries_triggers_ua_fallback() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3104,12 +3106,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
+                volume_m3: Some(200.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -3134,12 +3136,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
+                volume_m3: Some(200.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -3164,7 +3166,7 @@ mod tests {
     fn a_c_diagonal_is_negative() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3190,7 +3192,7 @@ mod tests {
     fn zero_area_boundary_is_skipped() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3233,7 +3235,7 @@ mod tests {
     fn precomputed_single_layer_creates_one_node() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3267,7 +3269,7 @@ mod tests {
     fn precomputed_multi_layer_creates_correct_node_count() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3306,7 +3308,7 @@ mod tests {
     fn precomputed_zero_capacitance_layer_is_pruned() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3345,7 +3347,7 @@ mod tests {
     fn precomputed_outdoor_boundary_keeps_all_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3388,12 +3390,12 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
@@ -3436,7 +3438,7 @@ mod tests {
     fn precomputed_all_zero_capacitance_falls_back_to_resistance() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3472,7 +3474,7 @@ mod tests {
     fn precomputed_takes_priority_over_material_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3515,7 +3517,7 @@ mod tests {
     fn build_precomputed_boundary_same_zone_correct_topology() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3610,7 +3612,7 @@ mod tests {
     fn precomputed_same_zone_node_count_matches_material_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -3853,22 +3855,22 @@ mod tests {
     fn zone_capacitance_uses_per_zone_multiplier() {
         let conditioned = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: 7.0,
         };
         let attic = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: 1.0,
         };
         let foundation = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: 1.5,
         };
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&[conditioned, attic, foundation], p_pa).unwrap();
-        let vol = 100.0 * DEFAULT_HEIGHT_M;
+        let vol = 250.0;
         // Density computed from ideal gas law at 20 °C, not the 1.2041 constant.
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
         let base = rho * AIR_CP_J_KG_K * vol;
@@ -3958,7 +3960,7 @@ mod tests {
     fn r_zone_to_inner_uses_innermost_layer() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
+            volume_m3: Some(120.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4005,7 +4007,7 @@ mod tests {
     fn r_zone_to_inner_uses_post_split_thickness() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
+            volume_m3: Some(120.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4053,7 +4055,7 @@ mod tests {
     fn r_zone_to_inner_precomputed_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4256,7 +4258,7 @@ mod tests {
         // Build boundary inputs with simple layered construction.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
+            volume_m3: Some(120.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4434,7 +4436,7 @@ mod tests {
     fn inner_node_does_not_collide_with_reserved_ids_material_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4470,7 +4472,7 @@ mod tests {
     fn inner_node_does_not_collide_with_reserved_ids_precomputed_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4518,7 +4520,7 @@ mod tests {
     fn node_index_cardinality_matches_a_c() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4541,7 +4543,7 @@ mod tests {
     fn surface_layer_info_nodes_in_capacitances() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4588,7 +4590,7 @@ mod tests {
     fn precomputed_negative_capacitance_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4613,7 +4615,7 @@ mod tests {
     fn precomputed_zero_r_total_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4634,7 +4636,7 @@ mod tests {
     fn material_negative_cap_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =
@@ -4650,7 +4652,7 @@ mod tests {
     fn fallback_zero_r_total_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps =

@@ -42,7 +42,7 @@ fn minimal_building() -> hares_io::Building {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,

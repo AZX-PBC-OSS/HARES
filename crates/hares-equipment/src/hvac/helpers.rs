@@ -398,7 +398,13 @@ pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> crate
 
     let lat = config.get_f64("duct_latitude_deg").unwrap_or(40.0);
     let lon = config.get_f64("duct_longitude_deg").unwrap_or(-100.0);
-    let house_vol = config.get_f64("duct_house_volume_m3").unwrap_or(400.0);
+    let house_vol = config.get_f64("duct_house_volume_m3").ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{}: duct_zone_type is set but duct_house_volume_m3 is not; the duct \
+             distribution efficiency needs the conditioned volume",
+            config.name
+        ))
+    })?;
     let supply_leak = config
         .get_f64("duct_supply_leakage_frac")
         .unwrap_or(0.0)
@@ -815,6 +821,43 @@ mod tests {
         assert!(
             (0.0..1.0).contains(&basement_dse),
             "basement DSE {basement_dse} must be in (0,1) — class-default leakage must not be zero"
+        );
+    }
+
+    /// Duct parameters with no conditioned volume are an error naming the
+    /// unit, not a 400 m3 house.
+    #[test]
+    fn duct_dse_without_a_house_volume_errors() {
+        use std::collections::HashMap;
+
+        let ctx = DuctDseContext {
+            is_heating: true,
+            capacity_w: 12_000.0,
+            fan_flow_m3_s: 0.5,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let config = EquipmentConfig::with_payload(
+            "Unhoused".to_string(),
+            "Gas Furnace".to_string(),
+            ConfigPayload::Raw {
+                data: HashMap::from([
+                    (
+                        "duct_zone_type".to_string(),
+                        ConfigValue::Text("attic_unvented".to_string()),
+                    ),
+                    ("duct_latitude_deg".to_string(), ConfigValue::Float(40.0)),
+                    ("duct_longitude_deg".to_string(), ConfigValue::Float(-105.0)),
+                ]),
+            },
+        );
+        let err = resolve_duct_dse(&config, &ctx).expect_err("no house volume must fail");
+        assert!(
+            err.to_string().contains("Unhoused")
+                && err.to_string().contains("duct_house_volume_m3"),
+            "got: {err}"
         );
     }
 

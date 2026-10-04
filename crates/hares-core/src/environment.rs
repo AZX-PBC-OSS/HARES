@@ -30,7 +30,6 @@ use thiserror::Error;
 use crate::SimClock;
 use crate::ambient_air::{MoistAir, scheduled_space_air};
 
-const DEFAULT_ZONE_VOLUME_M3: f64 = 200.0;
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 const MAINS_WATER_DOMAIN_ID: DomainId = DomainId(u16::MAX - 1);
@@ -82,6 +81,15 @@ pub enum EnvironmentManagerError {
     MultipleConditionedZones(#[from] hares_io::hpxml::MultipleConditionedZones),
     #[error("the building has no zones to simulate")]
     NoZones,
+    #[error(
+        "zone {zone_idx} ({zone_type}) has no usable volume ({volume_m3:?} m3): the input gives \
+         none and neither the OCHRE geometry nor OS-HPXML's volume rule derives one"
+    )]
+    ZoneVolume {
+        zone_idx: usize,
+        zone_type: String,
+        volume_m3: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1185,28 +1193,14 @@ fn initial_zones(
                     ZoneType::Foundation => ground_temp_c,
                     _ => outdoor_temp_c,
                 };
-                let volume_m3 = match zone.volume_m3 {
-                    Some(v) => v,
-                    None => {
-                        let estimated = zone
-                            .floor_area_m2
-                            .map(|area| match zone.zone_type {
-                                ZoneType::Attic => 0.5 * area * 1.5,
-                                ZoneType::Garage | ZoneType::Foundation | ZoneType::Conditioned => {
-                                    area * 2.44
-                                }
-                                _ => DEFAULT_ZONE_VOLUME_M3,
-                            })
-                            .unwrap_or(DEFAULT_ZONE_VOLUME_M3);
-                        tracing::warn!(
-                            zone_idx = idx,
-                            zone_type = ?zone.zone_type,
-                            estimated_m3 = estimated,
-                            "zone is missing volume_m3; using geometry-based estimate"
-                        );
-                        estimated
-                    }
-                };
+                let volume_m3 = zone
+                    .volume_m3
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .ok_or_else(|| EnvironmentManagerError::ZoneVolume {
+                        zone_idx: idx,
+                        zone_type: format!("{:?}", zone.zone_type),
+                        volume_m3: zone.volume_m3,
+                    })?;
                 Ok(ZoneState {
                     id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
                     temperature_c: temp,
@@ -1474,7 +1468,7 @@ mod tests {
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(244.0),
                 attached_wall_ids: vec![],
                 duct_systems: vec![],
                 vented: false,
@@ -1838,19 +1832,23 @@ mod tests {
         );
     }
 
+    /// A zone whose volume neither the input nor a derivation gives is a
+    /// typed error naming the zone, not a constant volume.
     #[test]
-    fn manager_defaults_attic_volume_when_missing() {
-        let result = EnvironmentManager::new(
+    fn zone_without_volume_or_derivation_errors() {
+        let err = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building_with_missing_attic_volume(),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
             None,
-        );
+        )
+        .expect_err("a zone with no volume must fail construction");
         assert!(
-            result.is_ok(),
-            "attic missing volume should fall back to DEFAULT_ZONE_VOLUME_M3, got: {result:?}"
+            matches!(&err, EnvironmentManagerError::ZoneVolume { zone_type, volume_m3: None, .. }
+                if zone_type == "Attic"),
+            "the error must name the attic and its missing volume, got: {err}"
         );
     }
 

@@ -172,7 +172,7 @@ fn minimal_building() -> hares_io::Building {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
@@ -636,7 +636,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(244.0),
                 attached_wall_ids: vec![],
                 duct_systems: vec![],
                 vented: false,
@@ -849,7 +849,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
@@ -958,7 +958,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
@@ -1063,7 +1063,7 @@ fn window_missing_azimuth_returns_error() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,

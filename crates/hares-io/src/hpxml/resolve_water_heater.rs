@@ -2774,6 +2774,13 @@ mod tests {
                   </BuildingSummary>
                   <Enclosure>
                     <Walls />
+                    <Slabs>
+                      <Slab>
+                        <SystemIdentifier id="garage-slab"/>
+                        <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+                        <Area units="ft2">400</Area>
+                      </Slab>
+                    </Slabs>
                     <Garages>
                       <Garage>
                         <SystemIdentifier id="g1"/>

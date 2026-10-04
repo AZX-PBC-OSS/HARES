@@ -15,6 +15,7 @@ use chrono::{DateTime, Duration};
 
 use hares_io::ScheduleTimeSeries;
 use hares_io::defaults::DefaultsStore;
+use hares_io::hpxml::ZoneType;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::parse_hpxml;
@@ -2583,4 +2584,95 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
             other => unreachable!("uncovered boolean site: {other}"),
         }
     }
+}
+
+fn parse_vendored_sample(sample: &str) -> hares_io::Building {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    parse_hpxml(&path).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"))
+}
+
+fn zone_volume_m3(building: &hares_io::Building, zone_type: &ZoneType) -> Option<f64> {
+    building
+        .zones
+        .iter()
+        .find(|zone| zone.zone_type == *zone_type)
+        .unwrap_or_else(|| panic!("no {zone_type:?} zone"))
+        .volume_m3
+}
+
+/// A foundation or garage zone whose HPXML gives no floor area takes
+/// OS-HPXML's volume: the slab area times the tallest foundation wall of
+/// the location, or 8 ft for a garage without foundation walls
+/// (geometry.rb `calculate_zone_volume`).
+#[test]
+fn zone_volume_follows_the_os_hpxml_default() {
+    use hares_physics::units::{area_ft2_to_m2, length_ft_to_m};
+    for (sample, zone_type, slab_ft2, height_ft) in [
+        // Conditioned basement: 1350 ft2 slab, 8 ft walls.
+        ("base.xml", ZoneType::Foundation, 1350.0, 8.0),
+        // Unvented crawlspace: 1350 ft2 slab, 4 ft walls.
+        (
+            "base-foundation-unvented-crawlspace.xml",
+            ZoneType::Foundation,
+            1350.0,
+            4.0,
+        ),
+        // Garage: 600 ft2 slab, no foundation walls, 8 ft assumed.
+        ("base-enclosure-garage.xml", ZoneType::Garage, 600.0, 8.0),
+    ] {
+        let building = parse_vendored_sample(sample);
+        let volume = zone_volume_m3(&building, &zone_type)
+            .unwrap_or_else(|| panic!("{sample}: {zone_type:?} must have a volume"));
+        let expected = area_ft2_to_m2(slab_ft2) * length_ft_to_m(height_ft);
+        assert!(
+            (volume - expected).abs() < 1e-9,
+            "{sample}: {zone_type:?} volume {volume} m3, expected {expected} m3"
+        );
+    }
+}
+
+/// A foundation or attic the HPXML declares but no surface touches (a
+/// slab-on-grade foundation, a below-apartment attic) is no zone.
+#[test]
+fn declared_spaces_no_surface_touches_are_no_zones() {
+    for (sample, zone_type) in [
+        ("base-foundation-slab.xml", ZoneType::Foundation),
+        ("base-atticroof-cathedral.xml", ZoneType::Attic),
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert!(
+            building
+                .zones
+                .iter()
+                .all(|zone| zone.zone_type != zone_type),
+            "{sample}: no surface is adjacent to the {zone_type:?}, got {:?}",
+            building.zones
+        );
+    }
+}
+
+/// A file with no ConditionedBuildingVolume takes OS-HPXML's default, the
+/// conditioned floor area times an 8 ft average ceiling (defaults.rb
+/// `apply_building_construction`), recorded as a warning.
+#[test]
+fn missing_conditioned_volume_takes_the_os_hpxml_default() {
+    let building = parse_vendored_sample("base-misc-defaults.xml");
+    let expected = hares_physics::units::volume_ft3_to_m3(2700.0 * 8.0);
+    let volume = building
+        .conditioned_volume_m3
+        .expect("the defaulted conditioned volume");
+    assert!(
+        (volume - expected).abs() < 1e-6,
+        "conditioned volume {volume} m3, expected {expected} m3"
+    );
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("ConditionedBuildingVolume")),
+        "the default must be a warning, got {:?}",
+        building.parse_warnings
+    );
 }

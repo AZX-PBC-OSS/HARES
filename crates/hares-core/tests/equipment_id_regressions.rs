@@ -57,6 +57,12 @@ fn fixture_dir() -> PathBuf {
     project_root().join("tests/fixtures/resstock/2025.1/bldg0000007")
 }
 
+/// A home with a garage and a foundation besides the conditioned zone:
+/// environment zones no equipment declares a thermal port on.
+fn fixture_dir_with_unserved_zones() -> PathBuf {
+    project_root().join("tests/fixtures/resstock/2025.1/bldg0176227")
+}
+
 /// Injects a 75 kWh / 11.5 kW Level-2 EV into the fixture's `<Systems>`
 /// element, matching the reported scenario.
 fn inject_ev(hpxml: &str) -> String {
@@ -1065,7 +1071,7 @@ fn checkpoint_restore_rejects_spec_reorder_with_named_error() {
 /// accumulator exists.
 #[test]
 fn added_equipment_gains_port_slot_coverage_before_first_step() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     let zone = dwelling
         .latest_env()
         .zones
@@ -1534,7 +1540,7 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
 /// silently miswired or dropped.
 #[test]
 fn add_equipment_after_stepping_rejects_undeclared_port() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     dwelling.step().expect("first step succeeds");
     // A real env zone the frozen table never allocated (no declarant at
     // assembly): valid for the environment, unsatisfiable for the frozen
@@ -2014,7 +2020,7 @@ fn replace_equipment_rejects_unknown_zone_declaration() {
 /// at the replacement entrance.
 #[test]
 fn replace_equipment_after_stepping_rejects_undeclared_port() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     dwelling.step().expect("first step succeeds");
     // A real env zone the frozen table never allocated (no declarant at
     // assembly): valid for the environment, unsatisfiable for the frozen

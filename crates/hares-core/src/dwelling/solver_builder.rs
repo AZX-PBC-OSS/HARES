@@ -1362,7 +1362,9 @@ pub(crate) fn build_default_solvers(
                 let ach50 = match leakage {
                     Leakage::Ach50(ach50) => ach50,
                     // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 × 35.3147
-                    Leakage::Cfm50(cfm50) => (cfm50 * 60.0) / (volume_m3 * 35.3147),
+                    Leakage::Cfm50(cfm50) => {
+                        (cfm50 * 60.0) / hares_physics::units::volume_m3_to_ft3(volume_m3)
+                    }
                 };
                 Some((ach50, volume_m3))
             }
@@ -1897,7 +1899,7 @@ mod tests {
         Zone {
             zone_type,
             floor_area_m2: None,
-            volume_m3: None,
+            volume_m3: Some(100.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
