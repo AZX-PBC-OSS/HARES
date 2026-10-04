@@ -2197,12 +2197,28 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         dwelling.step().expect("day-1 step");
     }
 
-    // Replace the battery mid-run with a fresh, unassigned instance — the
-    // replacement is auto-assigned a new never-reused id.
+    // Replace the battery mid-run with a fresh, unassigned instance: the
+    // replacement is auto-assigned a new never-reused id. It is configured
+    // like the original for its manager (same mode and power limits), so
+    // the manager stays bound to the name rather than being rebuilt.
+    let Some(hares_equipment::ActorSeed::Battery {
+        max_charge_kw,
+        max_discharge_kw,
+        ..
+    }) = dwelling
+        .equipment()
+        .iter()
+        .find(|e| e.descriptor().name == "Battery")
+        .expect("the battery is installed")
+        .actor_seed()
+    else {
+        panic!("the original battery seeds a battery manager");
+    };
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
         "capacity_kwh": 13.5,
-        "max_charge_kw": 5.0,
-        "max_discharge_kw": 5.0,
+        "max_charge_kw": max_charge_kw,
+        "max_discharge_kw": max_discharge_kw,
+        "bms_mode": bms_mode.to_string(),
     }))
     .expect("minimal BatteryConfig");
     let eq_config =

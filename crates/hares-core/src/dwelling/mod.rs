@@ -1458,6 +1458,26 @@ fn apply_to_matching(
     delivered
 }
 
+/// Holds an actor bound to one equipment to its declaration: every signal
+/// it sends must require only capabilities in
+/// [`Actor::required_control_capabilities`], the set a replacement of its
+/// target is checked against. `requests` are the requests the actor just
+/// emitted.
+fn ensure_declared_signals(actor: &dyn Actor, requests: &[DispatchRequest]) -> Result<()> {
+    match requests
+        .iter()
+        .find_map(|request| crate::actor::undeclared_capability(actor, &request.signal))
+    {
+        None => Ok(()),
+        Some(required) => Err(HaresError::Control(format!(
+            "actor '{}' sent a signal requiring {required:?}, which its declared control \
+             capabilities {:?} omit",
+            actor.name(),
+            actor.required_control_capabilities()
+        ))),
+    }
+}
+
 fn compute_equipment_execution_order(equipment: &[&dyn Equipment]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..equipment.len()).collect();
     indices.sort_by_key(|&idx| stage_rank(equipment[idx].descriptor().stage));
@@ -1787,9 +1807,10 @@ pub struct Dwelling {
     /// Used to evict stale built-in actors when set_tariff() triggers rebuild.
     auto_registered_actor_names: HashSet<String>,
     /// Offset (from `RNG_STREAM_EV_DRIVER_BASE`) of the RNG stream the next
-    /// built-in EV driver receives. A rebuild of every built-in actor
-    /// restarts it at 0; each driver built afterwards takes the next
-    /// stream, so no two live built-in drivers share one.
+    /// built-in EV driver receives. It never moves back: each driver built
+    /// takes the next stream (a driver rebuilt with new prices keeps its
+    /// own), and the checkpoint carries it, so no two live built-in drivers
+    /// share one.
     next_ev_driver_stream: u64,
     /// Pre-allocated buffer for actor dispatch requests, reused each step.
     actor_dispatch_buf: Vec<DispatchRequest>,
@@ -4607,7 +4628,12 @@ impl Dwelling {
                         #[cfg(feature = "profiling")]
                         phase_clock.mark_open_actor_called();
 
+                        let emitted_from = self.actor_dispatch_buf.len();
                         self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
+                        ensure_declared_signals(
+                            self.actors[idx].as_ref(),
+                            &self.actor_dispatch_buf[emitted_from..],
+                        )?;
 
                         if !self.actors[idx].healthy() {
                             #[cfg(feature = "observe")]
@@ -4904,7 +4930,12 @@ impl Dwelling {
                 let pv_kw = -power_w_to_kw(self.ports.electrical.generation_power_w);
                 self.actor_dispatch_buf.clear();
                 for actor in &mut self.actors {
+                    let emitted_from = self.actor_dispatch_buf.len();
                     actor.adjust_for_pv(pv_kw, &self.latest_env, &mut self.actor_dispatch_buf);
+                    ensure_declared_signals(
+                        actor.as_ref(),
+                        &self.actor_dispatch_buf[emitted_from..],
+                    )?;
                 }
                 if !self.actor_dispatch_buf.is_empty() {
                     for req in self.actor_dispatch_buf.drain(..) {
@@ -6672,17 +6703,18 @@ pub(crate) struct ActorPricing {
     pub(crate) steps_per_day: usize,
 }
 
-/// Where built-in EV drivers get their RNG state.
-pub(crate) struct EvDriverRng<'a> {
-    /// The dwelling RNG every driver stream derives from.
+/// Where built-in actors get their starting state.
+pub(crate) struct ActorSeedState<'a> {
+    /// The dwelling RNG every EV driver stream derives from.
     pub(crate) rng: &'a ChaCha8Rng,
     /// Offset of the next unused stream in the range reserved for built-in
     /// EV drivers (see [`crate::rng::ev_driver_stream`]).
     pub(crate) next_stream: u64,
-    /// Live drivers being rebuilt. A driver built under one of their names
-    /// takes over that driver's state, its RNG stream and position
-    /// included, and uses no new stream: rebuilding a driver (to give it a
-    /// tariff's prices) never replays or reassigns its draws.
+    /// Live built-in actors being rebuilt with new prices. An actor built
+    /// under one of their names takes over that actor's decision state
+    /// and telemetry (an EV driver its RNG stream and position too, using
+    /// no new stream), so a rebuild never replays draws or restarts a
+    /// timer; see the actors' `take_over`.
     pub(crate) rebuilt: &'a [&'a dyn Actor],
 }
 
@@ -6690,10 +6722,11 @@ pub(crate) struct EvDriverRng<'a> {
 ///
 /// Pure function for testability -- takes equipment, existing actors and
 /// the tariff inputs, and returns new built-in actors. A seed whose actor
-/// name an existing actor holds builds nothing. Each EV driver that does
-/// not take over a rebuilt driver's state gets the next unused driver
-/// stream. Battery management actors are always built fresh: their state
-/// is derived from the prices they are built with.
+/// name an existing actor holds builds nothing. An actor rebuilt under the
+/// name of one of `seed_state.rebuilt` takes over its state, except a
+/// battery management actor's price-derived cache, which it recomputes
+/// from its own prices. Each EV driver that takes over nothing gets the
+/// next unused driver stream.
 /// `pub(crate)` so integration tests outside this module can exercise the
 /// real seed → actor construction path (e.g. the EV driver's actor/equipment
 /// contract tests) rather than re-deriving the arm's wiring by hand.
@@ -6707,7 +6740,7 @@ pub(crate) fn build_actors_from_seeds(
     existing_actors: &[&dyn Actor],
     pricing: ActorPricing,
     equipment_id_by_name: &HashMap<String, EquipmentId>,
-    driver_rng: &mut EvDriverRng<'_>,
+    seed_state: &mut ActorSeedState<'_>,
 ) -> Result<Vec<Box<dyn Actor>>> {
     let ActorPricing {
         has_tariff,
@@ -6776,6 +6809,11 @@ pub(crate) fn build_actors_from_seeds(
                     },
                 );
                 let mut actor = actor;
+                if let Some(predecessor) =
+                    seed_state.rebuilt.iter().find(|a| a.name() == actor_name)
+                {
+                    actor.take_over(*predecessor)?;
+                }
                 actor.resolve_equipment_id(equipment_id_by_name);
                 built_in_actors.push(Box::new(actor));
             }
@@ -6815,13 +6853,13 @@ pub(crate) fn build_actors_from_seeds(
                     }
                 }
 
-                let predecessor = driver_rng.rebuilt.iter().find(|a| a.name() == actor_name);
+                let predecessor = seed_state.rebuilt.iter().find(|a| a.name() == actor_name);
                 let ev_seed = match predecessor {
                     // Replaced below by the predecessor's own RNG state.
-                    Some(_) => driver_rng.rng.clone(),
+                    Some(_) => seed_state.rng.clone(),
                     None => {
-                        let stream = ev_driver_stream(driver_rng.next_stream)?;
-                        let sub = derive_sub_rng(driver_rng.rng, stream);
+                        let stream = ev_driver_stream(seed_state.next_stream)?;
+                        let sub = derive_sub_rng(seed_state.rng, stream);
                         #[cfg(any(debug_assertions, test))]
                         check_ev_rng_stream_no_collision(
                             &mut seen_rng_pairs,
@@ -6829,7 +6867,7 @@ pub(crate) fn build_actors_from_seeds(
                             sub.get_stream(),
                             &actor_name,
                         );
-                        driver_rng.next_stream += 1;
+                        seed_state.next_stream += 1;
                         sub
                     }
                 };
@@ -6859,7 +6897,7 @@ pub(crate) fn build_actors_from_seeds(
                     actor = actor.with_price_schedule(Arc::clone(prices), steps_per_day);
                 }
                 if let Some(predecessor) = predecessor {
-                    actor.load_state(&predecessor.save_state()?)?;
+                    actor.take_over(*predecessor)?;
                 }
                 actor.resolve_equipment_id(equipment_id_by_name);
 
@@ -10908,7 +10946,7 @@ occupancy = 1.0
                 steps_per_day: 24,
             },
             &HashMap::new(),
-            &mut EvDriverRng {
+            &mut ActorSeedState {
                 rng,
                 next_stream: 0,
                 rebuilt: &[],
@@ -14876,18 +14914,248 @@ master_seed = 0
         let mut without = bestest_dwelling();
         for dwelling in [&mut with_tariff, &mut without] {
             add_driven_ev(dwelling, "EV1");
-            net_power_kw(dwelling, 30);
         }
+        // Step until the driver is charging, so its telemetry differs from
+        // a freshly built driver's.
+        let charging = |dwelling: &Dwelling| {
+            actor_telemetry(dwelling, "EvDriver:EV1")
+                .iter()
+                .any(|(key, bits)| key == "charge_kw" && f64::from_bits(*bits) > 0.0)
+        };
+        for _ in 0..200 {
+            if charging(&with_tariff) {
+                break;
+            }
+            net_power_kw(&mut with_tariff, 1);
+            net_power_kw(&mut without, 1);
+        }
+        assert!(
+            charging(&with_tariff),
+            "the driver charges within 200 steps"
+        );
         let stream = driver_stream(&with_tariff, "EV1");
+        let telemetry = actor_telemetry(&with_tariff, "EvDriver:EV1");
         with_tariff
             .set_tariff(ElectricTariff::default(), chrono_tz::Tz::UTC)
             .expect("attach a tariff");
 
         assert_eq!(driver_stream(&with_tariff, "EV1"), stream);
         assert_eq!(
+            actor_telemetry(&with_tariff, "EvDriver:EV1"),
+            telemetry,
+            "between the rebuild and the next step the driver reports its carried state"
+        );
+        assert_eq!(
             net_power_kw(&mut with_tariff, 96),
             net_power_kw(&mut without, 96)
         );
+    }
+
+    /// An actor's telemetry as sorted `(key, bits)` pairs, for bitwise
+    /// comparison.
+    fn actor_telemetry(dwelling: &Dwelling, actor: &str) -> Vec<(String, u64)> {
+        let telemetry = dwelling
+            .actors
+            .iter()
+            .find(|a| a.name() == actor)
+            .and_then(|a| a.telemetry())
+            .unwrap_or_else(|| panic!("{actor} is registered and publishes telemetry"));
+        let mut entries: Vec<(String, u64)> = telemetry
+            .0
+            .iter()
+            .map(|(key, value)| (key.clone(), value.to_bits()))
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    const PGE_E_TOU_C: &str = include_str!("../../../../tests/fixtures/urdb/pge_e_tou_c.json");
+
+    /// A battery whose management actor optimises against time-of-use
+    /// prices, with a three-step minimum dwell.
+    fn tou_battery(env: &EnvironmentState) -> Box<dyn Equipment> {
+        let bms_mode = serde_json::json!({ "TimeOfUseOptimization": {
+            "reserve_soc": 0.2,
+            "charge_threshold_percentile": 0.3,
+            "discharge_threshold_percentile": 0.7,
+            "solar_only_charging": false,
+            "min_duration_steps": 3,
+        }});
+        let config: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
+            "capacity_kwh": 13.5,
+            "max_charge_kw": 5.0,
+            "max_discharge_kw": 5.0,
+            "bms_mode": bms_mode.to_string(),
+            "min_dwell_steps": 3,
+        }))
+        .expect("BatteryConfig");
+        let config = EquipmentConfig::from_typed("Bat".to_string(), "Battery".to_string(), config)
+            .expect("typed battery config");
+        let mut battery = EquipmentRegistry::new()
+            .create("Battery", config.clone())
+            .expect("create battery");
+        battery.init(&config, env).expect("init battery");
+        battery
+    }
+
+    /// Re-attaching the tariff a dwelling already has rebuilds its battery
+    /// management actor from the same prices with its decision state
+    /// carried over, and the new tariff prices from the current step, so
+    /// nothing changes: the actor's telemetry right after the rebuild and
+    /// every later step are bitwise those of the dwelling that kept its
+    /// actor and tariff.
+    #[test]
+    fn reattaching_the_same_tariff_mid_run_changes_nothing() {
+        let tariff = || hares_tariff::parse_urdb(PGE_E_TOU_C).expect("parse the URDB tariff");
+        let tz = chrono_tz::America::Los_Angeles;
+        let mut continuous = bestest_dwelling();
+        let mut reattached = bestest_dwelling();
+        for dwelling in [&mut continuous, &mut reattached] {
+            dwelling
+                .set_tariff(tariff(), tz)
+                .expect("attach the tariff");
+            let battery = tou_battery(&dwelling.latest_env);
+            dwelling.add_equipment(battery).expect("add the battery");
+            net_power_kw(dwelling, 40);
+        }
+
+        reattached
+            .set_tariff(tariff(), tz)
+            .expect("attach the same tariff again");
+
+        let bms = "BatteryManagementActor:Bat";
+        assert_eq!(
+            actor_telemetry(&reattached, bms),
+            actor_telemetry(&continuous, bms)
+        );
+        assert_eq!(
+            net_power_kw(&mut reattached, 96),
+            net_power_kw(&mut continuous, 96)
+        );
+        assert_eq!(
+            actor_telemetry(&reattached, bms),
+            actor_telemetry(&continuous, bms)
+        );
+    }
+
+    /// A checkpoint whose stream cursor is not past every restored built-in
+    /// driver's stream is rejected: restoring it would let the next driver
+    /// share a live driver's stream.
+    #[test]
+    fn a_checkpoint_cursor_behind_a_restored_driver_is_rejected() {
+        let mut continuous = bestest_dwelling();
+        add_driven_ev(&mut continuous, "EV1");
+        let ev1 = continuous.remove_equipment("EV1").expect("remove EV1");
+        continuous.add_equipment(ev1).expect("add EV1 back");
+        net_power_kw(&mut continuous, 4);
+        let mut checkpoint = continuous.save_checkpoint().expect("checkpoint");
+        checkpoint.next_ev_driver_stream = 1;
+
+        let mut resumed = bestest_dwelling();
+        add_driven_ev(&mut resumed, "EV1");
+        let err = resumed
+            .load_checkpoint(checkpoint)
+            .expect_err("a cursor behind EV1's restored stream is rejected");
+        assert!(err.to_string().contains("stream"), "got: {err}");
+    }
+
+    /// An EV replaced in kind by an EV with other driving parameters gets
+    /// a driver built for the replacement, as if it had been removed and
+    /// the replacement added.
+    #[test]
+    fn replacing_an_ev_in_kind_rebuilds_its_driver_for_the_new_ev() {
+        let ev_of = |capacity_kwh: f64, env: &EnvironmentState| -> Box<dyn Equipment> {
+            let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
+                "capacity_kwh": capacity_kwh,
+                "charging_level": "L2",
+                "max_charging_power_kw": 7.2,
+            }))
+            .expect("EvConfig");
+            let config = EquipmentConfig::from_typed("EV1".to_string(), "EV".to_string(), config)
+                .expect("typed EV config");
+            let mut ev = EquipmentRegistry::new()
+                .create("EV", config.clone())
+                .expect("create EV");
+            ev.init(&config, env).expect("init EV");
+            ev
+        };
+        let mut replaced = bestest_dwelling();
+        let mut re_added = bestest_dwelling();
+        for dwelling in [&mut replaced, &mut re_added] {
+            let small = ev_of(30.0, &dwelling.latest_env);
+            dwelling.add_equipment(small).expect("add the 30 kWh EV");
+        }
+        let large = ev_of(100.0, &replaced.latest_env);
+        if let Err(err) = replaced.replace_equipment("EV1", large) {
+            panic!("replace in kind: {err}");
+        }
+        re_added
+            .remove_equipment("EV1")
+            .expect("remove the 30 kWh EV");
+        let large = ev_of(100.0, &re_added.latest_env);
+        re_added.add_equipment(large).expect("add the 100 kWh EV");
+
+        assert_eq!(
+            driver_stream(&replaced, "EV1"),
+            driver_stream(&re_added, "EV1")
+        );
+        assert_eq!(
+            net_power_kw(&mut replaced, 48),
+            net_power_kw(&mut re_added, 48)
+        );
+        assert_eq!(
+            actor_telemetry(&replaced, "EvDriver:EV1"),
+            actor_telemetry(&re_added, "EvDriver:EV1")
+        );
+    }
+
+    /// An actor bound to one equipment that sends a signal its declared
+    /// capabilities omit fails the step, naming the actor: the declaration
+    /// replacements are checked against is the set of signals the actor
+    /// sends.
+    #[test]
+    fn a_bound_actor_sending_an_undeclared_signal_fails_the_step() {
+        struct Undeclared;
+        impl crate::Actor for Undeclared {
+            fn name(&self) -> &str {
+                "Undeclared"
+            }
+            fn dispatch_target_name(&self) -> Option<&str> {
+                Some("Target")
+            }
+            fn decide(
+                &mut self,
+                _env: &hares_types::EnvironmentState,
+                out: &mut Vec<hares_control::DispatchRequest>,
+            ) {
+                let signal = ControlSignal::PowerSetpoint {
+                    active_power_kw: 0.0,
+                    reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
+                };
+                out.push(hares_control::DispatchRequest {
+                    target: DispatchTarget::ByName(Arc::from("Target")),
+                    priority: PriorityTier::from(&signal),
+                    signal,
+                });
+            }
+        }
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .add_equipment(Box::new(TestEquipment::new(
+                "Target",
+                ControlCapabilities::POWER_SETPOINT,
+            )))
+            .expect("add the target");
+        dwelling
+            .add_actor(Box::new(Undeclared))
+            .expect("add the actor");
+
+        let err = dwelling
+            .step()
+            .expect_err("an undeclared signal fails the step");
+        assert!(err.to_string().contains("Undeclared"), "got: {err}");
     }
 
     /// Replacing equipment in kind with equipment that rejects an actor's

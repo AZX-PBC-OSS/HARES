@@ -63,6 +63,21 @@ pub struct BatteryManagementActor {
 }
 
 impl BatteryManagementActor {
+    /// Takes over the decision state and telemetry of the actor this one
+    /// is rebuilt to replace (with new prices): the dwell timer, action
+    /// hysteresis, storm-watch and demand-response latches and counters
+    /// carry over, and only the cached day and its price thresholds are
+    /// dropped, so they are recomputed from this actor's prices on the
+    /// next decision.
+    pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
+        self.load_state(&predecessor.save_state()?)?;
+        self.current_day_ordinal0 = u32::MAX;
+        if let Some(telemetry) = predecessor.telemetry() {
+            self.telemetry.clone_from(telemetry);
+        }
+        Ok(())
+    }
+
     pub fn new(battery_name: &str, params: BmsParams) -> Self {
         Self::with_name(
             &format!("BatteryManagementActor:{battery_name}"),
@@ -146,6 +161,10 @@ impl BatteryManagementActor {
         // mapping where `PowerLimit` would map to `Grid` — the BMS's use of
         // `PowerLimit` is a charge-rate cap within a scheduled mode, not a
         // grid-imposed power constraint.
+        debug_assert!(
+            crate::actor::undeclared_capability(self, &signal).is_none(),
+            "the battery manager sent {signal:?}, which its declared control capabilities omit"
+        );
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal,

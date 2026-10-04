@@ -30,7 +30,7 @@ use hares_types::{
 
 /// Configuration seed for auto-registering an actor for this equipment.
 /// Equipment that wants a built-in actor overrides `actor_seed()`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ActorSeed {
     Battery {
         bms_mode: BmsMode,

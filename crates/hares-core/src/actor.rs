@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
-    ControlCapabilities, EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId,
+    ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId, HaresError, Telemetry,
+    ZoneId,
 };
 
 /// What state changes an actor subscribes to. Empty = polled every step.
@@ -43,6 +44,20 @@ pub enum ActorInterest {
 /// Implementations must be `Send + Sync` for thread-safe simulation.
 /// The `decide()` method receives a pre-allocated output buffer to avoid
 /// per-step allocations in the hot loop.
+/// The capability `signal` requires that `actor` does not declare in
+/// [`Actor::required_control_capabilities`], when the actor is bound to one
+/// equipment; `None` when the declaration covers it or the actor is
+/// unbound.
+pub(crate) fn undeclared_capability(
+    actor: &dyn Actor,
+    signal: &ControlSignal,
+) -> Option<ControlCapabilities> {
+    let required = signal.required_capability();
+    (actor.dispatch_target_name().is_some()
+        && !actor.required_control_capabilities().contains(required))
+    .then_some(required)
+}
+
 pub trait Actor: Send + Sync + 'static {
     /// Returns the actor's name for logging and diagnostics.
     fn name(&self) -> &str;
@@ -62,8 +77,10 @@ pub trait Actor: Send + Sync + 'static {
     /// The control capabilities the equipment named by
     /// [`Self::dispatch_target_name`] must declare to accept every signal
     /// this actor sends it. The dwelling evicts the actor when a
-    /// replacement under that name lacks one. Default: none, for actors
-    /// with no bound target.
+    /// replacement under that name lacks one, and fails the step when a
+    /// bound actor sends a signal whose capability this set omits, so the
+    /// declaration always covers what the actor sends. Default: none, for
+    /// actors with no bound target.
     fn required_control_capabilities(&self) -> ControlCapabilities {
         ControlCapabilities::empty()
     }

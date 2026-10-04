@@ -25,7 +25,10 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 rand_distr = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# Exact f64 round-tripping through checkpoint files: without this feature
+# serde_json's parser is a few ULP off for long decimals, so a run resumed
+# from a checkpoint file would diverge from the run that wrote it.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 postcard = { workspace = true }
 arrow = { workspace = true }
 nalgebra = { workspace = true }

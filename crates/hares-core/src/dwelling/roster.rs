@@ -30,7 +30,7 @@ use crate::scheduler::{ActorSlot, ExecutionPhase};
 
 use super::conversions::build_output_column_index;
 use super::{
-    ActorPricing, Dwelling, EquipmentColumns, EvDriverRng, Result, ZoneColumnCaches,
+    ActorPricing, ActorSeedState, Dwelling, EquipmentColumns, Result, ZoneColumnCaches,
     build_actor_column_map, build_actors_from_seeds, build_end_use_aggregate_indices,
     build_equipment_column_map, build_hvac_thermal_consistency, build_zone_column_caches,
     compute_equipment_dispatch_targets, compute_equipment_execution_order,
@@ -305,7 +305,7 @@ impl Dwelling {
         let steps_per_day = 86_400 / interval_secs as usize;
         let price_schedule: Option<Arc<[f64]>> =
             tariff.and_then(|te| te.price_slice(0, te.total_steps()).map(Arc::from));
-        let mut driver_rng = EvDriverRng {
+        let mut seed_state = ActorSeedState {
             rng: &self.rng,
             next_stream: change.next_ev_driver_stream,
             rebuilt,
@@ -319,9 +319,9 @@ impl Dwelling {
                 steps_per_day,
             },
             &self.equipment_id_by_name,
-            &mut driver_rng,
+            &mut seed_state,
         )?;
-        change.next_ev_driver_stream = driver_rng.next_stream;
+        change.next_ev_driver_stream = seed_state.next_stream;
         change.built_in.extend(built_in);
         Ok(())
     }
@@ -360,7 +360,7 @@ impl Dwelling {
 
     /// The change that rebuilds every built-in actor from the equipment's
     /// actor seeds, priced by `tariff`, keeping every user actor. A rebuilt
-    /// EV driver keeps the state of the driver it replaces.
+    /// actor takes over the state of the actor it replaces.
     fn plan_built_in_actor_rebuild(
         &self,
         tariff: Option<&TariffEvaluator>,
@@ -385,9 +385,11 @@ impl Dwelling {
     /// actor seeds with the current tariff's prices.
     ///
     /// Built-in actors run ahead of user actors. A seed whose actor name a
-    /// user actor already holds builds nothing. A rebuilt EV driver keeps
-    /// the state of the driver it replaces, its RNG stream and position
-    /// included; a battery management actor restarts from the new prices.
+    /// user actor already holds builds nothing. A rebuilt actor takes over
+    /// the decision state and telemetry of the actor it replaces: an EV
+    /// driver its RNG stream and position too, a battery management actor
+    /// everything but the price thresholds of its current day, which it
+    /// recomputes from the new prices.
     ///
     /// # Errors
     ///
@@ -418,7 +420,12 @@ impl Dwelling {
         let start = self.clock.start_time.with_timezone(&tz);
         let end = (self.clock.start_time + self.clock.duration).with_timezone(&tz);
         let interval_secs = self.clock.time_res.num_seconds() as u32;
-        let evaluator = TariffEvaluator::new(tariff, start, end, interval_secs)?;
+        let mut evaluator = TariffEvaluator::new(tariff, start, end, interval_secs)?;
+        // The evaluator prices step by step from the simulation start; a
+        // tariff attached mid-run prices (and bills) from the current step.
+        for _ in 0..self.clock.current_step {
+            evaluator.advance();
+        }
         let change = self.plan_built_in_actor_rebuild(Some(&evaluator))?;
         let plan =
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
@@ -811,10 +818,15 @@ impl Dwelling {
     /// it stay and re-bind to the replacement unless the replacement lacks
     /// a control capability they require
     /// ([`Actor::required_control_capabilities`]), in which case they are
-    /// evicted; when the replacement takes another name, every actor
-    /// targeting the old name is evicted, as on removal. The replacement's
-    /// actor seed builds its built-in actor unless an actor already holds
-    /// that actor's name.
+    /// evicted. A built-in actor also stays only when the replacement's
+    /// actor seed equals the replaced equipment's, since the seed carries
+    /// the parameters the actor was built with (an EV's capacity, a
+    /// battery's mode); otherwise it is evicted and the replacement's seed
+    /// builds a fresh one, as if the equipment had been removed and the
+    /// replacement added. When the replacement takes another name, every
+    /// actor targeting the old name is evicted, as on removal. The
+    /// replacement's actor seed builds its built-in actor unless an actor
+    /// already holds that actor's name.
     ///
     /// # Errors
     ///
@@ -841,13 +853,16 @@ impl Dwelling {
                 let replacement = new_equipment.descriptor();
                 let renamed = replacement.name != name;
                 let accepted = replacement.control_capabilities;
+                let seed_unchanged = self.equipment[pos].actor_seed() == new_equipment.actor_seed();
                 let mut change = self.actor_change(
                     self.actors
                         .iter()
                         .map(|a| {
                             a.dispatch_target_name() != Some(name)
                                 || (!renamed
-                                    && accepted.contains(a.required_control_capabilities()))
+                                    && accepted.contains(a.required_control_capabilities())
+                                    && (seed_unchanged
+                                        || !self.auto_registered_actor_names.contains(a.name())))
                         })
                         .collect(),
                 );

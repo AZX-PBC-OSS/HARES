@@ -355,6 +355,17 @@ pub struct EvDriverActor {
 use efficiency::temp_efficiency_multiplier;
 
 impl EvDriverActor {
+    /// Takes over the decision state (its RNG stream and position
+    /// included) and telemetry of the driver this one is rebuilt to
+    /// replace with new prices.
+    pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
+        self.load_state(&predecessor.save_state()?)?;
+        if let Some(telemetry) = predecessor.telemetry() {
+            self.telemetry.clone_from(telemetry);
+        }
+        Ok(())
+    }
+
     /// Creates a new EV driver actor.
     ///
     /// `rng` is required for deterministic behavior. All stochastic draws
@@ -509,6 +520,17 @@ impl EvDriverActor {
         before_out: usize,
         out: &[DispatchRequest],
     ) {
+        // Every decision ends here, so this is where the step's signals are
+        // held to the driver's declared capabilities.
+        debug_assert!(
+            out[before_out..]
+                .iter()
+                .all(
+                    |request| crate::actor::undeclared_capability(self, &request.signal).is_none()
+                ),
+            "the EV driver sent a signal its declared control capabilities omit: {:?}",
+            &out[before_out..]
+        );
         // SOC channel: report the equipment's ground-truth SOC whenever the
         // equipment core is observable. `estimated_soc` is the driver's
         // behavioral belief — reconciled only at observation events
@@ -7204,7 +7226,7 @@ mod tests {
                 steps_per_day: 96,
             },
             &id_by_name,
-            &mut crate::dwelling::EvDriverRng {
+            &mut crate::dwelling::ActorSeedState {
                 rng: &rng,
                 next_stream: 0,
                 rebuilt: &[],

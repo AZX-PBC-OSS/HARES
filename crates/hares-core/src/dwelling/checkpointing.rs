@@ -12,6 +12,7 @@ use super::Dwelling;
 use crate::checkpoint::{
     ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
 };
+use crate::rng::{EV_DRIVER_STREAM_COUNT, RNG_STREAM_EV_DRIVER_BASE};
 
 type Result<T> = std::result::Result<T, HaresError>;
 
@@ -94,7 +95,9 @@ impl Dwelling {
         let equipment_blobs = self.matched_equipment_blobs(&cp)?;
         let actor_blobs = self.matched_actor_blobs(&cp)?;
         let last_step_env = self.last_step_environment(cp.timestep_index)?;
-        self.load_component_states(&equipment_blobs, &actor_blobs)?;
+        self.load_component_states(&equipment_blobs, &actor_blobs, |dwelling| {
+            dwelling.check_ev_driver_cursor(cp.next_ev_driver_stream)
+        })?;
 
         if let Some(env) = last_step_env {
             self.latest_env = env;
@@ -317,13 +320,36 @@ impl Dwelling {
         Ok(blobs)
     }
 
-    /// Loads the equipment and actor blobs; if any load fails, reloads every
+    /// Every restored built-in driver's stream must lie behind the restored
+    /// cursor, or the next driver built would share it. Reads the drivers'
+    /// streams as their loaded state holds them.
+    fn check_ev_driver_cursor(&self, cursor: u64) -> Result<()> {
+        let driver_streams =
+            RNG_STREAM_EV_DRIVER_BASE..RNG_STREAM_EV_DRIVER_BASE + EV_DRIVER_STREAM_COUNT;
+        let Some(driver) = self.actors.iter().find(|actor| {
+            self.auto_registered_actor_names.contains(actor.name())
+                && actor.rng_pair().is_some_and(|(_, stream)| {
+                    driver_streams.contains(&stream) && stream - RNG_STREAM_EV_DRIVER_BASE >= cursor
+                })
+        }) else {
+            return Ok(());
+        };
+        Err(HaresError::Io(format!(
+            "checkpoint EV driver stream cursor {cursor} is not past the restored stream of \
+             '{}': the next driver built would share that stream",
+            driver.name()
+        )))
+    }
+
+    /// Loads the equipment and actor blobs, then runs `check_loaded` on the
+    /// loaded dwelling; if any load or the check fails, reloads every
     /// equipment and actor with the state it held before and returns the
     /// failure.
     fn load_component_states(
         &mut self,
         equipment_blobs: &[&[u8]],
         actor_blobs: &[&[u8]],
+        check_loaded: impl FnOnce(&Self) -> Result<()>,
     ) -> Result<()> {
         let saved_equipment = self
             .equipment
@@ -335,7 +361,10 @@ impl Dwelling {
             .iter()
             .map(|actor| actor.save_state())
             .collect::<Result<Vec<_>>>()?;
-        let Err(err) = self.load_component_blobs(equipment_blobs, actor_blobs) else {
+        let Err(err) = self
+            .load_component_blobs(equipment_blobs, actor_blobs)
+            .and_then(|()| check_loaded(self))
+        else {
             return Ok(());
         };
         let saved_equipment: Vec<&[u8]> = saved_equipment.iter().map(Vec::as_slice).collect();

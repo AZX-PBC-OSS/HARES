@@ -1374,9 +1374,13 @@ impl PyDwelling {
     /// Actors bound to the replaced name stay and drive the replacement
     /// when it keeps that name and accepts their signals; they are removed
     /// when the replacement takes another name or cannot accept their
-    /// signals. The replacement's own driver or battery manager is attached
-    /// unless an actor already holds its name. A rejected replacement
-    /// leaves the dwelling unchanged.
+    /// signals. A built-in EV driver or battery manager also stays only
+    /// when the replacement is configured for it identically (an EV's
+    /// capacity and charging, a battery's mode and power limits);
+    /// otherwise a fresh one is built for the replacement. The
+    /// replacement's own driver or battery manager is attached unless an
+    /// actor already holds its name. A rejected replacement leaves the
+    /// dwelling unchanged.
     pub fn replace_equipment(
         &mut self,
         name: String,

@@ -27,7 +27,7 @@ pub const RNG_STREAM_EV_DRIVER_BASE: u64 = 1;
 /// are `RNG_STREAM_EV_DRIVER_BASE + offset` for `offset` below this count,
 /// so they end below the tagged event-load streams and never alias an
 /// event load or the dwelling's own stream.
-pub const EV_DRIVER_STREAM_COUNT: u64 = EVENT_LOAD_STREAM_TAG - RNG_STREAM_EV_DRIVER_BASE;
+pub(crate) const EV_DRIVER_STREAM_COUNT: u64 = EVENT_LOAD_STREAM_TAG - RNG_STREAM_EV_DRIVER_BASE;
 const _: () = assert!(RNG_STREAM_DWELLING < RNG_STREAM_EV_DRIVER_BASE);
 
 /// The RNG stream of the built-in EV driver at `offset` into the reserved
@@ -38,7 +38,7 @@ const _: () = assert!(RNG_STREAM_DWELLING < RNG_STREAM_EV_DRIVER_BASE);
 /// `HaresError::Dwelling` once `offset` passes the reserved range: a
 /// dwelling that has built that many drivers cannot give the next one a
 /// stream of its own.
-pub fn ev_driver_stream(offset: u64) -> Result<u64, HaresError> {
+pub(crate) fn ev_driver_stream(offset: u64) -> Result<u64, HaresError> {
     if offset < EV_DRIVER_STREAM_COUNT {
         Ok(RNG_STREAM_EV_DRIVER_BASE + offset)
     } else {
