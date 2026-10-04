@@ -319,4 +319,123 @@ mod tests {
             run_resstock_smoke("2025.1", &bldg_dir);
         }
     }
+
+    /// The 72 h winter case on the 2024.2 `bldg0000002` fixture books its
+    /// whole `hvac_cooling` end use to the central air conditioner's
+    /// crankcase heater. The fixture declares a 50 W crankcase heater
+    /// (`CrankcaseHeaterPowerWatts` in the `CoolingSystem` extension); the
+    /// compressor never runs in mid-January, so the heater draws its rated
+    /// 50 W on every step whose outdoor dry-bulb is below the 12.78 °C
+    /// activation threshold (69 of the 72 steps) and nothing on the three
+    /// warm-afternoon steps that reach the threshold. That booking matches
+    /// the references: EnergyPlus meters a standalone DX cooling coil's
+    /// crankcase electricity to the cooling end
+    /// use ("Cooling Coil Crankcase Heater Electricity Energy",
+    /// `EndUseCat::Cooling` in DXCoils.cc) and applies the heater power as
+    /// capacity times the compressor-off fraction (1 minus the coil runtime
+    /// fraction), and OCHRE's `AirConditioner` adds the crankcase power to
+    /// the unit's `electric_kw` (booked to the HVAC Cooling end use) when its
+    /// mode is off and the ambient dry-bulb is below 55 °F.
+    #[test]
+    fn winter_cooling_energy_is_the_crankcase_heater() {
+        const RATED_CRANKCASE_KW: f64 = 0.05;
+        const CRANKCASE_THRESHOLD_C: f64 = 12.78;
+        const STEP_HOURS: f64 = 1.0;
+        const BELOW_THRESHOLD_STEPS: usize = 69;
+
+        let bldg_dir = fixture_building_dirs("2024.2")
+            .into_iter()
+            .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
+            .expect("2024.2 bldg0000002 fixture must exist");
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_winter_crankcase_pin", "csv"));
+        let _guard = TempFile(output_path.clone());
+
+        let config = DwellingConfig {
+            hpxml_path: bldg_dir.join("home.xml"),
+            schedule_path: bldg_dir.join("in.schedules.csv"),
+            weather_path: weather_path("2024.2", &bldg_dir),
+            defaults_path: Some(project_root().join("defaults")),
+            sim_config: SimulationConfig {
+                start_time: FixedOffset::west_opt(7 * 3600)
+                    .expect("UTC-7 offset")
+                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(72),
+                time_res: Duration::minutes(60),
+                output_verbosity: 1,
+                output_path: Some(output_path.clone()),
+                write_output: true,
+                output_format: OutputFormat::Csv,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 42,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                retain_batches: true,
+                rotation: hares_io::RotationPolicy::None,
+            },
+            overrides: None,
+            bldg_id: 200,
+            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
+            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
+        };
+
+        let engine = SimulationEngine::new();
+        let result = engine.run(config).expect("engine.run should succeed");
+        assert!(
+            !matches!(result.status, SimStatus::Failed(_)),
+            "winter run failed: {result:?}"
+        );
+
+        let data = parse_csv_columns(&output_path);
+        let outdoor = data
+            .get("Outdoor Dry Bulb (C)")
+            .expect("Outdoor Dry Bulb (C) column");
+        let ac_power = data
+            .get("Air Conditioner Electric Power (kW)")
+            .expect("Air Conditioner Electric Power (kW) column");
+        assert_eq!(
+            outdoor.len(),
+            ac_power.len(),
+            "outdoor dry-bulb and AC power must cover the same steps"
+        );
+        assert_eq!(ac_power.len(), 72, "72 h run must produce 72 hourly steps");
+
+        // The heater draws only on steps below its threshold, with the
+        // compressor off: a below-threshold step draws exactly the rated
+        // 50 W (compressor and fan contribute nothing and the compressor-off
+        // fraction is 1), a step at or above the threshold draws nothing.
+        let mut below_threshold_steps = 0usize;
+        for (i, (&t, &p)) in outdoor.iter().zip(ac_power.iter()).enumerate() {
+            if t < CRANKCASE_THRESHOLD_C {
+                below_threshold_steps += 1;
+                assert_eq!(
+                    p, RATED_CRANKCASE_KW,
+                    "step {i} at {t:.1} °C drew {p} kW, not the rated crankcase draw"
+                );
+            } else {
+                assert_eq!(
+                    p, 0.0,
+                    "step {i} at {t:.1} °C drew {p} kW at or above the threshold"
+                );
+            }
+        }
+        assert_eq!(
+            below_threshold_steps, BELOW_THRESHOLD_STEPS,
+            "the run's outdoor dry-bulb must sit below the threshold on all but \
+             the three warm-afternoon steps"
+        );
+
+        // The cooling end use equals the crankcase heater's energy: the AC is
+        // the fixture's only cooling equipment, so the two books reconcile.
+        let crankcase_energy_kwh = (below_threshold_steps as f64) * RATED_CRANKCASE_KW * STEP_HOURS;
+        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        assert!(
+            (cooling_kwh - crankcase_energy_kwh).abs() < 1e-9,
+            "hvac_cooling {cooling_kwh} kWh must equal the crankcase heater's \
+             {crankcase_energy_kwh} kWh"
+        );
+    }
 }
