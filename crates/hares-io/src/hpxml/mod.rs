@@ -7,6 +7,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod building;
+pub mod climate_zone;
 pub mod data_patches;
 pub mod equipment;
 mod resolve_der;

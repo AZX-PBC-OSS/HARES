@@ -63,6 +63,7 @@ fn empty_weather_meta() -> WeatherMeta {
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
         has_embedded_location: false,
+        station_wmo: None,
     }
 }
 
@@ -2181,6 +2182,43 @@ fn unlocated_water_heater_takes_the_os_hpxml_default_location() {
                 .iter()
                 .any(|w| w.message.contains(expected) && w.message.contains(&spec.name)),
             "{sample}: the defaulted location must be a warning naming the unit, got {warnings:?}"
+        );
+    }
+}
+
+/// Where a building has both basement kinds the hierarchy order decides:
+/// IECC 4-8 picks the unconditioned basement first, no IECC zone picks the
+/// conditioned basement first (defaults.rb:6104-6132). `base.xml` has a
+/// conditioned basement; moving its rim joist to an unconditioned basement
+/// gives it both.
+#[test]
+fn unlocated_water_heater_follows_the_hierarchy_order_between_basements() {
+    let with_both_basements = |xml: String| {
+        let xml = without_water_heater_location(xml);
+        let rim = xml.find("<RimJoist>").expect("base.xml has a rim joist");
+        let tag = "<InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>";
+        let at = rim
+            + xml[rim..]
+                .find(tag)
+                .expect("the rim joist is in the basement");
+        format!(
+            "{}<InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>{}",
+            &xml[..at],
+            &xml[at + tag.len()..]
+        )
+    };
+    for (climate_zone, expected) in [
+        ("<ClimateZone>5B</ClimateZone>", "basement - unconditioned"),
+        ("", "basement - conditioned"),
+    ] {
+        let (spec, _) = resolve_vendored_water_heater("base.xml", |xml| {
+            with_both_basements(xml).replacen("<ClimateZone>5B</ClimateZone>", climate_zone, 1)
+        })
+        .unwrap_or_else(|e| panic!("IECC {climate_zone:?}: must resolve: {e:?}"));
+        assert_eq!(
+            spec.parameters.get("zone_type").and_then(|v| v.as_str()),
+            Some(expected),
+            "IECC {climate_zone:?}: defaulted location with both basements"
         );
     }
 }

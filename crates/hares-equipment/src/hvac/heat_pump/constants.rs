@@ -1,8 +1,5 @@
 //! Named constants for heat-pump models.
 
-pub const DEFAULT_ZONE_ID: u16 = 1;
-pub const DEFAULT_EQUIPMENT_ID: u32 = 0;
-
 pub const DEFROST_ENABLE_TEMP_C: f64 = 4.4445;
 pub const DEFROST_COIL_TEMP_SLOPE: f64 = 0.82;
 pub const DEFROST_COIL_TEMP_OFFSET_C: f64 = -8.589;

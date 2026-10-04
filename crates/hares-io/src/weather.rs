@@ -310,6 +310,11 @@ pub struct WeatherMeta {
     /// format with `has_embedded_location == false` means "unknown", not
     /// "the prime meridian".
     pub has_embedded_location: bool,
+    /// The weather station's WMO number, from the EPW LOCATION header
+    /// (field N4) or the TMY3 header's station ID; `None` for formats that
+    /// carry none (PSM3, ResStock CSV). OS-HPXML derives an HPXML's missing
+    /// IECC climate zone from it.
+    pub station_wmo: Option<String>,
 }
 
 /// Upsampling interpolation strategy for continuous weather fields.
@@ -1295,6 +1300,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: vec![10.0, 11.0],
@@ -1328,6 +1334,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: vec![10.0, 12.0, 15.0, 13.0, 11.0],

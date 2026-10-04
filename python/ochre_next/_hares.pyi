@@ -1748,70 +1748,9 @@ class IdealHVAC:
 # Water heater equipment types
 # ---------------------------------------------------------------------------
 
-class IndirectTank:
-    def __init__(
-        self,
-        name: str,
-        autosize: bool = ...,
-        tank_volume_m3: float | None = ...,
-        hx_ua_w_per_k: float | None = ...,
-        setpoint_c: float | None = ...,
-        zone_id: int | None = ...,
-        boiler_loop_id: int | None = ...,
-        avg_water_draw_l_per_day: float | None = ...,
-        oversizing_factor: float | None = ...,
-    ) -> None: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def autosize(self) -> bool: ...
-    @property
-    def tank_volume_m3(self) -> float | None: ...
-    @property
-    def hx_ua_w_per_k(self) -> float | None: ...
-    @property
-    def setpoint_c(self) -> float | None: ...
-    @property
-    def zone_id(self) -> int | None: ...
-    @property
-    def boiler_loop_id(self) -> int | None: ...
-    @property
-    def avg_water_draw_l_per_day(self) -> float | None: ...
-    @property
-    def oversizing_factor(self) -> float | None: ...
-    def __repr__(self) -> str: ...
-
-class TanklessWaterHeater:
-    def __init__(
-        self,
-        name: str,
-        autosize: bool = ...,
-        heating_capacity_w: float | None = ...,
-        uniform_energy_factor: float | None = ...,
-        setpoint_c: float | None = ...,
-        zone_id: int | None = ...,
-        avg_water_draw_l_per_day: float | None = ...,
-        oversizing_factor: float | None = ...,
-    ) -> None: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def autosize(self) -> bool: ...
-    @property
-    def heating_capacity_w(self) -> float | None: ...
-    @property
-    def uniform_energy_factor(self) -> float | None: ...
-    @property
-    def setpoint_c(self) -> float | None: ...
-    @property
-    def zone_id(self) -> int | None: ...
-    @property
-    def avg_water_draw_l_per_day(self) -> float | None: ...
-    @property
-    def oversizing_factor(self) -> float | None: ...
-    def __repr__(self) -> str: ...
-
 class GasWaterHeater:
+    """Gas-fired storage water heater. `zone_id` (keyword, required) is the
+    zone the heater stands in."""
     def __init__(
         self,
         name: str,
@@ -1820,7 +1759,8 @@ class GasWaterHeater:
         uniform_energy_factor: float | None = ...,
         heating_capacity_w: float | None = ...,
         setpoint_c: float | None = ...,
-        zone_id: int | None = ...,
+        *,
+        zone_id: int,
         avg_water_draw_l_per_day: float | None = ...,
         oversizing_factor: float | None = ...,
     ) -> None: ...
@@ -1837,7 +1777,7 @@ class GasWaterHeater:
     @property
     def setpoint_c(self) -> float | None: ...
     @property
-    def zone_id(self) -> int | None: ...
+    def zone_id(self) -> int: ...
     @property
     def avg_water_draw_l_per_day(self) -> float | None: ...
     @property
@@ -1845,6 +1785,8 @@ class GasWaterHeater:
     def __repr__(self) -> str: ...
 
 class ElectricResistanceWH:
+    """Electric resistance storage water heater. `zone_id` (keyword,
+    required) is the zone the heater stands in."""
     def __init__(
         self,
         name: str,
@@ -1853,7 +1795,8 @@ class ElectricResistanceWH:
         uniform_energy_factor: float | None = ...,
         heating_capacity_w: float | None = ...,
         setpoint_c: float | None = ...,
-        zone_id: int | None = ...,
+        *,
+        zone_id: int,
         avg_water_draw_l_per_day: float | None = ...,
         oversizing_factor: float | None = ...,
     ) -> None: ...
@@ -1870,7 +1813,7 @@ class ElectricResistanceWH:
     @property
     def setpoint_c(self) -> float | None: ...
     @property
-    def zone_id(self) -> int | None: ...
+    def zone_id(self) -> int: ...
     @property
     def avg_water_draw_l_per_day(self) -> float | None: ...
     @property
@@ -1878,6 +1821,9 @@ class ElectricResistanceWH:
     def __repr__(self) -> str: ...
 
 class HeatPumpWH:
+    """Heat pump water heater with electric backup. `zone_id` (keyword,
+    required) is the zone the heater stands in and draws its evaporator air
+    from."""
     def __init__(
         self,
         name: str,
@@ -1887,7 +1833,8 @@ class HeatPumpWH:
         backup_capacity_w: float | None = ...,
         compressor_power_w: float | None = ...,
         setpoint_c: float | None = ...,
-        zone_id: int | None = ...,
+        *,
+        zone_id: int,
         avg_water_draw_l_per_day: float | None = ...,
         oversizing_factor: float | None = ...,
     ) -> None: ...
@@ -1906,7 +1853,76 @@ class HeatPumpWH:
     @property
     def setpoint_c(self) -> float | None: ...
     @property
-    def zone_id(self) -> int | None: ...
+    def zone_id(self) -> int: ...
+    @property
+    def avg_water_draw_l_per_day(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
+class TanklessWaterHeater:
+    """Tankless (on-demand) gas water heater. `zone_id` (keyword, required)
+    is the zone the heater stands in."""
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        heating_capacity_w: float | None = ...,
+        uniform_energy_factor: float | None = ...,
+        setpoint_c: float | None = ...,
+        *,
+        zone_id: int,
+        avg_water_draw_l_per_day: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def heating_capacity_w(self) -> float | None: ...
+    @property
+    def uniform_energy_factor(self) -> float | None: ...
+    @property
+    def setpoint_c(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int: ...
+    @property
+    def avg_water_draw_l_per_day(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
+class IndirectTank:
+    """Indirect storage tank heated by a boiler. `zone_id` (keyword,
+    required) is the zone the tank stands in."""
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        tank_volume_m3: float | None = ...,
+        hx_ua_w_per_k: float | None = ...,
+        setpoint_c: float | None = ...,
+        *,
+        zone_id: int,
+        boiler_loop_id: int | None = ...,
+        avg_water_draw_l_per_day: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def tank_volume_m3(self) -> float | None: ...
+    @property
+    def hx_ua_w_per_k(self) -> float | None: ...
+    @property
+    def setpoint_c(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int: ...
+    @property
+    def boiler_loop_id(self) -> int | None: ...
     @property
     def avg_water_draw_l_per_day(self) -> float | None: ...
     @property

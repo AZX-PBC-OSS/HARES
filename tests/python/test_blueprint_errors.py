@@ -10,6 +10,7 @@ from ochre_next import (
     ElectricBaseboard,
     ElectricBoiler,
     ElectricFurnace,
+    ElectricResistanceWH,
     EndUse,
     GasBoiler,
     GasFurnace,
@@ -287,7 +288,18 @@ def test_afue_out_of_range_raises():
 
 def test_negative_tank_volume_raises():
     with pytest.raises(ValueError, match="tank_volume_m3 must be positive"):
-        GasWaterHeater("bad", tank_volume_m3=-0.1, heating_capacity_w=4500)
+        GasWaterHeater("bad", tank_volume_m3=-0.1, heating_capacity_w=4500, zone_id=1)
+
+
+@pytest.mark.parametrize(
+    "heater_class",
+    [GasWaterHeater, ElectricResistanceWH, HeatPumpWH, TanklessWaterHeater, IndirectTank],
+)
+def test_water_heater_without_zone_id_raises(heater_class: type) -> None:
+    """A water heater must name the zone it stands in: Python has no HPXML
+    location to place it by, so omitting zone_id fails at construction."""
+    with pytest.raises(TypeError, match="zone_id"):
+        heater_class("NoZone")
 
 
 def test_gas_boiler_construction_and_autosize():
@@ -410,12 +422,12 @@ def test_missing_capacity_electric_furnace_raises():
 
 def test_missing_capacity_tankless_raises():
     with pytest.raises(ValueError, match="heating_capacity_w is required"):
-        TanklessWaterHeater("NoCap", autosize=False)
+        TanklessWaterHeater("NoCap", autosize=False, zone_id=1)
 
 
 def test_missing_tank_volume_indirect_tank_raises():
     with pytest.raises(ValueError, match="tank_volume_m3 is required"):
-        IndirectTank("NoVol", autosize=False)
+        IndirectTank("NoVol", autosize=False, zone_id=1)
 
 
 def test_afue_out_of_range_gas_boiler_raises():
@@ -425,7 +437,9 @@ def test_afue_out_of_range_gas_boiler_raises():
 
 def test_uef_out_of_range_tankless_raises():
     with pytest.raises(ValueError, match="uniform_energy_factor must be between"):
-        TanklessWaterHeater("bad", heating_capacity_w=20000, uniform_energy_factor=2.0)
+        TanklessWaterHeater(
+            "bad", heating_capacity_w=20000, uniform_energy_factor=2.0, zone_id=1
+        )
 
 
 def test_empty_blueprint_builds():

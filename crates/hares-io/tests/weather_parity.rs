@@ -406,6 +406,7 @@ fn make_series(n: usize, fields: SeriesFields) -> WeatherTimeSeries {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: false,
+            station_wmo: None,
         },
         dry_bulb_c: vec![20.0; n],
         dew_point_c: vec![10.0; n],

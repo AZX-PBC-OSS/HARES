@@ -1,13 +1,12 @@
-//! Generate a ScheduleTimeSeries from HPXML building data when no schedule CSV is
+//! Generate a ScheduleTimeSeries for an HPXML home when no schedule CSV is
 //! available. Uses default schedule fraction profiles to produce time-varying
-//! occupancy, power, water, and setpoint columns.
+//! occupancy, power and water columns.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Timelike};
 use hares_types::HaresError;
 
-use crate::hpxml::building::Building;
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
 use crate::schedule_resolve::{DefaultProfiles, DefaultScheduleProfile};
 
@@ -27,16 +26,18 @@ const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
     ("hot_water_fixtures", "Water Heating"),
 ];
 
-/// Generate a complete schedule from HPXML building data and default profiles.
+/// Generate a complete schedule from the default profiles.
 ///
 /// Columns are generated in the same order and with the same names as a standard
 /// ResStock `in.schedules.csv`. Power, water, and occupancy columns use the
 /// weekday/weekend fraction profiles from the defaults CSV (occupancy follows
-/// the `Occupancy` profile); setpoints use HPXML values falling back to HERS
-/// reference-home defaults. A missing profile is an error naming the profile
-/// and the file, so a column is never a silent constant.
-pub fn generate_schedule_from_hpxml(
-    building: &Building,
+/// the `Occupancy` profile). A missing profile is an error naming the profile
+/// and the file, so a column is never a silent constant. No setpoint column
+/// is generated: a schedule column would override the HVAC's own setpoints,
+/// which come from the HPXML's hourly weekday and weekend profiles, or
+/// OS-HPXML's default when the HPXML has none
+/// (`schedule_resolve::inject_setpoint_schedules`).
+pub fn generate_default_schedule(
     start: DateTime<FixedOffset>,
     duration: Duration,
     interval: Duration,
@@ -56,30 +57,6 @@ pub fn generate_schedule_from_hpxml(
         let values = generate_profile_column(n_steps, &timestamps, profile);
         generated.push((col_name, values, ColumnAggregation::Mean));
     }
-
-    // Heating setpoint from HPXML building data
-    let heating_sp = building
-        .heating_weekday_setpoints_c
-        .as_ref()
-        .map(|v| v[0])
-        .unwrap_or(20.0);
-    generated.push((
-        "heating_setpoint",
-        vec![heating_sp; n_steps],
-        ColumnAggregation::Mean,
-    ));
-
-    // Cooling setpoint from HPXML building data
-    let cooling_sp = building
-        .cooling_weekday_setpoints_c
-        .as_ref()
-        .map(|v| v[0])
-        .unwrap_or(24.0);
-    generated.push((
-        "cooling_setpoint",
-        vec![cooling_sp; n_steps],
-        ColumnAggregation::Mean,
-    ));
 
     let column_names: Vec<String> = generated
         .iter()

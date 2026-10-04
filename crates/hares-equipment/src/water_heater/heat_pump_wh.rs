@@ -2555,6 +2555,50 @@ mod tests {
         );
     }
 
+    /// Measurement of the evaporator-moisture rule for a heat pump water
+    /// heater in "other heated space" on a winter hour: conditioned zone
+    /// 22 °C / 40 % RH, outdoors 0 °C / 80 % RH, sea-level pressure. The
+    /// 50/50 dry-bulb blend, 11 °C, rises to the 20 °C floor. HARES blends
+    /// the humidity ratio, which conserves vapour (ASHRAE Fundamentals 2021
+    /// ch. 1 adiabatic mixing), and holds it through the floor; OS-HPXML
+    /// averages the relative humidities to 60 % and applies that at 20 °C
+    /// (waterheater.rb `apply_hpwh_loc_temp_rh_sensors`). The vapour-
+    /// conserving inlet is 3.8 K lower in wet-bulb (11.33 °C against
+    /// 15.14 °C) and, from the shared cold-tank start, runs the default COP
+    /// curve 9.3 % below the RH-average inlet.
+    #[test]
+    fn hpwh_winter_cop_under_the_vapour_conserving_blend_against_the_rh_average() {
+        use hares_physics::psychrometrics::{
+            EPSILON, saturation_pressure_pa, wet_bulb_from_humidity_ratio,
+        };
+        let p_pa = 101_325.0;
+        let humidity_ratio = |t_c: f64, rh: f64| {
+            let p_v = rh * saturation_pressure_pa(t_c);
+            EPSILON * p_v / (p_pa - p_v)
+        };
+        let blended_w = 0.5 * humidity_ratio(22.0, 0.4) + 0.5 * humidity_ratio(0.0, 0.8);
+        let vapour_conserving_wb = wet_bulb_from_humidity_ratio(20.0, blended_w, p_pa);
+        let rh_average_wb = wet_bulb_from_humidity_ratio(20.0, humidity_ratio(20.0, 0.6), p_pa);
+        let cop_at = |wet_bulb_c: f64| {
+            let mut e = env_with_wet_bulb(22.0, 14.0);
+            e.ambient_other_space_c.other_heated_space = Some(hares_types::AmbientAirTemps {
+                dry_bulb_c: 20.0,
+                wet_bulb_c,
+            });
+            cop_after_one_step(&placed_config(None, "other heated space"), &e)
+        };
+        let cop_ratio = cop_at(vapour_conserving_wb) / cop_at(rh_average_wb);
+        assert!(
+            (vapour_conserving_wb - 11.33).abs() < 0.01 && (rh_average_wb - 15.14).abs() < 0.01,
+            "wet-bulbs {vapour_conserving_wb:.3} °C (vapour-conserving) and \
+             {rh_average_wb:.3} °C (RH average)"
+        );
+        assert!(
+            (cop_ratio - 0.907).abs() < 0.001,
+            "COP ratio vapour-conserving / RH average {cop_ratio:.4}"
+        );
+    }
+
     /// The wall share of the HPWH sensible gain is an OCHRE construct for
     /// the living zone's partition walls; OS-HPXML places every HPWH gain
     /// convectively in the zone air. With no explicit value the share is

@@ -271,3 +271,175 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
         );
     }
 }
+
+/// Each HVAC unit's equivalent-battery maximum energy over the run, by unit
+/// name, with the HVAC zone_ids cleared from the resolved specs when
+/// `clear_zone_ids` is set.
+fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
+    // A Connecticut home with a gas boiler, in January: the boiler heats.
+    let fixture_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
+    let mut config = bldg0000007_config();
+    config.hpxml_path = fixture_dir.join("home.xml");
+    config.schedule_path = Some(fixture_dir.join("in.schedules.csv"));
+    config.weather_path =
+        project_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv");
+    config.sim_config.start_time = FixedOffset::west_opt(5 * 3600)
+        .expect("UTC-5 offset is valid")
+        .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+        .unwrap();
+    config.sim_config.duration = Duration::hours(12);
+    let mut blueprint =
+        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+    let mut cleared = 0;
+    for spec in &mut blueprint.equipment_specs {
+        let Some(typed) = spec.typed_config.as_mut() else {
+            continue;
+        };
+        let is_hvac = [
+            "Heater",
+            "Cooler",
+            "Air Conditioner",
+            "Room AC",
+            "Furnace",
+            "Boiler",
+            "Baseboard",
+        ]
+        .iter()
+        .any(|class| spec.name.contains(class))
+            && !spec.name.contains("Water Heater");
+        if clear_zone_ids
+            && is_hvac
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            data["zone_id"] = serde_json::Value::Null;
+            spec.parameters.remove("zone_id");
+            cleared += 1;
+        }
+    }
+    assert!(
+        !clear_zone_ids || cleared > 0,
+        "the fixture must carry HVAC to clear"
+    );
+    let mut dwelling = blueprint.build().expect("dwelling builds");
+    let units: Vec<String> = dwelling
+        .equipment()
+        .iter()
+        .filter(|eq| {
+            let end_use = &eq.descriptor().end_use;
+            *end_use == EndUse::HVAC_HEATING || *end_use == EndUse::HVAC_COOLING
+        })
+        .map(|eq| eq.descriptor().name.clone())
+        .collect();
+    let mut series: Vec<(String, Vec<f64>)> = units
+        .iter()
+        .map(|name| (name.clone(), Vec::new()))
+        .collect();
+    for _ in 0..48 {
+        dwelling.step().expect("fixture steps");
+        for (name, values) in &mut series {
+            let eq = dwelling
+                .equipment()
+                .iter()
+                .find(|eq| eq.descriptor().name == *name)
+                .expect("unit stays in the dwelling");
+            values.push(
+                eq.telemetry()
+                    .get(hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH)
+                    .expect("HVAC registers the equivalent-battery keys"),
+            );
+        }
+    }
+    series
+}
+
+/// An HVAC unit with no zone_id serves the conditioned zone, so the
+/// dwelling hands it that zone's capacitance: its equivalent-battery energy
+/// bounds equal those of the same unit naming the zone explicitly, and are
+/// nonzero (a missing capacitance leaves them at 0).
+#[test]
+fn hvac_without_a_zone_id_takes_the_conditioned_zone_capacitance() {
+    let explicit = hvac_ebm_max_energy(false);
+    let implicit = hvac_ebm_max_energy(true);
+    assert!(!explicit.is_empty(), "the fixture must carry HVAC");
+    assert!(
+        explicit
+            .iter()
+            .any(|(_, values)| values.iter().any(|v| *v > 0.0)),
+        "a unit must reach a heating or cooling mode in the run, got {explicit:?}"
+    );
+    assert_eq!(
+        implicit, explicit,
+        "a unit with no zone_id must carry the conditioned zone's capacitance"
+    );
+}
+
+/// A home whose HPXML has neither a ClimateZoneIECC nor a water heater
+/// location takes its IECC zone from the weather station, as OS-HPXML
+/// does, and the water heater default follows that zone: `base.xml` has a
+/// conditioned basement, which IECC 5B (Denver) picks, while IECC 1A
+/// (Miami) has only garage and conditioned space in its hierarchy.
+#[test]
+fn water_heater_default_follows_the_weather_station_climate_zone() {
+    let sample = project_root().join("vendors/OCHRE/test/OS-HPXML Sample Files/base.xml");
+    let xml = std::fs::read_to_string(&sample).expect("base.xml readable");
+    let without = |xml: &str, open: &str, close: &str| {
+        let start = xml.find(open).expect("element present");
+        let end = start + xml[start..].find(close).expect("element closed") + close.len();
+        format!("{}{}", &xml[..start], &xml[end..])
+    };
+    let xml = without(&xml, "<ClimateZoneIECC>", "</ClimateZoneIECC>");
+    let system = xml
+        .find("<WaterHeatingSystem>")
+        .expect("base.xml has a water heater");
+    let xml = format!(
+        "{}{}",
+        &xml[..system],
+        without(&xml[system..], "<Location>", "</Location>")
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let hpxml_path = dir.path().join("home.xml");
+    std::fs::write(&hpxml_path, xml).expect("write edited HPXML");
+
+    for (weather, zone, expected) in [
+        (
+            "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
+            "5B",
+            "basement - conditioned",
+        ),
+        (
+            "tests/fixtures/resstock/2024.2/weather/G1200860.epw",
+            "1A",
+            "conditioned space",
+        ),
+    ] {
+        let mut config = bldg0000007_config();
+        config.hpxml_path = hpxml_path.clone();
+        config.schedule_path = None;
+        config.weather_path = project_root().join(weather);
+        let blueprint = hares_core::dwelling::DwellingBlueprint::from_config(config)
+            .unwrap_or_else(|err| panic!("{weather}: blueprint builds: {err}"));
+        let water_heater = blueprint
+            .equipment_specs
+            .iter()
+            .find(|spec| spec.name.contains("Water Heater"))
+            .expect("base.xml resolves a water heater");
+        assert_eq!(
+            water_heater
+                .parameters
+                .get("zone_type")
+                .and_then(|v| v.as_str()),
+            Some(expected),
+            "{weather}: defaulted water heater location"
+        );
+        let warnings = blueprint
+            .build()
+            .unwrap_or_else(|err| panic!("{weather}: dwelling builds: {err}"))
+            .take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(&format!("IECC zone {zone} derived from weather station"))),
+            "{weather}: the derived zone must be a warning, got {warnings:?}"
+        );
+    }
+}

@@ -410,6 +410,7 @@ mod tests {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         }
     }
 

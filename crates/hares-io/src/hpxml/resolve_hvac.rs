@@ -3999,6 +3999,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: HashMap::new(),

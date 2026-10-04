@@ -1945,6 +1945,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
@@ -3380,6 +3381,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -3588,6 +3590,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -3822,6 +3825,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4059,6 +4063,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4348,6 +4353,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4615,6 +4621,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4872,6 +4879,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),

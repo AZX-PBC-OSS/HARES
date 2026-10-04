@@ -108,19 +108,16 @@ fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
 /// The location OS-HPXML gives a water heater with no `<Location>`:
 /// defaults.rb:6104-6132 (`get_water_heater_location`, v1.12.0, after
 /// ANSI/RESNET/ICC 301-2022C), called from defaults.rb:3401-3406 with the
-/// building's first IECC climate zone. The first location of the zone's
-/// hierarchy the building has surfaces in wins. Conditioned space, last in
-/// every hierarchy, is present in every HPXML building (the schema requires
-/// conditioned floor area; HARES always builds the conditioned zone), and
-/// older files spell it "living space".
+/// building's first IECC climate zone: the HPXML's, else the one OS-HPXML
+/// derives from the weather station (`Building::climate_zone_iecc`). The
+/// first location of the zone's hierarchy the building has surfaces in
+/// wins. Conditioned space, last in every hierarchy, is present in every
+/// HPXML building (the schema requires conditioned floor area; HARES always
+/// builds the conditioned zone), and older files spell it "living space".
 fn default_water_heater_location(
     building: &Building,
 ) -> std::result::Result<&'static str, super::HpxmlError> {
-    let iecc_zone = building
-        .details_xml
-        .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
-        .and_then(|iecc| child_text(iecc, "ClimateZone"));
-    let hierarchy: &[&'static str] = match iecc_zone.as_deref().map(str::trim) {
+    let hierarchy: &[&'static str] = match building.climate_zone_iecc.as_deref() {
         Some("1A" | "1B" | "1C" | "2A" | "2B" | "2C" | "3A" | "3B" | "3C") => {
             &["garage", "conditioned space"]
         }
@@ -1223,6 +1220,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: details,
             parse_warnings: Vec::new(),
         }
@@ -2732,6 +2730,7 @@ mod tests {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: std::collections::HashMap::new(),

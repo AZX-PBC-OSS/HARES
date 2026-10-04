@@ -151,13 +151,23 @@ name; a unit that names none fails when the dwelling is built.
 - HVAC equipment (furnaces, boilers, baseboards, air conditioners, heat
   pumps, ideal HVAC), dehumidifiers and ventilation serve the zone given by
   `zone_id`, or the dwelling's conditioned zone when `zone_id` is omitted.
-- Water heaters need a `zone_id` (or, from HPXML, a `Location`). HPXML
+- Water heaters need a `zone_id` (or, from HPXML, a `Location`). The
+  Python water heater classes take it as a required keyword argument, so a
+  heater built without one raises `TypeError` at construction. HPXML
   locations with no modeled zone ("other heated space", "other
   multifamily buffer space", "other non-freezing space", "other housing
   unit", "other exterior", "outside") run against that location's ambient
   air: the OS-HPXML indoor/outdoor blend with its temperature floor, and a
   wet-bulb from the blended humidity ratio for heat pump water heaters.
   Their standing losses leave the model there instead of heating a zone.
+  Blending the humidity ratio conserves water vapour; OS-HPXML averages
+  the two relative humidities instead. On a winter hour (22 °C / 40 % RH
+  indoors, 0 °C / 80 % RH outdoors, "other heated space" at its 20 °C
+  floor) HARES's evaporator inlet is 3.8 K lower in wet-bulb (11.3 °C
+  against 15.1 °C) and the heat pump water heater's COP is 9.3 % lower
+  than under OS-HPXML's rule (the
+  `hpwh_winter_cop_under_the_vapour_conserving_blend_against_the_rh_average`
+  test in `hares-equipment`).
 
 ## Troubleshooting
 

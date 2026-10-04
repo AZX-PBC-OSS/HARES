@@ -42,13 +42,17 @@ pub struct DwellingBlueprint {
 impl DwellingBlueprint {
     /// Build blueprint from a DwellingConfig by parsing HPXML, weather, and schedule files.
     pub fn from_config(config: DwellingConfig) -> Result<Self, HaresError> {
-        let building = hares_io::parse_hpxml(&config.hpxml_path)
+        let mut building = hares_io::parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 
         let weather = hares_io::parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
+        hares_io::hpxml::climate_zone::apply_climate_zone_default(
+            &mut building,
+            weather.meta.station_wmo.as_deref(),
+        );
 
-        let schedule_raw = config.load_schedule(&building, &weather.meta)?;
+        let schedule_raw = config.load_schedule(&weather.meta)?;
 
         let target_step_secs =
             super::conversions::duration_to_u32_secs(config.sim_config.time_res)?;

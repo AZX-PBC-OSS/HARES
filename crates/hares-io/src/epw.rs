@@ -408,6 +408,9 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
     let longitude = parse_f64_field(fields[7], "location longitude")?;
     let timezone_offset_h = parse_f64_field(fields[8], "location timezone")?;
     let elevation_m = parse_f64_field(fields[9], "location elevation")?;
+    let station_wmo = Some(fields[5].trim())
+        .filter(|wmo| !wmo.is_empty())
+        .map(str::to_string);
 
     Ok(WeatherMeta {
         location,
@@ -421,6 +424,7 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // Subtract half-period (30 min) from sim time to read the correct period.
         midpoint_offset_secs: 1800,
         has_embedded_location: true,
+        station_wmo,
     })
 }
 

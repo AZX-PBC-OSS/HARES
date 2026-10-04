@@ -100,6 +100,7 @@ fn minimal_building() -> hares_io::Building {
         residential_facility_type: None,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     }
@@ -135,6 +136,7 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c: seq(start_temp_c),

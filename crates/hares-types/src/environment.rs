@@ -129,17 +129,6 @@ pub struct ZoneState {
     pub volume_m3: f64,
 }
 
-impl Default for ZoneState {
-    fn default() -> Self {
-        Self {
-            id: ZoneId(0),
-            temperature_c: 20.0,
-            humidity_ratio: 0.008,
-            volume_m3: 200.0,
-        }
-    }
-}
-
 impl ZoneState {
     pub fn new(id: ZoneId, temperature_c: f64, humidity_ratio: f64, volume_m3: f64) -> Self {
         Self {

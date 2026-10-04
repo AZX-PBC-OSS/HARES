@@ -109,6 +109,7 @@ fn synthetic_weather() -> WeatherTimeSeries {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c,
@@ -255,6 +256,7 @@ fn minimal_building() -> hares_io::Building {
         residential_facility_type: None,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     }
@@ -569,6 +571,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c: seq.clone(),
@@ -691,6 +694,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml,
             parse_warnings: Vec::new(),
         }
@@ -905,6 +909,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         residential_facility_type: None,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     };
@@ -1012,6 +1017,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         residential_facility_type: None,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     };
@@ -1115,6 +1121,7 @@ fn window_missing_azimuth_returns_error() {
         residential_facility_type: None,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     };

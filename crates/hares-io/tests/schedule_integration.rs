@@ -549,11 +549,11 @@ fn repo_defaults_dir() -> std::path::PathBuf {
         .join("defaults")
 }
 
-/// Verify that the simulation starts without panicking when the only source of
-/// HVAC thermostat setpoints is the real defaults CSV (no HPXML-derived setpoints).
-/// This is the integration-test acceptance criterion from the ticket.
+/// HVAC with no HPXML-derived setpoints and no schedule setpoint column, run
+/// against the repository's defaults directory, takes OS-HPXML's default
+/// setpoints (68 °F heating, 78 °F cooling).
 #[test]
-fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
+fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
     let defaults_dir = repo_defaults_dir();
 
     let mut specs = vec![
@@ -617,7 +617,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
-    // Heater: must receive a heating DailyProfile with max_value = 20°C from HERS defaults.
+    // Heater: 68 °F.
     let heater_typed = specs[0]
         .typed_config
         .as_ref()
@@ -637,7 +637,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             .get("setpoint")
             .and_then(|sp| sp.get("heating_setpoint_source"))
             .cloned()
-            .expect("heater must have heating_setpoint_source injected from defaults CSV"),
+            .expect("heater must have the default heating_setpoint_source"),
     )
     .expect("heater source must deserialize");
     assert!(
@@ -657,7 +657,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         "heater must not get a cooling setpoint source"
     );
 
-    // Cooler: must receive a cooling DailyProfile with weekday[0] = 24°C, max_value = 1.0.
+    // Cooler: 78 °F.
     let cooler_typed = specs[1]
         .typed_config
         .as_ref()
@@ -677,17 +677,19 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             .get("setpoint")
             .and_then(|sp| sp.get("cooling_setpoint_source"))
             .cloned()
-            .expect("cooler must have cooling_setpoint_source injected from defaults CSV"),
+            .expect("cooler must have the default cooling_setpoint_source"),
     )
     .expect("cooler source must deserialize");
+    let expected_cooling_c = (78.0 - 32.0) * 5.0 / 9.0;
     assert!(
         matches!(
             &cooler_source,
             ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-            if (weekday[0] - 24.0).abs() < 1e-12
+            if (weekday[0] - expected_cooling_c).abs() < 1e-12
             && (max_value - 1.0).abs() < 1e-12
         ),
-        "expected DailyProfile with weekday[0]=24°C and max_value=1.0, got {cooler_source:?}"
+        "expected DailyProfile with weekday[0]={expected_cooling_c} °C and max_value=1.0, \
+         got {cooler_source:?}"
     );
     assert!(
         cooler_obj

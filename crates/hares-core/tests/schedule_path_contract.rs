@@ -1,6 +1,6 @@
 //! The `DwellingConfig.schedule_path` contract.
 //!
-//! `None` requests a schedule generated from the HPXML. A set path must be
+//! `None` requests the default generated schedule. A set path must be
 //! readable: construction fails naming the path when it is not, so a
 //! mistyped path can never silently run on a generated schedule's different
 //! occupancy and loads. A generated schedule needs the default schedule
@@ -24,15 +24,17 @@ fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The schedule the generated path produced when it still pushed a constant
-/// 1.0 `occupants` column in front of the `Occupancy` profile column and
-/// dropped the last column on resample, captured for `base.xml` over the
-/// Denver TMY3 weather with the repo defaults: a 24 h run starting
-/// 2023-01-15 00:00 UTC-7 at 900 s steps. On every column the index names
-/// the schedule is bitwise today's; the constant column is gone and the
-/// last column survives the resample, so the digest changed once here.
+/// The default generated schedule for `base.xml` over the Denver TMY3
+/// weather with the repo defaults: a 24 h run starting 2023-01-15 00:00
+/// UTC-7 at 900 s steps. The digest moved twice. Once when the constant
+/// 1.0 `occupants` column in front of the `Occupancy` profile column was
+/// deleted and the last column survived the resample; once when the two
+/// constant setpoint columns, which overrode the HVAC's own hourly
+/// setpoints, were dropped. On every column the index names the schedule
+/// is bitwise the earlier one's. The generation path must stay
+/// bitwise-equal to it.
 const GENERATED_SCHEDULE_DIGEST: &str =
-    "782e4dabd57fcb5e92e537c5abefba9b8efe9c80957297c40e162e5f8fa66bc6";
+    "a30b9593fcc0fa406e2ce833b43db6b24cd7f5b7a4489a12cf5d4015f10d84ca";
 
 fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
     let start_time = denver_offset::denver_offset()
@@ -127,18 +129,15 @@ fn nonexistent_schedule_path_is_an_error() {
     );
 }
 
-/// `None` generates the schedule from the HPXML: bitwise-equal to the
-/// generator called directly on the same parsed inputs. The digest is pinned
-/// in `GENERATED_SCHEDULE_DIGEST`; it moved once, when the constant duplicate
-/// `occupants` column was deleted and `cooling_setpoint` became the last
-/// column the resample keeps (see that constant's comment).
+/// `None` generates the default schedule: bitwise-equal to the generator
+/// called directly on the same inputs, and to the digest pinned in
+/// `GENERATED_SCHEDULE_DIGEST` (see that constant's comment for its moves).
 #[test]
-fn no_schedule_generates_from_hpxml() {
+fn no_schedule_generates_the_default_schedule() {
     let config = generated_schedule_config(None);
     let blueprint = DwellingBlueprint::from_config(config.clone())
         .expect("a None schedule requests the generated schedule");
 
-    let building = hares_io::parse_hpxml(&config.hpxml_path).expect("the HPXML parses");
     let profiles = hares_io::load_default_profiles(
         config
             .defaults_path
@@ -146,8 +145,7 @@ fn no_schedule_generates_from_hpxml() {
             .expect("the config carries a defaults directory"),
     )
     .expect("the shipped defaults CSV loads");
-    let generated = hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-        &building,
+    let generated = hares_io::hpxml_schedule::generate_default_schedule(
         config.sim_config.start_time,
         config.sim_config.duration,
         config.sim_config.time_res,
@@ -181,7 +179,7 @@ fn no_schedule_generates_from_hpxml() {
     );
     assert_eq!(
         built_digest, GENERATED_SCHEDULE_DIGEST,
-        "the generated schedule must stay bitwise-equal to the pinned schedule"
+        "the generated schedule must stay bitwise-equal to the pinned default schedule"
     );
 }
 

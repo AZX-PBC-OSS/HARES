@@ -253,6 +253,9 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
         midpoint_offset_secs: 1800,
         has_embedded_location: true,
+        station_wmo: Some(fields[0].trim())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
     })
 }
 

@@ -305,6 +305,10 @@ pub struct Building {
     /// When set, overrides the default 1.0°C hysteresis for IdealHVAC.
     /// BESTEST/ASHRAE 140 requires 0.0 (ideal setpoint tracking).
     pub hvac_deadband_c: Option<f64>,
+    /// The first `ClimateandRiskZones/ClimateZoneIECC/ClimateZone`, or, when
+    /// the HPXML has none, the zone OS-HPXML derives from the weather
+    /// station (`climate_zone::apply_climate_zone_default`).
+    pub climate_zone_iecc: Option<String>,
     /// Raw HPXML parse tree retained for downstream consumers that still read
     /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
@@ -1291,6 +1295,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         residential_facility_type,
         mass_multiplier_override: None,
         hvac_deadband_c: None,
+        climate_zone_iecc: details
+            .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
+            .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
+            .filter(|zone| !zone.is_empty()),
         details_xml: details.clone(),
         parse_warnings: Vec::new(),
     })

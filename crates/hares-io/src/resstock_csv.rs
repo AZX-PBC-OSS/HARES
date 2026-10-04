@@ -361,6 +361,7 @@ pub fn parse_resstock_csv_str(
         // ResStock AMY 2018 CSV files (G0100630_2018.csv, G5107750_2018.csv).
         midpoint_offset_secs: 1800,
         has_embedded_location: false,
+        station_wmo: None,
     };
 
     Ok(WeatherTimeSeries {

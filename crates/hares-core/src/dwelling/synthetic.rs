@@ -1523,6 +1523,7 @@ pub(crate) fn build_synthetic_building(
         residential_facility_type: None,
         mass_multiplier_override: config.geometry.mass_multiplier,
         hvac_deadband_c: config.hvac.deadband_c,
+        climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
     };
@@ -1678,6 +1679,7 @@ pub(crate) fn build_synthetic_weather(
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
         has_embedded_location: true,
+        station_wmo: None,
     };
 
     let outdoor_temp_c = config.weather.outdoor_temp_c;

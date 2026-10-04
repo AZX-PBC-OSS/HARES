@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike};
 use hares_io::hpxml::building::parse_building;
-use hares_io::hpxml_schedule::generate_schedule_from_hpxml;
+use hares_io::hpxml_schedule::generate_default_schedule;
 use hares_io::load_default_profiles;
 
 #[path = "../../../tests/support/denver_offset.rs"]
@@ -25,10 +25,7 @@ fn shipped_profiles() -> hares_io::DefaultProfiles {
 
 #[test]
 fn generated_schedule_has_all_required_columns() {
-    let xml = minimal_hpxml();
-    let building = parse_building(&xml).expect("parse");
-    let sched = generate_schedule_from_hpxml(
-        &building,
+    let sched = generate_default_schedule(
         test_start(),
         Duration::hours(1),
         Duration::minutes(1),
@@ -48,56 +45,21 @@ fn generated_schedule_has_all_required_columns() {
         "hot_water_dishwasher",
         "hot_water_clothes_washer",
         "hot_water_fixtures",
-        "heating_setpoint",
-        "cooling_setpoint",
     ];
     for col in required {
         assert!(sched.column_index.contains_key(*col), "missing: {col}");
     }
-}
-
-#[test]
-fn generated_schedule_uses_hpxml_setpoints() {
-    let xml = minimal_hpxml_with_hvac_control();
-    let building = parse_building(&xml).expect("parse");
-    let sched = generate_schedule_from_hpxml(
-        &building,
-        test_start(),
-        Duration::hours(2),
-        Duration::minutes(60),
-        &shipped_profiles(),
-    )
-    .expect("the shipped profiles generate the schedule");
-
-    let heat = sched.columns[sched.column_index["heating_setpoint"]][0];
-    let cool = sched.columns[sched.column_index["cooling_setpoint"]][0];
-    assert!((heat - 22.222).abs() < 0.01); // 72°F
-    assert!((cool - 25.556).abs() < 0.01); // 78°F
-}
-
-#[test]
-fn generated_schedule_defaults_setpoints_when_hpxml_missing() {
-    let xml = minimal_hpxml();
-    let building = parse_building(&xml).expect("parse");
-    let sched = generate_schedule_from_hpxml(
-        &building,
-        test_start(),
-        Duration::hours(1),
-        Duration::minutes(1),
-        &shipped_profiles(),
-    )
-    .expect("the shipped profiles generate the schedule");
-    let heat = sched.columns[sched.column_index["heating_setpoint"]][0];
-    let cool = sched.columns[sched.column_index["cooling_setpoint"]][0];
-    assert!((heat - 20.0).abs() < 1e-9);
-    assert!((cool - 24.0).abs() < 1e-9);
+    for col in ["heating_setpoint", "cooling_setpoint"] {
+        assert!(
+            !sched.column_index.contains_key(col),
+            "a generated {col} column would override the HVAC's own setpoints"
+        );
+    }
 }
 
 #[test]
 fn generated_schedule_timestamps_are_correct() {
-    let building = parse_building(&minimal_hpxml()).expect("parse");
-    let sched = generate_schedule_from_hpxml(
-        &building,
+    let sched = generate_default_schedule(
         test_start(),
         Duration::hours(3),
         Duration::minutes(15),
@@ -114,9 +76,7 @@ fn generated_schedule_timestamps_are_correct() {
 
 #[test]
 fn generated_schedule_uses_default_profiles_when_dir_provided() {
-    let building = parse_building(&minimal_hpxml()).expect("parse");
-    let sched = generate_schedule_from_hpxml(
-        &building,
+    let sched = generate_default_schedule(
         test_start(),
         Duration::hours(24),
         Duration::minutes(60),
@@ -140,10 +100,8 @@ fn generated_schedule_uses_default_profiles_when_dir_provided() {
 /// between a column vector and its aggregation.
 #[test]
 fn generated_schedule_has_one_occupants_column() {
-    let building = parse_building(&minimal_hpxml()).expect("parse");
     let profiles = shipped_profiles();
-    let sched = generate_schedule_from_hpxml(
-        &building,
+    let sched = generate_default_schedule(
         test_start(),
         Duration::hours(24),
         Duration::minutes(60),
@@ -187,99 +145,71 @@ fn generated_schedule_has_one_occupants_column() {
     }
 }
 
+/// With no schedule file, the HVAC keeps the HPXML's hourly weekday and
+/// weekend setpoints: the generated schedule carries no setpoint column to
+/// override them.
 #[test]
-fn generated_schedule_parity_with_real_csv_for_resstock_2025_1() {
-    let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0527060");
-
-    // Skip if fixture not available
-    if !bldg_dir.join("home.xml").exists() {
-        return;
-    }
-
-    let xml = std::fs::read_to_string(bldg_dir.join("home.xml")).expect("read fixture");
-    let building = parse_building(&xml).expect("parse building");
-
-    let generated = generate_schedule_from_hpxml(
+fn hvac_without_a_schedule_file_keeps_the_hpxml_hourly_setpoints() {
+    let sample = project_root()
+        .join("vendors/OCHRE/test/OS-HPXML Sample Files/base-hvac-setpoints-daily-schedules.xml");
+    let xml = std::fs::read_to_string(&sample)
+        .expect("sample readable")
+        .replacen(
+            "</StateCode>",
+            "</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+            1,
+        );
+    let building = parse_building(&xml).expect("parse");
+    let defaults_dir = project_root().join("defaults");
+    let defaults = hares_io::defaults::DefaultsStore::load(&defaults_dir).expect("defaults load");
+    let mut specs = hares_io::resolve_equipment(
         &building,
+        &defaults,
+        &serde_json::json!({}),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve");
+    let mut schedule = generate_default_schedule(
         test_start(),
-        Duration::hours(1),
-        Duration::minutes(1),
+        Duration::hours(24),
+        Duration::minutes(60),
         &shipped_profiles(),
     )
     .expect("the shipped profiles generate the schedule");
-
-    // Must have all required columns
-    for col in &[
-        "occupants",
-        "plug_loads_other",
-        "plug_loads_tv",
-        "lighting_interior",
-        "heating_setpoint",
-        "cooling_setpoint",
-    ] {
-        assert!(generated.column_index.contains_key(*col), "missing: {col}");
-    }
-
-    // Setpoints must be physically plausible
-    let heat = generated.columns[generated.column_index["heating_setpoint"]][0];
-    let cool = generated.columns[generated.column_index["cooling_setpoint"]][0];
-    assert!(
-        heat > 5.0 && heat < 40.0,
-        "implausible heating setpoint: {heat}"
-    );
-    assert!(
-        cool > 10.0 && cool < 50.0,
-        "implausible cooling setpoint: {cool}"
-    );
-    assert!(cool > heat, "cooling must be above heating");
-}
-
-// --- helpers ---
-
-fn minimal_hpxml() -> String {
-    r#"
-    <HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
-      <Building>
-        <BuildingDetails>
-          <BuildingSummary>
-            <Site><SiteType>suburban</SiteType></Site>
-            <BuildingConstruction>
-              <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
-              <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
-              <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
-            </BuildingConstruction>
-          </BuildingSummary>
-          <Enclosure><Walls/></Enclosure>
-        </BuildingDetails>
-      </Building>
-    </HPXML>"#
-        .to_string()
-}
-
-fn minimal_hpxml_with_hvac_control() -> String {
-    r#"
-    <HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
-      <Building>
-        <BuildingDetails>
-          <BuildingSummary>
-            <Site><SiteType>suburban</SiteType></Site>
-            <BuildingConstruction>
-              <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
-              <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
-              <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
-            </BuildingConstruction>
-          </BuildingSummary>
-          <Enclosure><Walls/></Enclosure>
-          <Systems>
-            <HVAC>
-              <HVACControl>
-                <SetpointTempHeatingSeason>72.0</SetpointTempHeatingSeason>
-                <SetpointTempCoolingSeason>78.0</SetpointTempCoolingSeason>
-              </HVACControl>
-            </HVAC>
-          </Systems>
-        </BuildingDetails>
-      </Building>
-    </HPXML>"#
-        .to_string()
+    hares_io::inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(&defaults_dir),
+        &defaults,
+        None,
+        false,
+        &mut Vec::new(),
+    )
+    .expect("inject");
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("the sample has a gas furnace");
+    let hares_equipment::ConfigPayload::Typed { data, .. } = &furnace
+        .typed_config
+        .as_ref()
+        .expect("typed furnace config")
+        .payload
+    else {
+        panic!("typed payload");
+    };
+    let source: hares_types::ScheduleSourceConfig =
+        serde_json::from_value(data["setpoint"]["heating_setpoint_source"].clone())
+            .expect("the furnace carries a heating setpoint source");
+    let hares_types::ScheduleSourceConfig::DailyProfile {
+        weekday, weekend, ..
+    } = source
+    else {
+        panic!("the HPXML hourly setpoints must reach the furnace, got {source:?}");
+    };
+    let f_to_c = |f: f64| (f - 32.0) * 5.0 / 9.0;
+    assert!((weekday[0] - f_to_c(64.0)).abs() < 1e-9, "{weekday:?}");
+    assert!((weekday[7] - f_to_c(70.0)).abs() < 1e-9, "{weekday:?}");
+    assert!((weekend[0] - f_to_c(68.0)).abs() < 1e-9, "{weekend:?}");
 }
