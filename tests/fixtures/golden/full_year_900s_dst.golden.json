@@ -4,9 +4,9 @@
     "dst"
   ],
   "defaults_dir": "defaults",
-  "defaults_digest": "226c1fd640695df65c67ccce2d7d18425429e240bc60fdc2eb076f047c4a5383",
-  "git_head": "979b87738682f5164fdbcc60933a5bf13b949ac7",
-  "git_dirty": true,
+  "defaults_digest": "275cd3997b1cd531fdcb981ea36caace63a0db211702acdb47e8bf16cf69fa27",
+  "git_head": "ede151dae3758181ae6604edc15fd7b21c4a6f9d",
+  "git_dirty": false,
   "metrics": [
     {
       "comfort_hours": {
