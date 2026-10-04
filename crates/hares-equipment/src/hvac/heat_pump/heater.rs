@@ -20,8 +20,8 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
+        lookup_zone, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
+        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -1237,6 +1237,7 @@ impl HeatPumpHeaterCore {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         let dt_min = dt.as_secs_f64() / 60.0;
         let dt_s = dt.as_secs_f64();
 
@@ -1552,13 +1553,7 @@ impl HeatPumpHeaterCore {
             OperatingMode::Cooling => sp.cooling_c,
             _ => sp.heating_c + self.dr_setpoint_offset_c,
         };
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            delivered_thermal_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, delivered_thermal_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),

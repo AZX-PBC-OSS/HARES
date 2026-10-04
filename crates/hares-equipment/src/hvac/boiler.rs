@@ -22,9 +22,9 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
-        apply_simple_mode_override_in_control, compute_and_write_ebm_telemetry, lookup_zone,
-        loop_id_from_config, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
-        update_heating_control, zone_id_from_config,
+        apply_simple_mode_override_in_control, lookup_zone, loop_id_from_config, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -349,6 +349,7 @@ impl Equipment for ElectricBoiler {
             + self
                 .pump_zip
                 .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -394,13 +395,7 @@ impl Equipment for ElectricBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -765,6 +760,7 @@ impl Equipment for GasBoiler {
         } else {
             0.0
         };
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if fuel_input_w > 0.0 {
             ports.accumulate(&PortContribution::Fuel {
@@ -798,7 +794,6 @@ impl Equipment for GasBoiler {
                 0.0,
                 ThermalCategory::HvacHeating,
             )?;
-            self.run_time_s += dt.as_secs_f64();
         }
 
         // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
@@ -815,6 +810,9 @@ impl Equipment for GasBoiler {
                 latent_gain_w: 0.0,
                 category: ThermalCategory::JacketLoss,
             })?;
+        }
+        if thermal_output_w > 0.0 {
+            self.run_time_s += dt.as_secs_f64();
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
@@ -837,13 +835,7 @@ impl Equipment for GasBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),

@@ -23,8 +23,8 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
-        apply_simple_mode_override_in_control, compute_and_write_ebm_telemetry, lookup_zone,
-        outage_forces_off, register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
         zone_id_from_config,
     },
 };
@@ -205,6 +205,7 @@ impl Equipment for ElectricBaseboard {
         let reactive_power_kvar = self
             .zip
             .reactive_kvar(electric_kw, env.grid.bus_voltage_pu());
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -233,13 +234,7 @@ impl Equipment for ElectricBaseboard {
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),

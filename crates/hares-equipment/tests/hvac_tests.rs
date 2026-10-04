@@ -176,6 +176,43 @@ fn electric_boiler_config(name: &str) -> EquipmentConfig {
     .unwrap()
 }
 
+fn electric_baseboard_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+            setpoint: HvacSetpointConfig::default(),
+        },
+    )
+    .unwrap()
+}
+
+fn gas_boiler_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Boiler".to_string(),
+        GasBoilerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            capacity_w: 10_000.0,
+            afue: 0.8,
+            flow_rate_kg_s: 0.5,
+            return_temp_c: 70.0,
+            fluid_type: FluidType::Water,
+            fan_power_w: None,
+            number_of_speeds: 1,
+            setpoint: HvacSetpointConfig::default(),
+            condensing: false,
+        },
+    )
+    .unwrap()
+}
+
 fn ports_for_zone1() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -4875,43 +4912,12 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
 fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
     const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
     const BAND_C: f64 = 0.25;
-    let baseboard = EquipmentConfig::from_typed(
-        "bb_band".to_string(),
-        "Electric Baseboard".to_string(),
-        ElectricBaseboardConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            capacity_w: 3_000.0,
-            eir: 1.0,
-            setpoint: HvacSetpointConfig::default(),
-        },
-    )
-    .unwrap();
-    let gas_boiler = EquipmentConfig::from_typed(
-        "gb_band".to_string(),
-        "Gas Boiler".to_string(),
-        GasBoilerConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            loop_id: Some(1),
-            capacity_w: 10_000.0,
-            afue: 0.8,
-            flow_rate_kg_s: 0.5,
-            return_temp_c: 70.0,
-            fluid_type: FluidType::Water,
-            fan_power_w: None,
-            number_of_speeds: 1,
-            setpoint: HvacSetpointConfig::default(),
-            condensing: false,
-        },
-    )
-    .unwrap();
     let cases = [
         ("Electric Furnace", electric_furnace_config("ef_band")),
         ("Gas Furnace", gas_furnace_config("gf_band")),
-        ("Electric Baseboard", baseboard),
+        ("Electric Baseboard", electric_baseboard_config("bb_band")),
         ("Electric Boiler", electric_boiler_config("eb_band")),
-        ("Gas Boiler", gas_boiler),
+        ("Gas Boiler", gas_boiler_config("gb_band")),
     ];
     let registry = EquipmentRegistry::new();
     let env_warm = env_with_zone_temp(22.0);
@@ -4970,4 +4976,170 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
             windows[1]
         );
     }
+}
+
+/// The telemetry a failed step must not have written.
+const STEP_TELEMETRY: [&str; 5] = [
+    tk::ELECTRIC_KW,
+    tk::THERMAL_OUTPUT_W,
+    tk::OPERATING_MODE,
+    tk::EBM_MIN_ENERGY_KWH,
+    tk::EBM_MAX_ENERGY_KWH,
+];
+
+/// A step whose equivalent battery model fails (a 0.1 C band on a
+/// 1e-15 kWh/K zone puts the window below f64 resolution) leaves no state
+/// behind: the checkpoint, the core output and the step telemetry are what
+/// they were before it.
+#[test]
+fn a_failed_hvac_step_leaves_no_partial_state() {
+    let ashp = EquipmentConfig::from_typed(
+        "ashp_partial".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(0.3),
+                backup_capacity_w: Some(0.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ac = EquipmentConfig::from_typed(
+        "ac_partial".to_string(),
+        "Air Conditioner".to_string(),
+        CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 10_000.0,
+            eir: 0.25,
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: Some(1.0),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
+        },
+    )
+    .unwrap();
+    let heat_signal = ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: None,
+        deadband_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
+    };
+    let cool_signal = ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: Some(24.0),
+        deadband_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
+    };
+    let cases = [
+        (
+            "Electric Furnace",
+            electric_furnace_config("ef_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Gas Furnace",
+            gas_furnace_config("gf_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Electric Boiler",
+            electric_boiler_config("eb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Gas Boiler",
+            gas_boiler_config("gb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Electric Baseboard",
+            electric_baseboard_config("bb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        ("ASHP Heater", ashp, &heat_signal, env_with_zone_temp(18.0)),
+        (
+            "Air Conditioner",
+            ac,
+            &cool_signal,
+            env_with_zone_temp_hot(28.0),
+        ),
+    ];
+    let registry = EquipmentRegistry::new();
+    for (kind, mut cfg, signal, env) in cases {
+        cfg.zone_capacitance_kwh_per_k = 1e-15;
+        let mut eq = registry.create(kind, cfg.clone()).unwrap();
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(signal).unwrap();
+        eq.update_control(&env);
+        let state = eq.save_state().unwrap();
+        let core = eq.core_output().clone();
+        let telemetry = STEP_TELEMETRY.map(|key| eq.telemetry().get(key));
+
+        eq.step(
+            &env,
+            Duration::from_secs(60),
+            &mut ports_for_zone1_with_water_loop(),
+        )
+        .expect_err("the window is below f64 resolution");
+
+        assert_eq!(
+            eq.save_state().unwrap(),
+            state,
+            "{kind}: checkpointed state changed"
+        );
+        assert_eq!(*eq.core_output(), core, "{kind}: core output changed");
+        assert_eq!(
+            STEP_TELEMETRY.map(|key| eq.telemetry().get(key)),
+            telemetry,
+            "{kind}: step telemetry changed"
+        );
+    }
+}
+
+/// The equivalent battery reads the equipment's own zone: a step whose zone
+/// is missing from the environment errors instead of assuming 20 C.
+#[test]
+fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
+    let mut cfg = electric_baseboard_config("bb_no_zone");
+    cfg.zone_capacitance_kwh_per_k = 2.0;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
+    eq.init(&cfg, &env_with_zone_temp(18.0)).unwrap();
+    let mut env = env_with_zone_temp(18.0);
+    env.zones.clear();
+    let err = eq
+        .step(&env, Duration::from_secs(60), &mut ports_for_zone1())
+        .expect_err("the zone temperature is required");
+    assert!(err.to_string().contains("not found"), "{err}");
 }

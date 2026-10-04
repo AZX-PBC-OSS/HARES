@@ -15,7 +15,9 @@ use hares_types::{
 
 use crate::{ConfigPayload, EquipmentConfig};
 
+use super::equivalent_battery::EquivalentBatteryWindow;
 use super::hvac_core::MAX_CONDITIONED_ZONE_TEMP_C;
+use super::thermostat::lookup_zone_temp;
 
 use crate::HvacEquipment;
 
@@ -490,42 +492,57 @@ pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
     telemetry.insert(hares_types::telemetry_keys::EBM_MAX_POWER_KW, 0.0);
 }
 
-/// Compute the equivalent battery model and write results to telemetry.
+/// The step's equivalent battery window, or `None` when the zone capacitance
+/// (`hvac.config.zone_capacitance_kwh_per_k`, set by the dwelling from the
+/// envelope solver) is zero and the model is disabled.
 ///
-/// Called at the end of each equipment `step()`. Uses the zone capacitance
-/// stored on `hvac.config.zone_capacitance_kwh_per_k` (set by the dwelling
-/// from envelope solver zone capacitances during construction). When
-/// `zone_capacitance_kwh_per_k <= 0.0` (EBM disabled), returns immediately
-/// without writing — the pre-registered 0.0 placeholders remain.
+/// A step computes it first, before it commits any state, so a failure here
+/// leaves the equipment exactly as it was; [`write_ebm_telemetry`] completes
+/// it with the step's load once the step has run.
 ///
-/// `capacity_ideal_w` is the current thermal load being served [W], passed
-/// from the equipment's step() as the actual delivered thermal output
-/// (sensible + latent cooling for AC, heating W for heating equipment).
-/// This is used as the EBM's `capacity_ideal` input (OCHRE HVAC.py:640),
-/// yielding `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`.
+/// # Errors
 ///
-/// OCHRE computes `capacity_ideal` from a per-step steady-state solve
-/// (`self.solve_ideal_capacity()`, HVAC.py:434-435) called unconditionally.
-/// HARES uses the delivered thermal output as a proxy — it equals the
-/// steady-state load when the thermostat is maintaining setpoint, and is
-/// zero when the equipment is off (no load being served). A proper
-/// `solve_ideal_capacity()` that computes the hold load even during off
-/// cycles is deferred to T-1711.
-pub fn compute_and_write_ebm_telemetry(
+/// The window's own errors, and an error when the equipment's zone is not
+/// in `env`.
+pub fn step_equivalent_battery(
     hvac: &HvacEquipment,
-    zone_temp_c: f64,
+    env: &EnvironmentState,
+) -> crate::Result<Option<EquivalentBatteryWindow>> {
+    let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
+    if cap_kwh <= 0.0 {
+        return Ok(None);
+    }
+    let zone_temp_c = lookup_zone_temp(env, hvac.config.served_zone()?)?;
+    hvac.equivalent_battery_window(zone_temp_c, cap_kwh, hvac.eir_at_stage(0))
+        .map(Some)
+}
+
+/// Completes a step's equivalent battery window with the step's load and
+/// publishes it; a disabled model leaves the pre-registered 0.0
+/// placeholders.
+///
+/// `capacity_ideal_w` is the thermal output the step delivers [W] (sensible
+/// plus latent cooling for an AC, heating for a heater), the EBM's
+/// `capacity_ideal` input (OCHRE HVAC.py:640), giving
+/// `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
+/// the steady-state hold load every step (`solve_ideal_capacity()`,
+/// HVAC.py:434-435); the delivered output equals it while the thermostat
+/// holds the setpoint and is zero while the unit is off.
+///
+/// # Errors
+///
+/// [`EquivalentBatteryWindow::with_load`]'s error for a negative load.
+pub fn write_ebm_telemetry(
+    window: Option<EquivalentBatteryWindow>,
     capacity_ideal_w: f64,
     telemetry: &mut Telemetry,
 ) -> crate::Result<()> {
     use hares_types::telemetry_keys as tk;
 
-    let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
-    if cap_kwh <= 0.0 {
+    let Some(window) = window else {
         return Ok(());
-    }
-    let rated_eir = hvac.eir_at_stage(0);
-    let ebm =
-        hvac.make_equivalent_battery_model(zone_temp_c, cap_kwh, rated_eir, capacity_ideal_w)?;
+    };
+    let ebm = window.with_load(capacity_ideal_w)?;
     telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
     telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
     telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
@@ -547,8 +564,9 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, compute_and_write_ebm_telemetry, loop_id_from_config, parse_fuel_type,
-        parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, zone_id_from_config,
+        DuctDseContext, loop_id_from_config, parse_fuel_type, parse_zone_id_key,
+        register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     };
 
     #[test]
@@ -876,7 +894,9 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 18.0, 3000.0, &mut telemetry).unwrap();
+        let env = crate::hvac::thermostat::tests::env_with_zone_temp(18.0);
+        let window = step_equivalent_battery(&hvac, &env).unwrap();
+        write_ebm_telemetry(window, 3000.0, &mut telemetry).unwrap();
 
         let efficiency = telemetry.get(tk::EBM_EFFICIENCY).unwrap();
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
@@ -905,7 +925,10 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 20.0, 5000.0, &mut telemetry).unwrap();
+        let env = crate::hvac::thermostat::tests::env_with_zone_temp(20.0);
+        let window = step_equivalent_battery(&hvac, &env).unwrap();
+        assert!(window.is_none());
+        write_ebm_telemetry(window, 5000.0, &mut telemetry).unwrap();
 
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
         assert_eq!(

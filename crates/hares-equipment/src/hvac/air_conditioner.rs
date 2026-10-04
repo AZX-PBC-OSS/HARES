@@ -37,8 +37,8 @@ use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, zone_id_from_config,
+        lookup_zone, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
+        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -1097,6 +1097,7 @@ impl CoolingCore {
         ports: &mut PortSlots,
         companion_heating_rtf: Option<f64>,
     ) -> std::result::Result<(), HaresError> {
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
         self.crankcase_heater_kw = 0.0;
 
@@ -1378,12 +1379,9 @@ impl CoolingCore {
             .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
         self.telemetry
             .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        let capacity_ideal_w = post_dse_sensible_w + post_dse_latent_w;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            capacity_ideal_w,
+        write_ebm_telemetry(
+            ebm_window,
+            post_dse_sensible_w + post_dse_latent_w,
             &mut self.telemetry,
         )?;
         let active_setpoint_c = match original_mode {

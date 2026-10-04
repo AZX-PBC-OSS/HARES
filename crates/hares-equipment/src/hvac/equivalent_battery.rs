@@ -81,9 +81,8 @@ impl HvacEquipment {
     ///
     /// # Errors
     ///
-    /// Returns a typed error when `rated_eir <= 0.0` (a non-positive energy
-    /// input ratio implies infinite or negative COP, physically impossible)
-    /// or when `capacity_ideal_w` is negative (the baseline power would be).
+    /// The errors of [`Self::equivalent_battery_window`] and
+    /// [`EquivalentBatteryWindow::with_load`].
     pub fn make_equivalent_battery_model(
         &self,
         zone_temp_c: f64,
@@ -91,22 +90,33 @@ impl HvacEquipment {
         rated_eir: f64,
         capacity_ideal_w: f64,
     ) -> crate::Result<EquivalentBatteryModel> {
+        self.equivalent_battery_window(zone_temp_c, zone_capacitance_kwh_per_k, rated_eir)?
+            .with_load(capacity_ideal_w)
+    }
+
+    /// The load-independent part of the equivalent battery model: the energy
+    /// state and window, the power limit and the efficiency, with every
+    /// invariant on the equipment's state checked. A step computes it before
+    /// it commits any state, so these failures leave the equipment as it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when `rated_eir <= 0.0` (a non-positive energy
+    /// input ratio implies infinite or negative COP, physically impossible)
+    /// or when the energy window is not above f64 resolution.
+    pub fn equivalent_battery_window(
+        &self,
+        zone_temp_c: f64,
+        zone_capacitance_kwh_per_k: f64,
+        rated_eir: f64,
+    ) -> crate::Result<EquivalentBatteryWindow> {
         if rated_eir <= 0.0 || !rated_eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "EBM requires rated_eir > 0.0 (COP = 1/EIR must be finite and positive), got {rated_eir}"
             )));
         }
-        // COP = 1/EIR (OCHRE HVAC.py:639) and steady-state electrical draw to hold
-        // setpoint = ideal thermal capacity * EIR (OCHRE HVAC.py:640, converted from
-        // the thermal quantity to electrical draw via the EIR).
+        // COP = 1/EIR (OCHRE HVAC.py:639).
         let efficiency = 1.0 / rated_eir;
-        let baseline_power_kw = power_w_to_kw(capacity_ideal_w * rated_eir);
-        if baseline_power_kw < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "EBM baseline_power_kw={baseline_power_kw} must be >= 0 \
-                 (capacity_ideal_w={capacity_ideal_w} * eir={rated_eir})"
-            )));
-        }
 
         let setpoints = self.effective_setpoints();
         let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
@@ -162,22 +172,13 @@ impl HvacEquipment {
             ThermostatMode::Deadband => (None, None, 0.0, None, f64::NAN),
         };
 
-        // The energy capacity must be positive and straddle a deadband range
-        // whenever the zone capacitance is positive: a non-positive computed
-        // capacity means the thermostat thresholds or the reference
-        // temperature derivation are wrong.
+        // The energy window must be open whenever the zone capacitance is
+        // positive. The energies themselves may be negative: the reference
+        // temperature is a datum, and a setpoint beyond it (a heating
+        // setback below 10 C) is valid, as in OCHRE.
         if zone_capacitance_kwh_per_k > 0.0
             && let Some(max_e) = max_energy_kwh
         {
-            if max_e <= 0.0 {
-                return Err(HaresError::Equipment(format!(
-                    "EBM invariant violation: zone_capacitance_kwh_per_k={} > 0 \
-                     but max_energy_kwh={} <= 0. Capacitance is positive but \
-                     the computed energy capacity is non-positive; check \
-                     deadband and reference temperature computation.",
-                    zone_capacitance_kwh_per_k, max_e
-                )));
-            }
             let deadband_range = (max_e - min_energy_kwh).max(0.0);
             if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
                 return Err(HaresError::Equipment(format!(
@@ -215,9 +216,7 @@ impl HvacEquipment {
                 zone_capacitance_kwh_per_k,
                 deadband_range_c,
                 efficiency,
-                baseline_power_kw,
                 rated_eir,
-                capacity_ideal_w,
                 t_min_heat_c = t_heat_on,
                 t_max_heat_c = t_heat_off,
                 t_min_cool_c = t_cool_off,
@@ -226,16 +225,58 @@ impl HvacEquipment {
                 hysteresis_c = hysteresis,
                 heating_setpoint_c = setpoints.heating_c,
                 cooling_setpoint_c = setpoints.cooling_c,
-                "EquivalentBatteryModel parameters computed"
+                "EquivalentBatteryModel window computed"
             );
         }
 
-        Ok(EquivalentBatteryModel {
+        Ok(EquivalentBatteryWindow {
             energy_kwh,
             min_energy_kwh,
             max_energy_kwh,
             max_power_kw,
             efficiency,
+            rated_eir,
+        })
+    }
+}
+
+/// The load-independent part of an [`EquivalentBatteryModel`], from
+/// [`HvacEquipment::equivalent_battery_window`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EquivalentBatteryWindow {
+    energy_kwh: Option<f64>,
+    min_energy_kwh: f64,
+    max_energy_kwh: Option<f64>,
+    max_power_kw: Option<f64>,
+    efficiency: f64,
+    rated_eir: f64,
+}
+
+impl EquivalentBatteryWindow {
+    /// Completes the model with the step's load: the steady-state electrical
+    /// draw to hold the setpoint is the ideal thermal capacity times the EIR
+    /// (OCHRE HVAC.py:640, converted from the thermal quantity to electrical
+    /// draw).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when `capacity_ideal_w` is negative or
+    /// non-finite (the baseline power would be).
+    pub fn with_load(self, capacity_ideal_w: f64) -> crate::Result<EquivalentBatteryModel> {
+        let baseline_power_kw = power_w_to_kw(capacity_ideal_w * self.rated_eir);
+        if baseline_power_kw.is_nan() || baseline_power_kw < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "EBM baseline_power_kw={baseline_power_kw} must be >= 0 \
+                 (capacity_ideal_w={capacity_ideal_w} * eir={})",
+                self.rated_eir
+            )));
+        }
+        Ok(EquivalentBatteryModel {
+            energy_kwh: self.energy_kwh,
+            min_energy_kwh: self.min_energy_kwh,
+            max_energy_kwh: self.max_energy_kwh,
+            max_power_kw: self.max_power_kw,
+            efficiency: self.efficiency,
             baseline_power_kw,
         })
     }
@@ -318,6 +359,21 @@ mod tests {
     /// Turn-on threshold for cooling: thermostat FSM formula (thermostat.rs:404).
     fn cooling_t_on(setpoint: f64, hysteresis: f64, offset: f64) -> f64 {
         setpoint + hysteresis * (1.0 - offset)
+    }
+
+    /// The reference temperature is a datum: a heating setpoint below it (a
+    /// freeze-protection setback) gives negative energies, as in OCHRE, and
+    /// an intact window.
+    #[test]
+    fn a_setpoint_below_the_reference_temperature_gives_negative_energies() {
+        let capacitance = 2.0;
+        let eq = heating_equipment(5.0, 10_000.0, 1.0, 0.2);
+        let ebm = eq
+            .make_equivalent_battery_model(4.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a setback below the reference temperature is valid");
+        let max_e = ebm.max_energy_kwh.expect("heating mode has a window");
+        assert!(max_e < 0.0 && ebm.min_energy_kwh < max_e);
+        assert!((max_e - ebm.min_energy_kwh - capacitance * 1.0).abs() < 1e-12);
     }
 
     #[test]

@@ -596,7 +596,7 @@ impl ThermostatFsm {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 
     use super::*;
@@ -878,7 +878,7 @@ mod tests {
         assert!(!result.unwrap()); // signal was NOT handled
     }
 
-    fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
+    pub(in crate::hvac) fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
         EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {

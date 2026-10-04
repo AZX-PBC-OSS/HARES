@@ -23,8 +23,8 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
-        apply_simple_mode_override_in_control, compute_and_write_ebm_telemetry, lookup_zone,
-        outage_forces_off, register_ebm_telemetry_keys, served_zone_ports, update_heating_control,
+        apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
         zone_id_from_config,
     },
 };
@@ -259,17 +259,18 @@ impl Equipment for ElectricFurnace {
             + self
                 .fan_zip
                 .reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = power_kw_to_w(fan_kw);
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
+
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar,
             })?;
         }
-
-        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
-        let total_sensible_w = gross_capacity_w + fan_heat_w;
-
         if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -283,7 +284,6 @@ impl Equipment for ElectricFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
         // OCHRE HVAC.py:575: main_power = total_input - fan.
@@ -359,13 +359,7 @@ impl Equipment for ElectricFurnace {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -674,6 +668,13 @@ impl Equipment for GasFurnace {
         } else {
             0.0
         };
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = power_kw_to_w(fan_kw);
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+        // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if fuel_input_w > 0.0 {
             ports.accumulate(&PortContribution::Fuel {
@@ -681,19 +682,12 @@ impl Equipment for GasFurnace {
                 consumption_w: fuel_input_w,
             })?;
         }
-
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
         if fan_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
                 reactive_power_kvar,
             })?;
         }
-
-        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
-        let total_sensible_w = gross_capacity_w + fan_heat_w;
-
         if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -707,8 +701,6 @@ impl Equipment for GasFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
-        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
         // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
@@ -784,13 +776,7 @@ impl Equipment for GasFurnace {
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        )?;
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
