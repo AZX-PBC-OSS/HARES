@@ -9,7 +9,6 @@ with a PG&E E-TOU-C tariff loaded from the URDB fixture. Validates that:
 - Tariff telemetry is emitted every step
 """
 
-import itertools
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -234,23 +233,20 @@ class TestHvacActiveCooling:
         cool_signal = ControlSignal.thermal_setpoint(cool_c=21.0)
         n_steps = 2 * 86400 // TIME_RES_S
         cool_kwh = 0.0
-        temps = []
+        t_max = -999.0
         for _ in range(n_steps):
             dw.apply_control("Air Conditioner", cool_signal)
             r = dw.step()
             cool_kwh += r.get("hvac_cooling_w", 0) * TIME_RES_S / 3_600_000
-            temps.append(r.get("Temperature - Zone_1 (C)", 0))
+            z1 = r.get("Temperature - Zone_1 (C)", 0)
+            t_max = max(t_max, z1)
 
         assert cool_kwh > 1.0, (
             f"AC should deliver >1 kWh cooling with 21°C setpoint in July, "
             f"got {cool_kwh:.2f} kWh"
         )
-        # The AC runs or rests for whole 15-minute steps, so the zone swings
-        # between an on step and an off step; one on/off cycle is what the
-        # thermostat holds the zone to.
-        cycle_max = max((a + b) / 2 for a, b in itertools.pairwise(temps))
-        assert cycle_max < 28, (
-            f"Zone should stay below 28°C over an AC cycle, got {cycle_max:.1f}°C"
+        assert t_max < 28, (
+            f"Zone should stay below 28°C with active AC, got {t_max:.1f}°C"
         )
 
     def test_attic_hotter_than_conditioned(self, sim_result):
