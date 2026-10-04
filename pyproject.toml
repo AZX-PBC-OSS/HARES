@@ -86,6 +86,10 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
+# The vendored OCHRE reference (vendors/OCHRE submodule, version 0.9.2) is the
+# `ochre` the parity tests import; the `ochre` dependency group installs its
+# dependencies only.
+pythonpath = ["vendors/OCHRE"]
 addopts = "-n auto -m 'not slow and not ochre'"
 markers = [
     "slow: marks tests as slow (run with '-m slow' or '--run-slow')",

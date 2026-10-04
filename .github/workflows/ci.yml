@@ -257,6 +257,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v5
         with:
