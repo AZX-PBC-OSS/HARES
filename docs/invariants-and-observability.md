@@ -122,6 +122,30 @@ silently miss violations from `Equipment` (port/core consistency), `nan_screen`,
 `hvac_power_non_negative`, and `hvac_accumulator`. All four variants halt the
 dwelling simulation — no silent corruption.
 
+### Equipment Step Failures
+
+An equipment whose `step()` returns an error is rolled back rather than
+ending the run at once: its port contributions are removed, the failure is
+logged as a run warning naming the equipment and counted in
+`RunHealth::port_rollbacks` (every build profile), and the step continues
+without it. For that step the equipment delivered nothing: the consistency
+checks skip it, and the recorded flows (per-equipment and end-use power,
+the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
+step's electrical summary) report zero for it, while its state columns
+(mode, setpoint, SOC) keep its committed state.
+
+A failure that repeats on the next step comes from the equipment's state or
+configuration, not from one step's inputs, so the run errors
+(`HaresError::Simulation`, naming the equipment and its last failure) once
+one equipment fails more than `SimulationConfig::max_consecutive_step_failures`
+consecutive steps. The default, 1, tolerates an isolated failure; 0
+tolerates none. The streak is reset by a successful step and is part of the
+checkpoint.
+
+`ExecutionStage::EnvelopeResolution` is reserved for the domain solvers:
+equipment declaring it is rejected at registration, since no step loop runs
+it.
+
 ### Ordering Contract
 
 ```

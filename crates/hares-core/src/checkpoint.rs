@@ -49,6 +49,10 @@ use serde::{Deserialize, Serialize};
 /// rejected by the version gate. The payload carries its own schema
 /// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]), validated
 /// independently of this constant.
+///
+/// v12: `equipment_states` entries carry the equipment's consecutive failed
+/// steps, so a restored run ends at the same step the uninterrupted one
+/// does under `SimulationConfig::max_consecutive_step_failures`.
 pub const CHECKPOINT_VERSION: u32 = 12;
 
 /// One equipment's checkpointed state, identity-keyed.
@@ -70,6 +74,8 @@ pub struct EquipmentStateCheckpoint {
     /// is direct evidence the equipment set or its order changed between
     /// save and restore.
     pub equipment_id: u32,
+    /// Consecutive failed steps of this equipment at save time.
+    pub consecutive_step_failures: u32,
     /// Opaque state blob from `Equipment::save_state()`.
     pub blob: Vec<u8>,
 }
@@ -285,6 +291,7 @@ mod tests {
             equipment_states: vec![EquipmentStateCheckpoint {
                 name: "EV".into(),
                 equipment_id: 3,
+                consecutive_step_failures: 1,
                 blob: vec![1, 2, 3],
             }],
             rng_state: [42; 32],
@@ -350,7 +357,7 @@ mod tests {
     /// [`type_schema`]`::<DwellingCheckpoint>()`.
     const PINNED_VERSION: u32 = 12;
     const PINNED_SCHEMA_SHA256: &str =
-        "18eca1b4cbb5eef906d3a7ee768cd17fb49f97f06e1e60604db28c6f6597725e";
+        "3d4c0064e152fe8b3adf79e27b45d685dbfe7dd4bba1733d65c6761754f358ac";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

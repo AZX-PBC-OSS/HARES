@@ -74,7 +74,7 @@ use hares_types::{
     ThermalAccumulator, ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
     validate_core_contract,
 };
-use hares_types::{ControlCapabilities, validate_port_core_electrical_consistency};
+use hares_types::{ControlCapabilities, CoreOutput, validate_port_core_electrical_consistency};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
@@ -1657,6 +1657,22 @@ fn validate_equipment_zones(
     Ok(())
 }
 
+/// Verify that an equipment declares a stage the step loops run. The
+/// envelope-resolution stage belongs to the domain solvers: no loop steps
+/// equipment there, so such an equipment would silently never run.
+fn validate_equipment_stage(eq: &dyn Equipment) -> Result<()> {
+    let desc = eq.descriptor();
+    if desc.stage == ExecutionStage::EnvelopeResolution {
+        return Err(HaresError::Dwelling(format!(
+            "equipment '{}' declares ExecutionStage::EnvelopeResolution, which is \
+             reserved for the domain solvers; equipment steps in the Independent, \
+             Electrical or Thermal stage",
+            desc.name
+        )));
+    }
+    Ok(())
+}
+
 /// Verify that every fluid-loop port declaration references a loop ID that was
 /// allocated to equipment via [`loop_allocator::allocate_loop_ids`].
 ///
@@ -1714,6 +1730,15 @@ pub struct Dwelling {
     /// no allocation) to restore the pre-step state.  Initialised from the
     /// same port declarations as `ports` so capacities always match.
     rollback_ports: PortSlots,
+    /// Per equipment, index-aligned with `equipment`: whether its step in
+    /// the latest timestep failed and was rolled back. Such an equipment
+    /// delivered nothing that step, so the consistency checks skip it and
+    /// every recorded output reports no flow for it.
+    step_failed: Vec<bool>,
+    /// Per equipment, index-aligned with `equipment`: consecutive failed
+    /// steps through the latest timestep, held against
+    /// `SimulationConfig::max_consecutive_step_failures`.
+    consecutive_step_failures: Vec<u32>,
     pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
@@ -2017,6 +2042,7 @@ impl Dwelling {
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         };
 
         let config = DwellingConfig {
@@ -2089,6 +2115,7 @@ impl Dwelling {
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: config.output.retain_batches,
             rotation: config.output.rotation,
+            max_consecutive_step_failures: config.simulation.max_consecutive_step_failures,
         };
         validate_sim_config(&sim_config)?;
 
@@ -2707,6 +2734,7 @@ fn build_from_blueprint_inner(
 
     let mut declarations: Vec<PortDeclaration> = Vec::new();
     for eq in &equipment {
+        validate_equipment_stage(eq.as_ref())?;
         declarations.extend_from_slice(eq.ports());
     }
 
@@ -2766,6 +2794,8 @@ fn build_from_blueprint_inner(
         environment,
         ports: PortSlots::default(),
         rollback_ports: PortSlots::default(),
+        step_failed: Vec::new(),
+        consecutive_step_failures: Vec::new(),
         recorder: None,
         roster: RosterCaches::default(),
         rng,
@@ -3142,14 +3172,16 @@ impl Dwelling {
     /// external callers (e.g. Python bridges) to elevate a signal's priority
     /// (e.g. a freeze-protection `ThermalSetpoint` at `Safety`).
     ///
-    /// Returns `Err` if the equipment is not found or the signal is rejected
-    /// by the equipment's current state (e.g. EvDrive while plugged in).
+    /// Returns `Err` if the signal fails its numeric bounds, the equipment is
+    /// not found, or the signal is rejected by the equipment's current state
+    /// (e.g. EvDrive while plugged in).
     pub fn apply_control_validated(
         &mut self,
         name: &str,
         signal: ControlSignal,
         priority: Option<PriorityTier>,
     ) -> Result<()> {
+        signal.validate_numeric_bounds()?;
         let is_immediate = signal.is_immediate_state_update();
         if is_immediate {
             let eq = self
@@ -3487,12 +3519,16 @@ impl Dwelling {
         let mut equipment_soc = Vec::with_capacity(self.equipment.len());
         let mut equipment_power_kw = Vec::with_capacity(self.equipment.len());
 
-        for eq in &self.equipment {
+        for (idx, eq) in self.equipment.iter().enumerate() {
             let co = eq.core_output();
             equipment_names.push(eq.descriptor().name.clone());
             equipment_modes.push(co.state.operating_mode.map_or(0.0, |m| m.as_code()));
             equipment_soc.push(co.state.soc.map_or(0.0, |s| s.get()));
-            equipment_power_kw.push(co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()));
+            equipment_power_kw.push(
+                self.delivered_output(idx)
+                    .and_then(|delivered| delivered.flows.electric_kw)
+                    .map_or(0.0, |e| e.net_consumption_kw()),
+            );
 
             if let Some(zone_id) = eq.descriptor().zone
                 && let Some(zone_idx) = zone_ids.iter().position(|z| *z == zone_id)
@@ -3671,11 +3707,7 @@ impl Dwelling {
     /// Runs in every build profile, over the zone and HVAC-equipment index
     /// lists resolved at assembly ([`Self::hvac_thermal_consistency`]): a
     /// mismatch is a physics violation (a typed error), not a flag.
-    fn verify_per_zone_thermal_consistency(
-        &self,
-        step: u64,
-        step_succeeded: &[bool],
-    ) -> Result<()> {
+    fn verify_per_zone_thermal_consistency(&self, step: u64) -> Result<()> {
         for (i, acc) in self.ports.thermal.iter().enumerate() {
             let port_total: f64 = [ThermalCategory::HvacHeating, ThermalCategory::HvacCooling]
                 .into_iter()
@@ -3692,18 +3724,8 @@ impl Dwelling {
                 .map(|indices| {
                     indices
                         .iter()
-                        .filter_map(|&ei| {
-                            // A failed-and-rolled-back equipment booked no
-                            // thermal power this step (its port
-                            // contributions were removed); its core_output
-                            // retains the last committed value, which must
-                            // not be summed against the rolled-back ports.
-                            if !step_succeeded.get(ei).copied().unwrap_or(false) {
-                                return None;
-                            }
-                            self.equipment.get(ei)
-                        })
-                        .map(|eq| eq.core_output().flows.thermal_output_w.unwrap_or(0.0))
+                        .filter_map(|&ei| self.delivered_output(ei))
+                        .map(|co| co.flows.thermal_output_w.unwrap_or(0.0))
                         .sum()
                 })
                 .unwrap_or(0.0);
@@ -4240,6 +4262,46 @@ impl Dwelling {
         }
     }
 
+    /// The output an equipment delivered in the latest step: its core
+    /// output, or `None` when that step failed and was rolled back (it
+    /// delivered nothing, while its core output still holds an earlier
+    /// step's values).
+    fn delivered_output(&self, idx: usize) -> Option<&CoreOutput> {
+        (!self.step_failed[idx]).then(|| self.equipment[idx].core_output())
+    }
+
+    /// Books a successful equipment step: it ends the equipment's failure
+    /// streak.
+    fn record_equipment_step_success(&mut self, idx: usize) {
+        self.consecutive_step_failures[idx] = 0;
+    }
+
+    /// Books a failed equipment step: rolls back its port contributions
+    /// (surfaced as a warning and in `RunHealth::port_rollbacks`), flags it
+    /// failed for this step, and extends its failure streak.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Simulation` naming the equipment once its streak exceeds
+    /// `SimulationConfig::max_consecutive_step_failures`: a failure the
+    /// rollback cannot clear would otherwise leave it dead for the rest of
+    /// the run.
+    fn record_equipment_step_failure(&mut self, idx: usize, err: HaresError) -> Result<()> {
+        self.rollback_failed_equipment_ports(idx, &err);
+        self.step_failed[idx] = true;
+        let streak = &mut self.consecutive_step_failures[idx];
+        *streak = streak.saturating_add(1);
+        let budget = self.sim_config.max_consecutive_step_failures;
+        if *streak > budget {
+            return Err(HaresError::Simulation(format!(
+                "equipment '{}' failed {streak} consecutive steps, more than \
+                 max_consecutive_step_failures = {budget}; last failure: {err}",
+                self.equipment[idx].descriptor().name
+            )));
+        }
+        Ok(())
+    }
+
     /// Roll back port contributions from a failed equipment step.
     ///
     /// Called after `self.rollback_ports.copy_into(&self.ports)` captured
@@ -4491,7 +4553,7 @@ impl Dwelling {
         // required HVAC capacity.
         self.apply_occupancy_gains()?;
 
-        let mut step_succeeded = vec![false; self.equipment.len()];
+        self.step_failed.fill(false);
 
         // Step 1c: thermal equipment update_control() to determine mode and ideal targets.
         // Must run BEFORE solver feedback actor collects targets.
@@ -4864,7 +4926,7 @@ impl Dwelling {
             // is Copy).
             let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.rollback_failed_equipment_ports(idx, &err);
+                self.record_equipment_step_failure(idx, err)?;
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -4876,7 +4938,7 @@ impl Dwelling {
                     pre_electrical,
                     &self.ports.electrical,
                 )?;
-                step_succeeded[idx] = true;
+                self.record_equipment_step_success(idx);
                 stepped_stage_ranks.push(stage_rank(stage));
             }
 
@@ -4945,7 +5007,7 @@ impl Dwelling {
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.rollback_failed_equipment_ports(idx, &err);
+                self.record_equipment_step_failure(idx, err)?;
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -4957,7 +5019,7 @@ impl Dwelling {
                     pre_electrical,
                     &self.ports.electrical,
                 )?;
-                step_succeeded[idx] = true;
+                self.record_equipment_step_success(idx);
                 stepped_stage_ranks.push(stage_rank(stage));
             }
 
@@ -4998,7 +5060,7 @@ impl Dwelling {
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.rollback_failed_equipment_ports(idx, &err);
+                self.record_equipment_step_failure(idx, err)?;
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -5010,7 +5072,7 @@ impl Dwelling {
                     pre_electrical,
                     &self.ports.electrical,
                 )?;
-                step_succeeded[idx] = true;
+                self.record_equipment_step_success(idx);
                 stepped_stage_ranks.push(stage_rank(ExecutionStage::Thermal));
             }
 
@@ -5097,7 +5159,7 @@ impl Dwelling {
         // reset per take), and their step already failed the port contract.
         let mut step_curve_index_clamps: u64 = 0;
         for (idx, eq) in self.equipment.iter_mut().enumerate() {
-            if step_succeeded[idx] {
+            if !self.step_failed[idx] {
                 step_curve_index_clamps += eq.take_health_counts().curve_index_clamps;
             }
             // Warnings raised this step drain beside the health counts,
@@ -5544,7 +5606,7 @@ impl Dwelling {
             .equipment_telemetry
             .reserve(self.equipment.len());
         for (idx, eq) in self.equipment.iter().enumerate() {
-            if !step_succeeded[idx] {
+            if self.step_failed[idx] {
                 continue;
             }
             let desc = eq.descriptor();
@@ -5664,9 +5726,11 @@ impl Dwelling {
         let mut battery_kw = 0.0;
         let mut ev_kw = 0.0;
         let mut pv_kw = 0.0;
-        for eq in &self.equipment {
+        for (idx, eq) in self.equipment.iter().enumerate() {
             let end_use = &eq.descriptor().end_use;
-            let co = eq.core_output();
+            let Some(co) = self.delivered_output(idx) else {
+                continue;
+            };
             if *end_use == EndUse::BATTERY {
                 battery_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
             } else if *end_use == EndUse::EV {
@@ -5719,28 +5783,16 @@ impl Dwelling {
         // Physics checks raised from run_timestep in every build profile: the
         // per-equipment electric sum against the solver total, and the
         // per-zone HVAC port totals against the equipment thermal_output_w
-        // sums (over the wiring pre-resolved at assembly). Both sums read
-        // core_output, which a failed-and-rolled-back equipment retains from
-        // its last successful step ("tolerated step failures retain the last
-        // committed entry"): the rollback removed its port contributions, so
-        // the sums must skip it too. Its stale power must not be counted
-        // against the solver total, which no longer carries it.
+        // sums (over the wiring pre-resolved at assembly). Both sides see
+        // only what each equipment delivered this step.
         {
             let total = self.electrical_solver.net_active_kw();
-            let sum_equip: f64 = self
-                .equipment
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| step_succeeded[*idx])
-                .map(|(_, eq)| {
-                    eq.core_output()
-                        .flows
-                        .electric_kw
-                        .map_or(0.0, |e| e.net_consumption_kw())
-                })
+            let sum_equip: f64 = (0..self.equipment.len())
+                .filter_map(|idx| self.delivered_output(idx))
+                .map(|co| co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()))
                 .sum();
             DwellingTelemetry::verify_consistency(self.clock.current_step(), sum_equip, total)?;
-            self.verify_per_zone_thermal_consistency(self.clock.current_step(), &step_succeeded)?;
+            self.verify_per_zone_thermal_consistency(self.clock.current_step())?;
         }
         self.ports.zero();
         let _ = self.clock.next();
@@ -5801,8 +5853,16 @@ impl Dwelling {
             row[idx] = self.electrical_solver.net_reactive_kvar();
         }
 
-        // Per-equipment columns via pre-resolved index map.
-        for (eq, cols) in self.equipment.iter().zip(&self.roster.equipment_column_map) {
+        // Per-equipment columns via pre-resolved index map. The state
+        // columns (mode, setpoint, SOC, schedule) read the committed state;
+        // the flow and telemetry columns read what the equipment delivered
+        // this step, which for a failed-and-rolled-back step is nothing.
+        for (eq_idx, (eq, cols)) in self
+            .equipment
+            .iter()
+            .zip(&self.roster.equipment_column_map)
+            .enumerate()
+        {
             let co = eq.core_output();
             #[cfg(debug_assertions)]
             {
@@ -5841,13 +5901,6 @@ impl Dwelling {
                     debug_assert!(cols.duct_losses.is_some());
                 }
             }
-            if let Some(idx) = cols.electric_power {
-                row[idx] = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
-            }
-            if let Some(idx) = cols.gas_power {
-                row[idx] =
-                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W;
-            }
             if let Some(idx) = cols.mode {
                 row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
             }
@@ -5856,6 +5909,23 @@ impl Dwelling {
             }
             if let Some(idx) = cols.soc {
                 row[idx] = co.state.soc.map_or(0.0, |soc| soc.get());
+            }
+            if let Some(idx) = cols.schedule {
+                let is_active = co
+                    .state
+                    .operating_mode
+                    .is_some_and(|m| m != hares_types::OperatingMode::Off);
+                row[idx] = if is_active { 1.0 } else { 0.0 };
+            }
+            if self.step_failed[eq_idx] {
+                continue;
+            }
+            if let Some(idx) = cols.electric_power {
+                row[idx] = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
+            }
+            if let Some(idx) = cols.gas_power {
+                row[idx] =
+                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W;
             }
             if let Some(idx) = cols.capacity {
                 // Capacity column is always a positive magnitude (OCHRE HVAC.py:598:
@@ -5885,13 +5955,6 @@ impl Dwelling {
                 let dt_hours = self.latest_env.time_step_secs() / SECONDS_PER_HOUR;
                 let electric_kw = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
                 row[idx] = electric_kw * dt_hours;
-            }
-            if let Some(idx) = cols.schedule {
-                let is_active = co
-                    .state
-                    .operating_mode
-                    .is_some_and(|m| m != hares_types::OperatingMode::Off);
-                row[idx] = if is_active { 1.0 } else { 0.0 };
             }
             if let Some(idx) = cols.defrost_state {
                 row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
@@ -5940,14 +6003,21 @@ impl Dwelling {
         // Each equipment's electric power is accumulated into the aggregate column
         // for its EndUse category (e.g. all HVAC_HEATING equipment contribute to
         // "HVAC Heating End Use Electric Power (kW)").
-        for (eq, &agg_idx_opt) in self
-            .equipment
+        for (eq_idx, &agg_idx_opt) in self
+            .roster
+            .end_use_aggregate_indices
             .iter()
-            .zip(&self.roster.end_use_aggregate_indices)
+            .take(self.equipment.len())
+            .enumerate()
         {
-            if let Some(idx) = agg_idx_opt {
-                let co = eq.core_output();
-                row[idx] += co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
+            if let Some(idx) = agg_idx_opt
+                && !self.step_failed[eq_idx]
+            {
+                row[idx] += self.equipment[eq_idx]
+                    .core_output()
+                    .flows
+                    .electric_kw
+                    .map_or(0.0, |e| e.net_consumption_kw());
             }
         }
 
@@ -7357,6 +7427,20 @@ fn cfg_gated_helper() {
                 .iter()
                 .any(|eq| eq.descriptor().id == *id)
         });
+        for eq in &dwelling.equipment {
+            dwelling
+                .latest_env
+                .equipment_core
+                .entry(eq.descriptor().id)
+                .or_insert_with(|| eq.core_output().clone());
+        }
+        dwelling.step_failed = vec![false; dwelling.equipment.len()];
+        dwelling.consecutive_step_failures = vec![0; dwelling.equipment.len()];
+        assert_eq!(
+            dwelling.roster.equipment_ids.len(),
+            dwelling.consecutive_step_failures.len(),
+            "test helper: the per-equipment vectors stay index-aligned"
+        );
     }
 
     struct TestEquipment {
@@ -11652,6 +11736,7 @@ occupancy = 1.0
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: config.output.retain_batches,
             rotation: config.output.rotation,
+            max_consecutive_step_failures: config.simulation.max_consecutive_step_failures,
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 
@@ -13305,6 +13390,7 @@ master_seed = 0
                 latent_gain_w: 50.0,
                 category: ThermalCategory::InternalGain,
             })?;
+            self.core_output.flows.thermal_output_w = Some(1000.0);
             Err(HaresError::Equipment("simulated step failure".to_string()))
         }
 
@@ -13545,6 +13631,21 @@ master_seed = 0
         }
     }
 
+    /// The failing double writes `thermal_output_w` before it errors: the
+    /// environment must keep the entry seeded at registration, never the
+    /// failed step's output.
+    fn assert_failed_output_not_snapshotted(dwelling: &Dwelling, id: EquipmentId) {
+        let entry = dwelling
+            .latest_env
+            .equipment_core
+            .get(&id)
+            .expect("registration seeds every equipment's entry");
+        assert_eq!(
+            entry.flows.thermal_output_w, None,
+            "the failed step's output must not be snapshotted; id={id:?}"
+        );
+    }
+
     #[test]
     fn failed_equipment_step_prevents_snapshot_and_surfaces_warning() {
         let base_path =
@@ -13557,14 +13658,7 @@ master_seed = 0
 
         dwelling.run_timestep(false).expect("dwelling step");
 
-        // The failing equipment's step() returns Err, so its core output must
-        // not be snapshotted into equipment_core.
-        let failing_id = EquipmentId(999);
-        assert!(
-            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
-            "failed equipment core output must not be in equipment_core; id={:?}",
-            failing_id
-        );
+        assert_failed_output_not_snapshotted(&dwelling, EquipmentId(999));
 
         // Warning must be pushed.
         assert!(
@@ -13607,14 +13701,8 @@ master_seed = 0
             dwelling.warnings.iter().any(|w| w.contains("FailingEq")),
             "warning must contain failing equipment name"
         );
-        // The failing equipment's core output must not be snapshotted.
-        let failing_id = EquipmentId(999);
+        assert_failed_output_not_snapshotted(&dwelling, EquipmentId(999));
         let spy_id = EquipmentId(1001);
-        assert!(
-            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
-            "failed equipment core output must not be in equipment_core; id={:?}",
-            failing_id
-        );
         assert!(
             dwelling.latest_env.equipment_core.contains_key(&spy_id),
             "spy equipment core output must be snapshotted; id={:?}",
@@ -13637,15 +13725,8 @@ master_seed = 0
 
         dwelling.run_timestep(false).expect("dwelling step");
 
-        // Failing equipment's core output must NOT be in equipment_core.
-        let failing_id = EquipmentId(999);
+        assert_failed_output_not_snapshotted(&dwelling, EquipmentId(999));
         let functional_id = EquipmentId(1000);
-
-        assert!(
-            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
-            "failed equipment's core output must not be snapshotted; id={:?}",
-            failing_id
-        );
         assert!(
             dwelling
                 .latest_env
@@ -13656,21 +13737,23 @@ master_seed = 0
         );
     }
 
-    /// Equipment that books its electrical power and core_output on every
-    /// successful step, then fails on the step after `successful_steps`
-    /// successes (ports written first, then an error, so the rollback path
-    /// runs with a committed core_output from the previous step).
+    /// Equipment that follows a scripted outcome per step (`true` succeeds,
+    /// `false` fails, every step after the script fails). A successful step
+    /// books its electrical power and core_output; a failing one writes its
+    /// port contribution first and then errors, so the rollback path runs
+    /// with a committed core_output from an earlier step.
     struct FlakyPortEquipment {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
         core_output: CoreOutput,
         power_w: f64,
-        remaining_successes: u32,
+        outcomes: std::collections::VecDeque<bool>,
         ports: Vec<PortDeclaration>,
+        heats_zone: bool,
     }
 
     impl FlakyPortEquipment {
-        fn new(name: &str, power_w: f64, successful_steps: u32) -> Self {
+        fn new(name: &str, power_w: f64, outcomes: &[bool]) -> Self {
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(1002),
@@ -13688,9 +13771,48 @@ master_seed = 0
                 telemetry: Telemetry::default(),
                 core_output: CoreOutput::default(),
                 power_w,
-                remaining_successes: successful_steps,
+                outcomes: outcomes.iter().copied().collect(),
                 ports: vec![PortDeclaration::electrical()],
+                heats_zone: false,
             }
+        }
+
+        /// An electric heater: it also delivers `power_w` of HVAC heating to
+        /// zone 1 and reports it as `thermal_output_w`.
+        fn heating_zone(mut self) -> Self {
+            self.descriptor.end_use = EndUse::HVAC_HEATING;
+            self.descriptor.core_capabilities =
+                CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL;
+            self.ports.push(PortDeclaration::thermal(ZoneId(1)));
+            self.heats_zone = true;
+            self
+        }
+
+        /// A battery charging at `power_w` with a fixed state of charge.
+        fn battery(mut self) -> Self {
+            self.descriptor.end_use = EndUse::BATTERY;
+            self.descriptor.core_capabilities =
+                CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC;
+            self.core_output.state.soc =
+                Some(hares_types::Soc::try_from(0.5).expect("valid state of charge"));
+            self
+        }
+
+        fn book(&self, ports: &mut PortSlots) -> std::result::Result<(), HaresError> {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: self.power_w,
+                reactive_power_kvar: 0.0,
+            })?;
+            if self.heats_zone {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone: ZoneId(1),
+                    sensible_gain_w: self.power_w,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::HvacHeating,
+                })?;
+            }
+            Ok(())
         }
     }
 
@@ -13732,24 +13854,16 @@ master_seed = 0
             _dt: Duration,
             ports: &mut PortSlots,
         ) -> std::result::Result<(), hares_types::HaresError> {
-            if self.remaining_successes == 0 {
-                // Book the port contribution, then fail: the rollback removes
-                // the contribution while core_output keeps the last
-                // committed power.
-                ports.accumulate(&PortContribution::Electrical {
-                    active_power_w: self.power_w,
-                    reactive_power_kvar: 0.0,
-                })?;
+            self.book(ports)?;
+            if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
             }
-            self.remaining_successes -= 1;
-            ports.accumulate(&PortContribution::Electrical {
-                active_power_w: self.power_w,
-                reactive_power_kvar: 0.0,
-            })?;
             self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
                 self.power_w / 1000.0,
             )?);
+            if self.heats_zone {
+                self.core_output.flows.thermal_output_w = Some(self.power_w);
+            }
             Ok(())
         }
 
@@ -13780,21 +13894,19 @@ master_seed = 0
         }
     }
 
+    fn dwelling_with(equipment: FlakyPortEquipment) -> Dwelling {
+        let mut dwelling = bestest_dwelling();
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(equipment)]);
+        dwelling
+    }
+
     /// A tolerated equipment step failure must reconcile the electrical
     /// accounting: the rollback removes the failed equipment's port
     /// contributions, so its stale core_output power must not be summed
-    /// against the solver total. Before the reconciliation the consistency
-    /// check failed the step right after the tolerated one, contradicting
-    /// the tolerate-and-rollback design.
+    /// against the solver total.
     #[test]
     fn tolerated_step_failure_reconciles_the_electrical_sum() {
-        let base_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
-            .expect("build dwelling");
-
-        let flaky = FlakyPortEquipment::new("FlakyEq", 500.0, 1);
-        replace_equipment_for_test(&mut dwelling, vec![Box::new(flaky)]);
+        let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[true]));
 
         // Step 1: the equipment succeeds and books 500 W.
         dwelling.run_timestep(false).expect("first dwelling step");
@@ -13813,6 +13925,206 @@ master_seed = 0
             "the failure stays loud as a warning; warnings: {:?}",
             dwelling.warnings.iter().collect::<Vec<_>>()
         );
+    }
+
+    /// The per-zone HVAC thermal check skips a heater whose step failed: its
+    /// rolled-back port delivered nothing while its core_output still holds
+    /// the last committed heat.
+    #[test]
+    fn tolerated_heater_failure_reconciles_the_zone_thermal_sum() {
+        let mut dwelling =
+            dwelling_with(FlakyPortEquipment::new("FlakyHeater", 500.0, &[true]).heating_zone());
+        dwelling.run_timestep(false).expect("the heater succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("a tolerated heater failure must not desync the zone thermal sum");
+        assert_eq!(dwelling.health.port_rollbacks, 1);
+    }
+
+    #[test]
+    fn consecutive_failures_beyond_the_budget_end_the_run() {
+        let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[true]));
+        dwelling
+            .run_timestep(false)
+            .expect("the equipment succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is within the default budget");
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("a second consecutive failure ends the run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FlakyEq") && msg.contains("2 consecutive steps"),
+            "{msg}"
+        );
+        assert_eq!(dwelling.health.port_rollbacks, 2);
+    }
+
+    #[test]
+    fn a_failed_step_records_no_flow_for_the_failed_equipment() {
+        let (_dir, toml_path) = temp_toml("failed_step_row");
+        let output_path = toml_path.with_extension("csv");
+        fs::write(
+            &toml_path,
+            format!(
+                r#"building_id = 9001
+
+[simulation]
+start_time = "2024-06-15T12:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "none"
+
+[weather]
+outdoor_temp_c = 20.0
+dew_point_c = 10.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 0.0
+
+[output]
+output_verbosity = 1
+output_format = "csv"
+output_chunk_size = 1
+write_output = true
+retain_batches = true
+output_path = "{}"
+master_seed = 0
+"#,
+                output_path.display()
+            ),
+        )
+        .expect("write TOML");
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling
+            .add_equipment(Box::new(FlakyPortEquipment::new("FlakyEq", 500.0, &[true])))
+            .expect("register the equipment");
+        dwelling.step().expect("the equipment succeeds");
+        dwelling
+            .step()
+            .expect("one failure is within the default budget");
+
+        let recorded: Vec<f64> = dwelling
+            .flushed_batches()
+            .iter()
+            .flat_map(|batch| {
+                let column = batch
+                    .column_by_name("FlakyEq Electric Power (kW)")
+                    .expect("the equipment has an electric power column")
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float64Array>()
+                    .expect("power columns are f64")
+                    .clone();
+                column.values().to_vec()
+            })
+            .collect();
+        assert_eq!(recorded, vec![0.5, 0.0]);
+    }
+
+    /// The envelope-resolution stage belongs to the domain solvers: no
+    /// stage loop steps equipment there, so registering one is rejected
+    /// rather than leaving it silently never stepped.
+    #[test]
+    fn equipment_in_the_envelope_resolution_stage_is_rejected_at_registration() {
+        let mut dwelling = bestest_dwelling();
+        let mut unsteppable = FlakyPortEquipment::new("Unsteppable", 500.0, &[]);
+        unsteppable.descriptor.stage = ExecutionStage::EnvelopeResolution;
+        unsteppable.descriptor.id = EquipmentId(0);
+        let err = dwelling
+            .add_equipment(Box::new(unsteppable))
+            .expect_err("no stage loop steps envelope-resolution equipment");
+        assert!(err.to_string().contains("EnvelopeResolution"), "{err}");
+        assert!(
+            dwelling
+                .equipment
+                .iter()
+                .all(|eq| eq.descriptor().name != "Unsteppable")
+        );
+
+        let mut replacement = FlakyPortEquipment::new("Unsteppable", 500.0, &[]);
+        replacement.descriptor.stage = ExecutionStage::EnvelopeResolution;
+        replacement.descriptor.id = EquipmentId(0);
+        let existing = dwelling.equipment[0].descriptor().name.clone();
+        assert!(
+            dwelling
+                .replace_equipment(&existing, Box::new(replacement))
+                .is_err(),
+            "replacement is held to the same rule"
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_tolerates_no_failure() {
+        let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[]));
+        dwelling.sim_config.max_consecutive_step_failures = 0;
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the first failure exceeds a zero budget");
+        assert!(err.to_string().contains("1 consecutive steps"), "{err}");
+    }
+
+    #[test]
+    fn the_failure_streak_survives_a_checkpoint() {
+        let mut continuous = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[true]));
+        continuous
+            .run_timestep(false)
+            .expect("the equipment succeeds");
+        continuous
+            .run_timestep(false)
+            .expect("one failure is within the default budget");
+        let checkpoint = continuous.save_checkpoint().expect("save checkpoint");
+
+        let mut restored = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[]));
+        restored
+            .load_checkpoint(checkpoint)
+            .expect("restore checkpoint");
+        continuous
+            .run_timestep(false)
+            .expect_err("the continuous run ends at the second consecutive failure");
+        restored
+            .run_timestep(false)
+            .expect_err("the restored run ends at the same step");
+    }
+
+    #[test]
+    fn a_successful_step_resets_the_failure_streak() {
+        let mut dwelling = dwelling_with(FlakyPortEquipment::new(
+            "FlakyEq",
+            500.0,
+            &[false, true, false, true, false, true],
+        ));
+        for _ in 0..6 {
+            dwelling
+                .run_timestep(false)
+                .expect("isolated failures are tolerated");
+        }
+        assert_eq!(dwelling.health.port_rollbacks, 3);
+    }
+
+    #[test]
+    fn a_failed_step_reports_no_power_for_the_failed_equipment() {
+        let mut dwelling =
+            dwelling_with(FlakyPortEquipment::new("FlakyBattery", 500.0, &[true]).battery());
+        dwelling.run_timestep(false).expect("the battery succeeds");
+        assert_eq!(dwelling.prior_electrical_summary.battery_power_kw, 0.5);
+        assert_eq!(dwelling.telemetry().unwrap().equipment_power_kw, vec![0.5]);
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is tolerated");
+        assert_eq!(dwelling.prior_electrical_summary.battery_power_kw, 0.0);
+        assert_eq!(dwelling.telemetry().unwrap().equipment_power_kw, vec![0.0]);
     }
 
     // ── Run-health counters and always-on invariant enforcement ──

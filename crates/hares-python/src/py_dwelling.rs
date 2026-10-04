@@ -2247,6 +2247,7 @@ const KNOWN_KWARGS: &[&str] = &[
     "elevation_m",
     "utc_offset_h",
     "rotation",
+    "max_consecutive_step_failures",
 ];
 
 /// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
@@ -2465,6 +2466,13 @@ pub(crate) fn build_config(
             .transpose()?
             .unwrap_or(hares_io::RotationPolicy::None);
 
+        let max_consecutive_step_failures = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("max_consecutive_step_failures").ok().flatten())
+            .map(|obj| obj.extract::<u32>())
+            .transpose()?
+            .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
+
         if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
             return Err(PyValueError::new_err(format!(
                 "duration ({}s) must be an exact multiple of time_res ({}s)",
@@ -2492,6 +2500,7 @@ pub(crate) fn build_config(
             site_location,
             retain_batches: true,
             rotation: rotation_policy,
+            max_consecutive_step_failures,
         }
     };
 

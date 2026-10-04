@@ -1,7 +1,7 @@
-//! A thermostat band set by a named `ThermalSetpoint` and kept through the
-//! release is part of the resumable state: a dwelling restored from a
-//! checkpoint taken after the release continues exactly as the uninterrupted
-//! run does.
+//! The thermostat band a `ThermalSetpoint` carries, at dwelling level: a
+//! band below a thermostat's resolution never reaches the equipment, and a
+//! band set by a named signal and kept through the release is part of the
+//! resumable state.
 
 use std::path::PathBuf;
 
@@ -26,6 +26,43 @@ fn heating_equipment_name(dwelling: &Dwelling) -> String {
         .expect("s54 carries a heating unit")
         .name
         .clone()
+}
+
+/// A sub-band deadband is rejected before it reaches the furnace, so the
+/// furnace keeps heating and the zone holds its setpoint over twelve hours
+/// of -5 C weather.
+#[test]
+fn a_sub_band_deadband_is_rejected_and_the_furnace_keeps_heating() {
+    let mut dwelling = s54_dwelling();
+    let heater = heating_equipment_name(&dwelling);
+    for _ in 0..STEPS_BEFORE_CHECKPOINT {
+        dwelling.step().expect("step before the signal");
+    }
+    for deadband_c in [1e-17, 5e-324] {
+        dwelling
+            .apply_control_validated(
+                &heater,
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: None,
+                    deadband_c: Some(deadband_c),
+                },
+                None,
+            )
+            .expect_err("a band below a thermostat's resolution is rejected");
+    }
+    let mut lowest_zone_c = f64::INFINITY;
+    for _ in 0..720 {
+        let step = dwelling.step().expect("the furnace keeps stepping");
+        for &(_, zone_c) in &step.zone_temperatures_c {
+            lowest_zone_c = lowest_zone_c.min(zone_c);
+        }
+    }
+    assert_eq!(dwelling.health().port_rollbacks, 0);
+    assert!(
+        lowest_zone_c > 15.0,
+        "the zone must stay heated, fell to {lowest_zone_c} C"
+    );
 }
 
 #[test]

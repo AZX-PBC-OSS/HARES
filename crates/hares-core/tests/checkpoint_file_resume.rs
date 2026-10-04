@@ -42,6 +42,7 @@ fn dwelling(case: &Case) -> Dwelling {
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id: 1,

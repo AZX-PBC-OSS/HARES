@@ -20,7 +20,10 @@ pub mod tmy3;
 pub mod weather;
 pub mod wsf;
 
-pub use config::{ConfigError, OutputFormat, RotationPolicy, SimulationConfig};
+pub use config::{
+    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, OutputFormat, RotationPolicy,
+    SimulationConfig,
+};
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
     HvacCurveSet, HvacCurveVariant, PvPanelDefaults, ZipLoad,

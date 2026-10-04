@@ -22,6 +22,13 @@ class TestSimulationConfig:
         assert cfg.master_seed == 0
         assert cfg.civil_timezone is None
         assert cfg.setpoint_deadband_c is None
+        assert cfg.max_consecutive_step_failures == 1
+
+    def test_step_failure_budget_is_configurable(self):
+        cfg = SimulationConfig(max_consecutive_step_failures=0)
+        assert cfg.max_consecutive_step_failures == 0
+        cfg.max_consecutive_step_failures = 5
+        assert cfg.max_consecutive_step_failures == 5
 
     def test_construction_with_kwargs(self):
         """Verify SimulationConfig accepts kwargs in constructor."""

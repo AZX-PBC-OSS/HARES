@@ -1471,6 +1471,7 @@ mod tests {
             site_location: crate::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: crate::RotationPolicy::None,
+            max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         }
     }
 
@@ -1501,6 +1502,7 @@ mod tests {
             site_location: crate::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: crate::RotationPolicy::None,
+            max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         }
     }
 

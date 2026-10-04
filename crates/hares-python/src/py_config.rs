@@ -62,6 +62,7 @@ pub struct PySimulationConfig {
     utc_offset_h: Option<f64>,
     retain_batches: bool,
     rotation: Option<String>,
+    max_consecutive_step_failures: u32,
 }
 
 #[pymethods]
@@ -86,6 +87,7 @@ impl PySimulationConfig {
             utc_offset_h = None,
             retain_batches = None,
             rotation = None,
+            max_consecutive_step_failures = None,
         )
     )]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -108,6 +110,7 @@ impl PySimulationConfig {
         utc_offset_h: Option<f64>,
         retain_batches: Option<bool>,
         rotation: Option<String>,
+        max_consecutive_step_failures: Option<u32>,
     ) -> PyResult<Self> {
         let start_time = match start_time {
             Some(s) => parse_datetime_str(&s)?,
@@ -210,6 +213,8 @@ impl PySimulationConfig {
             utc_offset_h,
             retain_batches: retain_batches.unwrap_or(true),
             rotation,
+            max_consecutive_step_failures: max_consecutive_step_failures
+                .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES),
         })
     }
 
@@ -450,6 +455,16 @@ impl PySimulationConfig {
         Ok(())
     }
 
+    #[getter]
+    pub fn max_consecutive_step_failures(&self) -> u32 {
+        self.max_consecutive_step_failures
+    }
+
+    #[setter]
+    pub fn set_max_consecutive_step_failures(&mut self, value: u32) {
+        self.max_consecutive_step_failures = value;
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
             "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={}, retain_batches={}, rotation={})",
@@ -512,6 +527,7 @@ impl PySimulationConfig {
                 .map(parse_rotation_policy)
                 .transpose()?
                 .unwrap_or(hares_io::RotationPolicy::None),
+            max_consecutive_step_failures: self.max_consecutive_step_failures,
         })
     }
 
@@ -543,6 +559,7 @@ impl PySimulationConfig {
                 hares_io::RotationPolicy::Monthly => Some("monthly".to_string()),
                 hares_io::RotationPolicy::Yearly => Some("yearly".to_string()),
             },
+            max_consecutive_step_failures: config.max_consecutive_step_failures,
         }
     }
 }
@@ -760,6 +777,7 @@ impl PyDwellingConfig {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
         };
 
@@ -853,6 +871,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
@@ -883,6 +902,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
@@ -898,6 +918,7 @@ mod tests {
                 None,
                 Some(MAX_CHRONO_SECONDS),
                 Some(5),
+                None,
                 None,
                 None,
                 None,

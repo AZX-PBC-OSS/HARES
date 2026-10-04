@@ -31,14 +31,25 @@ impl Dwelling {
         humidity_states.sort_by_key(|&(zone, _)| zone);
         let fluid_states = self.fluid_solver.snapshot_payload();
 
+        if self.consecutive_step_failures.len() != self.equipment.len() {
+            return Err(HaresError::InvalidState(format!(
+                "{} failure streaks for {} equipment: the streaks are index-aligned \
+                 with the equipment",
+                self.consecutive_step_failures.len(),
+                self.equipment.len()
+            )));
+        }
         let mut equipment_states = Vec::with_capacity(self.equipment.len());
-        for eq in &self.equipment {
+        for (eq, &consecutive_step_failures) in
+            self.equipment.iter().zip(&self.consecutive_step_failures)
+        {
             match eq.save_state() {
                 Ok(blob) => {
                     let desc = eq.descriptor();
                     equipment_states.push(EquipmentStateCheckpoint {
                         name: desc.name.clone(),
                         equipment_id: desc.id.0,
+                        consecutive_step_failures,
                         blob,
                     });
                 }
@@ -97,7 +108,11 @@ impl Dwelling {
     /// call. On any error the dwelling is therefore left as it was.
     pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
         self.validate_building_state(&cp)?;
-        let equipment_blobs = self.matched_equipment_blobs(&cp)?;
+        let equipment_states = self.matched_equipment_states(&cp)?;
+        let equipment_blobs: Vec<&[u8]> = equipment_states
+            .iter()
+            .map(|state| state.blob.as_slice())
+            .collect();
         let actor_blobs = self.matched_actor_blobs(&cp)?;
         // The tariff evaluator rebuilds from its snapshot blob before
         // anything mutates, so a snapshot that fails to restore leaves the
@@ -113,6 +128,10 @@ impl Dwelling {
         self.load_component_states(&equipment_blobs, &actor_blobs, |dwelling| {
             dwelling.check_ev_driver_cursor(cp.next_ev_driver_stream)
         })?;
+        self.consecutive_step_failures = equipment_states
+            .iter()
+            .map(|state| state.consecutive_step_failures)
+            .collect();
 
         if let Some(env) = last_step_env {
             self.latest_env = env;
@@ -249,7 +268,10 @@ impl Dwelling {
     /// the live equipment. A spec reorder between save and restore (or any
     /// other identity drift) fails here, naming both sides, instead of
     /// loading one equipment's state into another.
-    fn matched_equipment_blobs<'cp>(&self, cp: &'cp DwellingCheckpoint) -> Result<Vec<&'cp [u8]>> {
+    fn matched_equipment_states<'cp>(
+        &self,
+        cp: &'cp DwellingCheckpoint,
+    ) -> Result<Vec<&'cp EquipmentStateCheckpoint>> {
         if cp.equipment_states.len() != self.equipment.len() {
             return Err(HaresError::Io(format!(
                 "checkpoint equipment count mismatch: checkpoint has {} equipment states, dwelling has {} equipment",
@@ -282,7 +304,7 @@ impl Dwelling {
                         desc.name, state.equipment_id, desc.id.0
                     )));
                 }
-                Ok(state.blob.as_slice())
+                Ok(state)
             })
             .collect()
     }

@@ -127,6 +127,28 @@ pub struct SimulationConfig {
     /// specifying coordinates/timezone explicitly.
     #[serde(default)]
     pub site_location: SiteLocationOverride,
+    /// Most consecutive steps one equipment's step may fail before the run
+    /// errors (default [`DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES`]).
+    ///
+    /// A failed step is rolled back: its port contributions are removed, it
+    /// is counted in `RunHealth::port_rollbacks` and logged as a warning, and
+    /// the step continues without that equipment. A failure that repeats on
+    /// the next step comes from the equipment's state or configuration, not
+    /// from one step's inputs, and would leave the equipment dead for the
+    /// rest of the run, so the step after this many consecutive failures of
+    /// one equipment returns an error naming it. `0` tolerates no failure.
+    #[serde(default = "default_max_consecutive_step_failures")]
+    pub max_consecutive_step_failures: u32,
+}
+
+/// Default for [`SimulationConfig::max_consecutive_step_failures`]: one
+/// isolated failure is tolerated, so a single step's input excursion does
+/// not end a long run, while the second consecutive failure of the same
+/// equipment, which the rollback cannot clear, ends it.
+pub const DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES: u32 = 1;
+
+fn default_max_consecutive_step_failures() -> u32 {
+    DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
 }
 
 impl SimulationConfig {
@@ -240,6 +262,21 @@ duration = 3600
         assert_eq!(cfg.master_seed, 0);
         assert!(cfg.output_path.is_none());
         assert!(cfg.write_output);
+        assert_eq!(
+            cfg.max_consecutive_step_failures,
+            DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
+        );
+    }
+
+    #[test]
+    fn step_failure_budget_is_configurable() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+max_consecutive_step_failures = 0
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
+        assert_eq!(cfg.max_consecutive_step_failures, 0);
     }
 
     #[test]

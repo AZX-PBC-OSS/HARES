@@ -821,6 +821,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: true,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
@@ -1177,6 +1178,7 @@ mod tests {
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         }
     }
 

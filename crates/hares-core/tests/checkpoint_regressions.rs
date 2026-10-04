@@ -536,6 +536,7 @@ fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) ->
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: true,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id: 176_227,

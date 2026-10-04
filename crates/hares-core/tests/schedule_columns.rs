@@ -112,6 +112,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
@@ -256,6 +257,7 @@ fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
         hpxml_path: bldg.join("home.xml"),

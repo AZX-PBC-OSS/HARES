@@ -127,6 +127,12 @@ pub(crate) struct SyntheticSimulationConfig {
     pub(crate) duration_s: i64,
     #[serde(default)]
     pub(crate) initialization_duration_s: Option<u64>,
+    #[serde(default = "default_max_consecutive_step_failures")]
+    pub(crate) max_consecutive_step_failures: u32,
+}
+
+fn default_max_consecutive_step_failures() -> u32 {
+    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
 }
 
 #[derive(Debug, Clone, Deserialize)]

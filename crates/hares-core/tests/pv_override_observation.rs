@@ -1,9 +1,10 @@
 //! Behavioral replication of the coverage-triage PV scenario: a solar
 //! override whose rows lack the PV arrays' synthetic orientation surfaces
-//! makes every PV `step()` fail (tolerated, warned); the question under
-//! test is whether the dwelling's per-step observable contract survives —
-//! run to completion with every equipment individually observable, and the
-//! start-of-step core-entry invariant never firing.
+//! makes every PV `step()` fail. Under the default failure budget the run
+//! ends at the second consecutive failure, naming the PV; under a budget
+//! that tolerates the whole run, the dwelling's per-step observable
+//! contract survives: every equipment stays individually observable and the
+//! start-of-step core-entry invariant never fires.
 
 use std::path::PathBuf;
 
@@ -41,8 +42,9 @@ fn envelope_only_override() -> Vec<Vec<SurfaceIrradiance>> {
         .collect()
 }
 
-#[test]
-fn tolerated_pv_step_failure_under_surface_less_override_keeps_equipment_observable() {
+const STEPS: u32 = 6;
+
+fn pv_dwelling_with_surface_less_override(max_consecutive_step_failures: u32) -> Dwelling {
     let config = DwellingConfig {
         hpxml_path: sample_dir().join("base-pv.xml"),
         schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
@@ -66,6 +68,7 @@ fn tolerated_pv_step_failure_under_surface_less_override_keeps_equipment_observa
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures,
         },
         overrides: None,
         bldg_id: 42,
@@ -84,13 +87,31 @@ fn tolerated_pv_step_failure_under_surface_less_override_keeps_equipment_observa
     dwelling
         .environment
         .set_solar_override(envelope_only_override());
+    dwelling
+}
 
-    // Six steps, mirroring the Python test. Behavioral contract: every step
-    // succeeds (the PV failure is tolerated by design), and — the face the
-    // triage found — the dwelling does not panic on its start-of-step
-    // core-entry invariant, because a tolerated step failure must not make
-    // an equipment permanently unobservable.
-    for step in 0..6 {
+#[test]
+fn a_pv_failing_every_step_ends_the_run_under_the_default_budget() {
+    let mut dwelling =
+        pv_dwelling_with_surface_less_override(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
+    dwelling
+        .step()
+        .expect("one failure is within the default budget");
+    let err = dwelling
+        .step()
+        .expect_err("the second consecutive failure ends the run");
+    assert!(err.to_string().contains("'PV"), "{err}");
+}
+
+#[test]
+fn tolerated_pv_step_failure_under_surface_less_override_keeps_equipment_observable() {
+    let mut dwelling = pv_dwelling_with_surface_less_override(STEPS);
+
+    // Behavioral contract under a budget that tolerates every step: the
+    // dwelling does not panic on its start-of-step core-entry invariant,
+    // because a tolerated step failure must not make an equipment
+    // permanently unobservable.
+    for step in 0..STEPS {
         dwelling
             .step()
             .unwrap_or_else(|e| panic!("step {step} must tolerate the PV failure: {e}"));

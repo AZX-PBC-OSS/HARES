@@ -35,7 +35,8 @@ use super::{
     build_equipment_column_map, build_hvac_thermal_consistency, build_zone_column_caches,
     compute_equipment_dispatch_targets, compute_equipment_execution_order,
     enrich_schema_with_telemetry_units, equipment_descriptor_specs,
-    extend_schema_with_actor_columns, validate_equipment_zones, zone_display_name,
+    extend_schema_with_actor_columns, validate_equipment_stage, validate_equipment_zones,
+    zone_display_name,
 };
 
 /// The values the per-step path reads that derive from the equipment and
@@ -626,6 +627,7 @@ impl Dwelling {
     fn validate_candidate_ports(&self, eq: &dyn Equipment) -> Result<()> {
         let env_zone_ids: HashSet<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
         validate_equipment_zones(eq.ports(), &env_zone_ids)?;
+        validate_equipment_stage(eq)?;
         if let Some(location) = eq.ambient_location() {
             self.environment.check_ambient_location(location)?;
         }
@@ -1237,6 +1239,22 @@ impl Dwelling {
             self.actor_timings = ActorTimings::new(self.actors.iter().map(|a| Arc::from(a.name())));
         }
         self.roster.equipment_execution_order = plan.equipment_execution_order;
+        // Each surviving equipment carries its failure streak across the
+        // change (an entering one has failed no step yet), and the
+        // latest-step failure flags clear.
+        let streak_by_id: HashMap<EquipmentId, u32> = self
+            .roster
+            .equipment_ids
+            .iter()
+            .copied()
+            .zip(self.consecutive_step_failures.iter().copied())
+            .collect();
+        self.consecutive_step_failures = plan
+            .equipment_ids
+            .iter()
+            .map(|id| streak_by_id.get(id).copied().unwrap_or(0))
+            .collect();
+        self.step_failed = vec![false; plan.equipment_ids.len()];
         self.roster.equipment_ids = plan.equipment_ids;
         // The environment snapshot follows the roster at once: removed
         // equipment leaves it, and joining equipment is seeded with its own
