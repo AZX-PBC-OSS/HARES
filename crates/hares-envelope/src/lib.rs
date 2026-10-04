@@ -36,7 +36,7 @@ pub use state_space::{
     van_loan_discretize,
 };
 pub use thermal_solver::{
-    BoundaryCategory, BoundaryDiagnosticInfo, CoupledState, DrivingTemp, EnvelopeComponentGains,
+    BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
     MechanicalVentilationParams, NaturalVentilationConfig, OpeningType, StateSpaceWiring,

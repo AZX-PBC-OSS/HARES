@@ -431,22 +431,27 @@ mod tests {
         if let Some(last) = snapshots.last()
             && let Some(solver) = last.phases.post_solvers.as_ref()
         {
-            let diags = &solver.envelope_gains.int_surface_diag;
-            if !diags.is_empty() {
-                eprintln!(
-                    "\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):",
-                    diags.len()
-                );
-                eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
-                let mut total_lwr = 0.0_f64;
-                for (i, d) in diags.iter().enumerate() {
+            // Per-surface diagnostics are recorded only in debug and
+            // `observe_detailed` builds.
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            {
+                let diags = &solver.envelope_gains.int_surface_diag;
+                if !diags.is_empty() {
                     eprintln!(
-                        "    {:>4} {:>10.2} {:>10.1}",
-                        i, d.surface_temp_c, d.lwr_flux_w
+                        "\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):",
+                        diags.len()
                     );
-                    total_lwr += d.lwr_flux_w;
+                    eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
+                    let mut total_lwr = 0.0_f64;
+                    for (i, d) in diags.iter().enumerate() {
+                        eprintln!(
+                            "    {:>4} {:>10.2} {:>10.1}",
+                            i, d.surface_temp_c, d.lwr_flux_w
+                        );
+                        total_lwr += d.lwr_flux_w;
+                    }
+                    eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
                 }
-                eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
             }
 
             // Also dump interior LWR by zone.
@@ -762,9 +767,9 @@ mod tests {
             let mut h_raw_inf_m3s = 0.0_f64;
             let mut h_driving_outdoor_c = 0.0_f64;
             let mut h_driving_ground_c = 0.0_f64;
-            let mut h_solar_beam_w = 0.0_f64;
-            let mut h_solar_diffuse_w = 0.0_f64;
-            let mut h_solar_absorbed_w = 0.0_f64;
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            let (mut h_solar_beam_w, mut h_solar_diffuse_w, mut h_solar_absorbed_w) =
+                (0.0_f64, 0.0_f64, 0.0_f64);
             let mut n = 0usize;
 
             for snap in &snapshots {
@@ -785,6 +790,7 @@ mod tests {
                     h_raw_inf_m3s += g.raw_infiltration_m3_s;
                     h_driving_outdoor_c += g.driving_outdoor_temp_c;
                     h_driving_ground_c += g.driving_ground_temp_c;
+                    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                     for wd in &g.window_solar_diag {
                         h_solar_beam_w += wd.transmitted_beam_w;
                         h_solar_diffuse_w += wd.transmitted_diffuse_w;
@@ -888,35 +894,40 @@ mod tests {
                     o_ground.unwrap_or(f64::NAN)
                 );
 
-                // Beam vs diffuse solar breakdown.
-                let beam_mean = h_solar_beam_w / d;
-                let diffuse_mean = h_solar_diffuse_w / d;
-                let absorbed_mean = h_solar_absorbed_w / d;
-                let total_solar = beam_mean + diffuse_mean + absorbed_mean;
-                let o_total_solar = o_wsolar.unwrap_or(0.0);
-                eprintln!("\n  Window solar breakdown (mean W):");
-                eprintln!("    Transmitted beam:      {:>8.1}", beam_mean);
-                eprintln!("    Transmitted diffuse:   {:>8.1}", diffuse_mean);
-                eprintln!("    Absorbed inward:       {:>8.1}", absorbed_mean);
-                eprintln!(
-                    "    Total window solar:    {:>8.1}  (OCHRE={:.1}  Δ={:+.1})",
-                    total_solar,
-                    o_total_solar,
-                    total_solar - o_total_solar
-                );
-                if total_solar > 1.0 {
+                // Beam vs diffuse solar breakdown, from the per-window
+                // diagnostics recorded only in debug and `observe_detailed`
+                // builds.
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                {
+                    let beam_mean = h_solar_beam_w / d;
+                    let diffuse_mean = h_solar_diffuse_w / d;
+                    let absorbed_mean = h_solar_absorbed_w / d;
+                    let total_solar = beam_mean + diffuse_mean + absorbed_mean;
+                    let o_total_solar = o_wsolar.unwrap_or(0.0);
+                    eprintln!("\n  Window solar breakdown (mean W):");
+                    eprintln!("    Transmitted beam:      {:>8.1}", beam_mean);
+                    eprintln!("    Transmitted diffuse:   {:>8.1}", diffuse_mean);
+                    eprintln!("    Absorbed inward:       {:>8.1}", absorbed_mean);
                     eprintln!(
-                        "    Beam fraction:         {:>7.1}%",
-                        beam_mean / total_solar * 100.0
+                        "    Total window solar:    {:>8.1}  (OCHRE={:.1}  Δ={:+.1})",
+                        total_solar,
+                        o_total_solar,
+                        total_solar - o_total_solar
                     );
-                    eprintln!(
-                        "    Diffuse fraction:      {:>7.1}%",
-                        diffuse_mean / total_solar * 100.0
-                    );
-                    eprintln!(
-                        "    Absorbed fraction:     {:>7.1}%",
-                        absorbed_mean / total_solar * 100.0
-                    );
+                    if total_solar > 1.0 {
+                        eprintln!(
+                            "    Beam fraction:         {:>7.1}%",
+                            beam_mean / total_solar * 100.0
+                        );
+                        eprintln!(
+                            "    Diffuse fraction:      {:>7.1}%",
+                            diffuse_mean / total_solar * 100.0
+                        );
+                        eprintln!(
+                            "    Absorbed fraction:     {:>7.1}%",
+                            absorbed_mean / total_solar * 100.0
+                        );
+                    }
                 }
             }
         }

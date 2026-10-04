@@ -10,7 +10,6 @@ use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_envelope::CoupledState;
 use hares_equipment::EvConfig;
 use hares_equipment::config::ConfigValue;
 use hares_equipment::ev::Ev;
@@ -593,6 +592,16 @@ fn assert_frames_bitwise_equal(expected: &RecordBatch, actual: &RecordBatch) {
 /// attic, vented crawlspace) with couplings active and its HVAC sized by the
 /// ideal-capacity solve, so every piece of thermal solver state a step reads
 /// must travel through the checkpoint.
+///
+/// A dwelling step rebuilds the couplings before any ideal-capacity solve
+/// reads them: `Dwelling::step` calls `prepare_inputs`
+/// (`crates/hares-core/src/dwelling/mod.rs:5888`) before
+/// `collect_and_solve` (`:5947`), and `prepare_inputs_inner` rebuilds
+/// `last_coupling` (`crates/hares-envelope/src/thermal_solver/stepping.rs:714`,
+/// `:717`). This test therefore pins resume equality of the whole dwelling;
+/// the restore of the coupling state itself, which a solve called directly
+/// after `restore_state` reads, is pinned by the solver unit test
+/// `restore_state_restores_coupling_state`.
 #[test]
 fn resumed_run_equals_continuous_run() {
     let output_dir = tempfile::tempdir().expect("temp dir");
@@ -619,9 +628,8 @@ fn resumed_run_equals_continuous_run() {
         interrupted.step().expect("step before checkpoint");
     }
     let checkpoint = interrupted.save_checkpoint().expect("save checkpoint");
-    assert_eq!(
-        checkpoint.thermal.last_coupled_state,
-        CoupledState::Identity,
+    assert!(
+        !checkpoint.thermal.last_coupling.is_empty(),
         "couplings must be active at the checkpoint"
     );
 

@@ -18,7 +18,6 @@ use hares_types::{
 };
 use nalgebra::DVector;
 
-use super::CoupledState;
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
@@ -49,7 +48,7 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_state`).
+    /// or `last_coupling`).
     pub fn autosize_capacity(&self, zone: ZoneId, target_c: f64, design_outdoor_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -190,7 +189,7 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_state`).
+    /// or `last_coupling`).
     ///
     /// * `site_elevation_m` — site elevation in meters
     ///
@@ -355,7 +354,8 @@ impl ThermalSolver {
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
-    /// Uses `last_u`, `last_coupling`, and `last_coupled_state` as background.
+    /// Uses `last_u` and `last_coupling` as background; a non-empty
+    /// `last_coupling` selects the identity-coupled solve.
     /// When `prepare_inputs()` has been called first (two-phase path), these
     /// contain current-step weather/solar/infiltration data.
     ///
@@ -401,11 +401,11 @@ impl ThermalSolver {
 
         // Shared per-step prefix: filled by the first solve call of the step
         // (or after any invalidation); later calls with unchanged x/last_u
-        // reuse it. The recorded variant guards the tail selection.
-        if !self.shared_prefix_valid || self.shared_prefix_variant != self.last_coupled_state {
+        // reuse it. The prefix depends on x and last_u only, not on whether
+        // couplings are active.
+        if !self.shared_prefix_valid {
             self.model
                 .fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
-            self.shared_prefix_variant = self.last_coupled_state;
             self.shared_prefix_valid = true;
             #[cfg(test)]
             {
@@ -417,8 +417,17 @@ impl ThermalSolver {
             self.solve_tail_calls += 1;
         }
 
-        let total = match &self.last_coupled_state {
-            CoupledState::Identity => self.model.solve_identity_coupled_tail(
+        let total = if self.last_coupling.is_empty() {
+            self.model.solve_uncoupled_tail(
+                &self.x,
+                &self.last_u,
+                target_c,
+                output_idx,
+                input_idx,
+                &mut self.solve_scratch,
+            )
+        } else {
+            self.model.solve_identity_coupled_tail(
                 &self.x,
                 &self.last_u,
                 target_c,
@@ -426,15 +435,7 @@ impl ThermalSolver {
                 input_idx,
                 &self.last_coupling,
                 &mut self.solve_scratch,
-            ),
-            CoupledState::Uncoupled => self.model.solve_uncoupled_tail(
-                &self.x,
-                &self.last_u,
-                target_c,
-                output_idx,
-                input_idx,
-                &mut self.solve_scratch,
-            ),
+            )
         };
 
         let t_zone = self
@@ -683,7 +684,7 @@ impl ThermalSolver {
     }
 
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
-    /// Stores results in `last_u`, `last_coupling`, `last_coupled_state` so that
+    /// Stores results in `last_u` and `last_coupling` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
@@ -700,7 +701,7 @@ impl ThermalSolver {
         // Clear per-step degradation tracking: a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
-        // The step's inputs (last_u, last_coupling, last_coupled_state) are
+        // The step's inputs (last_u, last_coupling) are
         // rebuilt below: any shared ideal-capacity prefix is stale.
         self.invalidate_shared_prefix();
 
@@ -711,12 +712,6 @@ impl ThermalSolver {
             .copy_from_slice(&self.ext_temps_save_buf);
 
         self.build_coupling();
-
-        if !self.coupling_buf.is_empty() {
-            self.last_coupled_state = CoupledState::Identity;
-        } else {
-            self.last_coupled_state = CoupledState::Uncoupled;
-        }
 
         self.last_u.copy_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
@@ -756,11 +751,8 @@ impl ThermalSolver {
                 &self.coupling_buf,
                 &mut self.d_agg_buf,
             );
-
-            self.last_coupled_state = CoupledState::Identity;
         } else {
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
-            self.last_coupled_state = CoupledState::Uncoupled;
         }
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);

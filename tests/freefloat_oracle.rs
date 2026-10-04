@@ -38,7 +38,11 @@ mod tests {
         project_root().join(format!("tests/fixtures/freefloat/{scenario}"))
     }
 
-    fn beopt_freefloat_config(scenario: &str, output_path: PathBuf) -> DwellingConfig {
+    fn beopt_freefloat_config(
+        scenario: &str,
+        output_path: PathBuf,
+        hpxml_path: PathBuf,
+    ) -> DwellingConfig {
         // Both HARES and OCHRE treat timestamps as local time internally --
         // .hour() is used directly for schedule evaluation regardless of offset.
         // We use Denver's real offset for clarity, but only the wall-clock
@@ -61,7 +65,7 @@ mod tests {
         };
 
         DwellingConfig {
-            hpxml_path: examples_dir().join("BEopt_example.xml"),
+            hpxml_path,
             schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
@@ -89,6 +93,45 @@ mod tests {
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         }
+    }
+
+    /// Builds the equipment-free BEopt dwelling for `scenario` and returns it
+    /// with its step count. Its windows are made fixed (`FractionOperable`
+    /// 0) before construction, so no natural ventilation is modeled: the
+    /// OCHRE free-float fixture does not model operable windows, and this
+    /// isolates envelope conduction, solar, and forced ventilation physics.
+    fn build_freefloat_dwelling(scenario: &str, output_path: PathBuf) -> (Dwelling, usize) {
+        let hpxml_dir = tempfile::tempdir().expect("temp dir");
+        let hpxml_path = hpxml_dir.path().join("BEopt_example_fixed_windows.xml");
+        let xml =
+            fs::read_to_string(examples_dir().join("BEopt_example.xml")).expect("read BEopt HPXML");
+        let operable = "<FractionOperable>0.67</FractionOperable>";
+        assert!(
+            xml.contains(operable),
+            "BEopt HPXML must declare its operable window fraction as {operable}"
+        );
+        fs::write(
+            &hpxml_path,
+            xml.replace(operable, "<FractionOperable>0</FractionOperable>"),
+        )
+        .expect("write fixed-window HPXML");
+
+        let config = beopt_freefloat_config(scenario, output_path, hpxml_path);
+        let n_steps = (config.sim_config.duration.num_seconds()
+            / config.sim_config.time_res.num_seconds()) as usize;
+        let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
+        assert!(
+            dwelling
+                .thermal_solver
+                .config()
+                .natural_ventilation
+                .is_none(),
+            "fixed windows must leave natural ventilation unmodeled"
+        );
+        dwelling
+            .clear_equipment()
+            .expect("clear must refresh caches");
+        (dwelling, n_steps)
     }
 
     fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
@@ -184,28 +227,7 @@ mod tests {
         ));
         let _ = fs::remove_file(&output_path);
 
-        let config = beopt_freefloat_config(scenario, output_path.clone());
-
-        // Duration in 1-min steps.
-        let n_steps = {
-            let dur = config.sim_config.duration;
-            let res = config.sim_config.time_res;
-            (dur.num_seconds() / res.num_seconds()) as usize
-        };
-
-        let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
-
-        // Remove all equipment -- free-floating envelope only.
-        dwelling
-            .clear_equipment()
-            .expect("clear must refresh caches");
-
-        // Disable natural ventilation to match the OCHRE freefloat fixture scope.
-        // HARES correctly enables natural ventilation from HPXML window operable
-        // fractions (BEopt has FractionOperable=0.67), but OCHRE's freefloat test
-        // fixture does not model operable windows. Disabling here isolates the
-        // envelope conduction, solar, and forced ventilation physics.
-        dwelling.thermal_solver.config_mut().natural_ventilation = None;
+        let (mut dwelling, n_steps) = build_freefloat_dwelling(scenario, output_path.clone());
 
         dwelling.enable_observer(n_steps);
 
@@ -1327,21 +1349,8 @@ mod tests {
             "csv",
         ));
         let _ = fs::remove_file(&baseline_output);
-        let baseline_config = beopt_freefloat_config(scenario, baseline_output.clone());
-        let n_steps = {
-            let dur = baseline_config.sim_config.duration;
-            let res = baseline_config.sim_config.time_res;
-            (dur.num_seconds() / res.num_seconds()) as usize
-        };
-        let mut dwelling_base =
-            Dwelling::from_config(baseline_config).expect("Dwelling::from_config (baseline)");
-        dwelling_base
-            .clear_equipment()
-            .expect("clear must refresh caches");
-        dwelling_base
-            .thermal_solver
-            .config_mut()
-            .natural_ventilation = None;
+        let (mut dwelling_base, n_steps) =
+            build_freefloat_dwelling(scenario, baseline_output.clone());
         for _ in 0..n_steps {
             dwelling_base.step().expect("dwelling.step (baseline)");
         }
@@ -1356,13 +1365,7 @@ mod tests {
             "csv",
         ));
         let _ = fs::remove_file(&override_output);
-        let override_config = beopt_freefloat_config(scenario, override_output.clone());
-        let mut dwelling_ov =
-            Dwelling::from_config(override_config).expect("Dwelling::from_config (override)");
-        dwelling_ov
-            .clear_equipment()
-            .expect("clear must refresh caches");
-        dwelling_ov.thermal_solver.config_mut().natural_ventilation = None;
+        let (mut dwelling_ov, _) = build_freefloat_dwelling(scenario, override_output.clone());
 
         let n_surfaces = dwelling_ov.environment.surface_count();
         let solar_data = load_solar_override(scenario, n_surfaces);

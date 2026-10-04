@@ -100,10 +100,12 @@ use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_
 
 #[cfg(feature = "observe")]
 use crate::diagnostics::DiagnosticAccumulator;
+#[cfg(all(feature = "observe", debug_assertions))]
+use crate::observer::MoistureZoneInvariant;
 #[cfg(feature = "observe")]
 use crate::observer::{
     DispatchCapture, DispatchedSignal, EquipmentObservation, MoistureInvariantCapture,
-    MoistureZoneInvariant, ObserverBuffer, PhaseSnapshots, SameTierConflict, StepSnapshot,
+    ObserverBuffer, PhaseSnapshots, SameTierConflict, StepSnapshot,
 };
 #[cfg(feature = "observe")]
 use crate::observer_capture;

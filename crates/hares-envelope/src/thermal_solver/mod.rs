@@ -64,17 +64,6 @@ use initialization::initialize_steady_state;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 
-/// Per-step coupled-solve state: tracks whether couplings are active, which
-/// selects the solver path for the HVAC capacity solve in
-/// [`ThermalSolver::solve_ideal_capacity_for_target`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CoupledState {
-    /// No couplings active; use uncoupled solve path.
-    Uncoupled,
-    /// Couplings active; use closed-form O(n) diagonal-scaling solve.
-    Identity,
-}
-
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
     model: StateSpaceModel,
@@ -112,9 +101,6 @@ pub struct ThermalSolver {
     /// validity window is exactly "same x and u as when the prefix was
     /// filled".
     shared_prefix_valid: bool,
-    /// The [`CoupledState`] variant the shared prefix was computed under; a
-    /// solve running under a different variant must not reuse it.
-    shared_prefix_variant: CoupledState,
     /// Test-visible instrumentation for `shared_terms_computed_once_per_step`:
     /// number of shared-prefix fills in `solve_ideal_capacity_for_target`.
     #[cfg(test)]
@@ -125,9 +111,10 @@ pub struct ThermalSolver {
     solve_tail_calls: usize,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
-    /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
+    /// Coupling tuples of the last prepared or integrated step, read by
+    /// `solve_ideal_capacity_for_target`: non-empty selects the
+    /// identity-coupled solve, empty the uncoupled one.
     last_coupling: Vec<(usize, f64, f64)>,
-    last_coupled_state: CoupledState,
     /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
     /// Indexed parallel to `config.exterior_surfaces`.
     exterior_surface_temps: Vec<f64>,
@@ -399,6 +386,10 @@ impl ZoneSensibleBreakdown {
 
 /// Captured thermal state for checkpoint save/restore: every piece of
 /// mutable solver state a step or an ideal-capacity solve reads.
+///
+/// Its serialized form is part of the dwelling checkpoint schema
+/// (`hares_core::checkpoint::DwellingCheckpoint`): changing it requires a
+/// `CHECKPOINT_VERSION` bump, which a schema test there enforces.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalSnapshot {
     pub x: Vec<f64>,
@@ -409,9 +400,6 @@ pub struct ThermalSnapshot {
     /// Coupling tuples `(state_idx, d_implicit, forcing)` of the last
     /// prepared or integrated step.
     pub last_coupling: Vec<(usize, f64, f64)>,
-    /// Solve path selected by `last_coupling`: [`CoupledState::Identity`]
-    /// exactly when it is non-empty.
-    pub last_coupled_state: CoupledState,
 }
 
 impl ThermalSolver {
@@ -1009,7 +997,6 @@ impl ThermalSolver {
             .collect();
         let coupling_buf = Vec::with_capacity(env.zones.len());
         let last_coupling = Vec::new();
-        let last_coupled_state = CoupledState::Uncoupled;
         let latent_buf = HashMap::new();
         let exterior_surface_temps =
             vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
@@ -1130,14 +1117,12 @@ impl ThermalSolver {
             du_buf,
             solve_scratch,
             shared_prefix_valid: false,
-            shared_prefix_variant: last_coupled_state,
             #[cfg(test)]
             shared_prefix_fills: 0,
             #[cfg(test)]
             solve_tail_calls: 0,
             coupling_buf,
             last_coupling,
-            last_coupled_state,
             latent_buf,
             exterior_surface_temps,
             ext_temps_save_buf,
@@ -1236,7 +1221,6 @@ impl ThermalSolver {
             interior_surface_temps: self.interior_surface_temps.clone(),
             interior_surface_prev_temps: self.interior_surface_prev_temps.clone(),
             last_coupling: self.last_coupling.clone(),
-            last_coupled_state: self.last_coupled_state,
         }
     }
 
@@ -1351,14 +1335,6 @@ impl ThermalSolver {
                 )));
             }
         }
-        let coupled = !snap.last_coupling.is_empty();
-        if coupled != (snap.last_coupled_state == CoupledState::Identity) {
-            return Err(ThermalSolverError::Initialization(format!(
-                "last_coupled_state {:?} disagrees with {} coupling entries",
-                snap.last_coupled_state,
-                snap.last_coupling.len()
-            )));
-        }
 
         // ── Phase 2: all validation passed — apply mutations ─────────────
         // x, last_u and the couplings change here: the shared
@@ -1367,7 +1343,6 @@ impl ThermalSolver {
         self.x.copy_from_slice(&snap.x);
         self.last_u.copy_from_slice(&snap.last_u);
         self.last_coupling.clone_from(&snap.last_coupling);
-        self.last_coupled_state = snap.last_coupled_state;
         self.exterior_surface_temps
             .copy_from_slice(&snap.lwr_t_prev_c);
         for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
@@ -1886,7 +1861,7 @@ mod tests {
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        BoundaryCategory, CoupledState, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
+        BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
         InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
@@ -7315,37 +7290,18 @@ mod tests {
         let valid = solver.snapshot_state();
         let n_states = valid.x.len();
 
-        for (bad_coupling, expected_in_error) in [
-            ((n_states, 0.1, 1.0), "invalid last_coupling[0]"),
-            ((0, -0.1, 1.0), "invalid last_coupling[0]"),
-            ((0, f64::NAN, 1.0), "invalid last_coupling[0]"),
-            ((0, 0.1, f64::INFINITY), "invalid last_coupling[0]"),
+        for bad_coupling in [
+            (n_states, 0.1, 1.0),
+            (0, -0.1, 1.0),
+            (0, f64::NAN, 1.0),
+            (0, 0.1, f64::INFINITY),
         ] {
             let bad_snap = ThermalSnapshot {
                 last_coupling: vec![bad_coupling],
                 ..valid.clone()
             };
-            assert_restore_rejected_atomically(&mut solver, &bad_snap, expected_in_error);
+            assert_restore_rejected_atomically(&mut solver, &bad_snap, "invalid last_coupling[0]");
         }
-
-        let coupled_marked_uncoupled = ThermalSnapshot {
-            last_coupled_state: CoupledState::Uncoupled,
-            ..valid.clone()
-        };
-        assert_restore_rejected_atomically(
-            &mut solver,
-            &coupled_marked_uncoupled,
-            "disagrees with 1 coupling entries",
-        );
-        let uncoupled_marked_coupled = ThermalSnapshot {
-            last_coupling: vec![],
-            ..valid
-        };
-        assert_restore_rejected_atomically(
-            &mut solver,
-            &uncoupled_marked_coupled,
-            "disagrees with 0 coupling entries",
-        );
     }
 
     /// The ideal-capacity solve reads the coupling terms of the step as well
