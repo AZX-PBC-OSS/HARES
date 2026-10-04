@@ -152,14 +152,22 @@ mod tests {
             }
         }
 
-        // Electric power is never negative: a negative total would mean a
-        // generation source booked into a load column or a sign error in the
-        // solver's net.
-        for (i, &v) in data["Total Electric Power (kW)"].iter().enumerate() {
-            assert!(
-                v >= 0.0,
-                "Total Electric Power ({v} kW) is negative at row {i}"
-            );
+        // Load-side end uses never go negative; the PV end use is the
+        // generation convention (negative = power produced), so it never
+        // goes positive. "Total Electric Power (kW)" is the net of the two,
+        // unbounded in sign for a PV home.
+        for (col, values) in &data {
+            if !col.ends_with(" End Use Electric Power (kW)") {
+                continue;
+            }
+            let is_pv = col.starts_with("PV ");
+            for (i, &v) in values.iter().enumerate() {
+                assert!(
+                    if is_pv { v <= 0.0 } else { v >= 0.0 },
+                    "'{col}' is {v} kW at row {i}: loads are non-negative and \
+                     the PV end use is non-positive"
+                );
+            }
         }
     }
 
