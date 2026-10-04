@@ -1905,11 +1905,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parallel_loop_splitter_mixer_topology_violation_is_a_typed_error() {
-        // Same topology as above but branch C reports 0.5 kg/s while the
-        // splitter reports 1.0 kg/s. Splitter inflow (1.0) does not equal
-        // sum of branch outflows (0.4 + 0.3 + 0.5 = 1.2) — violation.
+    /// Resolves the three-branch splitter → [A, B, C] → mixer loop with the
+    /// given flows for nodes 0 (splitter) to 4 (mixer) and checks that the
+    /// conservation violation is a typed error naming the violating node's
+    /// role, and that observe telemetry counts it with its imbalance.
+    fn assert_parallel_loop_violation(
+        flows_kg_s: [f64; 5],
+        violating_role: FluidNodeRole,
+        imbalance_kg_s: f64,
+    ) {
         let topology = LoopTopology::new(
             LoopId(1),
             vec![
@@ -1936,78 +1940,71 @@ mod tests {
 
         let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
 
+        // Supply and return temperatures [°C] per node: the splitter carries
+        // supply water, the mixer return water, and each branch drops 20 K.
+        let temps_c = [
+            (60.0, 60.0),
+            (60.0, 40.0),
+            (60.0, 40.0),
+            (60.0, 40.0),
+            (40.0, 40.0),
+        ];
         let ports = PortSlots {
-            fluid: vec![
-                FluidAccumulator {
+            fluid: (0u16..)
+                .zip(flows_kg_s.into_iter().zip(temps_c))
+                .map(|(node, (flow, (supply, ret)))| FluidAccumulator {
                     loop_id: LoopId(1),
                     fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(0),
-                    total_flow_kg_s: 1.0,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 60.0,
+                    node_id: FluidNodeId(node),
+                    total_flow_kg_s: flow,
+                    mean_supply_temp_c: supply,
+                    mean_return_temp_c: ret,
                     total_thermal_power_w: 0.0,
                     direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(1),
-                    total_flow_kg_s: 0.4,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(2),
-                    total_flow_kg_s: 0.3,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(3),
-                    total_flow_kg_s: 0.5, // mismatched: 1.0 != 0.4 + 0.3 + 0.5
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(4),
-                    total_flow_kg_s: 1.0,
-                    mean_supply_temp_c: 40.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-            ],
+                })
+                .collect(),
             ..Default::default()
         };
 
-        let result = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
-        let err =
-            result.expect_err("a splitter/mixer conservation violation must be a typed error");
+        let err = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .expect_err("a splitter/mixer conservation violation must be a typed error");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("mass conservation violated"),
-            "the error must name the check, got: {err}"
+            message.contains("mass conservation violated"),
+            "the error must name the check, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("({violating_role:?})")),
+            "the violation must be at the {violating_role:?}, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("imbalance = {imbalance_kg_s:.6e}")),
+            "the error must state the {imbalance_kg_s} kg/s imbalance, got: {message}"
         );
         #[cfg(feature = "observe")]
         {
             assert_eq!(solver.num_conservation_violations, 1);
             assert!(
-                (solver.max_mass_imbalance_kg_s - 0.2).abs() < 1e-12,
-                "splitter imbalance is 1.0 in against 1.2 out, got {}",
+                (solver.max_mass_imbalance_kg_s - imbalance_kg_s).abs() < 1e-12,
+                "expected peak imbalance {imbalance_kg_s} kg/s, got {}",
                 solver.max_mass_imbalance_kg_s
             );
         }
+    }
+
+    #[test]
+    fn parallel_loop_splitter_topology_violation_is_a_typed_error() {
+        // Branch C reports 0.5 kg/s while the splitter reports 1.0 kg/s:
+        // splitter inflow 1.0 against branch outflows 0.4 + 0.3 + 0.5 = 1.2.
+        assert_parallel_loop_violation([1.0, 0.4, 0.3, 0.5, 1.0], FluidNodeRole::Splitter, 0.2);
+    }
+
+    #[test]
+    fn parallel_loop_mixer_topology_violation_is_a_typed_error() {
+        // The splitter and branches balance (1.0 = 0.4 + 0.3 + 0.3), but the
+        // mixer reports 1.3 kg/s leaving against 1.0 kg/s arriving.
+        assert_parallel_loop_violation([1.0, 0.4, 0.3, 0.3, 1.3], FluidNodeRole::Mixer, 0.3);
     }
 
     // =======================================================================
