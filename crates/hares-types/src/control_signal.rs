@@ -210,6 +210,18 @@ bitflags! {
 }
 
 impl ControlSignal {
+    /// The release form of [`ControlSignal::ThermalSetpoint`]: it names no
+    /// setpoint and carries no band, and hands the thermostat back to its
+    /// schedule and its configured band.
+    #[must_use]
+    pub const fn thermal_release() -> Self {
+        Self::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        }
+    }
+
     /// Returns `true` for signals whose only effect is updating connection or
     /// mode state (idempotent assignments). These can be applied eagerly before
     /// queuing so that subsequent signals in the same timestep see the updated
